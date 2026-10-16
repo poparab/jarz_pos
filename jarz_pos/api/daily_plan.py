@@ -48,14 +48,14 @@ def _ensure_execute_access() -> None:
 		frappe.throw(_("Not permitted: production access required"), frappe.PermissionError)
 
 
-def _resolve_company(company: Optional[str]) -> str:
+def _resolve_company(company: str | None) -> str:
 	company = (company or "").strip() or planning._resolve_default_company()
 	if not company:
 		frappe.throw(_("Company is not configured and no Default Company is set"))
 	return company
 
 
-def _coerce_lines(lines: Any) -> List[Dict[str, Any]]:
+def _coerce_lines(lines: Any) -> list[dict[str, Any]]:
 	if isinstance(lines, str):
 		try:
 			lines = json.loads(lines)
@@ -66,7 +66,7 @@ def _coerce_lines(lines: Any) -> List[Dict[str, Any]]:
 	if not isinstance(lines, list):
 		frappe.throw(_("lines must be a list"))
 
-	out: List[Dict[str, Any]] = []
+	out: list[dict[str, Any]] = []
 	for i, row in enumerate(lines):
 		if not isinstance(row, dict):
 			frappe.throw(_("lines[{0}] must be an object").format(i))
@@ -92,7 +92,7 @@ def _coerce_lines(lines: Any) -> List[Dict[str, Any]]:
 
 
 @frappe.whitelist()
-def get_plan_template(company: Optional[str] = None, plan_date: Optional[str] = None) -> Dict[str, Any]:
+def get_plan_template(company: str | None = None, plan_date: str | None = None) -> dict[str, Any]:
 	"""Everything the morning screen needs to render an empty plan.
 
 	Returns the fillable items with the mix each one consumes and the jars a
@@ -143,7 +143,7 @@ def get_plan_template(company: Optional[str] = None, plan_date: Optional[str] = 
 	}
 
 
-def _find_open_plan(company: str, plan_date: str) -> Optional[str]:
+def _find_open_plan(company: str, plan_date: str) -> str | None:
 	return frappe.db.get_value(
 		PLAN_DOCTYPE,
 		{"company": company, "plan_date": plan_date, "status": ["in", ("Draft", "Planned")]},
@@ -152,7 +152,7 @@ def _find_open_plan(company: str, plan_date: str) -> Optional[str]:
 
 
 @frappe.whitelist()
-def get_plan(name: str) -> Dict[str, Any]:
+def get_plan(name: str) -> dict[str, Any]:
 	"""One saved plan, in the shape the screen renders."""
 	_ensure_view_access()
 	name = (name or "").strip()
@@ -166,16 +166,16 @@ def get_plan(name: str) -> Dict[str, Any]:
 
 @frappe.whitelist()
 def list_plans(
-	company: Optional[str] = None,
+	company: str | None = None,
 	limit: Any = 30,
-	from_date: Optional[str] = None,
-	to_date: Optional[str] = None,
-) -> List[Dict[str, Any]]:
+	from_date: str | None = None,
+	to_date: str | None = None,
+) -> list[dict[str, Any]]:
 	"""Recent plans, newest first — the history view."""
 	_ensure_view_access()
 	company = _resolve_company(company)
 
-	filters: Dict[str, Any] = {"company": company}
+	filters: dict[str, Any] = {"company": company}
 	if from_date and to_date:
 		filters["plan_date"] = ["between", [getdate(from_date), getdate(to_date)]]
 	elif from_date:
@@ -207,9 +207,9 @@ def list_plans(
 @frappe.whitelist()
 def preview_plan(
 	lines: Any,
-	company: Optional[str] = None,
+	company: str | None = None,
 	include_materials: Any = 1,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	"""Compute the batch split for a set of jar quantities without saving.
 
 	This is what the morning screen calls while somebody is still typing.  It
@@ -244,7 +244,7 @@ def preview_plan(
 		waste_weight=planning._resolve_waste_weight(),
 	)
 
-	payload: Dict[str, Any] = {
+	payload: dict[str, Any] = {
 		"company": company,
 		"mix": {
 			"item_code": mix_item,
@@ -270,10 +270,10 @@ def preview_plan(
 
 
 def _material_rollup(
-	parsed: List[Dict[str, Any]],
-	rows: Dict[str, Dict[str, Any]],
+	parsed: list[dict[str, Any]],
+	rows: dict[str, dict[str, Any]],
 	company: str,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	"""Raw-material demand for the whole plan, measured against one stock snapshot.
 
 	Reuses the Production Board's basket roll-up so the two screens can never
@@ -314,13 +314,13 @@ def _material_rollup(
 @frappe.whitelist()
 def save_plan(
 	lines: Any,
-	company: Optional[str] = None,
-	plan_date: Optional[str] = None,
-	name: Optional[str] = None,
-	status: Optional[str] = None,
-	notes: Optional[str] = None,
+	company: str | None = None,
+	plan_date: str | None = None,
+	name: str | None = None,
+	status: str | None = None,
+	notes: str | None = None,
 	actual_batches_run: Any = None,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	"""Create or update a day's plan.
 
 	Same endpoint for the morning save and the evening count — the only
@@ -377,8 +377,8 @@ def close_plan(
 	name: str,
 	lines: Any = None,
 	actual_batches_run: Any = None,
-	notes: Optional[str] = None,
-) -> Dict[str, Any]:
+	notes: str | None = None,
+) -> dict[str, Any]:
 	"""End-of-day: record what actually came out and close the day.
 
 	Closing with uncounted lines is allowed but reported, because "we never
@@ -428,7 +428,7 @@ def close_plan(
 
 
 @frappe.whitelist()
-def check_bom_readiness(company: Optional[str] = None) -> Dict[str, Any]:
+def check_bom_readiness(company: str | None = None) -> dict[str, Any]:
 	"""Whether the BOMs can answer the batch question, and what blocks them.
 
 	The plan reads the mix from a one-level BOM line, so a jar whose BOM still
@@ -444,7 +444,7 @@ def check_bom_readiness(company: Optional[str] = None) -> Dict[str, Any]:
 	mix_components = set(planning._resolve_flattened_mix_components(mix_item))
 	rows = planning._resolve_planable_rows(company, mix_item)
 
-	issues: List[Dict[str, Any]] = []
+	issues: list[dict[str, Any]] = []
 	ready = 0
 
 	for row in rows:
@@ -515,7 +515,7 @@ def _flattened_mix_components_on(bom_name: str, mix_components: set) -> set:
 	return direct.intersection(exclusive)
 
 
-def _serialise(doc) -> Dict[str, Any]:
+def _serialise(doc) -> dict[str, Any]:
 	return {
 		"name": doc.name,
 		"plan_date": str(doc.plan_date),
@@ -559,7 +559,7 @@ def _serialise(doc) -> Dict[str, Any]:
 
 
 @frappe.whitelist()
-def cancel_plan(name: str, reason: str) -> Dict[str, Any]:
+def cancel_plan(name: str, reason: str) -> dict[str, Any]:
 	"""Call off a day's plan that will not be produced.
 
 	``save_plan`` and ``close_plan`` were the only two exits a plan had, so a

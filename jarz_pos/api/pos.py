@@ -1,11 +1,11 @@
+from typing import Optional
+
 import frappe
 from frappe import _
 from frappe.utils import flt
-from typing import Optional
 
 from jarz_pos.constants import QUERY_LIMITS, ROLES
 from jarz_pos.utils.invoice_utils import sanitize_printable_text
-
 
 _MANAGER_PRICING_ROLES = ROLES.LINE_MANAGER_TIER
 
@@ -24,14 +24,14 @@ def _ensure_manager_pricing_access() -> None:
 		frappe.throw(_("Not permitted: manager pricing access required"), frappe.PermissionError)
 
 
-def _normalize_price_list_name(value: Optional[str]) -> Optional[str]:
+def _normalize_price_list_name(value: str | None) -> str | None:
 	cleaned = str(value or "").strip()
 	return cleaned or None
 
 
 def _resolve_effective_price_list(
-	profile: str, requested_price_list: Optional[str] = None
-) -> tuple[Optional[str], Optional[str]]:
+	profile: str, requested_price_list: str | None = None
+) -> tuple[str | None, str | None]:
 	default_price_list = _normalize_price_list_name(
 		frappe.db.get_value("POS Profile", profile, "selling_price_list")
 	)
@@ -47,7 +47,7 @@ def _resolve_effective_price_list(
 	return effective_price_list, default_price_list
 
 
-def _get_item_price_from_price_list(item_code: str, price_list: Optional[str]) -> Optional[float]:
+def _get_item_price_from_price_list(item_code: str, price_list: str | None) -> float | None:
 	if not price_list:
 		return None
 
@@ -84,7 +84,7 @@ def _get_b2b_catalog_item_rate(
 	)
 
 
-def _serialize_price_list_option(price_list: str, profile_currency: Optional[str]) -> dict:
+def _serialize_price_list_option(price_list: str, profile_currency: str | None) -> dict:
 	row = frappe.db.get_value(
 		"Price List",
 		price_list,
@@ -127,7 +127,7 @@ def _resolve_b2b_pricing_context(
 	customer: str,
 	order_purpose: str,
 	*,
-	requested_price_list: Optional[str] = None,
+	requested_price_list: str | None = None,
 ) -> dict:
 	"""Resolve the one policy/list combination a B2B catalog may use."""
 	from jarz_pos.api.crm import _B2B_ORDER_PURPOSE, _SAMPLE_ORDER_PURPOSE
@@ -500,9 +500,9 @@ def resolve_customer_price_list(
 @frappe.whitelist(allow_guest=False)
 def get_profile_bundles(
 	profile: str,
-	price_list: Optional[str] = None,
-	customer: Optional[str] = None,
-	order_purpose: Optional[str] = None,
+	price_list: str | None = None,
+	customer: str | None = None,
+	order_purpose: str | None = None,
 ):
 	"""Return bundles with items available to the given POS profile."""
 	from jarz_pos.utils.validation_utils import assert_pos_profile_enabled
@@ -660,9 +660,9 @@ def get_profile_bundles(
 @frappe.whitelist(allow_guest=False)
 def get_profile_products(
 	profile: str,
-	price_list: Optional[str] = None,
-	customer: Optional[str] = None,
-	order_purpose: Optional[str] = None,
+	price_list: str | None = None,
+	customer: str | None = None,
+	order_purpose: str | None = None,
 ):
 	"""Return items whose item_group is allowed for the given POS profile."""
 	if customer is not None or order_purpose is not None:
@@ -749,7 +749,7 @@ def get_profile_products(
 
 
 @frappe.whitelist(allow_guest=False)
-def get_sales_partners(search: Optional[str] = None, limit: int = 10):
+def get_sales_partners(search: str | None = None, limit: int = 10):
 	"""Return a short, touch-friendly list of Sales Partners.
 
 	Args:
@@ -945,7 +945,7 @@ def is_pos_profile_open(pos_profile: str):
 			if opening_time <= current_time <= closing_time:
 				return {"is_open": True, "message": "Branch is open"}
 
-	return {"is_open": False, "message": f"Branch is closed at this time"}
+	return {"is_open": False, "message": "Branch is closed at this time"}
 
 
 # ---------------------------------------------------------------------------

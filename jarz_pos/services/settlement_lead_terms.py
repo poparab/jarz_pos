@@ -122,7 +122,7 @@ def lead_field_ready() -> bool:
 		return False
 
 
-def decode_lead_terms(raw: Any) -> Optional[Dict[str, Any]]:
+def decode_lead_terms(raw: Any) -> dict[str, Any] | None:
 	"""Stored column value -> dict, or ``None`` when empty / unreadable / cycle-less."""
 	if raw is None or raw == "":
 		return None
@@ -146,11 +146,9 @@ def _json_value(value: Any) -> Any:
 	return value
 
 
-def encode_lead_terms(
-	values: Dict[str, Any], user: Optional[str] = None, modified: Optional[str] = None
-) -> str:
+def encode_lead_terms(values: dict[str, Any], user: str | None = None, modified: str | None = None) -> str:
 	"""A ``normalize_terms_input`` result -> the JSON text stored on the Lead."""
-	data: Dict[str, Any] = {key: _json_value(values.get(key)) for key in STORED_KEYS}
+	data: dict[str, Any] = {key: _json_value(values.get(key)) for key in STORED_KEYS}
 	data["modified"] = modified
 	data["modified_by"] = user
 	return json.dumps(data, sort_keys=True, default=str)
@@ -161,7 +159,7 @@ def lock_lead(lead: str) -> None:
 	frappe.db.sql("SELECT name FROM `tabLead` WHERE name = %s FOR UPDATE", (lead,))
 
 
-def read_lead_terms(lead: str, for_update: bool = False) -> Optional[Dict[str, Any]]:
+def read_lead_terms(lead: str, for_update: bool = False) -> dict[str, Any] | None:
 	"""The terms stored on *lead*, or ``None``.
 
 	``for_update=True`` is a LOCKING read -- required after the Lead row is
@@ -181,14 +179,14 @@ def read_lead_terms(lead: str, for_update: bool = False) -> Optional[Dict[str, A
 	return decode_lead_terms(raw)
 
 
-def _write_lead_column(lead: str, text: Optional[str]) -> None:
+def _write_lead_column(lead: str, text: str | None) -> None:
 	# update_modified=True on purpose: a Desk user holding the Lead form open
 	# then gets Frappe's normal "modified after you opened it" refusal instead
 	# of silently saving the stale (read-only) JSON back over these terms.
 	frappe.db.set_value("Lead", lead, LEAD_FIELD, text, update_modified=True)
 
 
-def write_lead_terms(lead: str, values: Optional[Dict[str, Any]]) -> None:
+def write_lead_terms(lead: str, values: dict[str, Any] | None) -> None:
 	"""Store (or clear, with ``None``) the terms on *lead*.
 
 	``db.set_value`` on purpose: this is not a Lead edit, so it must not run the
@@ -216,7 +214,7 @@ def _terms_doctype_ready() -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _stamp_carried(lead: str, stored: Dict[str, Any], customer: str, outcome: str) -> None:
+def _stamp_carried(lead: str, stored: dict[str, Any], customer: str, outcome: str) -> None:
 	"""Mark *stored* (a dict read FOR UPDATE under the Lead lock) as carried."""
 	stamped = dict(stored)
 	stamped[CARRIED_TO_KEY] = customer
@@ -225,7 +223,7 @@ def _stamp_carried(lead: str, stored: Dict[str, Any], customer: str, outcome: st
 	_write_lead_column(lead, json.dumps(stamped, sort_keys=True, default=str))
 
 
-def carry_over_lead_terms(lead: str, customer: str) -> Optional[str]:
+def carry_over_lead_terms(lead: str, customer: str) -> str | None:
 	"""Copy *lead*'s stored terms onto *customer*.
 
 	Returns :data:`CARRY_CREATED` when a ``Jarz Settlement Terms`` record was
@@ -282,10 +280,10 @@ def carry_over_lead_terms(lead: str, customer: str) -> Optional[str]:
 	return CARRY_CREATED
 
 
-def leads_of_customer(customer: str) -> List[str]:
+def leads_of_customer(customer: str) -> list[str]:
 	"""Every Lead tied to *customer* either way round (``Customer.lead_name`` /
 	``Lead.customer``). Never raises."""
-	names: List[str] = []
+	names: list[str] = []
 	try:
 		direct = frappe.db.get_value("Customer", customer, "lead_name")
 		if direct:
@@ -331,7 +329,7 @@ def mark_leads_superseded(customer: str) -> int:
 	return count
 
 
-def _message_log_length() -> Optional[int]:
+def _message_log_length() -> int | None:
 	try:
 		message_log = getattr(frappe.local, "message_log", None)
 		return len(message_log) if isinstance(message_log, list) else None
@@ -339,7 +337,7 @@ def _message_log_length() -> Optional[int]:
 		return None
 
 
-def _withdraw_messages_since(count: Optional[int]) -> None:
+def _withdraw_messages_since(count: int | None) -> None:
 	if count is None:
 		return
 	try:
@@ -348,7 +346,7 @@ def _withdraw_messages_since(count: Optional[int]) -> None:
 		pass
 
 
-def safe_carry_over(lead: str, customer: str, defer_log: bool = False) -> Optional[str]:
+def safe_carry_over(lead: str, customer: str, defer_log: bool = False) -> str | None:
 	""":func:`carry_over_lead_terms`, fenced.
 
 	Returns the outcome (truthy when something was written, so a GET caller

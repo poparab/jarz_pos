@@ -16,7 +16,7 @@ def get_context():
 
 
 @frappe.whitelist(allow_guest=False)
-def list_users(search: Optional[str] = None, include_disabled: Any = 1):
+def list_users(search: str | None = None, include_disabled: Any = 1):
 	return svc.list_users(search=search, include_disabled=include_disabled)
 
 
@@ -26,7 +26,7 @@ def get_user(user: str):
 
 
 @frappe.whitelist(allow_guest=False)
-def list_employees(search: Optional[str] = None):
+def list_employees(search: str | None = None):
 	return svc.list_employees(search=search)
 
 
@@ -36,10 +36,10 @@ def create_user(
 	first_name: str,
 	password: str,
 	role_profiles: Any,
-	last_name: Optional[str] = None,
-	mobile_no: Optional[str] = None,
+	last_name: str | None = None,
+	mobile_no: str | None = None,
 	require_pos_shift: Any = 0,
-	employee: Optional[str] = None,
+	employee: str | None = None,
 ):
 	return svc.create_user(
 		email=email,
@@ -56,9 +56,9 @@ def create_user(
 @frappe.whitelist(allow_guest=False, methods=["POST"])
 def update_user(
 	user: str,
-	first_name: Optional[str] = None,
-	last_name: Optional[str] = None,
-	mobile_no: Optional[str] = None,
+	first_name: str | None = None,
+	last_name: str | None = None,
+	mobile_no: str | None = None,
 	role_profiles: Any = None,
 	require_pos_shift: Any = None,
 	employee: Any = None,

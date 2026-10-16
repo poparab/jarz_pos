@@ -21,7 +21,7 @@ import frappe
 from jarz_pos.services import task_board as tb
 
 
-def _task_for_visibility(task_name: str) -> Optional[dict]:
+def _task_for_visibility(task_name: str) -> dict | None:
 	"""Just enough of a task to evaluate visibility (creator, assignee, subtask assignees)."""
 	if not task_name:
 		return None
@@ -47,7 +47,7 @@ READ_PTYPES = frozenset({"read", "select", "report", "print", "export"})
 def has_permission(
 	doc: Any,
 	ptype: str = "read",
-	user: Optional[str] = None,
+	user: str | None = None,
 	debug: bool = False,
 ) -> bool:
 	"""Deny any task (or task entry) the user could not see on the board.
@@ -84,7 +84,7 @@ def has_permission(
 		return False
 
 
-def get_permission_query_conditions(user: Optional[str] = None, doctype: Optional[str] = None) -> str:
+def get_permission_query_conditions(user: str | None = None, doctype: str | None = None) -> str:
 	"""List/report filter for ``Jarz Task``."""
 	try:
 		viewer = tb.get_viewer(user or frappe.session.user)
@@ -93,7 +93,7 @@ def get_permission_query_conditions(user: Optional[str] = None, doctype: Optiona
 		return "1=0"
 
 
-def get_entry_permission_query_conditions(user: Optional[str] = None, doctype: Optional[str] = None) -> str:
+def get_entry_permission_query_conditions(user: str | None = None, doctype: str | None = None) -> str:
 	"""List/report filter for ``Jarz Task Entry``: only entries of visible tasks."""
 	try:
 		viewer = tb.get_viewer(user or frappe.session.user)
@@ -126,7 +126,7 @@ def get_entry_permission_query_conditions(user: Optional[str] = None, doctype: O
 TASK_FILE_DOCTYPES = frozenset({tb.TASK_DOCTYPE, tb.ENTRY_DOCTYPE})
 
 
-def task_file_change_allowed(user: Optional[str], flags: Any) -> bool:
+def task_file_change_allowed(user: str | None, flags: Any) -> bool:
 	"""May *user* modify/delete an existing task attachment right now? (pure)"""
 	if user == "Administrator":
 		return True
@@ -136,7 +136,7 @@ def task_file_change_allowed(user: Optional[str], flags: Any) -> bool:
 	return False
 
 
-def _stored_attachment(name: Any) -> Optional[dict]:
+def _stored_attachment(name: Any) -> dict | None:
 	if not name:
 		return None
 	try:
@@ -149,7 +149,7 @@ def _is_task_file(*doctypes: Any) -> bool:
 	return any(dt in TASK_FILE_DOCTYPES for dt in doctypes if dt)
 
 
-def guard_task_file_trash(doc: Any, method: Optional[str] = None) -> None:
+def guard_task_file_trash(doc: Any, method: str | None = None) -> None:
 	"""File.on_trash: refuse deleting a task attachment outside the Task Board."""
 	try:
 		stored = _stored_attachment(getattr(doc, "name", None)) or {}
@@ -166,7 +166,7 @@ def guard_task_file_trash(doc: Any, method: Optional[str] = None) -> None:
 	)
 
 
-def guard_task_file_update(doc: Any, method: Optional[str] = None) -> None:
+def guard_task_file_update(doc: Any, method: str | None = None) -> None:
 	"""File.validate: refuse modifying an EXISTING task attachment outside the board.
 
 	Judged on the DB-stored ``attached_to_doctype`` as well as the incoming one,

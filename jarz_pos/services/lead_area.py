@@ -55,7 +55,6 @@ from typing import Any
 
 import frappe
 
-
 #: How long a worker keeps its gazetteer before rebuilding. Leads are imported
 #: in batches and edited by hand, so an hour-stale area vocabulary is harmless
 #: while a per-request query over 5,400 rows would not be.

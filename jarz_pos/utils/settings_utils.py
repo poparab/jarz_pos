@@ -35,7 +35,7 @@ from typing import Any, Optional
 import frappe
 
 
-def raw_single_value(doctype: str, fieldname: str) -> Optional[Any]:
+def raw_single_value(doctype: str, fieldname: str) -> Any | None:
 	"""The stored value for a Single's field, or ``None`` when never written.
 
 	Returns the raw string as MariaDB holds it; callers coerce. ``None`` means

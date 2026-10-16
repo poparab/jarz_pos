@@ -27,12 +27,12 @@ it, which is exactly where it belongs until the cash is physically handed over.
 
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List, Optional
+from collections.abc import Iterable
+from typing import Any, Dict, List, Optional
 
 import frappe
 from frappe import _
 from frappe.utils import flt, now_datetime
-
 
 # ---------------------------------------------------------------------------
 # Reading the outstanding set
@@ -72,7 +72,7 @@ def _courier_profile_expr() -> str:
 	return "si.pos_profile"
 
 
-def party_label(party_type: Optional[str], party: Optional[str]) -> str:
+def party_label(party_type: str | None, party: str | None) -> str:
 	if not party:
 		return _("Unknown courier")
 	try:
@@ -85,7 +85,7 @@ def party_label(party_type: Optional[str], party: Optional[str]) -> str:
 	return party
 
 
-def get_unsettled_transactions(pos_profile: str) -> List[Dict[str, Any]]:
+def get_unsettled_transactions(pos_profile: str) -> list[dict[str, Any]]:
 	"""Every non-Settled Courier Transaction whose invoice belongs to *pos_profile*.
 
 	One row per transaction, carrying enough invoice context for the closer to
@@ -148,7 +148,7 @@ def get_unsettled_transactions(pos_profile: str) -> List[Dict[str, Any]]:
 	return rows
 
 
-def build_close_block(pos_profile: str, detail_limit: int = 5) -> Dict[str, Any]:
+def build_close_block(pos_profile: str, detail_limit: int = 5) -> dict[str, Any]:
 	"""What the closing screen needs to know about money still with couriers.
 
 	``blocked`` is kept for wire compatibility with clients that predate the
@@ -157,7 +157,7 @@ def build_close_block(pos_profile: str, detail_limit: int = 5) -> Dict[str, Any]
 	Current clients read ``requires_acknowledgement`` and the ``transactions``
 	list instead.
 	"""
-	payload: Dict[str, Any] = {
+	payload: dict[str, Any] = {
 		"blocked": False,
 		"requires_acknowledgement": False,
 		"pos_profile": pos_profile,
@@ -174,7 +174,7 @@ def build_close_block(pos_profile: str, detail_limit: int = 5) -> Dict[str, Any]
 	if not rows:
 		return payload
 
-	parties: Dict[tuple, Dict[str, Any]] = {}
+	parties: dict[tuple, dict[str, Any]] = {}
 	invoice_names: set = set()
 	net_balance = 0.0
 	carried_count = 0
@@ -255,7 +255,7 @@ def build_close_block(pos_profile: str, detail_limit: int = 5) -> Dict[str, Any]
 # ---------------------------------------------------------------------------
 
 
-def normalize_acknowledgement(value: Any) -> List[str]:
+def normalize_acknowledgement(value: Any) -> list[str]:
 	"""Coerce the client's acknowledgement payload into a list of CT names.
 
 	Accepts a JSON string (Frappe passes list arguments that way over HTTP), a
@@ -276,7 +276,7 @@ def normalize_acknowledgement(value: Any) -> List[str]:
 	if isinstance(value, dict):
 		value = [value]
 
-	names: List[str] = []
+	names: list[str] = []
 	for item in value or []:
 		if isinstance(item, dict):
 			name = str(item.get("courier_transaction") or item.get("name") or "").strip()
@@ -288,11 +288,11 @@ def normalize_acknowledgement(value: Any) -> List[str]:
 
 
 def stamp_carried(
-	transactions: Iterable[Dict[str, Any]],
+	transactions: Iterable[dict[str, Any]],
 	*,
 	opening_entry: str,
-	user: Optional[str] = None,
-) -> Dict[str, Any]:
+	user: str | None = None,
+) -> dict[str, Any]:
 	"""Record that *transactions* were knowingly left unsettled at a close.
 
 	``carried_from_shift`` keeps the FIRST shift that let the money walk — that
@@ -302,7 +302,7 @@ def stamp_carried(
 	"""
 	user = user or frappe.session.user
 	stamped_at = now_datetime()
-	carried: List[str] = []
+	carried: list[str] = []
 	total = 0.0
 	if not carry_columns_available():
 		# Mid-deploy: the close still succeeds and the money still shows as
@@ -314,7 +314,7 @@ def stamp_carried(
 		name = str(row.get("courier_transaction") or row.get("name") or "").strip()
 		if not name:
 			continue
-		values: Dict[str, Any] = {
+		values: dict[str, Any] = {
 			"carried_at": stamped_at,
 			"carried_by": user,
 			"carry_count": int(row.get("carry_count") or 0) + 1,
@@ -337,10 +337,10 @@ def stamp_carried(
 def mark_settled(
 	names: Iterable[str],
 	*,
-	pos_profile: Optional[str] = None,
-	extra: Optional[Dict[str, Any]] = None,
+	pos_profile: str | None = None,
+	extra: dict[str, Any] | None = None,
 	update_modified: bool = True,
-) -> List[str]:
+) -> list[str]:
 	"""Flip *names* to Settled and record which shift received the cash.
 
 	The single place courier money is allowed to become Settled.  Every
@@ -364,7 +364,7 @@ def mark_settled(
 		except Exception:
 			settled_in_shift = None
 
-	values: Dict[str, Any] = {"status": "Settled"}
+	values: dict[str, Any] = {"status": "Settled"}
 	if carry_columns_available():
 		values["settled_at"] = now_datetime()
 		values["settled_by"] = frappe.session.user
@@ -373,7 +373,7 @@ def mark_settled(
 	if extra:
 		values.update(extra)
 
-	done: List[str] = []
+	done: list[str] = []
 	for name in names or []:
 		name = str(name or "").strip()
 		if not name:
@@ -386,8 +386,8 @@ def mark_settled(
 def mark_unsettled(
 	names: Iterable[str],
 	*,
-	extra: Optional[Dict[str, Any]] = None,
-) -> List[str]:
+	extra: dict[str, Any] | None = None,
+) -> list[str]:
 	"""Flip *names* back to Unsettled — the reversal counterpart to :func:`mark_settled`.
 
 	Used by ``jarz_pos.services.delivery_handling.unsettle_courier_settlement`` when a
@@ -401,11 +401,11 @@ def mark_unsettled(
 	what every settlement path filters on, so flipping only that is what actually
 	re-opens the row.
 	"""
-	values: Dict[str, Any] = {"status": "Unsettled"}
+	values: dict[str, Any] = {"status": "Unsettled"}
 	if extra:
 		values.update(extra)
 
-	done: List[str] = []
+	done: list[str] = []
 	for name in names or []:
 		name = str(name or "").strip()
 		if not name:
@@ -415,7 +415,7 @@ def mark_unsettled(
 	return done
 
 
-def settlement_stamp(pos_profile: Optional[str] = None) -> Dict[str, Any]:
+def settlement_stamp(pos_profile: str | None = None) -> dict[str, Any]:
 	"""The settlement fields to set on a Courier Transaction *document*.
 
 	For the paths that build or save a ``Courier Transaction`` doc rather than
@@ -425,7 +425,7 @@ def settlement_stamp(pos_profile: Optional[str] = None) -> Dict[str, Any]:
 	if not carry_columns_available():
 		return {}
 
-	stamp: Dict[str, Any] = {
+	stamp: dict[str, Any] = {
 		"settled_at": now_datetime(),
 		"settled_by": frappe.session.user,
 	}
@@ -445,7 +445,7 @@ def settlement_stamp(pos_profile: Optional[str] = None) -> Dict[str, Any]:
 # Reporting — what a shift handed forward, and what it collected
 # ---------------------------------------------------------------------------
 
-EMPTY_CARRY_STATS: Dict[str, Any] = {
+EMPTY_CARRY_STATS: dict[str, Any] = {
 	"carried_out_count": 0,
 	"carried_out_amount": 0.0,
 	"settled_in_count": 0,
@@ -453,7 +453,7 @@ EMPTY_CARRY_STATS: Dict[str, Any] = {
 }
 
 
-def get_shift_carry_stats_bulk(openings: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+def get_shift_carry_stats_bulk(openings: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
 	"""Carried-out and collected-in totals for many shifts, in two queries.
 
 	Deliberately bulk: the shift monitor renders up to a thousand shifts at a
@@ -467,7 +467,7 @@ def get_shift_carry_stats_bulk(openings: List[Dict[str, Any]]) -> Dict[str, Dict
 	  carried: the money that walked out one night and came back on another,
 	  which is the figure a manager is actually looking for.
 	"""
-	stats: Dict[str, Dict[str, Any]] = {}
+	stats: dict[str, dict[str, Any]] = {}
 	windows = []
 	for opening in openings or []:
 		name = str(opening.get("name") or "").strip()
@@ -545,14 +545,14 @@ def get_shift_carry_stats_bulk(openings: List[Dict[str, Any]]) -> Dict[str, Dict
 	return stats
 
 
-def get_carried_balances(profiles: List[str]) -> Dict[str, Any]:
+def get_carried_balances(profiles: list[str]) -> dict[str, Any]:
 	"""Money currently out with couriers across *profiles*, oldest first.
 
 	The aging view the close acknowledgement is worth nothing without: a branch
 	that ticks the same transaction every night for a week should be visible as
 	exactly that, not as a fresh acknowledgement each time.
 	"""
-	payload: Dict[str, Any] = {
+	payload: dict[str, Any] = {
 		"couriers": [],
 		"total_net_balance": 0.0,
 		"transaction_count": 0,
@@ -562,7 +562,7 @@ def get_carried_balances(profiles: List[str]) -> Dict[str, Any]:
 	if not profiles:
 		return payload
 
-	couriers: Dict[tuple, Dict[str, Any]] = {}
+	couriers: dict[tuple, dict[str, Any]] = {}
 	for profile in profiles:
 		for row in get_unsettled_transactions(profile):
 			key = (row.get("party_type") or "", row.get("party") or "", profile)

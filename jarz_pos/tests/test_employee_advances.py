@@ -40,7 +40,6 @@ from unittest.mock import MagicMock, patch
 
 from jarz_pos.constants import ROLES
 
-
 MODULE = "jarz_pos.api.employee_advances"
 
 

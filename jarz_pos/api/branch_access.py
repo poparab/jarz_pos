@@ -21,7 +21,7 @@ from frappe.utils import cint, getdate
 from jarz_pos.services import branch_access as service
 
 
-def _clean(value: Any) -> Optional[str]:
+def _clean(value: Any) -> str | None:
 	text = str(value or "").strip()
 	return text or None
 
@@ -36,7 +36,7 @@ def _coerce_date(value: Any, label: str) -> str:
 
 
 @frappe.whitelist()
-def get_branch_access() -> Dict[str, Any]:
+def get_branch_access() -> dict[str, Any]:
 	"""Branches (with open-shift state), users, memberships and day accesses."""
 	data = service.get_branch_access()
 	data["success"] = True
@@ -48,8 +48,8 @@ def set_branch_access(
 	user: str,
 	pos_profile: str,
 	allowed: Any,
-	notes: Optional[str] = None,
-) -> Dict[str, Any]:
+	notes: str | None = None,
+) -> dict[str, Any]:
 	"""Add (``allowed=1``) or remove (``allowed=0``) a permanent membership.
 
 	``changed`` is false when the user is already in the requested state; no
@@ -70,8 +70,8 @@ def grant_day_access(
 	user: str,
 	pos_profile: str,
 	access_date: str,
-	notes: Optional[str] = None,
-) -> Dict[str, Any]:
+	notes: str | None = None,
+) -> dict[str, Any]:
 	"""One branch day of POS access: today starts now, a later day is scheduled."""
 	result = service.grant_day_access(
 		_clean(user),
@@ -84,7 +84,7 @@ def grant_day_access(
 
 
 @frappe.whitelist(methods=["POST"])
-def cancel_day_access(name: str) -> Dict[str, Any]:
+def cancel_day_access(name: str) -> dict[str, Any]:
 	"""Withdraw a scheduled or running day access."""
 	result = service.cancel_day_access(_clean(name))
 	result["success"] = True
@@ -95,10 +95,10 @@ def cancel_day_access(name: str) -> Dict[str, Any]:
 def move_branch(
 	user: str,
 	to_pos_profile: str,
-	from_pos_profile: Optional[str] = None,
+	from_pos_profile: str | None = None,
 	keep_old_access: Any = 0,
-	notes: Optional[str] = None,
-) -> Dict[str, Any]:
+	notes: str | None = None,
+) -> dict[str, Any]:
 	"""Move somebody to another branch for good: POS access and future shifts.
 
 	``from_pos_profile`` defaults to the branch their schedule puts them at;
@@ -115,11 +115,11 @@ def move_branch(
 
 @frappe.whitelist()
 def get_access_log(
-	pos_profile: Optional[str] = None,
-	user: Optional[str] = None,
+	pos_profile: str | None = None,
+	user: str | None = None,
 	limit: Any = 50,
 	start: Any = 0,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	"""The change history, newest first, paged with ``start``/``limit``."""
 	result = service.get_access_log(
 		pos_profile=_clean(pos_profile),

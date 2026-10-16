@@ -57,20 +57,20 @@ def _month_end(day: date) -> date:
 	return day.replace(day=calendar.monthrange(day.year, day.month)[1])
 
 
-def split_by_month(amount: float, period_from: date, period_to: date, precision: int = 2) -> List[MonthShare]:
+def split_by_month(amount: float, period_from: date, period_to: date, precision: int = 2) -> list[MonthShare]:
 	"""Each calendar month's share of *amount*, oldest first."""
 	total_days = (period_to - period_from).days + 1
 	if total_days <= 0:
 		raise PeriodError("The period must start on or before the day it ends.")
 
-	months: List[tuple] = []
+	months: list[tuple] = []
 	cursor = period_from
 	while cursor <= period_to:
 		end = min(_month_end(cursor), period_to)
 		months.append((cursor.strftime("%Y-%m"), (end - cursor).days + 1, _month_end(cursor)))
 		cursor = end + timedelta(days=1)
 
-	shares: List[MonthShare] = []
+	shares: list[MonthShare] = []
 	allocated = 0.0
 	for index, (month, days, month_end) in enumerate(months):
 		if index == len(months) - 1:
@@ -84,7 +84,7 @@ def split_by_month(amount: float, period_from: date, period_to: date, precision:
 
 def earlier_month_shares(
 	amount: float, period_from: date, period_to: date, expense_date: date, precision: int = 2
-) -> List[MonthShare]:
+) -> list[MonthShare]:
 	"""The shares that belong to months before the payment's month.
 
 	Empty when the whole period falls in the payment's month -- the ordinary

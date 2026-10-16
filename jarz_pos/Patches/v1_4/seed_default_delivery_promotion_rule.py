@@ -1,6 +1,5 @@
 import frappe
 
-
 RULE_NAME = "Free Delivery >= 999 EGP"
 
 

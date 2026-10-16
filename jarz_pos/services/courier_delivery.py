@@ -45,7 +45,8 @@ from __future__ import annotations
 
 import hmac
 import json
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from collections.abc import Sequence
+from typing import Any, Dict, List, Optional, Tuple
 
 import frappe
 from frappe import _
@@ -54,13 +55,13 @@ from frappe.utils import flt, now_datetime
 from jarz_pos.constants import WS_EVENTS
 from jarz_pos.services import courier_identity, delivery_leg
 from jarz_pos.services.delivery_handling import update_submitted_sales_invoice_fields
-from jarz_pos.utils.settings_utils import single_flag
 from jarz_pos.utils.access_control import (
 	ShiftRequiredError,
 	ensure_open_shift_for_invoice,
 	ensure_profile_scoped_invoice_access,
 )
 from jarz_pos.utils.realtime import publish_invoice_event
+from jarz_pos.utils.settings_utils import single_flag
 
 
 class CourierSchemaError(frappe.ValidationError):
@@ -110,7 +111,7 @@ _STATE_FIELD_ALIASES = (
 
 #: Fields each action writes. Asserted present *and* ``allow_on_submit`` before
 #: anything is written.
-_REQUIRED_FIELDS: Dict[str, Tuple[str, ...]] = {
+_REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
 	ACTION_ARRIVED: (
 		"custom_arrived_at",
 		"custom_delivery_latitude",
@@ -232,8 +233,8 @@ def _assert_invoice_fields(fieldnames: Sequence[str]) -> None:
 			CourierSchemaError,
 		)
 
-	missing: List[str] = []
-	not_updatable: List[str] = []
+	missing: list[str] = []
+	not_updatable: list[str] = []
 	for fieldname in fieldnames:
 		field = meta.get_field(fieldname)
 		if not field:
@@ -265,7 +266,7 @@ def _assert_invoice_fields(fieldnames: Sequence[str]) -> None:
 		)
 
 
-def _board_state_fields() -> List[str]:
+def _board_state_fields() -> list[str]:
 	"""Whichever board-state aliases this site actually carries, in probe order."""
 	try:
 		meta = frappe.get_meta("Sales Invoice")
@@ -294,7 +295,7 @@ def _replay_key(invoice_id: str, action: str, request_id: str) -> str:
 	return f"{_REPLAY_CACHE_PREFIX}{action}::{invoice_id}::{request_id}"
 
 
-def _replay_lookup(invoice_id: str, action: str, request_id: str) -> Optional[Dict[str, Any]]:
+def _replay_lookup(invoice_id: str, action: str, request_id: str) -> dict[str, Any] | None:
 	"""Prior result for this exact ``request_id``, if we still remember it.
 
 	Cache-backed, so it is best-effort by construction: a Redis flush loses the
@@ -318,7 +319,7 @@ def _replay_lookup(invoice_id: str, action: str, request_id: str) -> Optional[Di
 		return None
 
 
-def _replay_store(invoice_id: str, action: str, request_id: str, result: Dict[str, Any]) -> None:
+def _replay_store(invoice_id: str, action: str, request_id: str, result: dict[str, Any]) -> None:
 	if not request_id:
 		return
 	try:
@@ -368,7 +369,7 @@ def _load_and_gate(invoice_id: str, *, action_label: str) -> Any:
 	return inv
 
 
-def _assert_actionable(inv: Any) -> Optional[str]:
+def _assert_actionable(inv: Any) -> str | None:
 	"""Return an error string when *inv* cannot take a delivery outcome."""
 	if int(getattr(inv, "docstatus", 0) or 0) != 1:
 		return _("Only submitted invoices can take a delivery outcome")
@@ -471,7 +472,7 @@ def _assert_delivery_code(invoice_id: str, supplied: Any) -> None:
 	)
 
 
-def _geo_updates(latitude: Any, longitude: Any, accuracy_m: Any) -> Dict[str, Any]:
+def _geo_updates(latitude: Any, longitude: Any, accuracy_m: Any) -> dict[str, Any]:
 	"""Coordinate fields for the update dict, omitting anything unusable.
 
 	Imported lazily so this module stays importable on a site where the geo lane
@@ -479,7 +480,7 @@ def _geo_updates(latitude: Any, longitude: Any, accuracy_m: Any) -> Dict[str, An
 	"""
 	from jarz_pos.utils.geo import is_valid_coordinate
 
-	updates: Dict[str, Any] = {}
+	updates: dict[str, Any] = {}
 	if latitude not in (None, "") and longitude not in (None, ""):
 		if is_valid_coordinate(latitude, longitude):
 			updates["custom_delivery_latitude"] = float(latitude)
@@ -492,7 +493,7 @@ def _geo_updates(latitude: Any, longitude: Any, accuracy_m: Any) -> Dict[str, An
 	return updates
 
 
-def _publish(event: str, inv: Any, payload: Dict[str, Any]) -> None:
+def _publish(event: str, inv: Any, payload: dict[str, Any]) -> None:
 	"""Emit to the branch that owns the invoice. Never raises."""
 	try:
 		publish_invoice_event(event, payload, inv)
@@ -500,7 +501,7 @@ def _publish(event: str, inv: Any, payload: Dict[str, Any]) -> None:
 		_log(frappe.get_traceback(), f"courier_delivery: realtime publish failed ({event})")
 
 
-def _envelope(action: str, inv: Any, **extra: Any) -> Dict[str, Any]:
+def _envelope(action: str, inv: Any, **extra: Any) -> dict[str, Any]:
 	return {
 		"success": True,
 		"action": action,
@@ -518,10 +519,10 @@ def _envelope(action: str, inv: Any, **extra: Any) -> Dict[str, Any]:
 def mark_invoice_arrived(
 	invoice_id: str,
 	*,
-	latitude: Optional[float] = None,
-	longitude: Optional[float] = None,
-	accuracy_m: Optional[float] = None,
-	request_id: Optional[str] = None,
+	latitude: float | None = None,
+	longitude: float | None = None,
+	accuracy_m: float | None = None,
+	request_id: str | None = None,
 ) -> dict:
 	"""Stamp "the courier is at the door" on an invoice.
 
@@ -563,7 +564,7 @@ def mark_invoice_arrived(
 			_replay_store(invoice_id, ACTION_ARRIVED, request_id, result)
 			return result
 
-		updates: Dict[str, Any] = {"custom_arrived_at": now_datetime()}
+		updates: dict[str, Any] = {"custom_arrived_at": now_datetime()}
 		updates.update(_geo_updates(latitude, longitude, accuracy_m))
 
 		if not update_submitted_sales_invoice_fields(inv, updates):
@@ -594,14 +595,14 @@ def mark_invoice_arrived(
 def mark_invoice_delivered(
 	invoice_id: str,
 	*,
-	latitude: Optional[float] = None,
-	longitude: Optional[float] = None,
-	accuracy_m: Optional[float] = None,
-	collected_amount: Optional[float] = None,
-	recipient_name: Optional[str] = None,
+	latitude: float | None = None,
+	longitude: float | None = None,
+	accuracy_m: float | None = None,
+	collected_amount: float | None = None,
+	recipient_name: str | None = None,
 	is_mocked: bool = False,
-	request_id: Optional[str] = None,
-	delivery_code: Optional[str] = None,
+	request_id: str | None = None,
+	delivery_code: str | None = None,
 	enforce_code: bool = False,
 ) -> dict:
 	"""Record a successful hand-over and move the invoice to ``Delivered``.
@@ -636,7 +637,7 @@ def mark_invoice_delivered(
 	if not courier_delivery_enabled():
 		return {"success": False, "error": _("Courier delivery actions are not enabled.")}
 
-	collected: Optional[float] = None
+	collected: float | None = None
 	if collected_amount not in (None, ""):
 		try:
 			collected = flt(collected_amount)
@@ -676,7 +677,7 @@ def mark_invoice_delivered(
 		if enforce_code and delivery_code_required():
 			_assert_delivery_code(invoice_id, delivery_code)
 
-		updates: Dict[str, Any] = {
+		updates: dict[str, Any] = {
 			"custom_delivered_at": now_datetime(),
 			# A delivered order has no outstanding failure. Cleared in the same
 			# save so the two can never be observed disagreeing.
@@ -766,11 +767,11 @@ def mark_invoice_failed(
 	invoice_id: str,
 	*,
 	failure_reason: str,
-	latitude: Optional[float] = None,
-	longitude: Optional[float] = None,
-	accuracy_m: Optional[float] = None,
-	notes: Optional[str] = None,
-	request_id: Optional[str] = None,
+	latitude: float | None = None,
+	longitude: float | None = None,
+	accuracy_m: float | None = None,
+	notes: str | None = None,
+	request_id: str | None = None,
 ) -> dict:
 	"""Record a failed delivery attempt.
 
@@ -821,7 +822,7 @@ def mark_invoice_failed(
 		state_before = {field: inv.get(field) for field in _board_state_fields()}
 
 		attempt_no = int(flt(inv.get("custom_delivery_attempt_no")) or 0) + 1
-		updates: Dict[str, Any] = {
+		updates: dict[str, Any] = {
 			"custom_delivery_failure_reason": reason["name"],
 			"custom_delivery_attempt_no": attempt_no,
 		}
@@ -888,7 +889,7 @@ def mark_invoice_leg_started(
 	invoice_id: str,
 	*,
 	at: Any = None,
-	request_id: Optional[str] = None,
+	request_id: str | None = None,
 ) -> dict:
 	"""The courier set off toward **this** customer.
 
@@ -972,7 +973,7 @@ def mark_invoice_leg_ended(
 	invoice_id: str,
 	*,
 	at: Any = None,
-	request_id: Optional[str] = None,
+	request_id: str | None = None,
 ) -> dict:
 	"""Close this order's leg. Closes the map, changes nothing else.
 
@@ -1034,7 +1035,7 @@ def mark_invoice_leg_ended(
 		return {"success": False, "error": str(exc)}
 
 
-def _close_other_open_legs(inv: Any, *, at: Any) -> List[str]:
+def _close_other_open_legs(inv: Any, *, at: Any) -> list[str]:
 	"""Close every other open leg this courier holds. Never raises.
 
 	Deliberately best-effort. If closing a stale leg fails, the *new* leg must
@@ -1053,7 +1054,7 @@ def _close_other_open_legs(inv: Any, *, at: Any) -> List[str]:
 	if not (party_type and party):
 		return []
 
-	closed: List[str] = []
+	closed: list[str] = []
 	try:
 		others = delivery_leg.open_legs_for_courier(
 			party_type, party, exclude_invoice=str(getattr(inv, "name", "") or "")
@@ -1083,7 +1084,7 @@ def _close_other_open_legs(inv: Any, *, at: Any) -> List[str]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _resolve_failure_reason(code: str) -> Optional[Dict[str, Any]]:
+def _resolve_failure_reason(code: str) -> dict[str, Any] | None:
 	"""Load an *active* ``Delivery Failure Reason`` by name, or ``None``."""
 	try:
 		row = frappe.db.get_value(
@@ -1106,7 +1107,7 @@ def _resolve_failure_reason(code: str) -> Optional[Dict[str, Any]]:
 	}
 
 
-def list_failure_reasons() -> List[Dict[str, Any]]:
+def list_failure_reasons() -> list[dict[str, Any]]:
 	"""Active failure reasons for the courier's picker."""
 	try:
 		return (
@@ -1142,8 +1143,8 @@ def _add_comment(inv: Any, content: str) -> None:
 def _record_delivery_note_comment(
 	inv: Any,
 	*,
-	collected: Optional[float],
-	recipient_name: Optional[str],
+	collected: float | None,
+	recipient_name: str | None,
 	is_mocked: bool,
 ) -> None:
 	"""Persist the non-schema delivery detail somewhere durable and visible.
@@ -1152,7 +1153,7 @@ def _record_delivery_note_comment(
 	and none of these three is one of them. A Comment costs no schema, survives,
 	and shows up in the Desk timeline where an investigator will actually look.
 	"""
-	parts: List[str] = [f"Delivered by {frappe.session.user}"]
+	parts: list[str] = [f"Delivered by {frappe.session.user}"]
 	if recipient_name:
 		parts.append(f"received by {recipient_name}")
 	if collected is not None:

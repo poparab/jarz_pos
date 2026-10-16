@@ -11,7 +11,6 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-
 # The stub is installed *additively*. A plain `if "frappe" not in sys.modules`
 # guard makes these tests order-dependent: whichever sibling module loads first
 # owns the fake, and this one then finds no `get_single` to patch. Filling in
@@ -79,7 +78,6 @@ for _attr in ("exists", "get_value", "get_single_value"):
 		setattr(_frappe.db, _attr, lambda *a, **k: None)
 
 from jarz_pos.setup import purchase_setup
-
 
 RAW = "Raw Material - J"
 CONSUMABLES = "Consumables - J"

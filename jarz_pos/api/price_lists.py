@@ -33,11 +33,10 @@ Item Price rows are NEVER surfaced in these generic reads/writes.
 
 import frappe
 
+from jarz_pos.api.crm import _can_access_b2b
 from jarz_pos.api.pos import (
 	_has_manager_pricing_access,
 )
-from jarz_pos.api.crm import _can_access_b2b
-
 
 _DEFAULT_CURRENCY = "EGP"
 

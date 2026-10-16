@@ -17,9 +17,8 @@ import unittest
 from contextlib import contextmanager
 from unittest.mock import patch
 
-from jarz_pos.crm import follow_ups as fu
 from jarz_pos.api import crm
-
+from jarz_pos.crm import follow_ups as fu
 
 _TODAY = "2026-07-11"
 

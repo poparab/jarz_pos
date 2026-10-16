@@ -38,9 +38,9 @@ from jarz_pos.constants import ROLES
 from jarz_pos.utils.invoice_utils import get_area_label
 
 # ── Item group sets ──────────────────────────────────────────────────────
-_SMALL_GROUPS: Set[str] = {"Small"}
-_MEDIUM_GROUPS: Set[str] = {"Medium", "Meduim"}
-_LARGE_GROUPS: Set[str] = {"Large"}
+_SMALL_GROUPS: set[str] = {"Small"}
+_MEDIUM_GROUPS: set[str] = {"Medium", "Meduim"}
+_LARGE_GROUPS: set[str] = {"Large"}
 
 _TYPE_BUNDLE = "Bundle"
 _TYPE_SMALL = "Small"
@@ -59,7 +59,7 @@ def _default_dates() -> tuple[str, str]:
 	return (today - timedelta(days=29)).isoformat(), today.isoformat()
 
 
-def _get_bundle_item_codes() -> Set[str]:
+def _get_bundle_item_codes() -> set[str]:
 	rows = frappe.get_all(
 		"Jarz Bundle",
 		filters={"disabled": 0},
@@ -68,7 +68,7 @@ def _get_bundle_item_codes() -> Set[str]:
 	return {r["erpnext_item"] for r in rows if r.get("erpnext_item")}
 
 
-def _get_bom_costs(item_codes: List[str]) -> Dict[str, float]:
+def _get_bom_costs(item_codes: list[str]) -> dict[str, float]:
 	"""Default BOM cost per unit (``total_cost / quantity``) per item.
 
 	No longer used by :func:`get_product_analytics` (the BOM fallback is joined
@@ -87,7 +87,7 @@ def _get_bom_costs(item_codes: List[str]) -> Dict[str, float]:
 		{"codes": tuple(item_codes)},
 		as_dict=True,
 	)
-	out: Dict[str, float] = {}
+	out: dict[str, float] = {}
 	for b in boms:
 		qty = float(b.get("quantity") or 0) or 1.0
 		out[b["item"]] = float(b.get("total_cost") or 0) / qty
@@ -100,7 +100,7 @@ _ALL_SIZE_GROUPS = tuple(sorted(_SMALL_GROUPS | _MEDIUM_GROUPS | _LARGE_GROUPS))
 _NO_CODE = "__jarz_no_item__"
 
 
-def _lines_sql(branch: Optional[str]) -> str:
+def _lines_sql(branch: str | None) -> str:
 	"""Classified invoice lines in the range, with their actual and BOM cost.
 
 	One row per Sales Invoice Item that the report counts: a bundle header, any
@@ -164,7 +164,7 @@ def _lines_sql(branch: Optional[str]) -> str:
 _LINE_COST = "COALESCE(l.actual_cost, l.bom_unit * l.stock_qty, 0)"
 
 
-def _product_rows(params: Dict[str, Any], lines: str) -> List[Dict[str, Any]]:
+def _product_rows(params: dict[str, Any], lines: str) -> list[dict[str, Any]]:
 	return (
 		frappe.db.sql(
 			f"""
@@ -194,7 +194,7 @@ def _product_rows(params: Dict[str, Any], lines: str) -> List[Dict[str, Any]]:
 	)
 
 
-def _territory_day_rows(params: Dict[str, Any], lines: str) -> List[Dict[str, Any]]:
+def _territory_day_rows(params: dict[str, Any], lines: str) -> list[dict[str, Any]]:
 	# An invoice has one territory and one posting date, so distinct counts per
 	# (territory, day) add up to distinct counts per territory, per day, and overall.
 	return (
@@ -215,7 +215,7 @@ def _territory_day_rows(params: Dict[str, Any], lines: str) -> List[Dict[str, An
 	)
 
 
-def _intrinsic_type(item_group: str) -> Optional[str]:
+def _intrinsic_type(item_group: str) -> str | None:
 	if item_group in _SMALL_GROUPS:
 		return _TYPE_SMALL
 	if item_group in _MEDIUM_GROUPS:
@@ -247,10 +247,10 @@ def _f(value: Any) -> float:
 
 @frappe.whitelist()
 def get_product_analytics(
-	date_from: Optional[str] = None,
-	date_to: Optional[str] = None,
-	branch: Optional[str] = None,
-) -> Dict[str, Any]:
+	date_from: str | None = None,
+	date_to: str | None = None,
+	branch: str | None = None,
+) -> dict[str, Any]:
 	"""
 	Return aggregated product analytics for the given date range.
 
@@ -297,7 +297,7 @@ def get_product_analytics(
 	branch = (branch or "").strip() or None
 
 	bundle_item_codes = _get_bundle_item_codes()
-	params: Dict[str, Any] = {
+	params: dict[str, Any] = {
 		"fd": date_from,
 		"td": date_to,
 		"branch": branch,
@@ -311,11 +311,11 @@ def get_product_analytics(
 	territory_day_rows = _territory_day_rows(params, lines)
 
 	# ── Aggregation accumulators ─────────────────────────────────────────
-	type_agg: Dict[str, Dict[str, float]] = {
+	type_agg: dict[str, dict[str, float]] = {
 		t: {"units": 0.0, "revenue": 0.0, "cost": 0.0} for t in _TYPE_ORDER
 	}
-	product_agg: Dict[str, Dict[str, Any]] = {}
-	bundle_comp: Dict[str, Dict[str, Any]] = {}
+	product_agg: dict[str, dict[str, Any]] = {}
+	bundle_comp: dict[str, dict[str, Any]] = {}
 	sources = {"actual": 0.0, "bom": 0.0, "none": 0.0}
 
 	for row in product_rows:
@@ -439,8 +439,8 @@ def get_product_analytics(
 		)
 
 	# ── by_territory / trend (from the territory × day aggregate) ────────
-	territory_agg: Dict[str, Dict[str, float]] = {}
-	trend_agg: Dict[str, Dict[str, float]] = {}
+	territory_agg: dict[str, dict[str, float]] = {}
+	trend_agg: dict[str, dict[str, float]] = {}
 	for row in territory_day_rows:
 		territory = (row.get("territory") or "Unassigned").strip()
 		day = str(row.get("posting_date"))
@@ -512,7 +512,7 @@ def get_product_analytics(
 	}
 
 
-def _empty_response(date_from: str, date_to: str, branch: Optional[str] = None) -> Dict[str, Any]:
+def _empty_response(date_from: str, date_to: str, branch: str | None = None) -> dict[str, Any]:
 	return {
 		"period": {"date_from": date_from, "date_to": date_to},
 		"filters": {"date_from": date_from, "date_to": date_to, "branch": branch},

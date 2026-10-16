@@ -68,7 +68,7 @@ DEFAULT_CREDIT_DAYS = 30
 #: that exists on every site. Anchoring on one of this app's own fixture fields
 #: would drop the whole block to the bottom of the form on a site where that
 #: fixture has not imported yet.
-CUSTOMER_FIELDS: List[Dict[str, Any]] = [
+CUSTOMER_FIELDS: list[dict[str, Any]] = [
 	{
 		"fieldname": "custom_credit_allowed",
 		"label": "Allow orders on credit",
@@ -132,7 +132,7 @@ def _custom_field_exists(doctype: str, fieldname: str) -> bool:
 		return False
 
 
-def _ensure_fields(doctype: str, specs: List[Dict[str, Any]], log: Dict[str, List[str]]) -> None:
+def _ensure_fields(doctype: str, specs: list[dict[str, Any]], log: dict[str, list[str]]) -> None:
 	"""Create (or bring in line) the given Custom Fields on ``doctype``.
 
 	Uses ``frappe.custom.doctype.custom_field.custom_field.create_custom_fields``
@@ -168,7 +168,7 @@ def _ensure_fields(doctype: str, specs: List[Dict[str, Any]], log: Dict[str, Lis
 			_logger().error(f"Failed to ensure Custom Field {doctype}.{fieldname}", exc_info=True)
 
 
-def _verify_columns(log: Dict[str, List[str]]) -> None:
+def _verify_columns(log: dict[str, list[str]]) -> None:
 	"""Say out loud whether the three columns are actually queryable.
 
 	``create_custom_fields`` can succeed as a document write and still leave the
@@ -190,14 +190,14 @@ def _verify_columns(log: Dict[str, List[str]]) -> None:
 			)
 
 
-def ensure_credit_terms_fields() -> Dict[str, List[str]]:
+def ensure_credit_terms_fields() -> dict[str, list[str]]:
 	"""Idempotently seed the customer credit schema. Safe on every migrate.
 
 	Never raises. This runs inside the shared ``bench migrate`` that the whole
 	bench depends on; a raising seeder does not fail its own feature, it aborts
 	the migrate for every app on the site.
 	"""
-	log: Dict[str, List[str]] = {
+	log: dict[str, list[str]] = {
 		"created": [],
 		"existing": [],
 		"skipped": [],

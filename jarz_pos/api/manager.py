@@ -10,15 +10,18 @@ Endpoints:
 """
 
 from __future__ import annotations
-from contextlib import contextmanager
-from datetime import timedelta
+
 import hashlib
 import json
 import re
-from typing import List, Dict, Any, Optional, Union
+from contextlib import contextmanager
+from datetime import timedelta
+from typing import Any, Dict, List, Optional, Union
+
 import frappe
 from frappe import _
 from frappe.utils import add_days, flt, getdate, nowdate
+
 from jarz_pos.constants import ACCOUNTS, ROLES, WS_EVENTS
 
 try:
@@ -96,9 +99,11 @@ except Exception:  # pragma: no cover - defensive, mirrors the import above
 
 
 from jarz_pos.services.amendment_cart import build_amendment_cart_from_invoice
-
+from jarz_pos.services.state_log import record_state_change
 from jarz_pos.utils.access_control import (
 	ensure_profile_scoped_invoice_access as _shared_ensure_profile_scoped_invoice_access,
+)
+from jarz_pos.utils.access_control import (
 	get_user_pos_profiles,
 	get_users_for_pos_profiles,
 )
@@ -107,8 +112,6 @@ from jarz_pos.utils.invoice_utils import normalize_woo_order_id
 # Renders a Time column (a timedelta) as HH:MM:SS without treating 00:00 as unset.
 from jarz_pos.utils.posting_datetime import format_time_value
 from jarz_pos.utils.realtime import publish_invoice_event, publish_to_branches
-from jarz_pos.services.state_log import record_state_change
-
 
 # Allowed states for invoice transfer (normalized: lowercase, no extra spaces)
 # These match the actual field values: "Received", "In Progress"
@@ -125,7 +128,7 @@ def _normalize_prep_state(state: Any) -> str:
 	return "in progress" if normalized == "ready" else normalized
 
 
-def _current_user_allowed_profiles() -> List[str]:
+def _current_user_allowed_profiles() -> list[str]:
 	"""Return POS Profiles the current user can manage.
 
 	Branch membership is the POS Profile User child table for *everyone*: a
@@ -162,14 +165,14 @@ def _ensure_shift_monitor_access() -> None:
 		frappe.throw(_("Not permitted: Shift monitor access required"), frappe.PermissionError)
 
 
-def _get_all_active_pos_profiles() -> List[str]:
+def _get_all_active_pos_profiles() -> list[str]:
 	try:
 		return frappe.get_all("POS Profile", filters={"disabled": 0}, pluck="name") or []
 	except Exception:
 		return []
 
 
-def _current_user_shift_monitor_profiles() -> List[str]:
+def _current_user_shift_monitor_profiles() -> list[str]:
 	"""Branches whose shifts this user may monitor.
 
 	The role check says the user may open the monitor at all; the branch list
@@ -180,7 +183,7 @@ def _current_user_shift_monitor_profiles() -> List[str]:
 	return _current_user_allowed_profiles()
 
 
-def _coerce_shift_monitor_date(value: Optional[str], fallback: str):
+def _coerce_shift_monitor_date(value: str | None, fallback: str):
 	if not value:
 		return getdate(fallback)
 	try:
@@ -189,7 +192,7 @@ def _coerce_shift_monitor_date(value: Optional[str], fallback: str):
 		frappe.throw(_("Invalid date: {0}").format(value))
 
 
-def _normalize_shift_monitor_status(status: Optional[str]) -> str:
+def _normalize_shift_monitor_status(status: str | None) -> str:
 	normalized = str(status or "all").strip().lower()
 	if normalized not in {"all", "open", "closed"}:
 		frappe.throw(_("Invalid status filter: {0}").format(status))
@@ -208,8 +211,8 @@ def _sum_shift_amount(rows: Any, fieldname: str) -> float:
 
 def _shift_monitor_user_details(
 	user: str,
-	user_cache: Dict[str, Dict[str, Optional[str]]],
-) -> Dict[str, Optional[str]]:
+	user_cache: dict[str, dict[str, str | None]],
+) -> dict[str, str | None]:
 	normalized_user = str(user or "").strip()
 	if not normalized_user:
 		return {
@@ -240,7 +243,7 @@ def _shift_monitor_user_details(
 	return cached
 
 
-def _find_linked_pos_closing_entry(opening_name: str) -> Optional[str]:
+def _find_linked_pos_closing_entry(opening_name: str) -> str | None:
 	linked = frappe.db.get_value("POS Opening Entry", opening_name, "pos_closing_entry")
 	if linked:
 		return linked
@@ -254,9 +257,9 @@ def _find_linked_pos_closing_entry(opening_name: str) -> Optional[str]:
 def _build_shift_monitor_row(
 	opening: Any,
 	*,
-	user_cache: Dict[str, Dict[str, Optional[str]]],
-	carry: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
+	user_cache: dict[str, dict[str, str | None]],
+	carry: dict[str, Any] | None = None,
+) -> dict[str, Any]:
 	from jarz_pos.api.shift import _resolve_pos_profile_account
 
 	opening_user = _shift_monitor_user_details(getattr(opening, "user", None), user_cache)
@@ -355,7 +358,7 @@ def _ensure_profile_scoped_invoice_access(
 	inv: Any,
 	*,
 	action_label: str,
-	extra_profiles: Optional[List[str]] = None,
+	extra_profiles: list[str] | None = None,
 ) -> None:
 	"""Assert the current user may act on this invoice's branch.
 
@@ -369,7 +372,7 @@ def _ensure_profile_scoped_invoice_access(
 	)
 
 
-def _get_state_field_options() -> List[str]:
+def _get_state_field_options() -> list[str]:
 	"""Return list of Sales Invoice state options without reading Custom Field doc.
 	Prefers 'custom_sales_invoice_state', falls back to legacy names.
 	"""
@@ -386,14 +389,14 @@ def _get_state_field_options() -> List[str]:
 		return []
 
 
-def _state_key(value: Optional[str]) -> Optional[str]:
+def _state_key(value: str | None) -> str | None:
 	"""Normalize a state label into the websocket state-key format."""
 	if not value:
 		return None
 	return str(value).strip().lower().replace(" ", "_")
 
 
-def _match_option(value: Optional[str], options: List[str]) -> Optional[str]:
+def _match_option(value: str | None, options: list[str]) -> str | None:
 	"""Return the canonical option that matches value case-insensitively."""
 	cleaned_value = str(value or "").strip()
 	if not cleaned_value:
@@ -404,7 +407,7 @@ def _match_option(value: Optional[str], options: List[str]) -> Optional[str]:
 	return None
 
 
-def _get_acceptance_field_options() -> List[str]:
+def _get_acceptance_field_options() -> list[str]:
 	"""Return Acceptance Status select options from Sales Invoice metadata."""
 	try:
 		field = frappe.get_meta("Sales Invoice").get_field("custom_acceptance_status")
@@ -437,10 +440,10 @@ def _validate_transfer_target_warehouse(inv: Any, target_warehouse: str) -> None
 		)
 
 
-def _get_transfer_stock_rows(inv: Any) -> List[Any]:
+def _get_transfer_stock_rows(inv: Any) -> list[Any]:
 	"""Return invoice rows whose warehouse must follow branch reassignment."""
-	stock_rows: List[Any] = []
-	item_stock_cache: Dict[str, bool] = {}
+	stock_rows: list[Any] = []
+	item_stock_cache: dict[str, bool] = {}
 
 	for row in list(getattr(inv, "items", []) or []):
 		item_code = str(getattr(row, "item_code", "") or "").strip()
@@ -456,7 +459,7 @@ def _get_transfer_stock_rows(inv: Any) -> List[Any]:
 	return stock_rows
 
 
-def _find_submitted_delivery_notes(invoice_name: str) -> List[str]:
+def _find_submitted_delivery_notes(invoice_name: str) -> list[str]:
 	"""Return submitted Delivery Notes already linked to the Sales Invoice."""
 	rows = (
 		frappe.get_all(
@@ -470,7 +473,7 @@ def _find_submitted_delivery_notes(invoice_name: str) -> List[str]:
 	return sorted({row for row in rows if row})
 
 
-def _find_submitted_payment_entries(invoice_name: str) -> List[str]:
+def _find_submitted_payment_entries(invoice_name: str) -> list[str]:
 	"""Return submitted Payment Entries already linked to the Sales Invoice."""
 	ref_rows = (
 		frappe.get_all(
@@ -508,7 +511,7 @@ _PAYMENT_TOLERANCE = 0.01
 
 def _find_closed_shift_holding_till(
 	voucher_creation: Any, paid_to: str, company: str
-) -> Optional[Dict[str, Any]]:
+) -> dict[str, Any] | None:
 	"""Return the closed shift whose OWN till is ``paid_to``, or None.
 
 	Deliberately not :func:`find_closed_shift_covering`, which answers a different
@@ -555,7 +558,7 @@ def _find_closed_shift_holding_till(
 	return None
 
 
-def evaluate_amendment_payment_migration(inv: Any) -> Dict[str, Any]:
+def evaluate_amendment_payment_migration(inv: Any) -> dict[str, Any]:
 	"""Describe what has to happen to a source invoice's payment when it is amended.
 
 	An amendment cancels the source invoice, and ERPNext will not let it cancel
@@ -603,7 +606,7 @@ def evaluate_amendment_payment_migration(inv: Any) -> Dict[str, Any]:
 	smaller cost than a cross-app dependency.
 	"""
 	invoice_name = str(getattr(inv, "name", None) or inv.get("name") or "").strip()
-	empty: Dict[str, Any] = {
+	empty: dict[str, Any] = {
 		"has_payment": False,
 		"can_migrate": True,
 		"block_code": None,
@@ -667,7 +670,7 @@ def evaluate_amendment_payment_migration(inv: Any) -> Dict[str, Any]:
 	# inference-from-an-absent-field that made an amendment impossible whenever
 	# `outstanding_amount` was unpopulated. Money allocated to nothing is caught by
 	# the unallocated check below.
-	def _is_foreign_allocation(row: Dict[str, Any]) -> bool:
+	def _is_foreign_allocation(row: dict[str, Any]) -> bool:
 		reference_name = str(row.get("reference_name") or "").strip()
 		reference_doctype = str(row.get("reference_doctype") or "").strip()
 		if reference_name and reference_name != invoice_name:
@@ -690,7 +693,7 @@ def evaluate_amendment_payment_migration(inv: Any) -> Dict[str, Any]:
 		allocated_total=allocated_total,
 	)
 
-	def _refuse(code: str, reason: str) -> Dict[str, Any]:
+	def _refuse(code: str, reason: str) -> dict[str, Any]:
 		return dict(paid, can_migrate=False, block_code=code, block_reason=reason)
 
 	# A Payment Entry that also settles another invoice cannot be reproduced by
@@ -805,7 +808,7 @@ def evaluate_amendment_payment_migration(inv: Any) -> Dict[str, Any]:
 	return paid
 
 
-def _capture_payment_entry_shape(payment_entry: Any) -> Dict[str, Any]:
+def _capture_payment_entry_shape(payment_entry: Any) -> dict[str, Any]:
 	"""Record what a Payment Entry IS, so an equivalent can be re-issued later.
 
 	Taken from the loaded document a line before ``.cancel()`` runs, rather than
@@ -841,9 +844,9 @@ def _capture_payment_entry_shape(payment_entry: Any) -> Dict[str, Any]:
 def _rebook_amendment_payment(
 	*,
 	replacement_invoice_name: str,
-	source_payment_rows: List[Dict[str, Any]],
+	source_payment_rows: list[dict[str, Any]],
 	logger: Any,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	"""Re-issue the source invoice's settled payment against its replacement.
 
 	Rebuilt from the **cancelled entries' own shape** — same ``paid_to``, same mode
@@ -895,7 +898,7 @@ def _rebook_amendment_payment(
 			"outstanding_before": outstanding,
 		}
 
-	created: List[str] = []
+	created: list[str] = []
 	allocated_total = 0.0
 	unallocated_total = 0.0
 	remaining = outstanding
@@ -963,7 +966,7 @@ def _rebook_amendment_payment(
 	}
 
 
-def _find_courier_transactions(invoice_name: str) -> List[str]:
+def _find_courier_transactions(invoice_name: str) -> list[str]:
 	"""Return courier transactions already linked to the Sales Invoice."""
 	try:
 		rows = (
@@ -980,13 +983,13 @@ def _find_courier_transactions(invoice_name: str) -> List[str]:
 	return sorted({row for row in rows if row})
 
 
-def _find_sales_partner_transactions(invoice_name: str, *, settled_only: bool = False) -> List[str]:
+def _find_sales_partner_transactions(invoice_name: str, *, settled_only: bool = False) -> list[str]:
 	"""Return Sales Partner Transaction rows already linked to the Sales Invoice.
 
 	``settled_only`` narrows to rows whose fee has actually been posted. An
 	Unsettled row is a pending charge, not a settlement artifact.
 	"""
-	filters: Dict[str, Any] = {"reference_invoice": invoice_name}
+	filters: dict[str, Any] = {"reference_invoice": invoice_name}
 	if settled_only:
 		filters["status"] = "Settled"
 	try:
@@ -1004,7 +1007,7 @@ def _find_sales_partner_transactions(invoice_name: str, *, settled_only: bool = 
 	return sorted({row for row in rows if row})
 
 
-def _find_active_custom_shipping_requests(invoice_name: str) -> List[str]:
+def _find_active_custom_shipping_requests(invoice_name: str) -> list[str]:
 	"""Return active (not cancelled) Custom Shipping Requests linked to the Sales Invoice."""
 	try:
 		rows = (
@@ -1021,7 +1024,7 @@ def _find_active_custom_shipping_requests(invoice_name: str) -> List[str]:
 	return sorted({row for row in rows if row})
 
 
-def _detach_custom_shipping_requests(invoice_name: str) -> List[Dict[str, Any]]:
+def _detach_custom_shipping_requests(invoice_name: str) -> list[dict[str, Any]]:
 	"""Unlink the invoice's active shipping requests so the source can be cancelled.
 
 	Two things refuse to cancel an invoice that a request still points at: the
@@ -1061,8 +1064,8 @@ def _detach_custom_shipping_requests(invoice_name: str) -> List[Dict[str, Any]]:
 
 
 def _resolve_carried_shipping_override(
-	source_override: Dict[str, Any], shipping_requests: List[Dict[str, Any]]
-) -> Dict[str, Any]:
+	source_override: dict[str, Any], shipping_requests: list[dict[str, Any]]
+) -> dict[str, Any]:
 	"""The override state the replacement inherits.
 
 	Derived from the carried REQUESTS, not from the source invoice's fields. The
@@ -1079,7 +1082,7 @@ def _resolve_carried_shipping_override(
 	  read as free delivery instead of the territory rate.
 	"""
 
-	def _approved_key(row: Dict[str, Any]) -> str:
+	def _approved_key(row: dict[str, Any]) -> str:
 		return str(row.get("approved_on") or row.get("creation") or "")
 
 	approved = sorted(
@@ -1106,10 +1109,10 @@ def _attach_custom_shipping_requests(
 	*,
 	source_invoice_name: str,
 	replacement_invoice_name: str,
-	shipping_requests: List[Dict[str, Any]],
-	source_override: Dict[str, Any],
+	shipping_requests: list[dict[str, Any]],
+	source_override: dict[str, Any],
 	logger: Any,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	"""Point the detached shipping requests at the replacement and re-apply the override.
 
 	Not best-effort: a replacement that silently dropped an approved courier cost
@@ -1144,9 +1147,9 @@ def _attach_custom_shipping_requests(
 
 	territory_changed = str(replacement.get("territory") or "") != str(source_override.get("territory") or "")
 	replacement_territory_rate = flt(replacement.get("custom_shipping_expense"))
-	names: List[str] = []
+	names: list[str] = []
 	for row in shipping_requests:
-		updates: Dict[str, Any] = {
+		updates: dict[str, Any] = {
 			"invoice": replacement_invoice_name,
 			"customer_name": replacement.get("customer_name"),
 			"territory": replacement.get("territory"),
@@ -1158,7 +1161,7 @@ def _attach_custom_shipping_requests(
 		names.append(str(row.get("name")))
 
 	carried = _resolve_carried_shipping_override(source_override, shipping_requests)
-	invoice_updates: Dict[str, Any] = {
+	invoice_updates: dict[str, Any] = {
 		"custom_shipping_override": carried["override"],
 		"custom_shipping_override_status": carried["status"],
 	}
@@ -1201,7 +1204,7 @@ def _attach_custom_shipping_requests(
 	}
 
 
-def _mentions_invoice(text: Optional[str], invoice_name: str) -> bool:
+def _mentions_invoice(text: str | None, invoice_name: str) -> bool:
 	"""True when *text* references *invoice_name* as a whole token.
 
 	A plain ``LIKE %name%`` cannot distinguish an invoice from its own
@@ -1220,7 +1223,7 @@ def _mentions_invoice(text: Optional[str], invoice_name: str) -> bool:
 	return re.search(pattern, str(text)) is not None
 
 
-def _find_submitted_journal_entries(invoice_name: str) -> List[str]:
+def _find_submitted_journal_entries(invoice_name: str) -> list[str]:
 	"""Return submitted Journal Entries that already settled against the invoice."""
 	journal_entry_names = set()
 
@@ -1279,7 +1282,7 @@ def _find_submitted_journal_entries(invoice_name: str) -> List[str]:
 	return sorted(journal_entry_names)
 
 
-def _get_active_delivery_trip_name(inv: Any) -> Optional[str]:
+def _get_active_delivery_trip_name(inv: Any) -> str | None:
 	"""Return the linked delivery trip when it is still operationally active."""
 	invoice_name = str(getattr(inv, "name", None) or inv.get("name") or "").strip()
 	trip_name = str(getattr(inv, "custom_delivery_trip", "") or inv.get("custom_delivery_trip") or "").strip()
@@ -1315,7 +1318,7 @@ def get_invoice_hard_mutation_blocker(
 	*,
 	ignore_unsettled_partner_transactions: bool = False,
 	ignore_custom_shipping_requests: bool = False,
-) -> Optional[Dict[str, Any]]:
+) -> dict[str, Any] | None:
 	"""Return the first downstream artifact that blocks cancel/amend mutations.
 
 	``ignore_unsettled_partner_transactions`` is what cancellation passes: a
@@ -1401,14 +1404,14 @@ def get_invoice_hard_mutation_blocker(
 	return None
 
 
-def get_invoice_amendment_eligibility(inv: Any) -> Dict[str, Any]:
+def get_invoice_amendment_eligibility(inv: Any) -> dict[str, Any]:
 	"""Return whether a submitted POS invoice can start the ERP-first amendment flow."""
 	invoice_name = str(getattr(inv, "name", None) or inv.get("name") or "").strip()
 	current_state = str(inv.get("custom_sales_invoice_state") or inv.get("sales_invoice_state") or "").strip()
 	normalized_state = _normalize_prep_state(current_state)
 
-	def _blocked(code: str, reason: str, **extra: Any) -> Dict[str, Any]:
-		payload: Dict[str, Any] = {
+	def _blocked(code: str, reason: str, **extra: Any) -> dict[str, Any]:
+		payload: dict[str, Any] = {
 			"can_amend": False,
 			"amendment_block_code": code,
 			"amendment_block_reason": reason,
@@ -1496,7 +1499,7 @@ def get_invoice_amendment_eligibility(inv: Any) -> Dict[str, Any]:
 _DISPATCHED_STATES = {"out_for_delivery", "delivered", "completed", "cancelled"}
 
 
-def get_invoice_cancellation_eligibility(inv: Any) -> Dict[str, Any]:
+def get_invoice_cancellation_eligibility(inv: Any) -> dict[str, Any]:
 	"""Return whether a submitted invoice can still be cancelled outright.
 
 	Mirrors the guards inside ``jarz_pos.api.kanban.cancel_invoice`` so the
@@ -1511,8 +1514,8 @@ def get_invoice_cancellation_eligibility(inv: Any) -> Dict[str, Any]:
 	"""
 	invoice_name = str(getattr(inv, "name", None) or inv.get("name") or "").strip()
 
-	def _blocked(code: str, reason: str, *, suggest_return: bool = False, **extra: Any) -> Dict[str, Any]:
-		payload: Dict[str, Any] = {
+	def _blocked(code: str, reason: str, *, suggest_return: bool = False, **extra: Any) -> dict[str, Any]:
+		payload: dict[str, Any] = {
 			"can_cancel": False,
 			"cancellation_block_code": code,
 			"cancellation_block_reason": reason,
@@ -1579,8 +1582,8 @@ def get_invoice_cancellation_eligibility(inv: Any) -> Dict[str, Any]:
 		try:
 			from jarz_pos.utils.access_control import (
 				find_closed_shift_covering,
-				get_open_shift_for_profile,
 				get_invoice_branch,
+				get_open_shift_for_profile,
 				user_requires_pos_shift,
 			)
 
@@ -1614,7 +1617,7 @@ def get_invoice_cancellation_eligibility(inv: Any) -> Dict[str, Any]:
 	}
 
 
-def _derive_required_delivery_datetime(inv: Any) -> Optional[str]:
+def _derive_required_delivery_datetime(inv: Any) -> str | None:
 	"""Derive the delivery start datetime from the invoice's stored slot fields.
 
 	``custom_delivery_time_from`` is a Time field, which Frappe hands back as a
@@ -1640,9 +1643,9 @@ def _derive_required_delivery_datetime(inv: Any) -> Optional[str]:
 
 def _amendment_delivery_end(
 	source_invoice: Any,
-	required_delivery_datetime: Optional[str],
-	delivery_end_datetime: Optional[str],
-) -> Optional[str]:
+	required_delivery_datetime: str | None,
+	delivery_end_datetime: str | None,
+) -> str | None:
 	"""Return the end to use for an amendment's delivery window.
 
 	The source's end only belongs with the source's START. When the caller sends
@@ -1657,7 +1660,7 @@ def _amendment_delivery_end(
 	return _derive_delivery_end_datetime(source_invoice)
 
 
-def _derive_delivery_end_datetime(inv: Any) -> Optional[str]:
+def _derive_delivery_end_datetime(inv: Any) -> str | None:
 	"""Derive the delivery end datetime from the invoice's duration metadata."""
 	start_text = _derive_required_delivery_datetime(inv)
 	if not start_text:
@@ -1689,7 +1692,7 @@ def _derive_delivery_end_datetime(inv: Any) -> Optional[str]:
 		return None
 
 
-def _optional_flag(value: Any) -> Optional[bool]:
+def _optional_flag(value: Any) -> bool | None:
 	"""A request flag that may be absent: ``None``/blank → ``None``, else truthy."""
 	if value is None:
 		return None
@@ -1699,8 +1702,8 @@ def _optional_flag(value: Any) -> Optional[bool]:
 
 
 def _amendment_delivery_slot_explicit(
-	requested_flag: Any, effective_start: Optional[str], source_invoice: Any
-) -> Optional[bool]:
+	requested_flag: Any, effective_start: str | None, source_invoice: Any
+) -> bool | None:
 	"""``delivery_slot_explicit`` for the replacement invoice.
 
 	Keeping the order's own start is always explicit; otherwise the client's
@@ -1711,7 +1714,7 @@ def _amendment_delivery_slot_explicit(
 	return _optional_flag(requested_flag)
 
 
-def _is_source_delivery_start(requested: Optional[str], source_invoice: Any) -> bool:
+def _is_source_delivery_start(requested: str | None, source_invoice: Any) -> bool:
 	"""Whether an amendment keeps the delivery start its order already has.
 
 	That window was chosen when the order was placed, so it stays even if its
@@ -1732,9 +1735,9 @@ def _is_source_delivery_start(requested: Optional[str], source_invoice: Any) -> 
 @contextmanager
 def _temporary_invoice_creation_form_context(
 	*,
-	required_delivery_datetime: Optional[str] = None,
-	delivery_end_datetime: Optional[str] = None,
-	delivery_slot_explicit: Optional[bool] = None,
+	required_delivery_datetime: str | None = None,
+	delivery_end_datetime: str | None = None,
+	delivery_slot_explicit: bool | None = None,
 ) -> Any:
 	"""Temporarily seed form_dict so invoice creation keeps the chosen slot duration.
 
@@ -1781,22 +1784,22 @@ def _build_invoice_amendment_request_id(
 	*,
 	invoice_id: str,
 	cart_json: Any,
-	pos_profile_name: Optional[str],
-	customer_name: Optional[str],
-	shipping_address_name: Optional[str],
-	required_delivery_datetime: Optional[str],
-	delivery_end_datetime: Optional[str],
-	sales_partner: Optional[str],
-	payment_type: Optional[str],
-	pickup: Union[bool, int, str, None],
-	payment_method: Optional[str],
-	suppress_shipping_income: Union[bool, int, str, None] = None,
-	suppress_legacy_delivery_charges: Union[bool, int, str, None] = None,
-	zero_shipping_override: Union[bool, int, str, None] = None,
-	custom_delivery_income: Union[float, str, None] = None,
-	price_list: Optional[str] = None,
-	provided_idempotency_key: Optional[str] = None,
-	employee_payment: Optional[str] = None,
+	pos_profile_name: str | None,
+	customer_name: str | None,
+	shipping_address_name: str | None,
+	required_delivery_datetime: str | None,
+	delivery_end_datetime: str | None,
+	sales_partner: str | None,
+	payment_type: str | None,
+	pickup: bool | int | str | None,
+	payment_method: str | None,
+	suppress_shipping_income: bool | int | str | None = None,
+	suppress_legacy_delivery_charges: bool | int | str | None = None,
+	zero_shipping_override: bool | int | str | None = None,
+	custom_delivery_income: float | str | None = None,
+	price_list: str | None = None,
+	provided_idempotency_key: str | None = None,
+	employee_payment: str | None = None,
 ) -> str:
 	"""Build a stable idempotency key for amendment retries of the same payload.
 
@@ -1854,7 +1857,7 @@ def _build_invoice_amendment_request_id(
 	return f"amd-{invoice_id}-{digest[:16]}"
 
 
-def _pos_profile_default_price_list(pos_profile_name: Optional[str]) -> Optional[str]:
+def _pos_profile_default_price_list(pos_profile_name: str | None) -> str | None:
 	"""The POS Profile's own selling price list, or None when unresolvable."""
 	name = str(pos_profile_name or "").strip()
 	if not name:
@@ -1867,10 +1870,10 @@ def _pos_profile_default_price_list(pos_profile_name: Optional[str]) -> Optional
 
 def _resolve_amendment_price_list(
 	source_invoice: Any,
-	requested: Optional[str],
+	requested: str | None,
 	*,
-	pos_profile_name: Optional[str],
-) -> Optional[str]:
+	pos_profile_name: str | None,
+) -> str | None:
 	"""Return the price list the replacement invoice must be priced from.
 
 	Precedence, highest first:
@@ -1930,7 +1933,7 @@ def _resolve_amendment_price_list(
 	# Case-insensitively, because MariaDB's collation is: "standard selling" and
 	# "Standard Selling" are the SAME list to `frappe.db.exists`, and treating them as
 	# different here would re-open the hole for any client that varies the casing.
-	def _same(a: Optional[str], b: Optional[str]) -> bool:
+	def _same(a: str | None, b: str | None) -> bool:
 		return bool(a) and bool(b) and a.casefold() == b.casefold()
 
 	if not profile_default:
@@ -1973,7 +1976,7 @@ def _resolve_amendment_price_list(
 	return explicit or None
 
 
-def _territory_default_delivery_income(territory_name: Optional[str]) -> Optional[float]:
+def _territory_default_delivery_income(territory_name: str | None) -> float | None:
 	"""Return a Territory's configured delivery income, or None when unresolvable.
 
 	Used to tell a genuine per-order override apart from an order that simply
@@ -1991,8 +1994,8 @@ def _territory_default_delivery_income(territory_name: Optional[str]) -> Optiona
 
 def _resolve_amendment_delivery_income(
 	source_invoice: Any,
-	requested: Union[float, str, None],
-) -> Optional[float]:
+	requested: float | str | None,
+) -> float | None:
 	"""Return the delivery income override to carry into the replacement invoice.
 
 	``requested`` follows the API contract:
@@ -2023,7 +2026,7 @@ def _resolve_amendment_delivery_income(
 	return actual_income
 
 
-def _find_existing_amendment_invoice(source_invoice_id: str) -> Optional[str]:
+def _find_existing_amendment_invoice(source_invoice_id: str) -> str | None:
 	"""Return the existing replacement invoice for a cancelled source invoice when present."""
 	try:
 		rows = (
@@ -2101,7 +2104,7 @@ def _source_till_receipts(source_invoice: Any) -> tuple:
 		)
 		or []
 	)
-	till_entries: List[str] = []
+	till_entries: list[str] = []
 	for row in rows:
 		if str(row.get("reference_no") or "").startswith(_EMPLOYEE_CASH_REFERENCE_PREFIX):
 			till_entries.append(row.get("name"))
@@ -2176,8 +2179,8 @@ def _source_paid_into_a_till(source_invoice: Any) -> bool:
 
 
 def _resolve_employee_amendment_payment_method(
-	source_invoice: Any, employee_payment: Optional[str]
-) -> Optional[str]:
+	source_invoice: Any, employee_payment: str | None
+) -> str | None:
 	"""The ``payment_method`` an amended EMPLOYEE order is recreated with.
 
 	Never the client's: the Flutter amendment loader clears the order purpose, so
@@ -2199,7 +2202,7 @@ def _resolve_employee_amendment_payment_method(
 	return None
 
 
-def _prepaid_amendment_payment_method(source_invoice: Any, has_payment: bool) -> Optional[str]:
+def _prepaid_amendment_payment_method(source_invoice: Any, has_payment: bool) -> str | None:
 	"""The payment method a PAID order's replacement keeps, or ``None``.
 
 	When the source has a submitted Payment Entry, the job carries that money onto
@@ -2238,7 +2241,7 @@ def _prepaid_amendment_payment_method(source_invoice: Any, has_payment: bool) ->
 	return stamped
 
 
-def _resolve_amendment_employee_payment(source_invoice: Any, requested: Optional[str]) -> Optional[str]:
+def _resolve_amendment_employee_payment(source_invoice: Any, requested: str | None) -> str | None:
 	"""The ``employee_payment`` to recreate an amended order with.
 
 	* An explicit request wins, passed through raw so ``create_pos_invoice``
@@ -2290,7 +2293,7 @@ def _mark_source_invoice_as_amended(
 		f"Superseded by {replacement_invoice_name} through POS amendment flow. "
 		f"Request ID: {request_id}. Initiated by: {initiated_by}."
 	)
-	updates: Dict[str, Any] = {}
+	updates: dict[str, Any] = {}
 	if meta.get_field("custom_cancellation_type"):
 		updates["custom_cancellation_type"] = "Amended"
 	if meta.get_field("custom_cancellation_reason"):
@@ -2391,7 +2394,7 @@ def _carry_over_invoice_notes(
 		)
 
 		for note_name in note_names:
-			updates: Dict[str, Any] = {"sales_invoice": new_invoice_name}
+			updates: dict[str, Any] = {"sales_invoice": new_invoice_name}
 			if new_pos_profile:
 				updates["pos_profile"] = new_pos_profile
 			frappe.db.set_value(
@@ -2432,11 +2435,11 @@ def _build_invoice_amendment_response(
 	request_id: str,
 	source_invoice_name: str,
 	replacement_invoice_name: str,
-	cancelled_payment_entries: Optional[List[str]] = None,
+	cancelled_payment_entries: list[str] | None = None,
 	already_processed: bool = False,
-	rebooked_payment: Optional[Dict[str, Any]] = None,
-	carried_shipping_requests: Optional[List[str]] = None,
-) -> Dict[str, Any]:
+	rebooked_payment: dict[str, Any] | None = None,
+	carried_shipping_requests: list[str] | None = None,
+) -> dict[str, Any]:
 	"""Return the stable API response for a completed amendment orchestration."""
 	replacement_invoice = frappe.get_doc("Sales Invoice", replacement_invoice_name)
 	rebooked_payment = rebooked_payment or {}
@@ -2466,27 +2469,27 @@ def _run_invoice_amendment_job(
 	invoice_id: str,
 	request_id: str,
 	cart_json: Any,
-	customer_name: Optional[str] = None,
-	shipping_address_name: Optional[str] = None,
-	pos_profile_name: Optional[str] = None,
-	required_delivery_datetime: Optional[str] = None,
-	delivery_end_datetime: Optional[str] = None,
-	sales_partner: Optional[str] = None,
-	payment_type: Optional[str] = None,
-	pickup: Union[bool, int, str, None] = None,
-	payment_method: Optional[str] = None,
-	initiated_by: Optional[str] = None,
-	pos_profile_override: Union[bool, int, str, None] = None,
-	suppress_shipping_income: Union[bool, int, None] = None,
-	suppress_legacy_delivery_charges: Union[bool, int, None] = None,
-	zero_shipping_override: Union[bool, int, str, None] = None,
-	expected_source_grand_total: Optional[float] = None,
-	expected_source_item_count: Optional[int] = None,
-	custom_delivery_income: Union[float, str, None] = None,
-	price_list: Optional[str] = None,
-	employee_payment: Optional[str] = None,
-	delivery_slot_explicit: Union[bool, int, str, None] = None,
-) -> Dict[str, Any]:
+	customer_name: str | None = None,
+	shipping_address_name: str | None = None,
+	pos_profile_name: str | None = None,
+	required_delivery_datetime: str | None = None,
+	delivery_end_datetime: str | None = None,
+	sales_partner: str | None = None,
+	payment_type: str | None = None,
+	pickup: bool | int | str | None = None,
+	payment_method: str | None = None,
+	initiated_by: str | None = None,
+	pos_profile_override: bool | int | str | None = None,
+	suppress_shipping_income: bool | int | None = None,
+	suppress_legacy_delivery_charges: bool | int | None = None,
+	zero_shipping_override: bool | int | str | None = None,
+	expected_source_grand_total: float | None = None,
+	expected_source_item_count: int | None = None,
+	custom_delivery_income: float | str | None = None,
+	price_list: str | None = None,
+	employee_payment: str | None = None,
+	delivery_slot_explicit: bool | int | str | None = None,
+) -> dict[str, Any]:
 	"""Queueable job that supersedes a submitted invoice and recreates it from the POS payload."""
 	if _create_amendment_invoice is None:
 		frappe.throw(_("Invoice amendment service is unavailable."))
@@ -2511,7 +2514,7 @@ def _run_invoice_amendment_job(
 			"amendment_block_code": eligibility.get("amendment_block_code"),
 		}
 
-	cancelled_payment_entries: List[str] = []
+	cancelled_payment_entries: list[str] = []
 	effective_customer_name = (
 		customer_name or source_invoice.get("customer") or ""
 	).strip() or "Walking Customer"
@@ -2880,8 +2883,8 @@ def _run_invoice_amendment_job(
 		# H1: Per-PE try/except so a single failed cancellation does not leave
 		# previously-cancelled PEs orphaned against a still-submitted source invoice.
 		payment_entries = _find_submitted_payment_entries(invoice_id)
-		source_payment_rows: List[Dict[str, Any]] = []
-		pe_cancel_errors: List[str] = []
+		source_payment_rows: list[dict[str, Any]] = []
+		pe_cancel_errors: list[str] = []
 		for payment_entry_name in payment_entries:
 			try:
 				payment_entry = frappe.get_doc("Payment Entry", payment_entry_name)
@@ -2985,7 +2988,7 @@ def _run_invoice_amendment_job(
 		# Carry the settled payment across. Not wrapped in a try: a prepaid order
 		# left unpaid is worse than a failed amendment, and the savepoint above
 		# puts the source invoice and its payment back exactly as they were.
-		rebooked_payment: Dict[str, Any] = {}
+		rebooked_payment: dict[str, Any] = {}
 		if source_payment_rows:
 			rebooked_payment = _rebook_amendment_payment(
 				replacement_invoice_name=replacement_invoice_name,
@@ -3072,7 +3075,7 @@ def _run_invoice_amendment_job(
 
 		# Not wrapped in a try, for the same reason as the payment above: an
 		# approved courier cost silently dropped would settle at the territory rate.
-		carried_shipping: Dict[str, Any] = {}
+		carried_shipping: dict[str, Any] = {}
 		if carried_shipping_requests:
 			carried_shipping = _attach_custom_shipping_requests(
 				source_invoice_name=invoice_id,
@@ -3219,28 +3222,28 @@ def _run_invoice_amendment_job(
 def submit_invoice_amendment(
 	invoice_id: str,
 	cart_json: Any = None,
-	customer_name: Optional[str] = None,
-	shipping_address_name: Optional[str] = None,
-	pos_profile_name: Optional[str] = None,
-	required_delivery_datetime: Optional[str] = None,
-	delivery_end_datetime: Optional[str] = None,
-	sales_partner: Optional[str] = None,
-	payment_type: Optional[str] = None,
-	pickup: Union[bool, int, str, None] = None,
-	payment_method: Optional[str] = None,
-	idempotency_key: Optional[str] = None,
-	pos_profile_override: Union[bool, int, str, None] = None,
-	suppress_shipping_income: Union[bool, int, None] = None,
-	suppress_legacy_delivery_charges: Union[bool, int, None] = None,
-	zero_shipping_override: Union[bool, int, str, None] = None,
-	expected_source_grand_total: Optional[float] = None,
-	expected_source_item_count: Optional[int] = None,
-	custom_delivery_income: Union[float, str, None] = None,
-	reuse_source_cart: Union[bool, int, str, None] = None,
-	price_list: Optional[str] = None,
-	employee_payment: Optional[str] = None,
-	delivery_slot_explicit: Union[bool, int, str, None] = None,
-) -> Dict[str, Any]:
+	customer_name: str | None = None,
+	shipping_address_name: str | None = None,
+	pos_profile_name: str | None = None,
+	required_delivery_datetime: str | None = None,
+	delivery_end_datetime: str | None = None,
+	sales_partner: str | None = None,
+	payment_type: str | None = None,
+	pickup: bool | int | str | None = None,
+	payment_method: str | None = None,
+	idempotency_key: str | None = None,
+	pos_profile_override: bool | int | str | None = None,
+	suppress_shipping_income: bool | int | None = None,
+	suppress_legacy_delivery_charges: bool | int | None = None,
+	zero_shipping_override: bool | int | str | None = None,
+	expected_source_grand_total: float | None = None,
+	expected_source_item_count: int | None = None,
+	custom_delivery_income: float | str | None = None,
+	reuse_source_cart: bool | int | str | None = None,
+	price_list: str | None = None,
+	employee_payment: str | None = None,
+	delivery_slot_explicit: bool | int | str | None = None,
+) -> dict[str, Any]:
 	"""Supersede a submitted invoice and recreate it from the edited POS cart payload.
 
 	``delivery_slot_explicit``: ``1`` when the operator picked the delivery slot,
@@ -3384,9 +3387,9 @@ def submit_invoice_amendment(
 	)
 
 
-def _get_invoice_warehouse_mismatches(inv: Any, expected_warehouse: str) -> List[Dict[str, str]]:
+def _get_invoice_warehouse_mismatches(inv: Any, expected_warehouse: str) -> list[dict[str, str]]:
 	"""Return stock rows whose warehouse no longer matches the operational branch."""
-	mismatches: List[Dict[str, str]] = []
+	mismatches: list[dict[str, str]] = []
 	for row in _get_transfer_stock_rows(inv):
 		row_warehouse = str(getattr(row, "warehouse", "") or "").strip()
 		if row_warehouse != expected_warehouse:
@@ -3400,7 +3403,7 @@ def _get_invoice_warehouse_mismatches(inv: Any, expected_warehouse: str) -> List
 	return mismatches
 
 
-def _is_truthy_flag(value: Union[bool, int, str, None]) -> bool:
+def _is_truthy_flag(value: bool | int | str | None) -> bool:
 	"""Normalize common truthy flag inputs from whitelisted method arguments."""
 	if isinstance(value, bool):
 		return value
@@ -3410,9 +3413,9 @@ def _is_truthy_flag(value: Union[bool, int, str, None]) -> bool:
 def _publish_invoice_reassignment_refresh(
 	invoice: Any,
 	*,
-	old_branch: Optional[str],
+	old_branch: str | None,
 	new_branch: str,
-	old_state: Optional[str],
+	old_state: str | None,
 	new_state: str,
 ) -> None:
 	"""Broadcast a board-refresh event for cross-session Kanban convergence."""
@@ -3458,7 +3461,7 @@ def _publish_invoice_reassignment_refresh(
 
 
 @frappe.whitelist(allow_guest=False)
-def get_transfer_target_branches() -> Dict[str, Any]:
+def get_transfer_target_branches() -> dict[str, Any]:
 	"""Return all enabled POS Profiles as transfer targets for any staff user.
 
 	Transfer targets are intentionally NOT scoped to the user's assigned POS
@@ -3475,7 +3478,7 @@ def get_transfer_target_branches() -> Dict[str, Any]:
 
 
 @frappe.whitelist(allow_guest=False)
-def get_manager_dashboard_summary(company: Optional[str] = None) -> Dict[str, Any]:
+def get_manager_dashboard_summary(company: str | None = None) -> dict[str, Any]:
 	"""Return accessible branches (POS Profiles) and their cash balances.
 
 	Args:
@@ -3508,7 +3511,7 @@ def get_manager_dashboard_summary(company: Optional[str] = None) -> Dict[str, An
 				company = row[0]["company"]
 		except Exception:
 			company = None
-	balances: List[Dict[str, Any]] = []
+	balances: list[dict[str, Any]] = []
 	total = 0.0
 	for p in profiles:
 		try:
@@ -3537,11 +3540,11 @@ def get_manager_dashboard_summary(company: Optional[str] = None) -> Dict[str, An
 
 @frappe.whitelist(allow_guest=False)
 def get_pos_shift_monitor(
-	from_date: Optional[str] = None,
-	to_date: Optional[str] = None,
-	pos_profile: Optional[str] = None,
-	status: Optional[str] = None,
-) -> Dict[str, Any]:
+	from_date: str | None = None,
+	to_date: str | None = None,
+	pos_profile: str | None = None,
+	status: str | None = None,
+) -> dict[str, Any]:
 	_ensure_shift_monitor_access()
 
 	start_date = _coerce_shift_monitor_date(from_date, nowdate())
@@ -3620,8 +3623,8 @@ def get_pos_shift_monitor(
 		limit=1000,
 	)
 
-	user_cache: Dict[str, Dict[str, Optional[str]]] = {}
-	rows: List[Dict[str, Any]] = []
+	user_cache: dict[str, dict[str, str | None]] = {}
+	rows: list[dict[str, Any]] = []
 	discrepancy_total = 0.0
 	discrepancy_count = 0
 	open_count = 0
@@ -3692,8 +3695,8 @@ def get_pos_shift_monitor(
 
 @frappe.whitelist(allow_guest=False)
 def get_manager_orders(
-	branch: Optional[str] = None, state: Optional[str] = None, limit: int = 200
-) -> Dict[str, Any]:
+	branch: str | None = None, state: str | None = None, limit: int = 200
+) -> dict[str, Any]:
 	"""Return a recent feed of POS invoices for selected branch or for all accessible branches.
 
 	Args:
@@ -3751,7 +3754,7 @@ def get_manager_orders(
 		"woo_order_id",
 	]
 	# Build filters
-	filters: Dict[str, Any] = {
+	filters: dict[str, Any] = {
 		branch_filter_field: ["in", profiles],
 		"docstatus": 1,
 		"is_pos": 1,
@@ -3787,7 +3790,7 @@ def get_manager_orders(
 		limit=limit,
 	)
 	# Normalize payload
-	invs: List[Dict[str, Any]] = []
+	invs: list[dict[str, Any]] = []
 	for r in rows:
 		invs.append(
 			{
@@ -3809,7 +3812,7 @@ def get_manager_orders(
 
 
 @frappe.whitelist(allow_guest=False)
-def get_manager_states() -> Dict[str, Any]:
+def get_manager_states() -> dict[str, Any]:
 	"""Return available Sales Invoice states (same list used by Kanban columns)."""
 	_ensure_manager_dashboard_access()
 	try:
@@ -3894,7 +3897,7 @@ def _employee_ledger_branch_field() -> str:
 		return "pos_profile"
 
 
-def _employee_ledger_state_field() -> Optional[str]:
+def _employee_ledger_state_field() -> str | None:
 	"""Sales Invoice field holding the Kanban state, or None when absent."""
 	try:
 		meta = frappe.get_meta("Sales Invoice")
@@ -3907,7 +3910,7 @@ def _employee_ledger_state_field() -> Optional[str]:
 	return None
 
 
-def _employee_ledger_employee_meta(employee_ids: List[str]) -> Dict[str, Dict[str, str]]:
+def _employee_ledger_employee_meta(employee_ids: list[str]) -> dict[str, dict[str, str]]:
 	"""``employee -> {employee_name, branch, user}`` for the ids in play.
 
 	One bulk read rather than a lookup per row. Deliberately NOT filtered on
@@ -3951,7 +3954,7 @@ def _employee_ledger_employee_meta(employee_ids: List[str]) -> Dict[str, Dict[st
 		return {}
 
 
-def _employee_ledger_delivery_notes(invoice_names: List[str]) -> Dict[str, str]:
+def _employee_ledger_delivery_notes(invoice_names: list[str]) -> dict[str, str]:
 	"""``invoice -> submitted Delivery Note`` in one query.
 
 	``_find_submitted_delivery_notes`` answers for a single invoice; the ledger
@@ -3975,7 +3978,7 @@ def _employee_ledger_delivery_notes(invoice_names: List[str]) -> Dict[str, str]:
 	except Exception:
 		_log_employee_ledger_error("Employee ledger: Delivery Note lookup failed")
 		return {}
-	mapping: Dict[str, str] = {}
+	mapping: dict[str, str] = {}
 	for row in rows:
 		invoice = str(row.get("against_sales_invoice") or "")
 		note = str(row.get("parent") or "")
@@ -3988,7 +3991,7 @@ def _employee_ledger_delivery_notes(invoice_names: List[str]) -> Dict[str, str]:
 
 
 def _employee_ledger_bucket(
-	people: Dict[str, Dict[str, Any]],
+	people: dict[str, dict[str, Any]],
 	*,
 	key: str,
 	employee: str = "",
@@ -3996,7 +3999,7 @@ def _employee_ledger_bucket(
 	customer: str = "",
 	user: str = "",
 	branch: str = "",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	"""Get-or-create the per-person rollup row addressed by ``key``.
 
 	The two passes know different things — the advances pass knows the employee's
@@ -4033,18 +4036,18 @@ def _employee_ledger_bucket(
 
 def _empty_employee_ledger(
 	*,
-	filters: Dict[str, Any],
+	filters: dict[str, Any],
 	currency: str,
 	hrms: bool,
-	notice_code: Optional[str] = None,
-	notice: Optional[str] = None,
-) -> Dict[str, Any]:
+	notice_code: str | None = None,
+	notice: str | None = None,
+) -> dict[str, Any]:
 	"""The ledger payload with every section empty and every total zeroed.
 
 	Same keys as a populated response so the client never branches on shape —
 	only ``notice_code`` tells it *why* it is empty.
 	"""
-	payload: Dict[str, Any] = {
+	payload: dict[str, Any] = {
 		"success": True,
 		"hrms_available": hrms,
 		"filters": filters,
@@ -4082,7 +4085,7 @@ def _employee_ledger_advance_rows(
 	HRMS is not a ``required_app`` of this bench, so an absent or half-migrated
 	Employee Advance table must leave the orders half of the ledger working.
 	"""
-	filters: Dict[str, Any] = {
+	filters: dict[str, Any] = {
 		"docstatus": 1,
 		# Fully claimed / returned advances carry no balance and are history.
 		"status": ["in", _EMPLOYEE_ADVANCE_OPEN_STATUSES],
@@ -4124,11 +4127,11 @@ def _employee_ledger_advance_rows(
 def _employee_ledger_order_rows(
 	start_date: Any,
 	end_date: Any,
-	profiles: List[str],
-	customers: Optional[List[str]],
+	profiles: list[str],
+	customers: list[str] | None,
 	limit: int,
 	branch_field: str,
-	state_field: Optional[str],
+	state_field: str | None,
 ) -> tuple:
 	"""Submitted Employee-purpose Sales Invoices in the window, branch-scoped.
 
@@ -4152,7 +4155,7 @@ def _employee_ledger_order_rows(
 	except Exception:
 		return [], False
 
-	filters: Dict[str, Any] = {
+	filters: dict[str, Any] = {
 		"docstatus": 1,
 		"custom_order_purpose": EMPLOYEE_ORDER_PURPOSE,
 		"posting_date": ["between", [f"{start_date} 00:00:00", f"{end_date} 23:59:59"]],
@@ -4213,7 +4216,7 @@ def _employee_ledger_advance_out_of_branch(
 	return employee_branch not in allowed_profiles
 
 
-def _employee_ledger_open_advance_rows(selected_employee: str) -> List[Dict[str, Any]]:
+def _employee_ledger_open_advance_rows(selected_employee: str) -> list[dict[str, Any]]:
 	"""EVERY unsettled Employee Advance. No date filter, no row cap.
 
 	This feeds the *balance*, and a balance has no window. An advance taken in
@@ -4228,7 +4231,7 @@ def _employee_ledger_open_advance_rows(selected_employee: str) -> List[Dict[str,
 	selected — the sum itself is done in Python, because ERPNext v16 rejects SQL
 	functions in ``SELECT``.
 	"""
-	filters: Dict[str, Any] = {
+	filters: dict[str, Any] = {
 		"docstatus": 1,
 		"status": ["in", _EMPLOYEE_ADVANCE_OPEN_STATUSES],
 	}
@@ -4256,10 +4259,10 @@ def _employee_ledger_open_advance_rows(selected_employee: str) -> List[Dict[str,
 
 
 def _employee_ledger_open_order_rows(
-	profiles: List[str],
-	customers: Optional[List[str]],
+	profiles: list[str],
+	customers: list[str] | None,
 	branch_field: str,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
 	"""EVERY employee-purpose invoice still carrying an outstanding amount.
 
 	All-time, uncapped, for the reasons in :func:`_employee_ledger_open_advance_rows`.
@@ -4279,7 +4282,7 @@ def _employee_ledger_open_order_rows(
 	except Exception:
 		return []
 
-	filters: Dict[str, Any] = {
+	filters: dict[str, Any] = {
 		"docstatus": 1,
 		"custom_order_purpose": EMPLOYEE_ORDER_PURPOSE,
 		branch_field: ["in", profiles],
@@ -4307,12 +4310,12 @@ def _employee_ledger_open_order_rows(
 
 @frappe.whitelist(allow_guest=False)
 def get_employee_ledger(
-	from_date: Optional[str] = None,
-	to_date: Optional[str] = None,
-	branch: Optional[str] = None,
-	employee: Optional[str] = None,
-	limit: Union[int, str, None] = 200,
-) -> Dict[str, Any]:
+	from_date: str | None = None,
+	to_date: str | None = None,
+	branch: str | None = None,
+	employee: str | None = None,
+	limit: int | str | None = 200,
+) -> dict[str, Any]:
 	"""What each employee owes the company, advances and staff orders together.
 
 	**THE DATE WINDOW DESCRIBES ACTIVITY. IT NEVER LIMITS THE BALANCE.**
@@ -4427,7 +4430,7 @@ def get_employee_ledger(
 	selected_employee = str(employee or "").strip()
 	hrms = bool(hrms_available())
 	currency = _employee_ledger_currency()
-	filters_echo: Dict[str, Any] = {
+	filters_echo: dict[str, Any] = {
 		"from_date": str(start_date),
 		"to_date": str(end_date),
 		"branch": selected_branch or None,
@@ -4463,14 +4466,14 @@ def get_employee_ledger(
 
 	branch_field = _employee_ledger_branch_field()
 	state_field = _employee_ledger_state_field()
-	customer_filter: Optional[List[str]] = None
+	customer_filter: list[str] | None = None
 	if selected_employee:
 		# One employee -> the Customer they order as. No Customer means no staff
 		# orders exist for them, which is an empty list, not an unfiltered query.
 		customer_filter = [c for c in (customers_for_employees([selected_employee]) or {}).values() if c]
 
 	# --- What is LISTED: the activity window --------------------------------
-	advance_rows: List[Dict[str, Any]] = []
+	advance_rows: list[dict[str, Any]] = []
 	advances_truncated = False
 	if hrms:
 		advance_rows, advances_truncated = _employee_ledger_advance_rows(
@@ -4517,11 +4520,11 @@ def get_employee_ledger(
 
 	# ``_shift_monitor_user_details`` resolves a login the same way the shift
 	# monitor does, so the same person is labelled identically on both screens.
-	user_cache: Dict[str, Dict[str, Optional[str]]] = {}
+	user_cache: dict[str, dict[str, str | None]] = {}
 
-	people: Dict[str, Dict[str, Any]] = {}
+	people: dict[str, dict[str, Any]] = {}
 
-	def _person(employee_id: str, customer: str, display_name: str) -> Dict[str, Any]:
+	def _person(employee_id: str, customer: str, display_name: str) -> dict[str, Any]:
 		"""The rollup row for one person, keyed identically from every pass.
 
 		Four passes write here — two balance, two listing — and they must land on
@@ -4587,7 +4590,7 @@ def get_employee_ledger(
 		_person(emp, customer, display or customer_name)["order_outstanding"] += outstanding
 
 	# --- Listing pass 1: advances in the window -----------------------------
-	advances_payload: List[Dict[str, Any]] = []
+	advances_payload: list[dict[str, Any]] = []
 	advance_count = 0
 
 	for row in advance_rows:
@@ -4638,7 +4641,7 @@ def get_employee_ledger(
 
 	# --- Listing pass 2: orders in the window -------------------------------
 	delivery_notes = _employee_ledger_delivery_notes([str(r.get("name") or "") for r in order_rows])
-	orders_payload: List[Dict[str, Any]] = []
+	orders_payload: list[dict[str, Any]] = []
 	order_count = 0
 
 	for row in order_rows:
@@ -4675,7 +4678,7 @@ def get_employee_ledger(
 		# Counts only — same reason as the advances pass above.
 		_person(emp, customer, emp_name)["order_count"] += 1
 
-	employees_payload: List[Dict[str, Any]] = []
+	employees_payload: list[dict[str, Any]] = []
 	for row in people.values():
 		row["advance_outstanding"] = flt(row["advance_outstanding"], 2)
 		row["order_outstanding"] = flt(row["order_outstanding"], 2)
@@ -4690,7 +4693,7 @@ def get_employee_ledger(
 	# order is still IN `employees` (at zero) but is not one of these.
 	employee_count = sum(1 for row in employees_payload if row["total_outstanding"])
 
-	payload: Dict[str, Any] = {
+	payload: dict[str, Any] = {
 		"success": True,
 		"hrms_available": hrms,
 		"filters": filters_echo,
@@ -4736,10 +4739,10 @@ def get_employee_ledger(
 
 @frappe.whitelist(allow_guest=False)
 def get_invoice_warehouse_alignment_report(
-	company: Optional[str] = None,
-	branch: Optional[str] = None,
-	limit: Union[int, str] = 100,
-) -> Dict[str, Any]:
+	company: str | None = None,
+	branch: str | None = None,
+	limit: int | str = 100,
+) -> dict[str, Any]:
 	"""List submitted POS invoices whose item warehouses no longer match the operational branch.
 
 	Read-only, and gated the same as the rest of the Manager Dashboard
@@ -4771,7 +4774,7 @@ def get_invoice_warehouse_alignment_report(
 	branch = str(branch or "").strip() or None
 	profile_expr = "COALESCE(NULLIF(si.custom_kanban_profile, ''), si.pos_profile)"
 	conditions = ["si.docstatus = 1", "si.is_pos = 1"]
-	params: Dict[str, Any] = {"limit": limit_value}
+	params: dict[str, Any] = {"limit": limit_value}
 	if company:
 		conditions.append("si.company = %(company)s")
 		params["company"] = company
@@ -4823,7 +4826,7 @@ def get_invoice_warehouse_alignment_report(
 	)
 
 	invoice_names = [str(r.get("name")) for r in candidates if r.get("name")]
-	stock_rows_by_invoice: Dict[str, List[Dict[str, Any]]] = {}
+	stock_rows_by_invoice: dict[str, list[dict[str, Any]]] = {}
 	if invoice_names:
 		for item_row in (
 			frappe.db.sql(
@@ -4841,7 +4844,7 @@ def get_invoice_warehouse_alignment_report(
 		):
 			stock_rows_by_invoice.setdefault(str(item_row.get("parent")), []).append(item_row)
 
-	misaligned_invoices: List[Dict[str, Any]] = []
+	misaligned_invoices: list[dict[str, Any]] = []
 	for row in candidates:
 		invoice_name = row.get("name")
 		if not invoice_name:
@@ -4901,7 +4904,7 @@ def get_invoice_warehouse_alignment_report(
 			)
 			continue
 
-		mismatches: List[Dict[str, str]] = []
+		mismatches: list[dict[str, str]] = []
 		for item_row in stock_rows_by_invoice.get(str(invoice_name), []):
 			item_code = str(item_row.get("item_code") or "").strip()
 			if not item_code:
@@ -4934,11 +4937,11 @@ def get_invoice_warehouse_alignment_report(
 
 @frappe.whitelist(allow_guest=False)
 def repair_invoice_warehouse_alignment(
-	company: Optional[str] = None,
-	branch: Optional[str] = None,
-	limit: Union[int, str] = 100,
-	apply_changes: Union[bool, int, str, None] = False,
-) -> Dict[str, Any]:
+	company: str | None = None,
+	branch: str | None = None,
+	limit: int | str = 100,
+	apply_changes: bool | int | str | None = False,
+) -> dict[str, Any]:
 	"""Dry-run or repair misaligned submitted invoices before Delivery Note creation."""
 	_ensure_manager_dashboard_access()
 	frappe.has_permission("Sales Invoice", throw=True)
@@ -4953,8 +4956,8 @@ def repair_invoice_warehouse_alignment(
 		report["mode"] = "dry_run"
 		return report
 
-	applied: List[Dict[str, Any]] = []
-	skipped: List[Dict[str, Any]] = []
+	applied: list[dict[str, Any]] = []
+	skipped: list[dict[str, Any]] = []
 	meta = frappe.get_meta("Sales Invoice")
 
 	for entry in report.get("invoices", []):
@@ -5039,9 +5042,9 @@ def repair_invoice_warehouse_alignment(
 @frappe.whitelist(allow_guest=False)
 def update_cancelled_invoice_status_fields(
 	invoice_id: str,
-	sales_invoice_state: Optional[str] = None,
-	acceptance_status: Optional[str] = None,
-) -> Dict[str, Any]:
+	sales_invoice_state: str | None = None,
+	acceptance_status: str | None = None,
+) -> dict[str, Any]:
 	"""Update selected workflow fields on a cancelled Sales Invoice.
 
 	This keeps cancelled documents immutable in general while allowing managers
@@ -5069,8 +5072,8 @@ def update_cancelled_invoice_status_fields(
 			}
 
 		meta = frappe.get_meta("Sales Invoice")
-		updates: Dict[str, Any] = {}
-		update_fragments: List[str] = []
+		updates: dict[str, Any] = {}
+		update_fragments: list[str] = []
 
 		if requested_state:
 			state_options = _get_state_field_options()
@@ -5167,7 +5170,7 @@ def update_cancelled_invoice_status_fields(
 
 
 @frappe.whitelist(allow_guest=False)
-def update_invoice_branch(invoice_id: str, new_branch: str) -> Dict[str, Any]:
+def update_invoice_branch(invoice_id: str, new_branch: str) -> dict[str, Any]:
 	"""Reassign a submitted POS invoice by updating custom_kanban_profile.
 
 	This is the only supported post-submit branch transfer path.
@@ -5267,14 +5270,14 @@ def update_invoice_branch(invoice_id: str, new_branch: str) -> Dict[str, Any]:
 			}
 		)
 
-		state_fields: List[str] = []
+		state_fields: list[str] = []
 		for candidate in ["custom_sales_invoice_state", "sales_invoice_state", "custom_state", "state"]:
 			if meta.get_field(candidate):
 				state_fields.append(candidate)
 
 		# Only update custom_kanban_profile, NOT pos_profile
 		# pos_profile is read-only after invoice submission and cannot be changed
-		updates: Dict[str, Any] = {"custom_kanban_profile": new_branch}
+		updates: dict[str, Any] = {"custom_kanban_profile": new_branch}
 		if meta.get_field("set_warehouse"):
 			updates["set_warehouse"] = target_warehouse
 
@@ -5374,9 +5377,7 @@ def update_invoice_branch(invoice_id: str, new_branch: str) -> Dict[str, Any]:
 								except Exception:
 									updates["custom_delivery_slot_label"] = f"{tf} - {tt}"
 			except Exception as e:
-				frappe.log_error(
-					f"Error updating delivery time during transfer: {str(e)}", "Invoice Transfer"
-				)
+				frappe.log_error(f"Error updating delivery time during transfer: {e!s}", "Invoice Transfer")
 
 		# Use flags to bypass validation and permission checks for submitted invoices
 		frappe.flags.ignore_permissions = True
@@ -5411,10 +5412,10 @@ def update_invoice_branch(invoice_id: str, new_branch: str) -> Dict[str, Any]:
 			frappe.db.commit()
 		except Exception as e:
 			frappe.log_error(
-				f"Error setting values during transfer: {str(e)}\nUpdates: {updates}", "Invoice Transfer"
+				f"Error setting values during transfer: {e!s}\nUpdates: {updates}", "Invoice Transfer"
 			)
 			frappe.db.rollback()
-			return {"success": False, "error": f"Failed to update invoice fields: {str(e)}"}
+			return {"success": False, "error": f"Failed to update invoice fields: {e!s}"}
 		finally:
 			frappe.flags.ignore_permissions = False
 			frappe.flags.ignore_validate = False
@@ -5462,6 +5463,6 @@ def update_invoice_branch(invoice_id: str, new_branch: str) -> Dict[str, Any]:
 			"target_warehouse": target_warehouse,
 		}
 	except Exception as e:
-		frappe.logger().error(f"Update Invoice Branch Error: {str(e)}")
+		frappe.logger().error(f"Update Invoice Branch Error: {e!s}")
 		frappe.log_error(frappe.get_traceback(), "Manager API - Update Invoice Branch")
 		return {"success": False, "error": str(e)}

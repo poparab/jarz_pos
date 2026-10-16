@@ -23,7 +23,8 @@ from __future__ import annotations
 
 import datetime as _dt
 import secrets
-from typing import Any, Dict, Iterable, List, Optional
+from collections.abc import Iterable
+from typing import Any, Dict, List, Optional
 
 import frappe
 
@@ -155,7 +156,7 @@ def shift_call_time(due: _dt.datetime, win_start: _dt.time, win_end: _dt.time) -
 	return due
 
 
-def plan_touches(delivered_at: Any, order_value: Any, is_repeat: bool, settings: Any) -> List[Dict[str, Any]]:
+def plan_touches(delivered_at: Any, order_value: Any, is_repeat: bool, settings: Any) -> list[dict[str, Any]]:
 	"""The touches one delivered order produces. Pure.
 
 	*settings* is a dict or Document with ``high_value_order_min``,
@@ -171,7 +172,7 @@ def plan_touches(delivered_at: Any, order_value: Any, is_repeat: bool, settings:
 	call_start = _to_time(_get(settings, "call_window_start"), DEFAULT_CALL_START)
 	call_end = _to_time(_get(settings, "call_window_end"), DEFAULT_CALL_END)
 
-	out: List[Dict[str, Any]] = []
+	out: list[dict[str, Any]] = []
 	for step, channel, (unit, amount), rule, skip in _PLAN:
 		if rule == "high" and not is_high:
 			continue
@@ -203,9 +204,7 @@ def template_key(step: str, channel: str) -> str:
 	return ("tpl_call_" if channel == CALL else "tpl_msg_") + str(step)
 
 
-def render_template(
-	template: Optional[str], first_name: str = "", order_no: Any = "", offer: str = ""
-) -> str:
+def render_template(template: str | None, first_name: str = "", order_no: Any = "", offer: str = "") -> str:
 	"""Fill the placeholders by plain replace (a stray brace cannot break it)."""
 	text = str(template or "")
 	for key, value in (("{first_name}", first_name), ("{order_no}", order_no), ("{offer}", offer)):
@@ -213,14 +212,14 @@ def render_template(
 	return " ".join(text.split())
 
 
-def first_name_of(customer_name: Optional[str]) -> str:
+def first_name_of(customer_name: str | None) -> str:
 	parts = str(customer_name or "").split()
 	return parts[0] if parts else ""
 
 
 def decide_log_effects(
-	channel: str, step: str, reached: Optional[str], outcome: Optional[str], apology_percent: Any = 0
-) -> Dict[str, Any]:
+	channel: str, step: str, reached: str | None, outcome: str | None, apology_percent: Any = 0
+) -> dict[str, Any]:
 	"""Validate a call/message result and say what it sets in motion. Pure.
 
 	Raises ``ValueError`` (message is user-facing) for an impossible result.
@@ -257,7 +256,7 @@ def decide_log_effects(
 # ---------------------------------------------------------------------------
 
 
-def load_settings() -> Dict[str, Any]:
+def load_settings() -> dict[str, Any]:
 	"""Follow-up settings as a plain dict, with the segmentation threshold."""
 	from jarz_pos.services import rfm_segmentation as rfm
 
@@ -265,7 +264,7 @@ def load_settings() -> Dict[str, Any]:
 		doc = frappe.get_single(SETTINGS_DOCTYPE)
 	except Exception:
 		doc = {}
-	out: Dict[str, Any] = {
+	out: dict[str, Any] = {
 		"enabled": int(_get(doc, "enabled", 0) or 0),
 		"start_date": _get(doc, "start_date", "2026-10-15"),
 		"offer_text": _get(doc, "offer_text", ""),
@@ -306,31 +305,31 @@ def _since_datetime(start_date: Any) -> _dt.datetime:
 	return max(floor, _to_datetime(start_date))
 
 
-def _cancel_pending(where: str, params: Dict[str, Any], reason: str) -> None:
+def _cancel_pending(where: str, params: dict[str, Any], reason: str) -> None:
 	frappe.db.sql(
-		"""
+		f"""
         UPDATE `tabJarz Follow-up Touch`
         SET status = 'Cancelled', cancel_reason = %(reason)s, modified = NOW()
         WHERE status = 'Pending' AND {where}
-        """.format(where=where),
+        """,
 		dict(params, reason=reason),
 	)
 
 
 def _earlier_retail_orders(customer: str, inv: Any, scope: str) -> int:
 	row = frappe.db.sql(
-		"""
+		f"""
         SELECT COUNT(*) FROM `tabSales Invoice` si
         INNER JOIN `tabCustomer` c ON c.name = si.customer
         WHERE si.customer = %(customer)s AND si.name != %(inv)s AND {scope}
           AND (si.posting_date < %(pd)s OR (si.posting_date = %(pd)s AND si.creation < %(cr)s))
-        """.format(scope=scope),
+        """,
 		{"customer": customer, "inv": inv.name, "pd": inv.posting_date, "cr": inv.creation},
 	)
 	return int(row[0][0] or 0) if row else 0
 
 
-def _insert_cycle(inv: Any, settings: Dict[str, Any], scope: str) -> int:
+def _insert_cycle(inv: Any, settings: dict[str, Any], scope: str) -> int:
 	earlier = _earlier_retail_orders(inv.customer, inv, scope)
 	is_repeat = earlier >= 1
 	plan = plan_touches(inv.delivered_at, inv.grand_total, is_repeat, settings)
@@ -367,11 +366,11 @@ def _insert_cycle(inv: Any, settings: Dict[str, Any], scope: str) -> int:
 	return len(plan)
 
 
-def _cancel_superseded(scope_inv_conds: List[str]) -> None:
+def _cancel_superseded(scope_inv_conds: list[str]) -> None:
 	"""Cancel Pending touches whose customer ordered again since the touch's order."""
 	newer = " AND ".join(scope_inv_conds)
 	frappe.db.sql(
-		"""
+		f"""
         UPDATE `tabJarz Follow-up Touch` t
         INNER JOIN `tabSales Invoice` cur ON cur.name = t.invoice
         SET t.status = 'Cancelled', t.cancel_reason = %(reason)s, t.modified = NOW()
@@ -382,18 +381,18 @@ def _cancel_superseded(scope_inv_conds: List[str]) -> None:
                 AND (n.posting_date > cur.posting_date
                      OR (n.posting_date = cur.posting_date AND n.creation > cur.creation))
           )
-        """.format(newer=newer),
+        """,
 		{"reason": REASON_NEW_ORDER},
 	)
 
 
-def generate_touches() -> Dict[str, Any]:
+def generate_touches() -> dict[str, Any]:
 	"""Hourly: open a cycle for every newly delivered retail order. Never raises.
 
 	Idempotent: an invoice that already has any touch is never planned again, so
 	re-running (or two overlapping runs) cannot duplicate a cycle.
 	"""
-	result: Dict[str, Any] = {"enabled": 0, "invoices": 0, "touches": 0, "errors": 0}
+	result: dict[str, Any] = {"enabled": 0, "invoices": 0, "touches": 0, "errors": 0}
 	try:
 		settings = load_settings()
 		result["enabled"] = settings["enabled"]
@@ -418,22 +417,22 @@ def generate_touches() -> Dict[str, Any]:
 		woo_col = "si.woo_order_id" if frappe.db.has_column("Sales Invoice", "woo_order_id") else "0"
 
 		invoices = frappe.db.sql(
-			"""
+			f"""
             SELECT si.name, si.customer, si.grand_total, si.posting_date, si.creation,
-                   {woo} AS woo_order_id, {delivered} AS delivered_at, c.mobile_no
+                   {woo_col} AS woo_order_id, {delivered_expr} AS delivered_at, c.mobile_no
             FROM `tabSales Invoice` si
             INNER JOIN `tabCustomer` c ON c.name = si.customer
             WHERE si.custom_sales_invoice_state = 'Delivered'
-              AND {delivered} >= %(since)s
+              AND {delivered_expr} >= %(since)s
               -- Index-friendly floor, and it stops an old order whose
               -- custom_delivered_at is empty from starting a cycle just because
               -- a later save bumped `modified`.
               AND si.posting_date >= DATE_SUB(DATE(%(since)s), INTERVAL 2 DAY)
               AND {scope} {opt_out}
               AND NOT EXISTS (SELECT 1 FROM `tabJarz Follow-up Touch` t WHERE t.invoice = si.name)
-            ORDER BY {delivered} ASC
+            ORDER BY {delivered_expr} ASC
             LIMIT %(limit)s
-            """.format(woo=woo_col, delivered=delivered_expr, scope=scope, opt_out=opt_out),
+            """,
 			{"since": _since_datetime(settings["start_date"]), "limit": MAX_INVOICES_PER_RUN},
 			as_dict=True,
 		)
@@ -478,7 +477,7 @@ def _load_pending(name: str):
 	return doc
 
 
-def _create_apology_code(doc: Any, settings: Dict[str, Any]) -> Optional[str]:
+def _create_apology_code(doc: Any, settings: dict[str, Any]) -> str | None:
 	"""A single-use percentage code for the customer. None when it cannot be made."""
 	from frappe.utils import add_days, now_datetime
 
@@ -513,9 +512,7 @@ def _create_apology_code(doc: Any, settings: Dict[str, Any]) -> Optional[str]:
 	return code
 
 
-def _create_quality_task(
-	doc: Any, settings: Dict[str, Any], user: str, notes: Optional[str]
-) -> Optional[str]:
+def _create_quality_task(doc: Any, settings: dict[str, Any], user: str, notes: str | None) -> str | None:
 	"""A Task Board card for the quality owner, due today. None when not possible."""
 	from frappe.utils import nowdate
 
@@ -568,11 +565,11 @@ def _create_quality_task(
 
 def log_touch(
 	name: str,
-	reached: Optional[str] = None,
-	outcome: Optional[str] = None,
-	notes: Optional[str] = None,
-	user: Optional[str] = None,
-) -> Dict[str, Any]:
+	reached: str | None = None,
+	outcome: str | None = None,
+	notes: str | None = None,
+	user: str | None = None,
+) -> dict[str, Any]:
 	"""Record the result of a touch and apply its consequences."""
 	from frappe.utils import now_datetime
 
@@ -625,7 +622,7 @@ def log_touch(
 	return _touch_row(doc.as_dict(), _customer_info([doc.customer]).get(doc.customer, {}), settings)
 
 
-def skip_touch(name: str, reason: Optional[str] = None, user: Optional[str] = None) -> Dict[str, Any]:
+def skip_touch(name: str, reason: str | None = None, user: str | None = None) -> dict[str, Any]:
 	doc = _load_pending(name)
 	doc.status = "Skipped"
 	doc.cancel_reason = (reason or "Skipped").strip()[:140]
@@ -640,7 +637,7 @@ def skip_touch(name: str, reason: Optional[str] = None, user: Optional[str] = No
 # ---------------------------------------------------------------------------
 
 
-def _customer_info(customers: Iterable[str]) -> Dict[str, Dict[str, Any]]:
+def _customer_info(customers: Iterable[str]) -> dict[str, dict[str, Any]]:
 	names = sorted({c for c in customers if c})
 	if not names:
 		return {}
@@ -651,7 +648,7 @@ def _customer_info(customers: Iterable[str]) -> Dict[str, Dict[str, Any]]:
 	return {r["name"]: r for r in rows}
 
 
-def _touch_row(t: Dict[str, Any], cust: Dict[str, Any], settings: Dict[str, Any]) -> Dict[str, Any]:
+def _touch_row(t: dict[str, Any], cust: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
 	from frappe.utils import getdate, nowdate
 
 	from jarz_pos.utils.phone import whatsapp_msisdn
@@ -708,7 +705,7 @@ def count_due_today() -> int:
 	)
 
 
-def get_due_touches(user: Optional[str] = None) -> Dict[str, Any]:
+def get_due_touches(user: str | None = None) -> dict[str, Any]:
 	"""Pending touches due by the end of today, oldest first, with a summary."""
 	from frappe.utils import add_days, nowdate
 
@@ -747,7 +744,7 @@ def get_due_touches(user: Optional[str] = None) -> Dict[str, Any]:
 	return {"items": items, "summary": summary}
 
 
-def get_followup_stats(from_date: Optional[str] = None, to_date: Optional[str] = None) -> Dict[str, Any]:
+def get_followup_stats(from_date: str | None = None, to_date: str | None = None) -> dict[str, Any]:
 	"""Outcome numbers for touches due in the range (default: last 30 days)."""
 	from frappe.utils import add_days, getdate, nowdate
 
@@ -784,7 +781,7 @@ def get_followup_stats(from_date: Optional[str] = None, to_date: Optional[str] =
 
 	newer = " AND ".join(rfm.retail_invoice_conditions(rfm.website_only_enabled(), "n"))
 	touched, reordered = frappe.db.sql(
-		"""
+		f"""
         SELECT COUNT(DISTINCT t.customer),
                COUNT(DISTINCT CASE WHEN EXISTS (
                    SELECT 1 FROM `tabSales Invoice` n
@@ -794,7 +791,7 @@ def get_followup_stats(from_date: Optional[str] = None, to_date: Optional[str] =
         FROM `tabJarz Follow-up Touch` t
         WHERE t.status = 'Done' AND t.done_at IS NOT NULL
           AND t.due_at >= %(from_d)s AND t.due_at < %(to_d)s
-        """.format(newer=newer),
+        """,
 		params,
 	)[0]
 	touched, reordered = int(touched or 0), int(reordered or 0)
@@ -818,9 +815,9 @@ def get_followup_stats(from_date: Optional[str] = None, to_date: Optional[str] =
 # ---------------------------------------------------------------------------
 
 
-def send_daily_sender_push() -> Dict[str, Any]:
+def send_daily_sender_push() -> dict[str, Any]:
 	"""12:00: tell each sender how many follow-ups wait for them. Never raises."""
-	result: Dict[str, Any] = {"status": "skipped", "count": 0, "recipients": 0}
+	result: dict[str, Any] = {"status": "skipped", "count": 0, "recipients": 0}
 	try:
 		settings = load_settings()
 		if not settings["enabled"]:

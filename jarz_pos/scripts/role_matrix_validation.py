@@ -62,7 +62,8 @@ Run::
 from __future__ import annotations
 
 import json
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from collections.abc import Callable, Iterable, Sequence
+from typing import Any, Dict, List, Optional, Tuple
 
 import frappe
 
@@ -74,7 +75,11 @@ from jarz_pos.constants import ROLES
 # would be a second thing to keep true.
 from jarz_pos.scripts.b2b_accounting_validation import (
 	RunContext as FixtureContext,
+)
+from jarz_pos.scripts.b2b_accounting_validation import (
 	_cleanup as _cleanup_fixtures,
+)
+from jarz_pos.scripts.b2b_accounting_validation import (
 	_create_invoice,
 	_ensure_customer,
 	_ensure_customer_group,
@@ -95,7 +100,7 @@ USER_DOMAIN = "roletest.jarz.invalid"
 TEST_PASSWORD = "R0leM@trix-Harness-2026"
 
 #: Used only when the site has no real user to copy a persona from.
-_FALLBACK_ROLES: Dict[str, List[str]] = {
+_FALLBACK_ROLES: dict[str, list[str]] = {
 	"staff": ["POS User"],
 	"line_manager": ["POS User", ROLES.JARZ_LINE_MANAGER],
 	"manager": ["POS User", ROLES.JARZ_MANAGER],
@@ -140,16 +145,16 @@ class RoleRunContext:
 	"""Collects check results and the synthetic records to tear down."""
 
 	def __init__(self) -> None:
-		self.checks: List[Dict[str, Any]] = []
-		self.users: List[str] = []
-		self.personas: Dict[str, Dict[str, Any]] = {}
-		self.profile_links: List[Tuple[str, str]] = []
+		self.checks: list[dict[str, Any]] = []
+		self.users: list[str] = []
+		self.personas: dict[str, dict[str, Any]] = {}
+		self.profile_links: list[tuple[str, str]] = []
 		#: Sales Invoices / Stock Entries / Item Prices created for this run.
 		#: Owned by ``b2b_accounting_validation._cleanup``.
 		self.fixtures: FixtureContext = FixtureContext()
 		#: Custom Shipping Requests, which ``_cleanup`` does not know about and
 		#: which must be removed BEFORE their invoice or the delete is refused.
-		self.shipping_requests: List[str] = []
+		self.shipping_requests: list[str] = []
 
 	def record(self, name: str, passed: bool, detail: str = "") -> None:
 		self.checks.append({"name": name, "passed": bool(passed), "detail": detail, "skipped": False})
@@ -191,7 +196,7 @@ class RoleRunContext:
 # ---------------------------------------------------------------------------
 
 
-def _enabled_human_users() -> List[str]:
+def _enabled_human_users() -> list[str]:
 	"""Enabled login accounts, newest first.
 
 	Excludes Administrator and Guest, and anything this harness created, so a
@@ -218,7 +223,7 @@ def _roles_of(user: str) -> set:
 	return set(frappe.get_all("Has Role", filters={"parent": user, "parenttype": "User"}, pluck="role") or [])
 
 
-def _derive_persona_roles(ctx: RoleRunContext) -> Dict[str, Dict[str, Any]]:
+def _derive_persona_roles(ctx: RoleRunContext) -> dict[str, dict[str, Any]]:
 	"""Copy each persona's role set from a real user on this site.
 
 	Hand-writing the sets is how a harness ends up testing a staff member who
@@ -230,7 +235,7 @@ def _derive_persona_roles(ctx: RoleRunContext) -> Dict[str, Dict[str, Any]]:
 	manager_lower = {ROLES.JARZ_MANAGER.lower(), "system manager", "administrator"}
 	line_only_lower = {ROLES.JARZ_LINE_MANAGER.lower(), "jarz line manager"}
 
-	found: Dict[str, Dict[str, Any]] = {}
+	found: dict[str, dict[str, Any]] = {}
 	for user in _enabled_human_users():
 		roles = _roles_of(user)
 		lowered = {r.lower() for r in roles}
@@ -274,15 +279,15 @@ def _derive_persona_roles(ctx: RoleRunContext) -> Dict[str, Dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
-def _enabled_profiles() -> List[str]:
+def _enabled_profiles() -> list[str]:
 	return sorted(
 		frappe.get_all("POS Profile", filters={"disabled": 0}, pluck="name", limit_page_length=0) or []
 	)
 
 
 def _provision_user(
-	ctx: RoleRunContext, persona: str, spec: Dict[str, Any], own_profile: Optional[str]
-) -> Optional[str]:
+	ctx: RoleRunContext, persona: str, spec: dict[str, Any], own_profile: str | None
+) -> str | None:
 	"""Create (or reset) one synthetic user carrying the persona's roles.
 
 	Idempotent by design: a run interrupted before teardown leaves the user
@@ -328,7 +333,7 @@ def _provision_user(
 		return None
 
 
-def _pin_user_to_branch(ctx: RoleRunContext, email: str, own_profile: Optional[str]) -> None:
+def _pin_user_to_branch(ctx: RoleRunContext, email: str, own_profile: str | None) -> None:
 	"""Assign the synthetic user to exactly ONE branch.
 
 	Branch scoping reads POS Profile links off the session user, so a persona
@@ -454,7 +459,7 @@ def _seed_branch_stock(ctx: RoleRunContext, profile: str) -> None:
 	_ensure_stock(ctx.fixtures, items, profile)
 
 
-def _latest_opening_entry(profile: str) -> Optional[str]:
+def _latest_opening_entry(profile: str) -> str | None:
 	"""The most recent submitted POS Opening Entry on *profile*, if any.
 
 	Read, never created: opening a shift here would take the branch offline for
@@ -476,7 +481,7 @@ def _latest_opening_entry(profile: str) -> Optional[str]:
 	return rows[0]["name"] if rows else None
 
 
-def _existing_price_list(profile: str) -> Optional[str]:
+def _existing_price_list(profile: str) -> str | None:
 	"""An enabled selling Price List that already exists.
 
 	``create_price_list`` is get-or-create: handed a name that exists it returns
@@ -490,7 +495,7 @@ def _existing_price_list(profile: str) -> Optional[str]:
 	return frappe.db.get_value("Price List", {"enabled": 1, "selling": 1}, "name")
 
 
-def _shift_gate_reason(own_profile: str, emails: Sequence[str]) -> Optional[str]:
+def _shift_gate_reason(own_profile: str, emails: Sequence[str]) -> str | None:
 	"""Why a shift-gated ALLOW probe cannot be trusted in this environment.
 
 	``_guard_invoice_action`` applies branch scoping AND, for the posting
@@ -519,14 +524,14 @@ def _shift_gate_reason(own_profile: str, emails: Sequence[str]) -> Optional[str]
 	)
 
 
-def _build_fixtures(ctx: RoleRunContext) -> Dict[str, Any]:
+def _build_fixtures(ctx: RoleRunContext) -> dict[str, Any]:
 	"""Create every document the matrix needs, and say what could not be made.
 
 	Returns the ``env`` the matrix is built from. Anything it could not create
 	is left ``None``; :func:`_matrix` turns each absence into a SKIP carrying the
 	reason, never into a pass and never into a failure of the gate under test.
 	"""
-	env: Dict[str, Any] = {
+	env: dict[str, Any] = {
 		"own_profile": None,
 		"other_profile": None,
 		"own_invoice": None,
@@ -712,7 +717,7 @@ class ApiSession:
 		self.session.headers.update({"Host": site, "Accept": "application/json"})
 		self.logged_in = False
 
-	def login(self, password: str) -> Tuple[bool, str]:
+	def login(self, password: str) -> tuple[bool, str]:
 		try:
 			resp = self.session.post(
 				f"{self.base_url}/api/method/login",
@@ -724,9 +729,7 @@ class ApiSession:
 		self.logged_in = resp.status_code == 200
 		return self.logged_in, f"HTTP {resp.status_code} {resp.text[:200]}"
 
-	def call(
-		self, method: str, params: Optional[Dict[str, Any]] = None, http: str = "POST"
-	) -> Dict[str, Any]:
+	def call(self, method: str, params: dict[str, Any] | None = None, http: str = "POST") -> dict[str, Any]:
 		"""Call a whitelisted method. Returns status + payload, never raises."""
 		url = f"{self.base_url}/api/method/{method}"
 		try:
@@ -756,7 +759,7 @@ class ApiSession:
 			pass
 
 
-def _resolve_base_url(ctx: RoleRunContext) -> Optional[str]:
+def _resolve_base_url(ctx: RoleRunContext) -> str | None:
 	"""Find a base URL this container can actually reach.
 
 	Reported as a check rather than assumed: if none of the candidates answer,
@@ -842,7 +845,7 @@ _INCONCLUSIVE_MARKERS = (
 )
 
 
-def _looks_like_failure(result: Dict[str, Any]) -> bool:
+def _looks_like_failure(result: dict[str, Any]) -> bool:
 	"""True when the response is the server saying no, for whatever reason.
 
 	Both marker lists are substring searches over the response body, and a
@@ -866,7 +869,7 @@ def _looks_like_failure(result: Dict[str, Any]) -> bool:
 	return False
 
 
-def _classify(result: Dict[str, Any]) -> str:
+def _classify(result: dict[str, Any]) -> str:
 	"""Reduce a response to denied / allowed / inconclusive / unreachable.
 
 	The distinction that matters is **denied versus allowed**, and the reason
@@ -913,7 +916,7 @@ def _classify(result: Dict[str, Any]) -> str:
 	return ALLOWED
 
 
-def _inconclusive_reason(result: Dict[str, Any]) -> str:
+def _inconclusive_reason(result: dict[str, Any]) -> str:
 	"""The specific thing that made a response inconclusive, for the report."""
 	status = result.get("status")
 	exc = str(result.get("exc_type") or "").strip()
@@ -931,7 +934,7 @@ def _inconclusive_reason(result: Dict[str, Any]) -> str:
 	return "the response matched no authorisation outcome"
 
 
-def _message(result: Dict[str, Any]) -> Any:
+def _message(result: dict[str, Any]) -> Any:
 	"""The whitelisted method's own return value, unwrapped from Frappe's envelope."""
 	payload = result.get("payload")
 	if isinstance(payload, dict) and "message" in payload:
@@ -944,7 +947,7 @@ def _message(result: Dict[str, Any]) -> Any:
 # ---------------------------------------------------------------------------
 
 
-def _foreign_invoices(names: Iterable[Any], allowed: Sequence[str]) -> Dict[str, str]:
+def _foreign_invoices(names: Iterable[Any], allowed: Sequence[str]) -> dict[str, str]:
 	"""Which of *names* belong to a branch outside *allowed*, and to which one.
 
 	Resolved server-side from the same fields the gates read, so the answer is
@@ -963,7 +966,7 @@ def _foreign_invoices(names: Iterable[Any], allowed: Sequence[str]) -> Dict[str,
 		or []
 	)
 	allowed_set = {str(p).strip() for p in allowed if str(p or "").strip()}
-	foreign: Dict[str, str] = {}
+	foreign: dict[str, str] = {}
 	for row in rows:
 		branch = str(row.get("custom_kanban_profile") or row.get("pos_profile") or "").strip()
 		if branch and branch not in allowed_set:
@@ -971,7 +974,7 @@ def _foreign_invoices(names: Iterable[Any], allowed: Sequence[str]) -> Dict[str,
 	return foreign
 
 
-def _proof_recent_invoices(message: Any, allowed: Sequence[str]) -> Optional[str]:
+def _proof_recent_invoices(message: Any, allowed: Sequence[str]) -> str | None:
 	"""HTTP 200 is not the finding — *whose orders came back* is."""
 	if not isinstance(message, dict):
 		return None
@@ -991,7 +994,7 @@ def _proof_recent_invoices(message: Any, allowed: Sequence[str]) -> Optional[str
 	)
 
 
-def _proof_courier_balances(message: Any, allowed: Sequence[str]) -> Optional[str]:
+def _proof_courier_balances(message: Any, allowed: Sequence[str]) -> str | None:
 	"""Same shape of claim, over the invoices embedded in each courier's rows."""
 	if not isinstance(message, list):
 		return None
@@ -1012,7 +1015,7 @@ def _proof_courier_balances(message: Any, allowed: Sequence[str]) -> Optional[st
 	)
 
 
-def _proof_branch_drawer(message: Any, allowed: Sequence[str]) -> Optional[str]:
+def _proof_branch_drawer(message: Any, allowed: Sequence[str]) -> str | None:
 	"""The drawer balance of a branch the caller does not work at."""
 	if not isinstance(message, dict):
 		return None
@@ -1044,14 +1047,14 @@ class Probe:
 		self,
 		key: str,
 		method: str,
-		expect: Dict[str, str],
-		params: Optional[Dict[str, Any]] = None,
+		expect: dict[str, str],
+		params: dict[str, Any] | None = None,
 		http: str = "POST",
 		note: str = "",
 		known_open: bool = False,
 		gate_is_first: bool = False,
-		persona_params: Optional[Dict[str, Dict[str, Any]]] = None,
-		leak_proof: Optional[Callable[[Any, Sequence[str]], Optional[str]]] = None,
+		persona_params: dict[str, dict[str, Any]] | None = None,
+		leak_proof: Callable[[Any, Sequence[str]], str | None] | None = None,
 		skip_reason: str = "",
 	) -> None:
 		self.key = key
@@ -1088,11 +1091,11 @@ class Probe:
 		#: Set when the environment cannot host this probe at all.
 		self.skip_reason = skip_reason
 
-	def params_for(self, persona: str) -> Dict[str, Any]:
+	def params_for(self, persona: str) -> dict[str, Any]:
 		return dict(self.persona_params.get(persona) or self.params)
 
 
-def _needs(env: Dict[str, Any], *keys: str) -> str:
+def _needs(env: dict[str, Any], *keys: str) -> str:
 	"""Skip reason when a fixture this probe depends on could not be created."""
 	missing = [k for k in keys if not env.get(k)]
 	if not missing:
@@ -1121,7 +1124,7 @@ _NONEXISTENT_PARTY = "_ROLETEST_NO_SUCH_PARTY_"
 _NONEXISTENT_ROW = "_ROLETEST_NO_SUCH_ROW_"
 
 
-def _matrix(env: Dict[str, Any]) -> List[Probe]:
+def _matrix(env: dict[str, Any]) -> list[Probe]:
 	"""Every capability boundary worth asserting, per persona.
 
 	Ordered by the journey a person actually performs rather than by module, so
@@ -1131,7 +1134,7 @@ def _matrix(env: Dict[str, Any]) -> List[Probe]:
 	other_profile = env.get("other_profile")
 	own_invoice = env.get("own_invoice")
 	other_invoice = env.get("other_invoice")
-	cancelable: Dict[str, str] = env.get("cancelable") or {}
+	cancelable: dict[str, str] = env.get("cancelable") or {}
 	own_opening = env.get("own_opening")
 	other_opening = env.get("other_opening")
 
@@ -1669,7 +1672,7 @@ def _run_probe(
 	ctx.record(name, passed, detail)
 
 
-def run(cleanup: bool = True) -> Dict[str, Any]:
+def run(cleanup: bool = True) -> dict[str, Any]:
 	if isinstance(cleanup, str):
 		cleanup = cleanup.strip().lower() not in {"", "0", "false", "no"}
 
@@ -1680,8 +1683,8 @@ def run(cleanup: bool = True) -> Dict[str, Any]:
 	frappe.flags.ignore_woo_outbound = True
 
 	ctx = RoleRunContext()
-	sessions: Dict[str, ApiSession] = {}
-	summary: Dict[str, Any] = {}
+	sessions: dict[str, ApiSession] = {}
+	summary: dict[str, Any] = {}
 	try:
 		base_url = _resolve_base_url(ctx)
 		if not base_url:
@@ -1797,8 +1800,8 @@ def run(cleanup: bool = True) -> Dict[str, Any]:
 			)
 
 
-def _summary_payload(ctx: RoleRunContext, skipped_reason: str = "") -> Dict[str, Any]:
-	summary: Dict[str, Any] = {
+def _summary_payload(ctx: RoleRunContext, skipped_reason: str = "") -> dict[str, Any]:
+	summary: dict[str, Any] = {
 		"passed": ctx.passed,
 		"failed": ctx.failed,
 		"skipped": ctx.skipped,
@@ -1822,7 +1825,7 @@ def _summary_payload(ctx: RoleRunContext, skipped_reason: str = "") -> Dict[str,
 	return summary
 
 
-def _summary(ctx: RoleRunContext, skipped_reason: str = "") -> Dict[str, Any]:
+def _summary(ctx: RoleRunContext, skipped_reason: str = "") -> dict[str, Any]:
 	summary = _summary_payload(ctx, skipped_reason)
 	print(f"role_matrix_validation: {ctx.passed} passed, {ctx.failed} failed, " f"{ctx.skipped} skipped")
 	print(MARKER_START)

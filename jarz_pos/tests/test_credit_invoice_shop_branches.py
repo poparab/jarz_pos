@@ -10,7 +10,6 @@ from unittest.mock import patch
 from jarz_pos.api import credit as credit_api
 from jarz_pos.services import b2b_branches
 
-
 BRANCHES = [
 	{"address_name": "ADDR-HEL", "branch_name": "Heliopolis"},
 	{"address_name": "ADDR-MAD", "branch_name": "Madinaty"},

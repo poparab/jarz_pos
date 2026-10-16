@@ -25,7 +25,7 @@ def _logger():
 	return frappe.logger(LOGGER_NAME, allow_site=True)
 
 
-def ensure_task_board_settings() -> Dict[str, str]:
+def ensure_task_board_settings() -> dict[str, str]:
 	"""Idempotently seed the full-access list. Never raises."""
 	result = {"status": "skipped"}
 	try:

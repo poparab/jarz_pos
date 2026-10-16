@@ -44,10 +44,10 @@ def _safe(label: str, fn, default):
 
 @frappe.whitelist()
 def get_executive_overview(
-	date_from: Optional[str] = None,
-	date_to: Optional[str] = None,
-	branch: Optional[str] = None,
-) -> Dict[str, Any]:
+	date_from: str | None = None,
+	date_to: str | None = None,
+	branch: str | None = None,
+) -> dict[str, Any]:
 	"""Composed executive roll-up across the four analytics domains.
 
 	``branch`` (optional POS Profile name) is passed to product, P&L, shipping
@@ -206,7 +206,7 @@ def get_executive_overview(
 		return get_alerts_data(from_date=date_from, to_date=date_to)
 
 	# Incomplete books first: they qualify every number below them.
-	alerts: List[Dict[str, str]] = []
+	alerts: list[dict[str, str]] = []
 	warnings = pnl_quality.get("warnings") or []
 	if "cogs_incomplete" in warnings:
 		alerts.append(

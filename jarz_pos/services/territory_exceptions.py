@@ -127,7 +127,7 @@ _DELIVER_AT_BRANCH = "Deliver at Branch"
 #: restarts the workers -- but one worker serves every site on the bench, and
 #: the WooCommerce app is not necessarily installed on all of them, so a
 #: site-blind memo would answer for the wrong database.
-_OPTIONAL_FIELD_CACHE: Dict[tuple, bool] = {}
+_OPTIONAL_FIELD_CACHE: dict[tuple, bool] = {}
 
 #: Rows fetched (and committed) per backfill batch.
 DEFAULT_BATCH_SIZE = 500
@@ -172,7 +172,7 @@ def _logger():
 	return logger
 
 
-def _log_failure(title: str, message: Optional[str] = None) -> None:
+def _log_failure(title: str, message: str | None = None) -> None:
 	"""Record a failure without ever raising out of the error path itself."""
 	try:
 		frappe.log_error(
@@ -229,7 +229,7 @@ def _territory_has_pos_profile_field() -> bool:
 		return False
 
 
-def _territory_pos_profile(territory: Any) -> Optional[str]:
+def _territory_pos_profile(territory: Any) -> str | None:
 	"""The branch a territory points at.
 
 	Deliberately a direct read rather than
@@ -244,7 +244,7 @@ def _territory_pos_profile(territory: Any) -> Optional[str]:
 	return _clean(_safe_get_value("Territory", territory_name, "pos_profile")) or None
 
 
-def _address_snapshot(address_name: Any) -> Dict[str, Any]:
+def _address_snapshot(address_name: Any) -> dict[str, Any]:
 	name = _clean(address_name)
 	if not name:
 		return {}
@@ -252,7 +252,7 @@ def _address_snapshot(address_name: Any) -> Dict[str, Any]:
 	return dict(row)
 
 
-def _address_territory(address_name: Any) -> Optional[str]:
+def _address_territory(address_name: Any) -> str | None:
 	"""What the shipping address says the territory should have been.
 
 	``Address.city`` is free text on this site (a WooCommerce label), never a
@@ -271,7 +271,7 @@ def _address_territory(address_name: Any) -> Optional[str]:
 		return None
 
 
-def _sole_territory_for_profile(pos_profile: Any) -> Optional[str]:
+def _sole_territory_for_profile(pos_profile: Any) -> str | None:
 	"""The territory a branch implies -- only when exactly one points at it."""
 	profile = _clean(pos_profile)
 	if not profile or not _territory_has_pos_profile_field():
@@ -298,10 +298,10 @@ def _current_site() -> str:
 		return ""
 
 
-def _optional_invoice_fields() -> List[str]:
+def _optional_invoice_fields() -> list[str]:
 	"""The optional columns that actually exist on this site's Sales Invoice."""
 	site = _current_site()
-	available: List[str] = []
+	available: list[str] = []
 	for field in _OPTIONAL_INVOICE_FIELDS:
 		key = (site, field)
 		if key not in _OPTIONAL_FIELD_CACHE:
@@ -315,7 +315,7 @@ def _optional_invoice_fields() -> List[str]:
 	return available
 
 
-def _optional_invoice_values(source: Any, invoice_name: str) -> Dict[str, Any]:
+def _optional_invoice_values(source: Any, invoice_name: str) -> dict[str, Any]:
 	"""Read the optional columns, with at most ONE extra query.
 
 	During the batched backfill the columns are already in the fetched row, so
@@ -323,8 +323,8 @@ def _optional_invoice_values(source: Any, invoice_name: str) -> Dict[str, Any]:
 	11,000 on a full-history sweep.
 	"""
 	fields = _optional_invoice_fields()
-	values: Dict[str, Any] = {}
-	missing: List[str] = []
+	values: dict[str, Any] = {}
+	missing: list[str] = []
 
 	for field in fields:
 		if isinstance(source, dict):
@@ -401,7 +401,7 @@ def detect_exception_type(
 	territory: Any,
 	pos_profile: Any,
 	territory_pos_profile: Any,
-) -> Optional[str]:
+) -> str | None:
 	"""Classify one order. Returns an exception type, or None when it is clean.
 
 	* ``Territory Unresolved`` -- no territory, or the root ``All Territories``,
@@ -430,7 +430,7 @@ def detect_exception_type(
 	return None
 
 
-def build_detail(snapshot: Dict[str, Any], exception_type: str) -> str:
+def build_detail(snapshot: dict[str, Any], exception_type: str) -> str:
 	"""A reviewer must be able to act on this row without opening the invoice."""
 	invoice = snapshot.get("sales_invoice") or "?"
 	posting_date = snapshot.get("posting_date") or "?"
@@ -444,7 +444,7 @@ def build_detail(snapshot: Dict[str, Any], exception_type: str) -> str:
 
 	lane = snapshot.get("order_lane") or "?"
 
-	parts: List[str] = []
+	parts: list[str] = []
 	if exception_type == TYPE_BRANCH_MISMATCH:
 		parts.append(
 			f"[{lane} lane] Order {invoice} ({posting_date}, {total}) shipped from POS Profile "
@@ -491,13 +491,13 @@ def build_detail(snapshot: Dict[str, Any], exception_type: str) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _load_invoice_row(invoice_name: str) -> Dict[str, Any]:
+def _load_invoice_row(invoice_name: str) -> dict[str, Any]:
 	fields = list(_INVOICE_FIELDS) + _optional_invoice_fields()
 	row = _safe_get_value(INVOICE_DOCTYPE, invoice_name, fields, as_dict=True) or {}
 	return dict(row)
 
 
-def build_snapshot(invoice_doc: Any) -> Dict[str, Any]:
+def build_snapshot(invoice_doc: Any) -> dict[str, Any]:
 	"""Collect everything the exception row stores. Reads only; never writes."""
 	if isinstance(invoice_doc, str):
 		source: Any = _load_invoice_row(invoice_doc)
@@ -527,7 +527,7 @@ def build_snapshot(invoice_doc: Any) -> Dict[str, Any]:
 	address = _address_snapshot(shipping_address)
 	resolved_territory = raw_territory if raw_territory.lower() not in _UNRESOLVED_TERRITORY_VALUES else None
 
-	snapshot: Dict[str, Any] = {
+	snapshot: dict[str, Any] = {
 		"sales_invoice": invoice_name,
 		"docstatus": int(_val(source, "docstatus", 0) or 0),
 		"posting_date": _val(source, "posting_date"),
@@ -552,7 +552,7 @@ def build_snapshot(invoice_doc: Any) -> Dict[str, Any]:
 	return snapshot
 
 
-def _resolve_expected_territory(snapshot: Dict[str, Any]) -> Optional[str]:
+def _resolve_expected_territory(snapshot: dict[str, Any]) -> str | None:
 	"""What the territory probably should have been.
 
 	Order matters: the shipping address is the customer's actual location and
@@ -576,7 +576,7 @@ def _resolve_expected_territory(snapshot: Dict[str, Any]) -> Optional[str]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def record_invoice_territory_exception(invoice_doc) -> Optional[str]:
+def record_invoice_territory_exception(invoice_doc) -> str | None:
 	"""Inspect a Sales Invoice and log an exception row if branch<>territory or
 	territory unresolved. Idempotent per (sales_invoice, exception_type).
 	Returns the exception name, or None when the invoice is clean.
@@ -592,7 +592,7 @@ def record_invoice_territory_exception(invoice_doc) -> Optional[str]:
 		return None
 
 
-def record_territory_exception_on_submit(doc, method: Optional[str] = None) -> None:
+def record_territory_exception_on_submit(doc, method: str | None = None) -> None:
 	"""``Sales Invoice.on_submit`` hook.
 
 	Wired in ``hooks.py`` rather than left to the callers so that BOTH lanes are
@@ -612,7 +612,7 @@ def _describe(invoice_doc: Any) -> str:
 		return "?"
 
 
-def _record(invoice_doc: Any) -> Optional[str]:
+def _record(invoice_doc: Any) -> str | None:
 	if not _exception_doctype_ready():
 		return None
 
@@ -637,7 +637,7 @@ def _record(invoice_doc: Any) -> Optional[str]:
 	return _insert_exception(snapshot, exception_type)
 
 
-def _is_counter_fulfilled(snapshot: Dict[str, Any]) -> bool:
+def _is_counter_fulfilled(snapshot: dict[str, Any]) -> bool:
 	"""True when the order's commercial policy hands the goods over at the counter.
 
 	Only ever used to silence ``Territory Unresolved``. A staff purchase under
@@ -660,7 +660,7 @@ def _is_counter_fulfilled(snapshot: Dict[str, Any]) -> bool:
 	return isinstance(behavior, str) and behavior.strip() == _DELIVER_AT_BRANCH
 
 
-def _existing_exception(invoice_name: str, exception_type: str) -> Optional[str]:
+def _existing_exception(invoice_name: str, exception_type: str) -> str | None:
 	try:
 		found = frappe.db.exists(
 			EXCEPTION_DOCTYPE,
@@ -671,7 +671,7 @@ def _existing_exception(invoice_name: str, exception_type: str) -> Optional[str]
 	return found or None
 
 
-def _insert_exception(snapshot: Dict[str, Any], exception_type: str) -> Optional[str]:
+def _insert_exception(snapshot: dict[str, Any], exception_type: str) -> str | None:
 	"""Create the row, or return the one that is already there.
 
 	Fenced behind a savepoint: this runs inside the invoice's own submit
@@ -738,7 +738,7 @@ def _insert_exception(snapshot: Dict[str, Any], exception_type: str) -> Optional
 def resolve_territory_exception(
 	exception_name: str,
 	status: str = STATUS_TERRITORY_CORRECTED,
-	user: Optional[str] = None,
+	user: str | None = None,
 ) -> bool:
 	"""Mark one exception row reviewed: sets ``status``/``resolved_on``/``resolved_by``.
 
@@ -773,13 +773,13 @@ def _assert_backfill_access() -> None:
 
 @frappe.whitelist()
 def backfill_territory_exceptions(
-	from_date: Optional[str] = None,
-	to_date: Optional[str] = None,
+	from_date: str | None = None,
+	to_date: str | None = None,
 	all_history: int = 0,
-	limit: Optional[int] = None,
+	limit: int | None = None,
 	batch_size: int = DEFAULT_BATCH_SIZE,
 	dry_run: int = 0,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	"""Sweep existing SUBMITTED invoices and file the exceptions already on the books.
 
 	**Windowed by default (last 90 days), on purpose.** The production
@@ -821,8 +821,8 @@ def backfill_territory_exceptions(
 
 
 def _resolve_backfill_window(
-	from_date: Optional[str],
-	to_date: Optional[str],
+	from_date: str | None,
+	to_date: str | None,
 	all_history: bool,
 ) -> tuple:
 	"""(from_date, to_date). Defaults to the last ``DEFAULT_BACKFILL_DAYS`` days."""
@@ -839,7 +839,7 @@ def _resolve_backfill_window(
 		return None, to_date
 
 
-def _count_outside_window(from_date: Optional[str], to_date: Optional[str]) -> int:
+def _count_outside_window(from_date: str | None, to_date: str | None) -> int:
 	"""Submitted invoices the window deliberately leaves unscanned."""
 	skipped = 0
 	try:
@@ -855,14 +855,14 @@ def _count_outside_window(from_date: Optional[str], to_date: Optional[str]) -> i
 
 def _run_backfill(
 	*,
-	from_date: Optional[str] = None,
-	to_date: Optional[str] = None,
+	from_date: str | None = None,
+	to_date: str | None = None,
 	all_history: bool = False,
-	limit: Optional[int] = None,
+	limit: int | None = None,
 	batch_size: int = DEFAULT_BATCH_SIZE,
 	dry_run: bool = False,
-) -> Dict[str, Any]:
-	summary: Dict[str, Any] = {
+) -> dict[str, Any]:
+	summary: dict[str, Any] = {
 		"scanned": 0,
 		"clean": 0,
 		"created": 0,
@@ -891,7 +891,7 @@ def _run_backfill(
 	except Exception:
 		page_size = DEFAULT_BATCH_SIZE
 
-	remaining: Optional[int] = None
+	remaining: int | None = None
 	if limit:
 		try:
 			remaining = max(0, int(limit))
@@ -951,16 +951,16 @@ def _run_backfill(
 def _fetch_invoice_batch(
 	cursor: str,
 	page: int,
-	from_date: Optional[str],
-	to_date: Optional[str],
-) -> List[Dict[str, Any]]:
+	from_date: str | None,
+	to_date: str | None,
+) -> list[dict[str, Any]]:
 	"""Keyset pagination on ``name``.
 
 	Deliberately not ``limit_start``: this sweep inserts rows while it runs, and
 	an offset walk over a table being written to skips records. Ordering by the
 	primary key with a ``>`` cursor is stable and makes a resumed run cheap.
 	"""
-	filters: Dict[str, Any] = {"docstatus": 1}
+	filters: dict[str, Any] = {"docstatus": 1}
 	if cursor:
 		filters["name"] = (">", cursor)
 
@@ -989,7 +989,7 @@ def _fetch_invoice_batch(
 		return []
 
 
-def _backfill_one(row: Dict[str, Any], summary: Dict[str, Any], dry_run: bool) -> None:
+def _backfill_one(row: dict[str, Any], summary: dict[str, Any], dry_run: bool) -> None:
 	try:
 		snapshot = build_snapshot(row)
 		if not snapshot:
@@ -1034,7 +1034,7 @@ def _backfill_one(row: Dict[str, Any], summary: Dict[str, Any], dry_run: bool) -
 		_log_failure(f"backfill row failed for {name}")
 
 
-def close_resolved_territory_exceptions(limit: int = DEFAULT_CLOSE_LIMIT) -> Dict[str, Any]:
+def close_resolved_territory_exceptions(limit: int = DEFAULT_CLOSE_LIMIT) -> dict[str, Any]:
 	"""Auto-close Open rows whose condition no longer holds.
 
 	Repointing one ``Territory.pos_profile`` fixes the crossing for every order
@@ -1053,7 +1053,7 @@ def close_resolved_territory_exceptions(limit: int = DEFAULT_CLOSE_LIMIT) -> Dic
 	``Territory Unresolved`` rows can never clear this way either (nothing about
 	a submitted invoice's territory can change), so they are not even fetched.
 	"""
-	summary: Dict[str, Any] = {"checked": 0, "closed": 0, "failed": 0}
+	summary: dict[str, Any] = {"checked": 0, "closed": 0, "failed": 0}
 	if not _exception_doctype_ready():
 		return summary
 
@@ -1077,7 +1077,7 @@ def close_resolved_territory_exceptions(limit: int = DEFAULT_CLOSE_LIMIT) -> Dic
 		_log_failure("auto-close fetch failed")
 		return summary
 
-	territory_profiles: Dict[str, Optional[str]] = {}
+	territory_profiles: dict[str, str | None] = {}
 
 	for row in rows:
 		summary["checked"] += 1
@@ -1126,7 +1126,7 @@ def close_resolved_territory_exceptions(limit: int = DEFAULT_CLOSE_LIMIT) -> Dic
 	return summary
 
 
-def run_territory_exception_sweep(days: int = DEFAULT_SWEEP_DAYS) -> Dict[str, Any]:
+def run_territory_exception_sweep(days: int = DEFAULT_SWEEP_DAYS) -> dict[str, Any]:
 	"""Daily scheduler entry: catch recent stragglers, then auto-close what is fixed.
 
 	Bounded on purpose. The ``on_submit`` hook is the primary catch; this exists
@@ -1135,7 +1135,7 @@ def run_territory_exception_sweep(days: int = DEFAULT_SWEEP_DAYS) -> Dict[str, A
 	clicking through hundreds of rows. Never raises -- a scheduler job that
 	throws takes the rest of the daily slot with it.
 	"""
-	result: Dict[str, Any] = {"backfill": None, "auto_close": None}
+	result: dict[str, Any] = {"backfill": None, "auto_close": None}
 
 	try:
 		window = abs(int(days or DEFAULT_SWEEP_DAYS))

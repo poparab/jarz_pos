@@ -82,7 +82,7 @@ def _ensure_employee_in_group(employee_name: str) -> None:
 		pass
 
 
-def _normalize(value: Optional[str]) -> str:
+def _normalize(value: str | None) -> str:
 	"""Collapse whitespace and strip surrounding spaces."""
 
 	return " ".join((value or "").split())
@@ -303,7 +303,7 @@ def create_delivery_party(
 					frappe.throw(f"Missing required field: {error_msg}")
 				elif "company" in error_msg.lower():
 					frappe.throw(
-						f"Company field is required for Employee courier. Please contact administrator to set default company."
+						"Company field is required for Employee courier. Please contact administrator to set default company."
 					)
 				else:
 					frappe.throw(f"Failed to create Employee courier: {error_msg}")
@@ -372,6 +372,6 @@ def create_delivery_party(
 		# Re-raise validation errors as-is (already have good messages)
 		raise
 	except Exception as e:
-		frappe.logger().error(f"Unexpected error in create_delivery_party: {str(e)}")
+		frappe.logger().error(f"Unexpected error in create_delivery_party: {e!s}")
 		frappe.logger().error(frappe.get_traceback())
-		frappe.throw(f"Failed to create courier: {str(e)}")
+		frappe.throw(f"Failed to create courier: {e!s}")

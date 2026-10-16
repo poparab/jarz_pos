@@ -37,7 +37,8 @@ from __future__ import annotations
 
 import datetime
 import math
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
+from collections.abc import Iterable, Mapping, Sequence
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from jarz_pos.services.replenishment_planning import (
 	QTY_EPSILON,
@@ -108,7 +109,7 @@ def coerce_parameters(
 	batch_medium: Any = None,
 	batch_large: Any = None,
 	batch_small: Any = None,
-) -> Dict[str, int]:
+) -> dict[str, int]:
 	"""Every query-string knob, defaulted and clamped per the contract."""
 	return {
 		"cycle_days": coerce_days(
@@ -138,7 +139,7 @@ def coerce_parameters(
 # ── Sales series ────────────────────────────────────────────────────────
 
 
-def sales_window(today: datetime.date, weeks: int) -> Tuple[datetime.date, datetime.date]:
+def sales_window(today: datetime.date, weeks: int) -> tuple[datetime.date, datetime.date]:
 	"""``(from, to)``: ``weeks * 7`` whole days ending **yesterday**.
 
 	Today's part-day is excluded for the same reason as the branch plan: a
@@ -154,7 +155,7 @@ def week_index(to_date: datetime.date, posting_date: datetime.date) -> int:
 	return (to_date - posting_date).days // 7
 
 
-def weekly_series(buckets: Optional[Mapping[Any, Any]], weeks: int) -> List[float]:
+def weekly_series(buckets: Mapping[Any, Any] | None, weeks: int) -> list[float]:
 	"""``{week_index: qty}`` -> a dense list of ``weeks`` values.
 
 	Missing weeks are zero.  A net-negative week (more returned than sold) is
@@ -172,7 +173,7 @@ def weekly_series(buckets: Optional[Mapping[Any, Any]], weeks: int) -> List[floa
 	return [max(0.0, value) for value in series]
 
 
-def mean_and_sd(series: Sequence[float]) -> Tuple[float, float]:
+def mean_and_sd(series: Sequence[float]) -> tuple[float, float]:
 	"""Mean and **population** standard deviation; ``(0, 0)`` for no data."""
 	values = [to_float(v, 0.0) for v in series or []]
 	if not values:
@@ -214,7 +215,7 @@ def fill_qty(*, par: Any, on_hand: Any) -> int:
 	return int(math.ceil(deficit - QTY_EPSILON))
 
 
-def days_of_cover(*, on_hand: Any, avg: Any) -> Optional[float]:
+def days_of_cover(*, on_hand: Any, avg: Any) -> float | None:
 	"""Days the shelf lasts at this branch's weekly rate; ``None`` if it never sells."""
 	avg = to_float(avg, 0.0)
 	if avg <= QTY_EPSILON:
@@ -238,7 +239,7 @@ def batch_tolerance(batch_size: Any) -> int:
 	return max(5, int(math.ceil(to_float(batch_size, 0.0) / 16.0 - QTY_EPSILON)))
 
 
-def round_to_batches(net_need: Any, batch_size: Any) -> Tuple[float, int]:
+def round_to_batches(net_need: Any, batch_size: Any) -> tuple[float, int]:
 	"""``(batches, jars)`` for a net need, in quarter batches.
 
 	Within the tolerance nothing is made.  Otherwise the smallest ``k >= 1``
@@ -279,15 +280,15 @@ def flavour_of(item_name: Any) -> str:
 # ── BOM helpers ─────────────────────────────────────────────────────────
 
 
-def pick_default_boms(rows: Iterable[Mapping[str, Any]]) -> Dict[str, Dict[str, Any]]:
+def pick_default_boms(rows: Iterable[Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
 	"""``{item: {"name", "quantity"}}`` from active submitted BOM rows.
 
 	Rows are ``{name, item, quantity, is_default, default_bom}`` where
 	``default_bom`` is the Item's own field.  The Item's ``default_bom`` wins;
 	otherwise the BOM flagged ``is_default``.  An item with neither has no BOM.
 	"""
-	by_item: Dict[str, Dict[str, Any]] = {}
-	rank: Dict[str, int] = {}
+	by_item: dict[str, dict[str, Any]] = {}
+	rank: dict[str, int] = {}
 	for row in sorted(rows or [], key=lambda r: str(r.get("name") or "")):
 		item = str(row.get("item") or "").strip()
 		name = str(row.get("name") or "").strip()
@@ -305,12 +306,12 @@ def pick_default_boms(rows: Iterable[Mapping[str, Any]]) -> Dict[str, Dict[str, 
 	return by_item
 
 
-def alternatives_map(rows: Iterable[Mapping[str, Any]]) -> Dict[str, List[str]]:
+def alternatives_map(rows: Iterable[Mapping[str, Any]]) -> dict[str, list[str]]:
 	"""``tabItem Alternative`` rows -> ``{item: [alternatives]}``.
 
 	``two_way = 1`` works in both directions.
 	"""
-	out: Dict[str, Set[str]] = {}
+	out: dict[str, set[str]] = {}
 	for row in rows or []:
 		item = str(row.get("item_code") or "").strip()
 		alt = str(row.get("alternative_item_code") or "").strip()
@@ -331,7 +332,7 @@ def _line_code(line: Mapping[str, Any]) -> str:
 	return str(line.get("item_code") or "").strip()
 
 
-def bom_order(boms: Mapping[str, Mapping[str, Any]]) -> Tuple[List[str], Set[Tuple[str, str]]]:
+def bom_order(boms: Mapping[str, Mapping[str, Any]]) -> tuple[list[str], set[tuple[str, str]]]:
 	"""Every BOM item, parents before children, plus the edges that close a cycle.
 
 	A sub-assembly's demand only ever comes from its ancestors, so walking this
@@ -340,12 +341,12 @@ def bom_order(boms: Mapping[str, Mapping[str, Any]]) -> Tuple[List[str], Set[Tup
 	instead of recursing forever.
 	"""
 	white, grey, black = 0, 1, 2
-	colour: Dict[str, int] = {code: white for code in boms}
-	postorder: List[str] = []
-	cyclic: Set[Tuple[str, str]] = set()
+	colour: dict[str, int] = {code: white for code in boms}
+	postorder: list[str] = []
+	cyclic: set[tuple[str, str]] = set()
 
-	def children(code: str) -> List[str]:
-		seen: List[str] = []
+	def children(code: str) -> list[str]:
+		seen: list[str] = []
 		for line in boms.get(code, {}).get("lines") or []:
 			child = _line_code(line)
 			if child in boms and child not in seen:
@@ -357,7 +358,7 @@ def bom_order(boms: Mapping[str, Mapping[str, Any]]) -> Tuple[List[str], Set[Tup
 			continue
 		# Iterative DFS: (node, iterator over its children).
 		colour[root] = grey
-		stack: List[Tuple[str, Iterable[str]]] = [(root, iter(children(root)))]
+		stack: list[tuple[str, Iterable[str]]] = [(root, iter(children(root)))]
 		while stack:
 			node, it = stack[-1]
 			advanced = False
@@ -381,7 +382,7 @@ def explode_round(
 	roots: Mapping[str, Any],
 	boms: Mapping[str, Mapping[str, Any]],
 	stock: Mapping[str, Any],
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	"""Explode the jars to make into sub-assemblies and leaf materials.
 
 	``roots`` is ``{jar item_code: jars to make}``.  ``boms`` is
@@ -394,12 +395,12 @@ def explode_round(
 	jar item_codes that ultimately need it.
 	"""
 	order, cyclic = bom_order(boms)
-	stored: Dict[str, float] = {}
-	fresh: Dict[str, float] = {}
-	materials: Dict[str, float] = {}
-	used_by: Dict[str, Set[str]] = {}
+	stored: dict[str, float] = {}
+	fresh: dict[str, float] = {}
+	materials: dict[str, float] = {}
+	used_by: dict[str, set[str]] = {}
 
-	def explode(code: str, qty: float, jars: Set[str], path: Set[str]) -> None:
+	def explode(code: str, qty: float, jars: set[str], path: set[str]) -> None:
 		bom = boms.get(code)
 		if not bom or qty <= QTY_EPSILON:
 			return
@@ -426,7 +427,7 @@ def explode_round(
 		if qty > QTY_EPSILON:
 			explode(jar, qty, {jar}, {jar})
 
-	to_make: Dict[str, float] = {}
+	to_make: dict[str, float] = {}
 	for code in order:
 		if code not in stored:
 			continue
@@ -458,9 +459,9 @@ def build_prep_rows(
 	boms: Mapping[str, Mapping[str, Any]],
 	stock: Mapping[str, Any],
 	item_meta: Mapping[str, Mapping[str, Any]],
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
 	"""Sub-assemblies in the order to make them: deepest first."""
-	rows: List[Dict[str, Any]] = []
+	rows: list[dict[str, Any]] = []
 	for code in reversed(exploded.get("order") or []):
 		bom = boms.get(code) or {}
 		batch_yield = _bom_yield(bom)
@@ -504,11 +505,11 @@ def build_material_rows(
 	stock: Mapping[str, Any],
 	alternatives: Mapping[str, Sequence[str]],
 	item_meta: Mapping[str, Mapping[str, Any]],
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
 	"""Leaf materials, missing first (largest share missing), then by name."""
 	# A non-stock line (``Water (tap)``) is never held, so it is never missing
 	# and is not something to buy: it is left off the list entirely.
-	needs: Dict[str, float] = {
+	needs: dict[str, float] = {
 		code: qty
 		for code, qty in (exploded.get("materials") or {}).items()
 		if _meta(item_meta, code).get("is_stock_item", True) is not False
@@ -516,14 +517,14 @@ def build_material_rows(
 	# An alternative lends only what it has LEFT after its own need this round,
 	# and each jar of it is lent once: two-way pairs that are both needed must
 	# not each count the other's whole stock.
-	spare: Dict[str, float] = {}
+	spare: dict[str, float] = {}
 
 	def spare_of(code: str) -> float:
 		if code not in spare:
 			spare[code] = max(0.0, countable(stock.get(code)) - needs.get(code, 0.0))
 		return spare[code]
 
-	rows: List[Dict[str, Any]] = []
+	rows: list[dict[str, Any]] = []
 	for code in sorted(needs):
 		required = needs[code]
 		meta = _meta(item_meta, code)
@@ -588,21 +589,21 @@ def build_item_row(
 	item: Mapping[str, Any],
 	*,
 	branches: Sequence[Mapping[str, Any]],
-	weekly_sales: Mapping[Tuple[str, str], Mapping[Any, Any]],
-	branch_stock: Mapping[Tuple[str, str], Any],
+	weekly_sales: Mapping[tuple[str, str], Mapping[Any, Any]],
+	branch_stock: Mapping[tuple[str, str], Any],
 	factory_on_hand: Any,
 	batch_sizes: Mapping[str, int],
 	cycle_days: int,
 	backup_days: int,
 	sales_weeks: int,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	"""One jar across every branch: par, fill, batches, status."""
 	code = str(item.get("item_code") or "")
 	name = str(item.get("item_name") or code)
 	size = str(item.get("item_group") or "")
 	batch_size = batch_size_for(size, batch_sizes)
 
-	branch_rows: List[Dict[str, Any]] = []
+	branch_rows: list[dict[str, Any]] = []
 	total_avg = 0.0
 	total_fill = 0
 	any_below = False
@@ -654,8 +655,8 @@ def build_item_row(
 
 def summarise_branches(
 	branches: Sequence[Mapping[str, Any]], items: Sequence[Mapping[str, Any]]
-) -> List[Dict[str, Any]]:
-	out: List[Dict[str, Any]] = []
+) -> list[dict[str, Any]]:
+	out: list[dict[str, Any]] = []
 	for branch in branches:
 		warehouse = str(branch.get("warehouse") or "")
 		rows = [
@@ -683,8 +684,8 @@ def summarise_branches(
 def build_production_round(
 	*,
 	generated_on: str,
-	company: Optional[str],
-	source_warehouse: Optional[str],
+	company: str | None,
+	source_warehouse: str | None,
 	cycle_days: int,
 	backup_days: int,
 	sales_weeks: int,
@@ -693,22 +694,22 @@ def build_production_round(
 	batch_sizes: Mapping[str, int],
 	items: Sequence[Mapping[str, Any]],
 	branches: Sequence[Mapping[str, Any]],
-	weekly_sales: Mapping[Tuple[str, str], Mapping[Any, Any]],
-	branch_stock: Mapping[Tuple[str, str], Any],
+	weekly_sales: Mapping[tuple[str, str], Mapping[Any, Any]],
+	branch_stock: Mapping[tuple[str, str], Any],
 	factory_stock: Mapping[str, Any],
 	boms: Mapping[str, Mapping[str, Any]],
 	material_stock: Mapping[str, Any],
 	alternatives: Mapping[str, Sequence[str]],
 	item_meta: Mapping[str, Mapping[str, Any]],
-	notices: Optional[Sequence[str]] = None,
-) -> Dict[str, Any]:
+	notices: Sequence[str] | None = None,
+) -> dict[str, Any]:
 	"""The whole ``get_production_round`` payload, from plain data.
 
 	``weekly_sales`` is ``{(warehouse, item_code): {week_index: qty}}`` and
 	``branch_stock`` is ``{(warehouse, item_code): raw qty}``.  ``branches``
 	are ``{warehouse, branch|label}`` as ``select_selling_warehouses`` returns.
 	"""
-	notes: List[str] = [str(n) for n in notices or [] if n]
+	notes: list[str] = [str(n) for n in notices or [] if n]
 	batch_sizes = {str(k): int(v) for k, v in (batch_sizes or {}).items()}
 	branches = [b for b in branches or [] if str(b.get("warehouse") or "").strip()]
 
@@ -736,7 +737,7 @@ def build_production_round(
 			)
 
 	boms = boms or {}
-	roots: Dict[str, float] = {}
+	roots: dict[str, float] = {}
 	for row in item_rows:
 		if row["jars"] <= 0:
 			continue

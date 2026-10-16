@@ -93,7 +93,7 @@ def _log(*args: Any, **kwargs: Any) -> None:
 		pass
 
 
-def _existing_delivery_note(invoice_name: str) -> Optional[str]:
+def _existing_delivery_note(invoice_name: str) -> str | None:
 	"""The submitted, non-return Delivery Note this invoice shipped on.
 
 	Same lookup as ``services/invoice_return._original_delivery_note`` — the
@@ -154,7 +154,7 @@ def _add_audit_comment(invoice_name: str, comment: str) -> None:
 		)
 
 
-def _publish_state_change(inv: Any, *, invoice_name: str, delivery_note: Optional[str]) -> None:
+def _publish_state_change(inv: Any, *, invoice_name: str, delivery_note: str | None) -> None:
 	"""Move the card on every open board without a refresh.
 
 	Same payload shape and same event pair ``api/kanban.update_invoice_state``

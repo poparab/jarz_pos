@@ -28,7 +28,7 @@ from typing import Any, Dict, List
 import frappe
 
 
-def run(dry_run: bool = False) -> Dict[str, Any]:
+def run(dry_run: bool = False) -> dict[str, Any]:
 	"""Backfill: probe every enabled device token and disable stale ones.
 
 	Args:
@@ -63,7 +63,7 @@ def run(dry_run: bool = False) -> Dict[str, Any]:
 		return {"kept": 0, "disabled": 0, "unexpected_errors": 0, "total": 0}
 
 	# Deduplicate tokens while tracking which rows share each token.
-	token_to_rows: Dict[str, List[Dict[str, Any]]] = {}
+	token_to_rows: dict[str, list[dict[str, Any]]] = {}
 	for row in rows:
 		token = (row.get("token") or "").strip()
 		if not token:

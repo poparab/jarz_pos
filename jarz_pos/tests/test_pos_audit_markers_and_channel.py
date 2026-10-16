@@ -30,7 +30,6 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-
 # ---------------------------------------------------------------------------
 # Minimal Frappe stub so the module can be imported outside bench
 # ---------------------------------------------------------------------------
@@ -58,8 +57,8 @@ if "frappe" not in sys.modules:
 	sys.modules["frappe"] = _make_frappe_stub()
 
 
-from jarz_pos.utils import invoice_utils  # noqa: E402
-from jarz_pos.utils.invoice_utils import (  # noqa: E402
+from jarz_pos.utils import invoice_utils
+from jarz_pos.utils.invoice_utils import (
 	ORDER_CHANNEL_FIELD,
 	POS_AUDIT_MARKERS_FIELD,
 	append_pos_audit_marker,

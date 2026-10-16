@@ -67,7 +67,7 @@ def _is_deadlock(exc: BaseException) -> bool:
 		return False
 
 
-def _customer_row(customer: str) -> Dict[str, Any]:
+def _customer_row(customer: str) -> dict[str, Any]:
 	"""One Customer in exactly the shape a ``search_customers`` row has.
 
 	Same columns, the same ``has_column`` probes for ``phone`` and
@@ -92,7 +92,7 @@ def _customer_row(customer: str) -> Dict[str, Any]:
 		fields.append("custom_credit_allowed")
 
 	raw = frappe.db.get_value("Customer", customer, fields, as_dict=True)
-	row: Dict[str, Any] = dict(raw or {"name": customer})
+	row: dict[str, Any] = dict(raw or {"name": customer})
 
 	_augment_customer_with_territory(row)
 	row["credit_allowed"] = bool(int(row.get("custom_credit_allowed") or 0)) if has_credit_column else False
@@ -105,7 +105,7 @@ def _customer_row(customer: str) -> Dict[str, Any]:
 
 
 @frappe.whitelist()
-def list_staff_for_orders(search: Optional[str] = None) -> Dict[str, Any]:
+def list_staff_for_orders(search: str | None = None) -> dict[str, Any]:
 	"""Active employees for the staff-order picker, with their staff customer.
 
 	``customer`` / ``customer_name`` are the canonical Employee-group customer
@@ -138,7 +138,7 @@ def list_staff_for_orders(search: Optional[str] = None) -> Dict[str, Any]:
 
 
 @frappe.whitelist(methods=["POST"])
-def ensure_staff_customer(employee: Optional[str] = None) -> Dict[str, Any]:
+def ensure_staff_customer(employee: str | None = None) -> dict[str, Any]:
 	"""Resolve (adopt / create if needed) the staff customer for ``employee``.
 
 	Success: ``{"success": true, "hrms_available": true, "created": bool,
@@ -211,7 +211,7 @@ def ensure_staff_customer(employee: Optional[str] = None) -> Dict[str, Any]:
 
 
 @frappe.whitelist(methods=["POST"])
-def sync_staff_customers() -> Dict[str, Any]:
+def sync_staff_customers() -> dict[str, Any]:
 	"""Ensure a staff customer for every Active employee.
 
 	``{"success": true, "hrms_available": bool, "created": [...], "adopted":

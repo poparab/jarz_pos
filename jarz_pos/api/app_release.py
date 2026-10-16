@@ -84,7 +84,7 @@ _GATE_EXEMPT_METHODS = {
 }
 
 
-def _as_build_number(value: Any) -> Optional[int]:
+def _as_build_number(value: Any) -> int | None:
 	"""Coerce a build number to a positive int, or None if it is not one.
 
 	Everything arriving here is untrusted: a header, a form field, or a Single
@@ -142,7 +142,7 @@ def _normalize_platform(platform: Any) -> str:
 	return str(platform or "").strip().lower()
 
 
-def resolve_requirement(platform: Any, build_number: Any) -> "dict[str, Any]":
+def resolve_requirement(platform: Any, build_number: Any) -> dict[str, Any]:
 	"""Pure decision function: given a client's platform and build, what now?
 
 	Split out from the endpoint so both the whitelisted method and the request
@@ -180,9 +180,9 @@ def resolve_requirement(platform: Any, build_number: Any) -> "dict[str, Any]":
 
 @frappe.whitelist(allow_guest=True)
 def get_app_requirement(
-	platform: Optional[str] = None,
-	build_number: Optional[str] = None,
-) -> "dict[str, Any]":
+	platform: str | None = None,
+	build_number: str | None = None,
+) -> dict[str, Any]:
 	"""Tell the caller whether its build may still run.
 
 	``allow_guest`` because the check runs before login: a stale build must be
@@ -232,10 +232,9 @@ def _refuse_stale_build(build_number: int, minimum_build: int) -> None:
 	Called outside the guarding try/except in :func:`before_request` so the
 	refusal itself is never mistaken for a bug and swallowed.
 	"""
-	message = _settings_str(
-		"mobile_force_update_message"
-	) or "This app version ({current}) is out of date. Install build {minimum} or newer to continue.".format(
-		current=build_number, minimum=minimum_build
+	message = (
+		_settings_str("mobile_force_update_message")
+		or f"This app version ({build_number}) is out of date. Install build {minimum_build} or newer to continue."
 	)
 	frappe.local.response["http_status_code"] = UPGRADE_REQUIRED_STATUS
 	frappe.local.response["update_required"] = True
@@ -303,10 +302,10 @@ def _as_flag(value: Any) -> bool:
 
 def publish_android_release(
 	build_number: Any,
-	download_url: Optional[str] = None,
+	download_url: str | None = None,
 	allow_lower: Any = False,
 	commit: Any = True,
-) -> "dict[str, Any]":
+) -> dict[str, Any]:
 	"""Make ``build_number`` the build every Android device must be on.
 
 	Called by ``publish_apk.ps1`` after the APK is verified live on

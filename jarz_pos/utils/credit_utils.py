@@ -111,7 +111,7 @@ def has_credit_terms_field(doctype: str = "Sales Invoice") -> bool:
 		return False
 
 
-def credit_invoice_or_filters(doctype: str = "Sales Invoice") -> Optional[List[List[Any]]]:
+def credit_invoice_or_filters(doctype: str = "Sales Invoice") -> list[list[Any]] | None:
 	"""``or_filters`` matching every invoice that WAS taken on credit.
 
 	Pass alongside (never inside) the caller's own ``filters``::
@@ -144,8 +144,8 @@ def credit_invoice_or_filters(doctype: str = "Sales Invoice") -> Optional[List[L
 
 
 def apply_credit_invoice_match(
-	filters: Dict[str, Any], doctype: str = "Sales Invoice"
-) -> Optional[List[List[Any]]]:
+	filters: dict[str, Any], doctype: str = "Sales Invoice"
+) -> list[list[Any]] | None:
 	"""Add the credit match to *filters*, returning the ``or_filters`` to pass.
 
 	Convenience for the common shape: when the stamp column exists the match is

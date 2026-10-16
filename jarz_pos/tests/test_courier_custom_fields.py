@@ -69,7 +69,7 @@ GEO_SOURCE_OPTIONS = (
 
 
 def _load_fixture():
-	with open(FIXTURE_PATH, "r", encoding="utf-8") as handle:
+	with open(FIXTURE_PATH, encoding="utf-8") as handle:
 		return json.load(handle)
 
 

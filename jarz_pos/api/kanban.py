@@ -4,13 +4,23 @@ Primary state field: 'custom_sales_invoice_state' (legacy fallback: 'sales_invoi
 """
 
 from __future__ import annotations
-import frappe
+
+import datetime
 import json
 import traceback
-import datetime
+from typing import Any, Dict, List, Optional, Tuple, Union
+
+import frappe
 from frappe.query_builder.functions import Count
-from typing import Dict, List, Any, Optional, Union, Tuple
-from jarz_pos.constants import ACCOUNTS, PAYMENT_MODES, STATUS, WS_EVENTS, QUERY_LIMITS, ROLES
+
+from jarz_pos.constants import ACCOUNTS, PAYMENT_MODES, QUERY_LIMITS, ROLES, STATUS, WS_EVENTS
+from jarz_pos.services import ofd_pin_gate
+from jarz_pos.services.delivery_handling import (
+	DN_LOGIC_VERSION,
+	build_ofd_shortage_field_values,
+	ensure_delivery_note_for_invoice,
+	get_ofd_shortage_preview,
+)
 from jarz_pos.utils.access_control import (
 	ClosedShiftError,
 	ShiftRequiredError,
@@ -21,22 +31,15 @@ from jarz_pos.utils.access_control import (
 	get_user_pos_profiles,
 	get_users_for_pos_profiles,
 )
-from jarz_pos.utils.realtime import publish_invoice_event
 from jarz_pos.utils.credit_utils import apply_credit_invoice_match
-from jarz_pos.services import ofd_pin_gate
-from jarz_pos.services.delivery_handling import (
-	DN_LOGIC_VERSION,
-	build_ofd_shortage_field_values,
-	ensure_delivery_note_for_invoice,
-	get_ofd_shortage_preview,
-)
+from jarz_pos.utils.realtime import publish_invoice_event
 
 # Accounting helpers
 try:
 	from jarz_pos.utils.account_utils import (
+		ensure_partner_receivable_subaccount,
 		get_company_receivable_account,
 		get_pos_cash_account,
-		ensure_partner_receivable_subaccount,
 	)
 except Exception:
 	# Fallback dummies (should not normally trigger)
@@ -53,16 +56,16 @@ except Exception:
 # Import utility functions with fallback if they don't exist
 try:
 	from jarz_pos.utils.invoice_utils import (
-		get_address_details,
-		format_invoice_data,
 		apply_invoice_filters,
-		sanitize_printable_text,
-		read_invoice_shipping_income,
+		format_invoice_data,
+		get_address_details,
 		normalize_woo_order_id,
+		read_invoice_shipping_income,
+		sanitize_printable_text,
 	)
 except ImportError:
 	# Fallback implementations if utils don't exist
-	def normalize_woo_order_id(value: Any) -> Optional[int]:
+	def normalize_woo_order_id(value: Any) -> int | None:
 		try:
 			return int(value or 0) or None
 		except (TypeError, ValueError):
@@ -86,7 +89,7 @@ except ImportError:
 		except Exception:
 			return ""
 
-	def format_invoice_data(invoice: frappe.Document) -> Dict[str, Any]:
+	def format_invoice_data(invoice: frappe.Document) -> dict[str, Any]:
 		address_name = invoice.get("shipping_address_name") or invoice.get("customer_address")
 		items = [
 			{
@@ -127,7 +130,7 @@ except ImportError:
 			return ""
 		return " ".join(str(value).split())
 
-	def apply_invoice_filters(filters: Optional[Union[str, Dict]] = None) -> Dict[str, Any]:
+	def apply_invoice_filters(filters: str | dict | None = None) -> dict[str, Any]:
 		# Mirrors utils.invoice_utils.apply_invoice_filters — is_return excludes
 		# credit notes, which inherit is_pos from the invoice they reverse.
 		filter_conditions = {"docstatus": 1, "is_pos": 1, "is_return": 0}
@@ -169,10 +172,10 @@ try:
 	)
 except Exception:
 	# The map-pin badge is additive: losing it must never cost the board.
-	def get_address_pin_map(address_names: Any) -> Dict[str, Dict[str, Any]]:  # type: ignore
+	def get_address_pin_map(address_names: Any) -> dict[str, dict[str, Any]]:  # type: ignore
 		return {}
 
-	def pin_fields_for(address_name: Any, pin_map: Any) -> Dict[str, Any]:  # type: ignore
+	def pin_fields_for(address_name: Any, pin_map: Any) -> dict[str, Any]:  # type: ignore
 		return {
 			"address_latitude": None,
 			"address_longitude": None,
@@ -184,10 +187,10 @@ except Exception:
 			"pin_flag": "",
 		}
 
-	def invoice_pin_columns() -> List[str]:  # type: ignore
+	def invoice_pin_columns() -> list[str]:  # type: ignore
 		return []
 
-	def invoice_pin_override(si_row: Any, address_fields: Any) -> Dict[str, Any]:  # type: ignore
+	def invoice_pin_override(si_row: Any, address_fields: Any) -> dict[str, Any]:  # type: ignore
 		out = dict(address_fields or {})
 		out.setdefault("pin_source", "")
 		out.setdefault("pin_flag", "")
@@ -202,14 +205,14 @@ try:
 	)
 except Exception:
 
-	def get_invoice_amendment_eligibility(inv: Any) -> Dict[str, Any]:  # type: ignore
+	def get_invoice_amendment_eligibility(inv: Any) -> dict[str, Any]:  # type: ignore
 		return {
 			"can_amend": False,
 			"amendment_block_code": "unavailable",
 			"amendment_block_reason": "Invoice amendment eligibility is unavailable.",
 		}
 
-	def get_invoice_cancellation_eligibility(inv: Any) -> Dict[str, Any]:  # type: ignore
+	def get_invoice_cancellation_eligibility(inv: Any) -> dict[str, Any]:  # type: ignore
 		return {
 			"can_cancel": False,
 			"cancellation_block_code": "unavailable",
@@ -217,7 +220,7 @@ except Exception:
 			"cancellation_suggests_return": False,
 		}
 
-	def get_invoice_hard_mutation_blocker(inv: Any) -> Optional[Dict[str, Any]]:  # type: ignore
+	def get_invoice_hard_mutation_blocker(inv: Any) -> dict[str, Any] | None:  # type: ignore
 		return None
 
 
@@ -237,7 +240,7 @@ except Exception:
 # which is available to all authenticated users and avoids 403 on restricted roles.
 
 
-def _get_state_field_options() -> List[str]:
+def _get_state_field_options() -> list[str]:
 	"""Return list of state options from Sales Invoice meta without reading Custom Field doc.
 	Prefers 'custom_sales_invoice_state', falls back to legacy names.
 	"""
@@ -255,7 +258,7 @@ def _get_state_field_options() -> List[str]:
 		frappe.logger().warning("No state field found, using default states")
 		return ["Received", "In Progress", "Out for Delivery", "Delivered", "Cancelled"]
 	except Exception as e:
-		frappe.logger().error(f"Error getting state field options: {str(e)}")
+		frappe.logger().error(f"Error getting state field options: {e!s}")
 		return ["Received", "In Progress", "Out for Delivery", "Delivered", "Cancelled"]
 
 
@@ -271,7 +274,7 @@ def _coerce_bool(val: Any) -> bool:
 		return False
 
 
-def _is_pickup_invoice(inv: Union[Dict[str, Any], frappe.Document]) -> bool:
+def _is_pickup_invoice(inv: dict[str, Any] | frappe.Document) -> bool:
 	"""Detect pickup flags across the standardized and legacy Sales Invoice fields."""
 	try:
 		getter = inv.get if isinstance(inv, dict) else getattr
@@ -295,7 +298,7 @@ def _is_pickup_invoice(inv: Union[Dict[str, Any], frappe.Document]) -> bool:
 	return False
 
 
-def _get_current_user_pos_profiles() -> List[str]:
+def _get_current_user_pos_profiles() -> list[str]:
 	"""Return names of POS Profiles linked to the current session user (and not disabled).
 
 	Thin alias over the shared resolver so the board and the manager feed can no
@@ -304,7 +307,7 @@ def _get_current_user_pos_profiles() -> List[str]:
 	return get_user_pos_profiles()
 
 
-def _parse_filter_payload(filters: Optional[Union[str, Dict[str, Any]]]) -> Dict[str, Any]:
+def _parse_filter_payload(filters: str | dict[str, Any] | None) -> dict[str, Any]:
 	if isinstance(filters, dict):
 		return dict(filters)
 	if isinstance(filters, str):
@@ -332,7 +335,7 @@ _NARROWING_FILTER_KEYS = (
 )
 
 
-def _has_narrowing_filters(raw_filters: Dict[str, Any]) -> bool:
+def _has_narrowing_filters(raw_filters: dict[str, Any]) -> bool:
 	for key in _NARROWING_FILTER_KEYS:
 		value = raw_filters.get(key)
 		if value in (None, "", []):
@@ -367,7 +370,7 @@ _SEARCH_MATCH_LIMIT = 500
 _SEARCH_LINK_LIMIT = 1000
 
 
-def _find_customer_search_matches(search_term: str) -> List[str]:
+def _find_customer_search_matches(search_term: str) -> list[str]:
 	search = sanitize_printable_text(search_term)
 	if not search:
 		return []
@@ -376,7 +379,7 @@ def _find_customer_search_matches(search_term: str) -> List[str]:
 	customer_ids = set()
 
 	try:
-		customer_or_filters: List[Dict[str, Any]] = [
+		customer_or_filters: list[dict[str, Any]] = [
 			{"name": ["like", like]},
 			{"customer_name": ["like", like]},
 		]
@@ -474,14 +477,14 @@ def _find_customer_search_matches(search_term: str) -> List[str]:
 
 def _build_invoice_search_or_filters(
 	search_term: str,
-	customer_ids: Optional[List[str]] = None,
-) -> List[Dict[str, Any]]:
+	customer_ids: list[str] | None = None,
+) -> list[dict[str, Any]]:
 	search = sanitize_printable_text(search_term)
 	if not search:
 		return []
 
 	like = _like_pattern(search)
-	or_filters: List[Dict[str, Any]] = [
+	or_filters: list[dict[str, Any]] = [
 		{"name": ["like", like]},
 		{"customer_name": ["like", like]},
 		{"customer": ["like", like]},
@@ -585,9 +588,9 @@ _COLLECTION_LEDGER_UNKNOWN = None
 
 def _classify_collection_account(
 	account: str,
-	meta: Optional[Dict[str, Any]],
-	sales_partner: Optional[str] = None,
-) -> Optional[str]:
+	meta: dict[str, Any] | None,
+	sales_partner: str | None = None,
+) -> str | None:
 	"""Map a Payment Entry ``paid_to`` ledger onto a POS collection method.
 
 	Returns ``None`` when the ledger does not identify a customer collection.
@@ -650,7 +653,7 @@ def _classify_collection_account(
 	return _COLLECTION_LEDGER_UNKNOWN
 
 
-def _get_collection_change_map(invoice_names: List[str]) -> Dict[str, str]:
+def _get_collection_change_map(invoice_names: list[str]) -> dict[str, str]:
 	"""Per invoice, the collection method it was switched to after dispatch.
 
 	``change_payment_collection_method`` posts a Journal Entry and rewrites the
@@ -668,7 +671,7 @@ def _get_collection_change_map(invoice_names: List[str]) -> Dict[str, str]:
 	reverted to "Cash". The note text is written by nothing but
 	``_append_collection_change_note``, so matching it is specific enough.
 	"""
-	change_map: Dict[str, str] = {}
+	change_map: dict[str, str] = {}
 	if not invoice_names:
 		return change_map
 	try:
@@ -697,13 +700,13 @@ def _get_collection_change_map(invoice_names: List[str]) -> Dict[str, str]:
 	return change_map
 
 
-def _get_payment_entry_method_map(rows: List[Dict[str, Any]]) -> Dict[str, str]:
+def _get_payment_entry_method_map(rows: list[dict[str, Any]]) -> dict[str, str]:
 	"""Per PAID invoice, the collection method its Payment Entry ledger implies.
 
 	Only invoices with nothing outstanding are considered: before that, a Payment
 	Entry either does not exist or does not stand for the whole order.
 	"""
-	method_map: Dict[str, str] = {}
+	method_map: dict[str, str] = {}
 	paid_inv_names = [
 		str(r.get("name")).strip()
 		for r in rows
@@ -735,7 +738,7 @@ def _get_payment_entry_method_map(rows: List[Dict[str, Any]]) -> Dict[str, str]:
 
 		# One query for every ledger involved, rather than one lookup per invoice.
 		account_names = sorted({acc for acc in pe_account_map.values() if acc})
-		account_meta: Dict[str, Dict[str, Any]] = {}
+		account_meta: dict[str, dict[str, Any]] = {}
 		if account_names:
 			for acc in frappe.get_all(
 				"Account",
@@ -762,7 +765,7 @@ def _get_payment_entry_method_map(rows: List[Dict[str, Any]]) -> Dict[str, str]:
 	return method_map
 
 
-def _get_actual_payment_method_map(rows: List[Dict[str, Any]]) -> Dict[str, str]:
+def _get_actual_payment_method_map(rows: list[dict[str, Any]]) -> dict[str, str]:
 	"""Resolve the payment method the customer ACTUALLY paid with, per invoice.
 
 	``rows`` are dicts carrying ``name``, ``outstanding_amount``, ``status`` and --
@@ -790,7 +793,7 @@ def _get_actual_payment_method_map(rows: List[Dict[str, Any]]) -> Dict[str, str]
 	Shared by the board (``get_kanban_invoices``) and the single-invoice details
 	endpoint so a card and its printed receipt can never disagree about the method.
 	"""
-	method_map: Dict[str, str] = {}
+	method_map: dict[str, str] = {}
 	invoice_names = [str(r.get("name") or "").strip() for r in rows if str(r.get("name") or "").strip()]
 	if not invoice_names:
 		return method_map
@@ -843,7 +846,7 @@ _COLLECTION_CHANGE_STATES = [
 ]
 
 
-def _get_unsettled_customer_amount_map(invoice_names: List[str]) -> Dict[str, float]:
+def _get_unsettled_customer_amount_map(invoice_names: list[str]) -> dict[str, float]:
 	"""Customer money still to be collected on this order, per invoice.
 
 	Two shapes hold that money in two different places, and reading only one of them
@@ -876,7 +879,7 @@ def _get_unsettled_customer_amount_map(invoice_names: List[str]) -> Dict[str, fl
 	against Courier Outstanding at Out-for-Delivery, so it reads as fully paid while the
 	customer has not handed over a single pound yet.
 	"""
-	amount_map: Dict[str, float] = {}
+	amount_map: dict[str, float] = {}
 	cleaned = [str(name or "").strip() for name in invoice_names if str(name or "").strip()]
 	if not cleaned:
 		return amount_map
@@ -944,7 +947,7 @@ def _get_unsettled_customer_amount_map(invoice_names: List[str]) -> Dict[str, fl
 	# server-side, so this is the affordance agreeing with the rule rather than
 	# offering an action the server will reject.
 	try:
-		credit_filters: Dict[str, Any] = {
+		credit_filters: dict[str, Any] = {
 			"name": ["in", cleaned],
 			"docstatus": 1,
 			"outstanding_amount": [">", 0.005],
@@ -993,7 +996,7 @@ def _get_unsettled_customer_amount_map(invoice_names: List[str]) -> Dict[str, fl
 		)
 		je_names = [r.get("journal_entry") for r in switched_rows if r.get("journal_entry")]
 		if je_names:
-			credits: Dict[str, float] = {}
+			credits: dict[str, float] = {}
 			for acc in frappe.get_all(
 				"Journal Entry Account",
 				filters={
@@ -1018,12 +1021,12 @@ def _get_unsettled_customer_amount_map(invoice_names: List[str]) -> Dict[str, fl
 	return amount_map
 
 
-def _get_active_payment_receipt_map(invoice_names: List[str]) -> Dict[str, Dict[str, Any]]:
+def _get_active_payment_receipt_map(invoice_names: list[str]) -> dict[str, dict[str, Any]]:
 	cleaned_names = [str(name or "").strip() for name in invoice_names if str(name or "").strip()]
 	if not cleaned_names:
 		return {}
 
-	receipt_map: Dict[str, Dict[str, Any]] = {}
+	receipt_map: dict[str, dict[str, Any]] = {}
 	try:
 		receipt_rows = frappe.get_all(
 			"POS Payment Receipt",
@@ -1061,7 +1064,7 @@ def _get_active_payment_receipt_map(invoice_names: List[str]) -> Dict[str, Dict[
 	except Exception as e:
 		# Same policy as the note helpers: degrade the badge, log the cause.
 		frappe.log_error(
-			f"Payment Receipt Map Error: {str(e)}\n\nTraceback:\n{traceback.format_exc()}",
+			f"Payment Receipt Map Error: {e!s}\n\nTraceback:\n{traceback.format_exc()}",
 			"Kanban API",
 		)
 		return {}
@@ -1073,7 +1076,7 @@ def _get_active_payment_receipt_map(invoice_names: List[str]) -> Dict[str, Dict[
 INVOICE_NOTE_PREVIEW_MAX_LENGTH = 300
 
 
-def _format_invoice_note_preview(note: Any) -> Optional[str]:
+def _format_invoice_note_preview(note: Any) -> str | None:
 	"""Sanitize + truncate a note body for card/preview payloads.
 
 	Returns None when the note is empty so consumers can distinguish
@@ -1085,7 +1088,7 @@ def _format_invoice_note_preview(note: Any) -> Optional[str]:
 	return text[:INVOICE_NOTE_PREVIEW_MAX_LENGTH]
 
 
-def _get_invoice_note_counts(invoice_names: List[str]) -> Dict[str, int]:
+def _get_invoice_note_counts(invoice_names: list[str]) -> dict[str, int]:
 	"""Batch-resolve the number of notes per invoice.
 
 	Built with the query builder rather than a ``"count(name) as note_count"``
@@ -1104,7 +1107,7 @@ def _get_invoice_note_counts(invoice_names: List[str]) -> Dict[str, int]:
 	if not cleaned_names:
 		return {}
 
-	note_counts: Dict[str, int] = {}
+	note_counts: dict[str, int] = {}
 	try:
 		note = frappe.qb.DocType("Jarz Invoice Note")
 		# One batched, grouped query for the whole page of invoices (no N+1).
@@ -1125,7 +1128,7 @@ def _get_invoice_note_counts(invoice_names: List[str]) -> Dict[str, int]:
 		# never silently: swallowing this is exactly what hid the v16 SELECT
 		# rejection in production for months.
 		frappe.log_error(
-			f"Invoice Note Counts Error: {str(e)}\n\nTraceback:\n{traceback.format_exc()}",
+			f"Invoice Note Counts Error: {e!s}\n\nTraceback:\n{traceback.format_exc()}",
 			"Kanban API",
 		)
 		return {}
@@ -1133,7 +1136,7 @@ def _get_invoice_note_counts(invoice_names: List[str]) -> Dict[str, int]:
 	return note_counts
 
 
-def _get_invoice_latest_notes(invoice_names: List[str]) -> Dict[str, str]:
+def _get_invoice_latest_notes(invoice_names: list[str]) -> dict[str, str]:
 	"""Batch-resolve the most recent note text per invoice.
 
 	Uses a single ordered query and reduces to the first row seen per invoice
@@ -1145,7 +1148,7 @@ def _get_invoice_latest_notes(invoice_names: List[str]) -> Dict[str, str]:
 	if not cleaned_names:
 		return {}
 
-	latest_notes: Dict[str, str] = {}
+	latest_notes: dict[str, str] = {}
 	try:
 		rows = frappe.get_all(
 			"Jarz Invoice Note",
@@ -1165,7 +1168,7 @@ def _get_invoice_latest_notes(invoice_names: List[str]) -> Dict[str, str]:
 		# Same policy as `_get_invoice_note_counts`: a note preview must never
 		# break the board, but it must never fail invisibly either.
 		frappe.log_error(
-			f"Invoice Latest Notes Error: {str(e)}\n\nTraceback:\n{traceback.format_exc()}",
+			f"Invoice Latest Notes Error: {e!s}\n\nTraceback:\n{traceback.format_exc()}",
 			"Kanban API",
 		)
 		return {}
@@ -1173,7 +1176,7 @@ def _get_invoice_latest_notes(invoice_names: List[str]) -> Dict[str, str]:
 	return latest_notes
 
 
-def _serialize_invoice_note_row(row: Dict[str, Any]) -> Dict[str, Any]:
+def _serialize_invoice_note_row(row: dict[str, Any]) -> dict[str, Any]:
 	return {
 		"name": sanitize_printable_text(row.get("name")),
 		"sales_invoice": sanitize_printable_text(row.get("sales_invoice")),
@@ -1190,7 +1193,7 @@ def _ensure_invoice_detail_access(invoice: frappe.Document) -> None:
 	ensure_profile_scoped_invoice_access(invoice, action_label="viewing this order")
 
 
-def _get_territory_shipping_values(territory_name: str) -> Dict[str, float]:
+def _get_territory_shipping_values(territory_name: str) -> dict[str, float]:
 	"""Resolve configured delivery income/expense defaults for a territory."""
 	if not territory_name:
 		return {"income": 0.0, "expense": 0.0}
@@ -1233,7 +1236,7 @@ def _read_shipping_income_from_taxes(invoice: frappe.Document) -> float:
 	return read_invoice_shipping_income(invoice)
 
 
-def _get_invoice_shipping_values(invoice: frappe.Document) -> Dict[str, Any]:
+def _get_invoice_shipping_values(invoice: frappe.Document) -> dict[str, Any]:
 	"""Return effective shipping values after override and pickup rules.
 
 	Reads the *actual* shipping income that the source invoice carried rather
@@ -1269,7 +1272,7 @@ def _get_invoice_shipping_values(invoice: frappe.Document) -> Dict[str, Any]:
 	was_free_shipping = False
 	if float(shipping.get("income") or 0) == 0.0:
 		try:
-			bundle_codes: List[str] = []
+			bundle_codes: list[str] = []
 			for row in invoice.get("items") or []:
 				bc = str(row.get("bundle_code") or "").strip()
 				pb = str(row.get("parent_bundle") or "").strip()
@@ -1300,7 +1303,7 @@ def _get_state_custom_field():  # noqa: intentionally returns None now
 	return None
 
 
-def _get_allowed_states() -> List[str]:  # override previous implementation
+def _get_allowed_states() -> list[str]:  # override previous implementation
 	return _get_state_field_options()
 
 
@@ -1329,13 +1332,13 @@ _STATE_LABELS = {
 }
 
 
-def _sequence_index(label: Any) -> Optional[int]:
+def _sequence_index(label: Any) -> int | None:
 	key = _state_key(str(label or ""))
 	key = _STATE_ALIASES.get(key, key)
 	return _STATE_SEQUENCE.index(key) if key in _STATE_SEQUENCE else None
 
 
-def _transition_block_reason(old_state: Any, new_state: Any) -> Optional[str]:
+def _transition_block_reason(old_state: Any, new_state: Any) -> str | None:
 	"""Why a board move is not allowed, or None when it is.
 
 	Unknown labels on either side (legacy values, empty state) are left to the
@@ -1369,7 +1372,7 @@ def _transition_block_reason(old_state: Any, new_state: Any) -> Optional[str]:
 	)
 
 
-def _safe_datetime(value: Any) -> Optional[datetime.datetime]:
+def _safe_datetime(value: Any) -> datetime.datetime | None:
 	if not value:
 		return None
 	try:
@@ -1378,7 +1381,7 @@ def _safe_datetime(value: Any) -> Optional[datetime.datetime]:
 		return None
 
 
-def _posting_datetime(card: Dict[str, Any]) -> Optional[datetime.datetime]:
+def _posting_datetime(card: dict[str, Any]) -> datetime.datetime | None:
 	posting_date = card.get("posting_date")
 	if not posting_date:
 		return None
@@ -1386,11 +1389,11 @@ def _posting_datetime(card: Dict[str, Any]) -> Optional[datetime.datetime]:
 	return _safe_datetime(f"{posting_date} {posting_time}")
 
 
-def _creation_datetime(card: Dict[str, Any]) -> Optional[datetime.datetime]:
+def _creation_datetime(card: dict[str, Any]) -> datetime.datetime | None:
 	return _safe_datetime(card.get("creation"))
 
 
-def _delivery_sort_key(card: Dict[str, Any]) -> datetime.datetime:
+def _delivery_sort_key(card: dict[str, Any]) -> datetime.datetime:
 	delivery_date = card.get("delivery_date")
 	if delivery_date:
 		delivery_time = card.get("delivery_time_from") or "00:00:00"
@@ -1403,7 +1406,7 @@ def _delivery_sort_key(card: Dict[str, Any]) -> datetime.datetime:
 	return frappe.utils.get_datetime("2099-12-31 23:59:59")
 
 
-def _state_transition_sort_key(card: Dict[str, Any]) -> datetime.datetime:
+def _state_transition_sort_key(card: dict[str, Any]) -> datetime.datetime:
 	state_dt = _safe_datetime(card.get("_state_timestamp"))
 	if state_dt:
 		return state_dt
@@ -1413,7 +1416,7 @@ def _state_transition_sort_key(card: Dict[str, Any]) -> datetime.datetime:
 	return frappe.utils.get_datetime("1970-01-01 00:00:00")
 
 
-def _received_sort_key(card: Dict[str, Any]) -> Tuple[datetime.datetime, datetime.datetime, str]:
+def _received_sort_key(card: dict[str, Any]) -> tuple[datetime.datetime, datetime.datetime, str]:
 	posting_dt = _posting_datetime(card) or frappe.utils.get_datetime("1970-01-01 00:00:00")
 	creation_dt = _creation_datetime(card) or posting_dt
 	return (
@@ -1423,7 +1426,7 @@ def _received_sort_key(card: Dict[str, Any]) -> Tuple[datetime.datetime, datetim
 	)
 
 
-def _sort_kanban_columns(data: Dict[str, List[Dict[str, Any]]]) -> Dict[str, List[Dict[str, Any]]]:
+def _sort_kanban_columns(data: dict[str, list[dict[str, Any]]]) -> dict[str, list[dict[str, Any]]]:
 	for state_key, cards in data.items():
 		if not cards:
 			continue
@@ -1462,7 +1465,7 @@ def _format_qty(value: Any) -> str:
 	return f"{qty:.3f}".rstrip("0").rstrip(".")
 
 
-def _build_ofd_preview_errors(preview: Dict[str, Any]) -> List[str]:
+def _build_ofd_preview_errors(preview: dict[str, Any]) -> list[str]:
 	errors = list(preview.get("validation_errors") or [])
 
 	for mismatch in preview.get("warehouse_mismatches") or []:
@@ -1507,7 +1510,7 @@ def _build_ofd_preview_errors(preview: Dict[str, Any]) -> List[str]:
 
 
 @frappe.whitelist(allow_guest=False)
-def preview_invoice_out_for_delivery(invoice_id: str) -> Dict[str, Any]:
+def preview_invoice_out_for_delivery(invoice_id: str) -> dict[str, Any]:
 	"""Return OFD blockers and shortage preview for a single invoice without mutating data."""
 	frappe.has_permission("Sales Invoice", ptype="read", throw=True)
 
@@ -1520,7 +1523,7 @@ def preview_invoice_out_for_delivery(invoice_id: str) -> Dict[str, Any]:
 	if invoice.docstatus != 1:
 		return _failure("Only submitted (docstatus=1) Sales Invoices can move Out for Delivery")
 
-	blocking_errors: List[str] = []
+	blocking_errors: list[str] = []
 
 	try:
 		from jarz_pos.api.territories import territory_has_children
@@ -1559,14 +1562,14 @@ def preview_invoice_out_for_delivery(invoice_id: str) -> Dict[str, Any]:
 
 
 @frappe.whitelist(allow_guest=False)
-def get_kanban_columns() -> Dict[str, Any]:
+def get_kanban_columns() -> dict[str, Any]:
 	"""Get all available Kanban columns based on Sales Invoice State field options.
 
 	Returns:
 	    Dict with success status and columns data
 	"""
 	try:
-		frappe.logger().debug("KANBAN API: get_kanban_columns called by {0}".format(frappe.session.user))
+		frappe.logger().debug(f"KANBAN API: get_kanban_columns called by {frappe.session.user}")
 		options = _get_state_field_options()
 		if not options:
 			return _failure("Field 'sales_invoice_state' not found or has no options on Sales Invoice")
@@ -1594,14 +1597,14 @@ def get_kanban_columns() -> Dict[str, Any]:
 			)
 		return _success(columns=columns)
 	except Exception as e:
-		error_msg = f"Error getting kanban columns: {str(e)}"
+		error_msg = f"Error getting kanban columns: {e!s}"
 		frappe.logger().error(error_msg)
-		frappe.log_error(f"Kanban Columns Error: {str(e)}", "Kanban API")
+		frappe.log_error(f"Kanban Columns Error: {e!s}", "Kanban API")
 		return _failure(error_msg)
 
 
 @frappe.whitelist(allow_guest=False)
-def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str, Any]:
+def get_kanban_invoices(filters: str | dict | None = None) -> dict[str, Any]:
 	"""Get Sales Invoices organized by their state for Kanban display.
 
 	Args:
@@ -1611,7 +1614,7 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
 	    Dict with success status and invoices organized by state
 	"""
 	try:
-		frappe.logger().debug("KANBAN API: get_kanban_invoices called with filters: {0}".format(filters))
+		frappe.logger().debug(f"KANBAN API: get_kanban_invoices called with filters: {filters}")
 
 		raw_filters = _parse_filter_payload(filters)
 		filter_conditions = apply_invoice_filters(raw_filters)
@@ -1654,7 +1657,7 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
 
 		# Initialize columns up-front for possible early return
 		all_states = _get_state_field_options()
-		kanban_data: Dict[str, List[Dict[str, Any]]] = {}
+		kanban_data: dict[str, list[dict[str, Any]]] = {}
 		for state in all_states:
 			st = (state or "").strip()
 			if st:
@@ -1674,7 +1677,7 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
 			)
 
 		# Optional client-provided branches list (subset of allowed profiles)
-		client_selected_branches: List[str] = []
+		client_selected_branches: list[str] = []
 		maybe = raw_filters.get("branches")
 		if isinstance(maybe, list):
 			client_selected_branches = [str(x) for x in maybe if str(x).strip()]
@@ -1812,11 +1815,11 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
 			)
 
 		# Territory shipping cache
-		territory_cache: Dict[str, Dict[str, float]] = {}
-		_sub_territory_cache: Dict[str, bool] = {}
-		_territory_name_cache: Dict[str, str] = {}
+		territory_cache: dict[str, dict[str, float]] = {}
+		_sub_territory_cache: dict[str, bool] = {}
+		_territory_name_cache: dict[str, str] = {}
 
-		def _get_territory_shipping(territory_name: str) -> Dict[str, float]:
+		def _get_territory_shipping(territory_name: str) -> dict[str, float]:
 			if not territory_name:
 				return {"income": 0.0, "expense": 0.0}
 			if territory_name in territory_cache:
@@ -1858,7 +1861,7 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
 			return territory_cache[territory_name]
 
 		# Get address information for invoices (batch compute via helper on names)
-		invoice_addresses: Dict[str, str] = {}
+		invoice_addresses: dict[str, str] = {}
 		try:
 			addr_name_by_inv = {}
 			for inv in invoices:
@@ -1880,7 +1883,7 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
 			address_pins = {}
 
 		# Batch fetch items for all invoices (avoid N+1 queries)
-		invoice_items: Dict[str, List[Dict[str, Any]]] = {inv.name: [] for inv in invoices}
+		invoice_items: dict[str, list[dict[str, Any]]] = {inv.name: [] for inv in invoices}
 		try:
 			if invoices:
 				items_rows = frappe.get_all(
@@ -1942,7 +1945,7 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
 		# Batch-fetch the shipping income each invoice actually carried. An invoice with
 		# no such row charged nothing — see read_invoice_shipping_income for why there is
 		# no territory fallback.
-		actual_shipping_income_map: Dict[str, float] = {}
+		actual_shipping_income_map: dict[str, float] = {}
 		try:
 			if invoices:
 				si_tax_rows = frappe.get_all(
@@ -2209,10 +2212,10 @@ def get_kanban_invoices(filters: Optional[Union[str, Dict]] = None) -> Dict[str,
 			card_count=sum(len(cards) for cards in kanban_data.values()),
 		)
 	except Exception as e:
-		error_msg = f"Error getting kanban invoices: {str(e)}"
+		error_msg = f"Error getting kanban invoices: {e!s}"
 		frappe.logger().error(error_msg)
 		frappe.log_error(
-			f"Kanban Invoices Error: {str(e)}\n\nTraceback:\n{traceback.format_exc()}", "Kanban API"
+			f"Kanban Invoices Error: {e!s}\n\nTraceback:\n{traceback.format_exc()}", "Kanban API"
 		)
 		return _failure(error_msg)
 
@@ -2222,9 +2225,9 @@ def update_invoice_state(
 	invoice_id: str,
 	new_state: str,
 	shortage_approved: bool | int = False,
-	shortage_reason: Optional[str] = None,
-	expected_state: Optional[str] = None,
-) -> Dict[str, Any]:
+	shortage_reason: str | None = None,
+	expected_state: str | None = None,
+) -> dict[str, Any]:
 	"""Update the custom_sales_invoice_state of a Sales Invoice (legacy field kept for backward compatibility).
 
 	Args:
@@ -2311,7 +2314,7 @@ def update_invoice_state(
 			return _failure(transition_block)
 
 		meta = frappe.get_meta("Sales Invoice")
-		fields_to_update: List[str] = []
+		fields_to_update: list[str] = []
 		for candidate in ["custom_sales_invoice_state", "sales_invoice_state", "custom_state", "state"]:
 			if meta.get_field(candidate):
 				fields_to_update.append(candidate)
@@ -2351,10 +2354,10 @@ def update_invoice_state(
 			f"Normalized Target: {normalized_target} | create_dn: {create_dn} | logic_version: {dn_logic_version}"
 		)
 
-		created_delivery_note: Optional[str] = None
-		created_cash_payment_entry: Optional[str] = None
-		created_partner_txn: Optional[str] = None
-		audit_field_values: Dict[str, Any] = {}
+		created_delivery_note: str | None = None
+		created_cash_payment_entry: str | None = None
+		created_partner_txn: str | None = None
+		audit_field_values: dict[str, Any] = {}
 
 		# ------------------------------------------------------------------
 		# Helper: Ensure CASH Payment Entry for Sales Partner invoices when
@@ -2369,7 +2372,7 @@ def update_invoice_state(
 		# Idempotency: if a PE already exists allocating full outstanding,
 		# function returns gracefully.
 		# ------------------------------------------------------------------
-		def _ensure_cash_payment_entry_for_partner(si_doc) -> Optional[str]:
+		def _ensure_cash_payment_entry_for_partner(si_doc) -> str | None:
 			try:
 				if not getattr(si_doc, "sales_partner", None):
 					return None
@@ -2617,7 +2620,7 @@ def update_invoice_state(
 				frappe.logger().error(
 					f"KANBAN API: Delivery Note creation failed for {invoice_id}: {dn_ex}\n{frappe.get_traceback()}"
 				)
-				fail_resp = _failure(f"Failed creating Delivery Note for invoice {invoice_id}: {str(dn_ex)}")
+				fail_resp = _failure(f"Failed creating Delivery Note for invoice {invoice_id}: {dn_ex!s}")
 				fail_resp["dn_logic_version"] = dn_logic_version
 				return fail_resp
 			# After (or even if reusing) DN creation, ensure branch cash PE if partner invoice
@@ -2692,7 +2695,7 @@ def update_invoice_state(
 					f"KANBAN API: Sales Partner Transaction creation failed for {invoice_id}: {sp_txn_err}"
 				)
 
-		updated_fields: List[str] = []
+		updated_fields: list[str] = []
 		for f in fields_to_update:
 			try:
 				invoice.set(f, new_state)
@@ -2774,15 +2777,15 @@ def update_invoice_state(
 		)
 	except Exception as e:
 		print(f"GENERAL FAILURE update_invoice_state: {e}")
-		error_msg = f"Error updating invoice state: {str(e)}"
+		error_msg = f"Error updating invoice state: {e!s}"
 		frappe.logger().error(error_msg)
 		frappe.log_error(
-			f"Update Invoice State Error: {str(e)}\n\nTraceback:\n{traceback.format_exc()}", "Kanban API"
+			f"Update Invoice State Error: {e!s}\n\nTraceback:\n{traceback.format_exc()}", "Kanban API"
 		)
 		return _failure(error_msg)
 
 
-def _release_operational_artifacts(invoice_name: str) -> Dict[str, Any]:
+def _release_operational_artifacts(invoice_name: str) -> dict[str, Any]:
 	"""Free the operational records a cancelled invoice was still holding.
 
 	Cancelling the accounting documents used to leave the *operational* ones
@@ -2794,7 +2797,7 @@ def _release_operational_artifacts(invoice_name: str) -> Dict[str, Any]:
 	Every step is independently guarded: releasing artifacts must never be able
 	to fail a cancellation that has already committed its accounting.
 	"""
-	released: Dict[str, Any] = {}
+	released: dict[str, Any] = {}
 
 	# An UNSETTLED Sales Partner Transaction is a fee not yet posted: with the
 	# order cancelled there is nothing to charge commission on, so the row goes.
@@ -2808,7 +2811,7 @@ def _release_operational_artifacts(invoice_name: str) -> Dict[str, Any]:
 			)
 			or []
 		)
-		removed: List[str] = []
+		removed: list[str] = []
 		for row_name in unsettled_partner_rows:
 			frappe.delete_doc("Sales Partner Transactions", row_name, ignore_permissions=True, force=True)
 			removed.append(row_name)
@@ -2837,7 +2840,7 @@ def _release_operational_artifacts(invoice_name: str) -> Dict[str, Any]:
 	try:
 		from jarz_pos.api.manager import _find_active_custom_shipping_requests
 
-		cancelled_requests: List[str] = []
+		cancelled_requests: list[str] = []
 		for csr_name in _find_active_custom_shipping_requests(invoice_name):
 			try:
 				csr = frappe.get_doc("Custom Shipping Request", csr_name)
@@ -2861,7 +2864,7 @@ def _release_operational_artifacts(invoice_name: str) -> Dict[str, Any]:
 
 
 @frappe.whitelist(allow_guest=False)
-def cancel_invoice(invoice_id: str, reason: str, notes: Optional[str] = None) -> Dict[str, Any]:
+def cancel_invoice(invoice_id: str, reason: str, notes: str | None = None) -> dict[str, Any]:
 	"""Cancel a Sales Invoice prior to dispatch with audit trail and notifications."""
 	try:
 		invoice_id = (invoice_id or "").strip()
@@ -2936,7 +2939,7 @@ def cancel_invoice(invoice_id: str, reason: str, notes: Optional[str] = None) ->
 		#   1. the branch must be open right now (cash is about to move), and
 		#   2. no payment we are about to cancel may belong to a CLOSED shift.
 		# Unpaid invoices move no cash, so neither applies to them.
-		linked_payment_entries: List[str] = []
+		linked_payment_entries: list[str] = []
 		if is_paid:
 			linked_payment_entries = sorted(
 				{
@@ -2963,8 +2966,8 @@ def cancel_invoice(invoice_id: str, reason: str, notes: Optional[str] = None) ->
 			except (ShiftRequiredError, ClosedShiftError) as shift_err:
 				return _failure(str(getattr(shift_err, "message", None) or shift_err))
 
-		credit_note_name: Optional[str] = None
-		cancelled_payment_entries: List[str] = []
+		credit_note_name: str | None = None
+		cancelled_payment_entries: list[str] = []
 		cancelled_docstatus = 1
 		savepoint = "kanban_cancel_invoice"
 		try:
@@ -3000,7 +3003,7 @@ def cancel_invoice(invoice_id: str, reason: str, notes: Optional[str] = None) ->
 				cancelled_docstatus = 2
 
 			meta = frappe.get_meta("Sales Invoice")
-			updated_fields: List[str] = []
+			updated_fields: list[str] = []
 			for candidate in [
 				"custom_sales_invoice_state",
 				"sales_invoice_state",
@@ -3124,7 +3127,7 @@ def cancel_invoice(invoice_id: str, reason: str, notes: Optional[str] = None) ->
 
 
 @frappe.whitelist(allow_guest=False)
-def get_invoice_details(invoice_id: str) -> Dict[str, Any]:
+def get_invoice_details(invoice_id: str) -> dict[str, Any]:
 	"""Get detailed information about a specific invoice.
 
 	Args:
@@ -3236,14 +3239,14 @@ def get_invoice_details(invoice_id: str) -> Dict[str, Any]:
 			data["returned_amount"] = 0.0
 		return _success(data=data)
 	except Exception as e:
-		error_msg = f"Error getting invoice details: {str(e)}"
+		error_msg = f"Error getting invoice details: {e!s}"
 		frappe.logger().error(error_msg)
-		frappe.log_error(f"Invoice Details Error: {str(e)}", "Kanban API")
+		frappe.log_error(f"Invoice Details Error: {e!s}", "Kanban API")
 		return _failure(error_msg)
 
 
 @frappe.whitelist(allow_guest=False)
-def get_invoice_notes(invoice_id: str) -> Dict[str, Any]:
+def get_invoice_notes(invoice_id: str) -> dict[str, Any]:
 	"""Return operational Jarz notes for a Sales Invoice only."""
 	try:
 		frappe.has_permission("Sales Invoice", ptype="read", throw=True)
@@ -3269,14 +3272,14 @@ def get_invoice_notes(invoice_id: str) -> Dict[str, Any]:
 		notes = [_serialize_invoice_note_row(row) for row in rows]
 		return _success(data=notes, note_count=len(notes))
 	except Exception as e:
-		error_msg = f"Error getting invoice notes: {str(e)}"
+		error_msg = f"Error getting invoice notes: {e!s}"
 		frappe.logger().error(error_msg)
-		frappe.log_error(f"Invoice Notes Error: {str(e)}", "Kanban API")
+		frappe.log_error(f"Invoice Notes Error: {e!s}", "Kanban API")
 		return _failure(error_msg)
 
 
 @frappe.whitelist(allow_guest=False)
-def add_invoice_note(invoice_id: str, note: str) -> Dict[str, Any]:
+def add_invoice_note(invoice_id: str, note: str) -> dict[str, Any]:
 	"""Add an operational Jarz note to a Sales Invoice."""
 	try:
 		frappe.has_permission("Sales Invoice", ptype="read", throw=True)
@@ -3323,14 +3326,14 @@ def add_invoice_note(invoice_id: str, note: str) -> Dict[str, Any]:
 		)
 		return _success(data=note_data, note_count=note_count)
 	except Exception as e:
-		error_msg = f"Error adding invoice note: {str(e)}"
+		error_msg = f"Error adding invoice note: {e!s}"
 		frappe.logger().error(error_msg)
-		frappe.log_error(f"Add Invoice Note Error: {str(e)}", "Kanban API")
+		frappe.log_error(f"Add Invoice Note Error: {e!s}", "Kanban API")
 		return _failure(error_msg)
 
 
 @frappe.whitelist(allow_guest=False)
-def get_kanban_filters() -> Dict[str, Any]:
+def get_kanban_filters() -> dict[str, Any]:
 	"""Get available filter options for the Kanban board.
 
 	Returns:
@@ -3343,7 +3346,7 @@ def get_kanban_filters() -> Dict[str, Any]:
 		# last six months. Unbounded, this was a DISTINCT over every POS invoice
 		# ever raised — slow enough on production to time the request out, which
 		# left the customer filter permanently empty and looking broken.
-		customer_filters: Dict[str, Any] = {
+		customer_filters: dict[str, Any] = {
 			"docstatus": 1,
 			"is_pos": 1,
 			"is_return": 0,
@@ -3371,7 +3374,7 @@ def get_kanban_filters() -> Dict[str, Any]:
 		)
 		# DISTINCT is over the pair, so one customer renamed mid-period yields two
 		# rows; collapse on the id and keep the first (alphabetical) label.
-		seen: Dict[str, str] = {}
+		seen: dict[str, str] = {}
 		for c in customers:
 			if c.customer and c.customer not in seen:
 				seen[c.customer] = c.customer_name or c.customer
@@ -3379,9 +3382,9 @@ def get_kanban_filters() -> Dict[str, Any]:
 		state_options = [{"value": s, "label": s} for s in _get_state_field_options()]
 		return _success(customers=customer_options, states=state_options)
 	except Exception as e:
-		error_msg = f"Error getting kanban filters: {str(e)}"
+		error_msg = f"Error getting kanban filters: {e!s}"
 		frappe.logger().error(error_msg)
-		frappe.log_error(f"Kanban Filters Error: {str(e)}", "Kanban API")
+		frappe.log_error(f"Kanban Filters Error: {e!s}", "Kanban API")
 		return _failure(error_msg)
 
 

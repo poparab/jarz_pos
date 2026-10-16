@@ -12,11 +12,11 @@ from frappe.utils import flt, get_datetime, getdate, now_datetime, today
 @dataclass
 class _AccountInfo:
 	name: str
-	company: Optional[str]
-	currency: Optional[str]
-	root_type: Optional[str]
+	company: str | None
+	currency: str | None
+	root_type: str | None
 	is_group: int
-	parent_account: Optional[str]
+	parent_account: str | None
 
 
 def _get_account_info(account: str) -> _AccountInfo:
@@ -57,7 +57,7 @@ def _validate_indirect_expense(account_info: _AccountInfo) -> None:
 	frappe.throw(_("Selected expense reason must belong under the Indirect Expenses group."))
 
 
-def _account_requires_period(account: Optional[str]) -> bool:
+def _account_requires_period(account: str | None) -> bool:
 	from jarz_pos.utils.cleanup import ACCOUNT_REQUIRES_PERIOD_FIELD
 
 	if not account or not frappe.db.has_column("Account", ACCOUNT_REQUIRES_PERIOD_FIELD):
@@ -89,7 +89,7 @@ def _accrued_expenses_account(company: str) -> str:
 	return account
 
 
-def _post_earlier_month_shares(doc, company: str) -> Tuple[float, Optional[str]]:
+def _post_earlier_month_shares(doc, company: str) -> tuple[float, str | None]:
 	"""Book the earlier months' share of this payment at each month's end.
 
 	Returns the total booked and the Accrued Expenses account. The payment's

@@ -24,7 +24,8 @@ expenses would each see the whole balance.
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, Iterable, Optional, Tuple
+from collections.abc import Iterable
+from typing import Any, Dict, Optional, Tuple
 
 import frappe
 from frappe import _
@@ -56,15 +57,15 @@ _LABEL_COLUMNS_FLAG = "jarz_custody_account_label_columns"
 # ---------------------------------------------------------------------------
 
 
-def custody_label_en(employee_name: Optional[str]) -> str:
+def custody_label_en(employee_name: str | None) -> str:
 	return f"Custody - {(employee_name or '').strip()}".strip()
 
 
-def custody_label_ar(employee_name: Optional[str]) -> str:
+def custody_label_ar(employee_name: str | None) -> str:
 	return f"عهدة - {(employee_name or '').strip()}".strip()
 
 
-def _label_columns() -> Tuple[bool, bool]:
+def _label_columns() -> tuple[bool, bool]:
 	"""Whether Account carries the bilingual label columns on this site."""
 	cached = getattr(frappe.flags, _LABEL_COLUMNS_FLAG, None)
 	if isinstance(cached, tuple):
@@ -86,7 +87,7 @@ def _label_columns() -> Tuple[bool, bool]:
 	return cached
 
 
-def custody_account_labels(account: Optional[str], employee_name: Optional[str]) -> Dict[str, str]:
+def custody_account_labels(account: str | None, employee_name: str | None) -> dict[str, str]:
 	"""``{label_en, label_ar}`` for a custody account.
 
 	The account's own bilingual columns win when they are filled; otherwise the
@@ -131,7 +132,7 @@ def _holder_table_exists() -> bool:
 	return exists
 
 
-def _accounts_cache() -> Dict[str, Dict[str, str]]:
+def _accounts_cache() -> dict[str, dict[str, str]]:
 	cache = getattr(frappe.flags, _ACCOUNTS_CACHE_FLAG, None)
 	if not isinstance(cache, dict):
 		cache = {}
@@ -151,7 +152,7 @@ def clear_custody_cache() -> None:
 		pass
 
 
-def custody_accounts(company: Optional[str] = None) -> Dict[str, str]:
+def custody_accounts(company: str | None = None) -> dict[str, str]:
 	"""``{account: holder name}`` for every holder, enabled or not.
 
 	Disabled holders are included on purpose: a disabled holder's account is
@@ -163,9 +164,9 @@ def custody_accounts(company: Optional[str] = None) -> Dict[str, str]:
 	if key in cache:
 		return dict(cache[key])
 
-	result: Dict[str, str] = {}
+	result: dict[str, str] = {}
 	if _holder_table_exists():
-		filters: Dict[str, Any] = {"account": ["is", "set"]}
+		filters: dict[str, Any] = {"account": ["is", "set"]}
 		if company:
 			filters["company"] = company
 		rows = frappe.get_all(
@@ -182,11 +183,11 @@ def custody_accounts(company: Optional[str] = None) -> Dict[str, str]:
 	return dict(result)
 
 
-def is_custody_account(account: Optional[str]) -> bool:
+def is_custody_account(account: str | None) -> bool:
 	return bool(account) and account in custody_accounts()
 
 
-def holder_for_user(user: Optional[str]):
+def holder_for_user(user: str | None):
 	"""The ENABLED holder document for *user*, or None."""
 	if not user or user == "Guest":
 		return None
@@ -198,7 +199,7 @@ def holder_for_user(user: Optional[str]):
 	return frappe.get_doc(HOLDER_DOCTYPE, name)
 
 
-def holder_employee_name(holder: Optional[str]) -> str:
+def holder_employee_name(holder: str | None) -> str:
 	if not holder:
 		return ""
 	return str(frappe.db.get_value(HOLDER_DOCTYPE, holder, "employee_name") or holder)
@@ -209,7 +210,7 @@ def holder_employee_name(holder: Optional[str]) -> str:
 # ---------------------------------------------------------------------------
 
 
-def custody_balance(account: str, company: Optional[str] = None, for_update: bool = False) -> float:
+def custody_balance(account: str, company: str | None = None, for_update: bool = False) -> float:
 	"""Debit-minus-credit of *account* over every live GL Entry.
 
 	``for_update=True`` is for callers that DECIDE something about money from
@@ -262,9 +263,9 @@ def overdraw_message(employee_name: str, balance: float, amount: float) -> str:
 def ensure_custody_can_cover(
 	account: str,
 	amount: float,
-	company: Optional[str] = None,
+	company: str | None = None,
 	for_update: bool = False,
-	holder: Optional[str] = None,
+	holder: str | None = None,
 ) -> float:
 	"""Throw the standard overdraw message if *account* cannot pay *amount*.
 
@@ -283,16 +284,16 @@ def ensure_custody_can_cover(
 # ---------------------------------------------------------------------------
 
 
-def _add(out: Dict[str, float], account: Any, amount: float) -> None:
+def _add(out: dict[str, float], account: Any, amount: float) -> None:
 	account = str(account or "").strip()
 	if not account:
 		return
 	out[account] = out.get(account, 0.0) + flt(amount)
 
 
-def net_credits(doc) -> Dict[str, float]:
+def net_credits(doc) -> dict[str, float]:
 	"""Net CREDIT *doc* puts on each account it touches (debits offset)."""
-	out: Dict[str, float] = {}
+	out: dict[str, float] = {}
 	doctype = doc.get("doctype") if isinstance(doc, dict) else getattr(doc, "doctype", None)
 
 	if doctype == "Journal Entry":
@@ -397,7 +398,7 @@ def guard_custody_balance_on_cancel(doc, method=None) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _company_currency(company: str) -> Optional[str]:
+def _company_currency(company: str) -> str | None:
 	return frappe.db.get_value("Company", company, "default_currency")
 
 
@@ -456,7 +457,7 @@ def custody_parent_group(company: str) -> str:
 	return doc.name
 
 
-def _account_held_by_other(account: str, holder_name: Optional[str]) -> bool:
+def _account_held_by_other(account: str, holder_name: str | None) -> bool:
 	other = (
 		frappe.db.get_value(HOLDER_DOCTYPE, {"account": account}, "name") if _holder_table_exists() else None
 	)
@@ -465,9 +466,9 @@ def _account_held_by_other(account: str, holder_name: Optional[str]) -> bool:
 
 def ensure_custody_account(
 	employee: str,
-	employee_name: Optional[str],
+	employee_name: str | None,
 	company: str,
-	holder_name: Optional[str] = None,
+	holder_name: str | None = None,
 ) -> str:
 	"""Return the custody leaf for *employee*, creating it if needed.
 
@@ -498,7 +499,7 @@ def ensure_custody_account(
 
 		if parent is None:
 			parent = custody_parent_group(company)
-		payload: Dict[str, Any] = {
+		payload: dict[str, Any] = {
 			"doctype": "Account",
 			"account_name": account_name,
 			"parent_account": parent,
@@ -527,7 +528,7 @@ def ensure_custody_account(
 	return ""
 
 
-def validate_custody_account(account: str, company: Optional[str]) -> None:
+def validate_custody_account(account: str, company: str | None) -> None:
 	row = frappe.db.get_value("Account", account, ["company", "is_group", "account_type"], as_dict=True)
 	if not row:
 		frappe.throw(_("Account {0} does not exist.").format(account))
@@ -559,12 +560,12 @@ def account_has_gl_entries(account: str) -> bool:
 _TAG_RE = re.compile(r"\s*\[JARZ-JE:[^\[\]]*\]")
 
 
-def strip_tag(text: Optional[str]) -> str:
+def strip_tag(text: str | None) -> str:
 	"""Remove ``[JARZ-JE:...]`` tags from a remark for display."""
 	return _TAG_RE.sub("", str(text or "")).strip()
 
 
-def custody_kind_from_tag(tag_text: Optional[str]) -> Optional[str]:
+def custody_kind_from_tag(tag_text: str | None) -> str | None:
 	text = str(tag_text or "")
 	if f"[JARZ-JE:{CUSTODY_ISSUE_TAG}:" in text:
 		return "issue"

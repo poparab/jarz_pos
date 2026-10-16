@@ -22,8 +22,8 @@ from frappe.utils import getdate
 
 from jarz_pos.api import roster as roster_api
 from jarz_pos.constants import ROLES
-from jarz_pos.services import roster as roster_service
 from jarz_pos.events import employee_checkin as checkin_guard
+from jarz_pos.services import roster as roster_service
 
 
 class TestShiftLengthHours(unittest.TestCase):

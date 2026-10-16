@@ -32,8 +32,9 @@ from __future__ import annotations
 
 import calendar
 from collections import defaultdict
+from collections.abc import Iterable
 from datetime import date, timedelta
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import frappe
 from frappe import _
@@ -69,7 +70,7 @@ TOLERANCE = 1.0
 COVERAGE_WARN_PCT = 90.0
 
 
-def channel_for_purpose(purpose: Optional[str]) -> str:
+def channel_for_purpose(purpose: str | None) -> str:
 	"""Map ``Sales Invoice.custom_order_purpose`` to a reporting channel."""
 	p = (purpose or "").strip()
 	if p == "B2B Supply":
@@ -91,7 +92,7 @@ def _ensure_jarz_manager() -> None:
 		frappe.throw(_("Only JARZ Manager can access the profit & loss report"), frappe.PermissionError)
 
 
-def _parse_dates(date_from: Optional[str], date_to: Optional[str]) -> Tuple[date, date]:
+def _parse_dates(date_from: str | None, date_to: str | None) -> tuple[date, date]:
 	today = getdate(nowdate())
 	fd = getdate(date_from) if date_from else getdate(get_first_day(today))
 	td = getdate(date_to) if date_to else today
@@ -119,9 +120,9 @@ def bucket_key(d: date, granularity: str) -> str:
 	return d.isoformat()
 
 
-def bucket_keys(fd: date, td: date, granularity: str) -> List[str]:
+def bucket_keys(fd: date, td: date, granularity: str) -> list[str]:
 	"""Every bucket in the range, so a quiet day still plots as zero."""
-	keys: List[str] = []
+	keys: list[str] = []
 	d = fd
 	while d <= td:
 		k = bucket_key(d, granularity)
@@ -137,9 +138,9 @@ def covers_whole_months(fd: date, td: date) -> bool:
 	return fd.day == 1 and td.day == last
 
 
-def months_in_range(fd: date, td: date) -> List[Tuple[date, date]]:
+def months_in_range(fd: date, td: date) -> list[tuple[date, date]]:
 	"""(first, last) day of every calendar month the range touches."""
-	out: List[Tuple[date, date]] = []
+	out: list[tuple[date, date]] = []
 	cur = date(fd.year, fd.month, 1)
 	while cur <= td:
 		last = date(cur.year, cur.month, calendar.monthrange(cur.year, cur.month)[1])
@@ -153,8 +154,8 @@ def months_in_range(fd: date, td: date) -> List[Tuple[date, date]]:
 
 def classify_expense_account(
 	account: str,
-	account_type: Optional[str],
-	freight_account: Optional[str],
+	account_type: str | None,
+	freight_account: str | None,
 	recurring_accounts: Iterable[str],
 ) -> str:
 	"""Which P&L section an Expense-root account belongs to."""
@@ -180,7 +181,7 @@ def pct(part: float, whole: float) -> float:
 # ── data loaders ──────────────────────────────────────────────────────────
 
 
-def _default_company() -> Optional[str]:
+def _default_company() -> str | None:
 	company = frappe.defaults.get_user_default("Company") or frappe.db.get_single_value(
 		"Global Defaults", "default_company"
 	)
@@ -190,7 +191,7 @@ def _default_company() -> Optional[str]:
 	return companies[0] if len(companies) == 1 else None
 
 
-def _accounts(company: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+def _accounts(company: str | None) -> tuple[str | None, str | None]:
 	"""(shipping income account, freight expense account) for the company."""
 	if not company:
 		return None, None
@@ -216,14 +217,14 @@ def _accounts(company: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
 	return shipping, freight
 
 
-def _recurring_accounts(company: Optional[str]) -> Dict[str, Dict[str, Any]]:
+def _recurring_accounts(company: str | None) -> dict[str, dict[str, Any]]:
 	"""Accounts that hold recurring spend, with what each is expected to cost.
 
 	Returns ``{account: {"category": ..., "items": [...], "monthly_due": float}}``.
 	"""
-	out: Dict[str, Dict[str, Any]] = {}
+	out: dict[str, dict[str, Any]] = {}
 	if frappe.db.table_exists("Jarz Recurring Expense"):
-		filters: Dict[str, Any] = {}
+		filters: dict[str, Any] = {}
 		if company and frappe.get_meta("Jarz Recurring Expense").has_field("company"):
 			filters["company"] = company
 		for row in frappe.get_all(
@@ -269,12 +270,12 @@ def _recurring_accounts(company: Optional[str]) -> Dict[str, Dict[str, Any]]:
 
 
 def _due_for_range(
-	recurring: Dict[str, Dict[str, Any]], fd: date, td: date, company: Optional[str]
-) -> Dict[str, float]:
+	recurring: dict[str, dict[str, Any]], fd: date, td: date, company: str | None
+) -> dict[str, float]:
 	"""What each recurring account is scheduled to cost over the months touched."""
 	from jarz_pos.api.recurring_expenses import _is_due_in_month
 
-	due: Dict[str, float] = defaultdict(float)
+	due: dict[str, float] = defaultdict(float)
 	months = months_in_range(fd, td)
 	for acct, info in recurring.items():
 		for item in info.get("items", []):
@@ -296,7 +297,7 @@ def _due_for_range(
 	return dict(due)
 
 
-def _gl_rows(fd: date, td: date, company: Optional[str]) -> List[Dict[str, Any]]:
+def _gl_rows(fd: date, td: date, company: str | None) -> list[dict[str, Any]]:
 	"""Net P&L movement per (account, bucket day) inside the range."""
 	cond = "AND gle.company = %(company)s" if company else ""
 	return frappe.db.sql(
@@ -319,7 +320,7 @@ def _gl_rows(fd: date, td: date, company: Optional[str]) -> List[Dict[str, Any]]
 	)
 
 
-def branch_condition(branch: Optional[str], alias: str = "si", param: str = "branch") -> str:
+def branch_condition(branch: str | None, alias: str = "si", param: str = "branch") -> str:
 	"""``AND <alias>.pos_profile = %(branch)s`` when a branch is given, else ``""``.
 
 	"Branch" is the POS Profile on the invoice. The value is always passed as a
@@ -337,7 +338,7 @@ def actual_line_cost_sql(
 	si_alias: str = "si",
 	sii_alias: str = "sii",
 	net_returns: bool = False,
-) -> Tuple[str, str]:
+) -> tuple[str, str]:
 	"""``(join_sql, cost_expr)`` giving the real cost of goods of an invoice line.
 
 	Cost of goods reaches the ledger one of two ways, and each leaves the
@@ -427,9 +428,7 @@ def actual_line_cost_sql(
 	return join_sql, cost_expr
 
 
-def _invoice_rows(
-	fd: date, td: date, company: Optional[str], branch: Optional[str] = None
-) -> List[Dict[str, Any]]:
+def _invoice_rows(fd: date, td: date, company: str | None, branch: str | None = None) -> list[dict[str, Any]]:
 	"""Net sales per (purpose, day), returns included as negatives."""
 	cond = "AND company = %(company)s" if company else ""
 	cond += " " + branch_condition(branch, alias="")
@@ -454,10 +453,10 @@ def _invoice_rows(
 def _shipping_rows(
 	fd: date,
 	td: date,
-	company: Optional[str],
-	shipping_account: Optional[str],
-	branch: Optional[str] = None,
-) -> List[Dict[str, Any]]:
+	company: str | None,
+	shipping_account: str | None,
+	branch: str | None = None,
+) -> list[dict[str, Any]]:
 	"""Delivery charges billed, per (purpose, day), from the invoice tax rows."""
 	cond = "AND si.company = %(company)s" if company else ""
 	cond += " " + branch_condition(branch)
@@ -482,7 +481,7 @@ def _shipping_rows(
 NO_BRANCH_LABEL = "(No Profile)"
 
 
-def validate_branch(branch: Any) -> Optional[str]:
+def validate_branch(branch: Any) -> str | None:
 	"""``None``/blank = all branches; otherwise it must be an existing POS Profile.
 
 	An unknown branch used to return an empty, all-zero branch view that looked
@@ -500,10 +499,10 @@ def validate_branch(branch: Any) -> Optional[str]:
 def _branch_rows(
 	fd: date,
 	td: date,
-	company: Optional[str],
-	shipping_account: Optional[str],
-	branch: Optional[str] = None,
-) -> List[Dict[str, Any]]:
+	company: str | None,
+	shipping_account: str | None,
+	branch: str | None = None,
+) -> list[dict[str, Any]]:
 	"""Per-branch (POS Profile) sales, actual COGS and shipping income, from invoices.
 
 	* ``revenue`` — net sales (``base_net_total``), returns included as negatives,
@@ -582,10 +581,10 @@ def _branch_rows(
 
 
 def assemble_branch_rows(
-	sales: Iterable[Dict[str, Any]],
-	costs: Iterable[Dict[str, Any]],
-	shipping: Iterable[Dict[str, Any]],
-) -> List[Dict[str, Any]]:
+	sales: Iterable[dict[str, Any]],
+	costs: Iterable[dict[str, Any]],
+	shipping: Iterable[dict[str, Any]],
+) -> list[dict[str, Any]]:
 	"""Merge the three per-branch aggregates (pure), biggest revenue first.
 
 	``sales`` and ``shipping`` rows may carry ``purpose`` (one row per branch and
@@ -593,9 +592,9 @@ def assemble_branch_rows(
 	(net sales + billed shipping, as :func:`channel_for_purpose` maps it). A
 	row without ``purpose`` is a legacy blank, i.e. B2C.
 	"""
-	out: Dict[str, Dict[str, Any]] = {}
+	out: dict[str, dict[str, Any]] = {}
 
-	def row(name: str) -> Dict[str, Any]:
+	def row(name: str) -> dict[str, Any]:
 		return out.setdefault(
 			name or NO_BRANCH_LABEL,
 			{
@@ -610,7 +609,7 @@ def assemble_branch_rows(
 			},
 		)
 
-	def add_channel(b: Dict[str, Any], purpose: Optional[str], amount: float) -> None:
+	def add_channel(b: dict[str, Any], purpose: str | None, amount: float) -> None:
 		c = channel_for_purpose(purpose)
 		if c in (CHANNEL_B2B, CHANNEL_B2C):
 			b[c] += amount
@@ -631,7 +630,7 @@ def assemble_branch_rows(
 		b["shipping_income"] += flt(r.get("amount"))
 		add_channel(b, r.get("purpose"), flt(r.get("amount")))
 
-	rows: List[Dict[str, Any]] = []
+	rows: list[dict[str, Any]] = []
 	for name, b in out.items():
 		revenue = round(b["revenue"], 2)
 		cogs = round(b["cogs"], 2)
@@ -654,8 +653,8 @@ def assemble_branch_rows(
 
 
 def _shipping_order_basis(
-	fd: date, td: date, company: Optional[str], branch: Optional[str] = None
-) -> Dict[str, Any]:
+	fd: date, td: date, company: str | None, branch: str | None = None
+) -> dict[str, Any]:
 	"""What the orders placed in the window say, independent of the ledger.
 
 	Two cross-checks come from here. Courier cost recorded on the orders
@@ -705,19 +704,19 @@ def build_report(
 	*,
 	fd: date,
 	td: date,
-	gl_rows: List[Dict[str, Any]],
-	invoice_rows: List[Dict[str, Any]],
-	shipping_rows: List[Dict[str, Any]],
-	shipping_account: Optional[str],
-	freight_account: Optional[str],
-	recurring: Dict[str, Dict[str, Any]],
-	due: Dict[str, float],
-	order_basis: Dict[str, Any],
-	branch: Optional[str] = None,
-	branch_rows: Optional[List[Dict[str, Any]]] = None,
-	branch_invoice_rows: Optional[List[Dict[str, Any]]] = None,
-	branch_shipping_rows: Optional[List[Dict[str, Any]]] = None,
-) -> Dict[str, Any]:
+	gl_rows: list[dict[str, Any]],
+	invoice_rows: list[dict[str, Any]],
+	shipping_rows: list[dict[str, Any]],
+	shipping_account: str | None,
+	freight_account: str | None,
+	recurring: dict[str, dict[str, Any]],
+	due: dict[str, float],
+	order_basis: dict[str, Any],
+	branch: str | None = None,
+	branch_rows: list[dict[str, Any]] | None = None,
+	branch_invoice_rows: list[dict[str, Any]] | None = None,
+	branch_shipping_rows: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
 	"""Assemble the payload.
 
 	With ``branch`` set, ``invoice_rows``/``shipping_rows``/``order_basis`` must
@@ -734,24 +733,24 @@ def build_report(
 	granularity = granularity_for(fd, td)
 	keys = bucket_keys(fd, td, granularity)
 
-	def blank() -> Dict[str, float]:
+	def blank() -> dict[str, float]:
 		return defaultdict(float)
 
-	trend: Dict[str, Dict[str, float]] = {k: blank() for k in keys}
+	trend: dict[str, dict[str, float]] = {k: blank() for k in keys}
 
 	# ── ledger ──
 	ledger_income = 0.0
 	ledger_expense = 0.0
 	ledger_shipping_income = 0.0
 	sales_income = 0.0
-	other_income: Dict[str, float] = defaultdict(float)
-	sections: Dict[str, Dict[str, float]] = {
+	other_income: dict[str, float] = defaultdict(float)
+	sections: dict[str, dict[str, float]] = {
 		"cost_of_sales": defaultdict(float),
 		"shipping": defaultdict(float),
 		"recurring": defaultdict(float),
 		"other": defaultdict(float),
 	}
-	account_types: Dict[str, str] = {}
+	account_types: dict[str, str] = {}
 	recurring_accounts = set(recurring)
 
 	for r in gl_rows:
@@ -779,7 +778,7 @@ def build_report(
 			t[section] += amt
 
 	# ── channels (invoices) ──
-	channels: Dict[str, Dict[str, float]] = {
+	channels: dict[str, dict[str, float]] = {
 		c: {"sales": 0.0, "shipping_income": 0.0, "orders": 0, "returns": 0, "returns_value": 0.0}
 		for c in CHANNELS
 	}
@@ -811,7 +810,7 @@ def build_report(
 	shipping_in_freight = round(shipping_income - ledger_shipping_income, 2)
 
 	# ── sections ──
-	def rows_for(section: str) -> List[Dict[str, Any]]:
+	def rows_for(section: str) -> list[dict[str, Any]]:
 		return sorted(
 			(
 				{"account": a, "label": account_label(a), "amount": round(v, 2)}
@@ -928,7 +927,7 @@ def build_report(
 			}
 		)
 
-	notes: List[str] = []
+	notes: list[str] = []
 	if abs(adjustments) >= TOLERANCE:
 		notes.append("sales_adjustments")
 	if abs(shipping_in_freight) >= TOLERANCE:
@@ -940,7 +939,7 @@ def build_report(
 	cogs_coverage = pct(stock_posted, orders_placed) if orders_placed else 100.0
 	expense_order_basis = flt(order_basis.get("expense"))
 	shipping_coverage = pct(shipping_expense, expense_order_basis) if expense_order_basis else 100.0
-	warnings: List[str] = []
+	warnings: list[str] = []
 	if cogs_coverage < COVERAGE_WARN_PCT:
 		warnings.append("cogs_incomplete")
 	if shipping_coverage < COVERAGE_WARN_PCT:
@@ -952,7 +951,7 @@ def build_report(
 		warnings.append("recurring_not_fully_posted")
 
 	delivery_orders = int(order_basis.get("delivery_orders") or 0)
-	data_quality: Dict[str, Any] = {
+	data_quality: dict[str, Any] = {
 		"orders": orders_placed,
 		"stock_posted_orders": stock_posted,
 		"cogs_coverage_pct": cogs_coverage,
@@ -1030,10 +1029,10 @@ def build_report(
 
 
 def channel_rows_from_invoices(
-	invoice_rows: Iterable[Dict[str, Any]], shipping_rows: Iterable[Dict[str, Any]]
-) -> List[Dict[str, Any]]:
+	invoice_rows: Iterable[dict[str, Any]], shipping_rows: Iterable[dict[str, Any]]
+) -> list[dict[str, Any]]:
 	"""Channel rows from invoice aggregates alone (pure), shares of invoiced revenue."""
-	channels: Dict[str, Dict[str, float]] = {
+	channels: dict[str, dict[str, float]] = {
 		c: {"sales": 0.0, "shipping_income": 0.0, "orders": 0, "returns": 0, "returns_value": 0.0}
 		for c in CHANNELS
 	}
@@ -1063,11 +1062,11 @@ def channel_rows_from_invoices(
 
 @frappe.whitelist()
 def get_profit_and_loss(
-	date_from: Optional[str] = None,
-	date_to: Optional[str] = None,
-	company: Optional[str] = None,
-	branch: Optional[str] = None,
-) -> Dict[str, Any]:
+	date_from: str | None = None,
+	date_to: str | None = None,
+	company: str | None = None,
+	branch: str | None = None,
+) -> dict[str, Any]:
 	"""Ledger-reconciled profit & loss for the range, split B2B / B2C.
 
 	``branch`` (a POS Profile, optional) filters the invoice-based parts only:

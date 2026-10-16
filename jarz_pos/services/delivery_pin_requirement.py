@@ -66,8 +66,8 @@ def pin_required_enabled() -> bool:
 def pin_fields_are_pin_grade(latitude: Any, longitude: Any, source: Any) -> bool:
 	"""True when these three Address values describe a pin-grade location."""
 	from jarz_pos.utils.geo import (
-		SOURCE_POS_LINK,
 		CONFIDENCE_RANK,
+		SOURCE_POS_LINK,
 		is_valid_coordinate,
 		normalize_source,
 	)
@@ -82,7 +82,7 @@ def pin_fields_are_pin_grade(latitude: Any, longitude: Any, source: Any) -> bool
 	return CONFIDENCE_RANK.get(known, 0) >= CONFIDENCE_RANK[SOURCE_POS_LINK]
 
 
-def address_is_pin_grade(address_name: Optional[str]) -> bool:
+def address_is_pin_grade(address_name: str | None) -> bool:
 	"""True when the named Address carries a pin-grade location."""
 	name = str(address_name or "").strip()
 	if not name:
@@ -118,7 +118,7 @@ def pin_exempt(*, pickup: Any = False, woo_order_id: Any = None, deliver_at_bran
 	return bool(_truthy(pickup) or deliver_at_branch is True or str(woo_order_id or "").strip())
 
 
-def policy_delivers_at_branch(policy_name: Any) -> Optional[bool]:
+def policy_delivers_at_branch(policy_name: Any) -> bool | None:
 	"""Whether the named Commercial Policy hands the goods over at the branch.
 
 	``False`` for no policy (a Standard order). ``None`` when it cannot be told
@@ -141,7 +141,7 @@ def policy_delivers_at_branch(policy_name: Any) -> Optional[bool]:
 
 def assert_amendment_pin(
 	source_invoice: Any,
-	shipping_address_name: Optional[str] = None,
+	shipping_address_name: str | None = None,
 	pickup: Any = None,
 ) -> None:
 	"""Synchronous pre-check for ``submit_invoice_amendment``.
@@ -194,7 +194,7 @@ def _truthy(value: Any) -> bool:
 
 
 def assert_delivery_pin(
-	address_name: Optional[str],
+	address_name: str | None,
 	*,
 	pickup: bool = False,
 	woo_order_id: Any = None,

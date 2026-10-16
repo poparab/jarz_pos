@@ -54,12 +54,12 @@ def test_kanban_setup():
 		try:
 			results["test_get_columns"] = kanban.get_kanban_columns()
 		except Exception as e:
-			results["test_get_columns"] = f"Error: {str(e)}"
+			results["test_get_columns"] = f"Error: {e!s}"
 
 		try:
 			results["test_get_filters"] = kanban.get_kanban_filters()
 		except Exception as e:
-			results["test_get_filters"] = f"Error: {str(e)}"
+			results["test_get_filters"] = f"Error: {e!s}"
 
 	except Exception as e:
 		results["error"] = str(e)
@@ -110,7 +110,7 @@ def create_sales_invoice_state_field():
 		return {"success": True, "message": "Custom field created successfully", "created": True}
 
 	except Exception as e:
-		frappe.log_error(f"Error creating custom field: {str(e)}", "Kanban Setup")
+		frappe.log_error(f"Error creating custom field: {e!s}", "Kanban Setup")
 		return {"success": False, "error": str(e)}
 
 
@@ -146,5 +146,5 @@ def fix_existing_invoices_state():
 		return {"success": True, "message": f"Updated {count} invoices with default state", "count": count}
 
 	except Exception as e:
-		frappe.log_error(f"Error fixing invoice states: {str(e)}", "Kanban Setup")
+		frappe.log_error(f"Error fixing invoice states: {e!s}", "Kanban Setup")
 		return {"success": False, "error": str(e)}

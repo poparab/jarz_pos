@@ -30,7 +30,8 @@ shipped bugs elsewhere in this codebase:
 from __future__ import annotations
 
 import math
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
+from collections.abc import Iterable, Mapping, Sequence
+from typing import Any, Dict, List, Optional
 
 # Batch counts are reported to 3 decimals.  Enough to see "2.5 batches in the
 # freezer" without rendering 0.30000000000000004 at somebody standing at a
@@ -123,7 +124,7 @@ def shortfall_batches(*, qty_required: Any, on_hand: Any, batch_yield: Any) -> f
 # ── Run sizes ───────────────────────────────────────────────────────────
 
 
-def parse_run_sizes(raw: Any) -> Optional[List[float]]:
+def parse_run_sizes(raw: Any) -> list[float] | None:
 	"""Sizes out of the ``1:poor, 1.5:preferred, 2`` settings grammar.
 
 	Returns a sorted, de-duplicated list, or ``None`` when nothing usable is
@@ -138,7 +139,7 @@ def parse_run_sizes(raw: Any) -> Optional[List[float]]:
 	if raw is None:
 		return None
 
-	sizes: List[float] = []
+	sizes: list[float] = []
 	for part in str(raw).split(","):
 		part = part.strip()
 		if not part:
@@ -160,9 +161,9 @@ def run_sizes_for_item(
 	item_code: Any,
 	*,
 	mix_item: Any,
-	mix_run_sizes: Optional[Sequence[float]],
-	overrides: Optional[Mapping[str, Any]] = None,
-) -> Optional[List[float]]:
+	mix_run_sizes: Sequence[float] | None,
+	overrides: Mapping[str, Any] | None = None,
+) -> list[float] | None:
 	"""Legal run sizes for one base item, or ``None`` when it has none.
 
 	Today exactly one item has configured sizes: the mixer's mix item, via
@@ -192,7 +193,7 @@ def run_sizes_for_item(
 	return None
 
 
-def matches_run_size(batches: Any, run_sizes: Optional[Sequence[float]]) -> bool:
+def matches_run_size(batches: Any, run_sizes: Sequence[float] | None) -> bool:
 	"""Whether a requested batch count is one the item is actually run in.
 
 	``True`` when the item has no configured sizes — an unconfigured item is
@@ -265,7 +266,7 @@ CONTINUOUS_UOMS: frozenset[str] = frozenset(
 )
 
 
-def pick_batch_unit(component_rows: Iterable[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
+def pick_batch_unit(component_rows: Iterable[Mapping[str, Any]]) -> dict[str, Any] | None:
 	"""The component the floor counts one batch of this base by, if any.
 
 	``component_rows`` are **one batch's** worth of BOM lines —
@@ -288,7 +289,7 @@ def pick_batch_unit(component_rows: Iterable[Mapping[str, Any]]) -> Optional[Dic
 	kilo**.  That is a real answer and must reach the client as ``null``; an
 	empty dict would render as a batch unit with no name.
 	"""
-	candidates: List[Dict[str, Any]] = []
+	candidates: list[dict[str, Any]] = []
 
 	for row in component_rows or []:
 		row = row or {}
@@ -406,7 +407,7 @@ def derive_base_demand(
 	jar_targets: Iterable[Mapping[str, Any]],
 	bom_rows: Iterable[Mapping[str, Any]],
 	base_item_codes: Iterable[str],
-) -> Dict[str, float]:
+) -> dict[str, float]:
 	"""Base-item quantities implied by a set of finished-jar targets.
 
 	``jar_targets`` are ``{"item_code", "qty", "bom_name"}`` — what somebody
@@ -435,14 +436,14 @@ def derive_base_demand(
 	if not wanted:
 		return {}
 
-	rows_by_bom: Dict[str, List[Mapping[str, Any]]] = {}
+	rows_by_bom: dict[str, list[Mapping[str, Any]]] = {}
 	for row in bom_rows or []:
 		bom_name = str(row.get("bom_name") or "").strip()
 		if not bom_name:
 			continue
 		rows_by_bom.setdefault(bom_name, []).append(row)
 
-	demand: Dict[str, float] = {}
+	demand: dict[str, float] = {}
 
 	for target in jar_targets or []:
 		bom_name = str(target.get("bom_name") or "").strip()
@@ -480,7 +481,7 @@ def build_demand_block(
 	on_hand: Any,
 	batch_yield: Any,
 	driver: str,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	"""The ``demand`` sub-object for one base item.
 
 	Kept here rather than in the API layer so the three batch figures on it can
@@ -513,7 +514,7 @@ def derive_base_consumption_per_day(
 	jar_velocity_targets: Iterable[Mapping[str, Any]],
 	bom_rows: Iterable[Mapping[str, Any]],
 	base_item_codes: Iterable[str],
-) -> Dict[str, float]:
+) -> dict[str, float]:
 	"""Per-day consumption of each base, implied by the jars that consume it.
 
 	Deliberately the *same* arithmetic and the *same* code path as
@@ -531,7 +532,7 @@ def derive_base_consumption_per_day(
 	return derive_base_demand(jar_velocity_targets, bom_rows, base_item_codes)
 
 
-def cover_days(*, on_hand: Any, consumption_per_day: Any) -> Optional[float]:
+def cover_days(*, on_hand: Any, consumption_per_day: Any) -> float | None:
 	"""Days the freezer lasts at the derived rate, or ``None`` if unknown.
 
 	Mirrors ``production_planning.days_of_cover`` deliberately, because the two
@@ -612,7 +613,7 @@ def build_cover_block(
 	on_hand: Any,
 	target_days: Any,
 	batch_yield: Any,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	"""The cover figures for one base, composed once so they cannot disagree.
 
 	``consumption_per_day=None`` means *no signal* — no jar BOM lists this base
@@ -649,7 +650,7 @@ def build_cover_block(
 # ── Summary ─────────────────────────────────────────────────────────────
 
 
-def summarise_bases(items: Sequence[Mapping[str, Any]]) -> Dict[str, int]:
+def summarise_bases(items: Sequence[Mapping[str, Any]]) -> dict[str, int]:
 	"""Header counts for the Bases screen.
 
 	``blocked_by_materials`` counts only a *known* zero.  ``can_make_now_batches``

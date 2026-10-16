@@ -49,14 +49,14 @@ Run::
 from __future__ import annotations
 
 import json
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from collections.abc import Callable
+from typing import Any, Dict, List, Optional, Tuple
 
 import frappe
 from frappe.utils import flt, get_datetime
 
 from jarz_pos.scripts.b2b_accounting_validation import (
 	RunContext,
-	assert_gl_balanced,
 	_cleanup,
 	_create_invoice,
 	_ensure_customer,
@@ -68,6 +68,7 @@ from jarz_pos.scripts.b2b_accounting_validation import (
 	_pick_courier_party,
 	_pick_pos_profile,
 	_pick_sellable_items,
+	assert_gl_balanced,
 )
 
 _TOL = 0.01
@@ -110,7 +111,7 @@ def _guard_environment() -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _bucket(ctx: RunContext, attr: str) -> List[Dict[str, Any]]:
+def _bucket(ctx: RunContext, attr: str) -> list[dict[str, Any]]:
 	rows = getattr(ctx, attr, None)
 	if rows is None:
 		rows = []
@@ -148,7 +149,7 @@ def _track(ctx: RunContext, attr: str, name: str) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _gl_by_account(voucher_type: str, voucher_no: str) -> Dict[str, float]:
+def _gl_by_account(voucher_type: str, voucher_no: str) -> dict[str, float]:
 	"""Net movement per account for one voucher (debit positive, live rows only)."""
 	rows = frappe.db.sql(
 		"""
@@ -167,7 +168,7 @@ def _gl_net(voucher_type: str, voucher_no: str, account: str) -> float:
 	return flt(_gl_by_account(voucher_type, voucher_no).get(account, 0.0))
 
 
-def _gl_net_for_invoices(invoices: List[str], account: str) -> float:
+def _gl_net_for_invoices(invoices: list[str], account: str) -> float:
 	"""Live net movement (debit positive) on *account* across several invoices."""
 	invoices = [i for i in invoices if i]
 	if not invoices:
@@ -255,7 +256,7 @@ def _pe_gl_net(invoice: str, account: str) -> float:
 	)
 
 
-def _payment_entries_for(invoice: str) -> List[str]:
+def _payment_entries_for(invoice: str) -> list[str]:
 	return sorted(
 		set(
 			frappe.get_all(
@@ -269,7 +270,7 @@ def _payment_entries_for(invoice: str) -> List[str]:
 	)
 
 
-def _submitted_payment_entries_for(invoice: str) -> List[str]:
+def _submitted_payment_entries_for(invoice: str) -> list[str]:
 	names = _payment_entries_for(invoice)
 	if not names:
 		return []
@@ -296,7 +297,7 @@ def _allocated_total(invoice: str) -> float:
 	return flt((rows and rows[0][0]) or 0.0)
 
 
-def _courier_transactions(invoice: str) -> List[Dict[str, Any]]:
+def _courier_transactions(invoice: str) -> list[dict[str, Any]]:
 	return (
 		frappe.get_all(
 			"Courier Transaction",
@@ -320,7 +321,7 @@ def _courier_transactions(invoice: str) -> List[Dict[str, Any]]:
 	)
 
 
-def _delivery_notes_for(invoice: str) -> List[str]:
+def _delivery_notes_for(invoice: str) -> list[str]:
 	return sorted(
 		set(
 			frappe.get_all(
@@ -334,7 +335,7 @@ def _delivery_notes_for(invoice: str) -> List[str]:
 	)
 
 
-def _shipping_income_row(invoice: str) -> Tuple[bool, float]:
+def _shipping_income_row(invoice: str) -> tuple[bool, float]:
 	"""Return (row_present, tax_amount) for the Shipping Income tax row.
 
 	The tax row is the source of truth for shipping income — never
@@ -355,16 +356,16 @@ def _shipping_income_row(invoice: str) -> Tuple[bool, float]:
 	return False, 0.0
 
 
-def _expect_throw(fn: Callable, *args: Any, **kwargs: Any) -> Tuple[bool, str]:
+def _expect_throw(fn: Callable, *args: Any, **kwargs: Any) -> tuple[bool, str]:
 	"""Call *fn* expecting it to raise. Returns (raised, message)."""
 	try:
 		fn(*args, **kwargs)
-	except Exception as exc:  # noqa: BLE001 - the message is the evidence
+	except Exception as exc:
 		return True, str(exc)[:400]
 	return False, "call returned without raising"
 
 
-def _shift_gate_reason(pos_profile: str) -> Optional[str]:
+def _shift_gate_reason(pos_profile: str) -> str | None:
 	"""Return why the open-shift gate would refuse, or None when it would not.
 
 	api/couriers.py:402 runs ensure_open_shift_for_invoice before any collection
@@ -396,7 +397,7 @@ def _shift_gate_reason(pos_profile: str) -> Optional[str]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _normalize_courier(picked: Any) -> Optional[Dict[str, Any]]:
+def _normalize_courier(picked: Any) -> dict[str, Any] | None:
 	if not picked:
 		return None
 	try:
@@ -409,7 +410,7 @@ def _normalize_courier(picked: Any) -> Optional[Dict[str, Any]]:
 
 
 def _new_invoice(
-	ctx: RunContext, env: Dict[str, Any], case: str, *, territory: Optional[str] = None, pickup: bool = False
+	ctx: RunContext, env: dict[str, Any], case: str, *, territory: str | None = None, pickup: bool = False
 ) -> str:
 	customer = _ensure_customer(ctx, case, territory or env["territory"], env["customer_group"])
 	return _create_invoice(
@@ -424,7 +425,7 @@ def _new_invoice(
 	)
 
 
-def _pay_invoice_partial(ctx: RunContext, invoice: str, pos_profile: str, amount: float) -> Optional[str]:
+def _pay_invoice_partial(ctx: RunContext, invoice: str, pos_profile: str, amount: float) -> str | None:
 	"""Pay exactly *amount* in cash to the branch account.
 
 	_pay_invoice_full_cash always clears the whole outstanding, so the
@@ -488,7 +489,7 @@ def _ensure_mp_territory(ctx: RunContext, name: str, income: float, expense: flo
 		doc.is_group = 0
 		doc.insert(ignore_permissions=True)
 	_track(ctx, "mp_territories", name)
-	updates: Dict[str, Any] = {}
+	updates: dict[str, Any] = {}
 	if "delivery_income" in cols:
 		updates["delivery_income"] = income
 	if "delivery_expense" in cols:
@@ -498,7 +499,7 @@ def _ensure_mp_territory(ctx: RunContext, name: str, income: float, expense: flo
 	return name
 
 
-def _ensure_territory_pos_profile(territory: str, pos_profile: str) -> Tuple[bool, str]:
+def _ensure_territory_pos_profile(territory: str, pos_profile: str) -> tuple[bool, str]:
 	"""Point the fixture Territory at the POS profile these cases drive.
 
 	api/manager.py:1252-1262 runs ``assert_pos_profile_matches_territory`` before
@@ -541,7 +542,7 @@ def _ensure_territory_pos_profile(territory: str, pos_profile: str) -> Tuple[boo
 	return True, f"Territory {territory} -> POS Profile {pos_profile}"
 
 
-def _addresses_for_customer(customer: str) -> List[str]:
+def _addresses_for_customer(customer: str) -> list[str]:
 	return sorted(
 		set(
 			frappe.get_all(
@@ -559,7 +560,7 @@ def _addresses_for_customer(customer: str) -> List[str]:
 	)
 
 
-def _ensure_mp_address(ctx: RunContext, customer: str, title: str, territory: str) -> Optional[str]:
+def _ensure_mp_address(ctx: RunContext, customer: str, title: str, territory: str) -> str | None:
 	"""Create (or refresh) a fixture Address whose city IS the Territory name.
 
 	Address.city is what resolve_address_territory reads first, and the POS lane
@@ -601,7 +602,7 @@ def _ensure_mp_address(ctx: RunContext, customer: str, title: str, territory: st
 
 def _make_receipt(
 	ctx: RunContext, invoice: str, pos_profile: str, amount: float, method: str = "InstaPay"
-) -> Optional[str]:
+) -> str | None:
 	"""Create a POS Payment Receipt through the real endpoint and stamp an image URL.
 
 	ensure_uploaded_payment_receipt rejects a receipt without an image, and
@@ -761,14 +762,14 @@ def _teardown_taxonomy(ctx: RunContext) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _case_batch_settlement(ctx: RunContext, env: Dict[str, Any]) -> None:
+def _case_batch_settlement(ctx: RunContext, env: dict[str, Any]) -> None:
 	case = "C5-BATCH-SETTLEMENT"
 
 	from jarz_pos.api.couriers import generate_settlement_preview
 	from jarz_pos.services.delivery_handling import (
+		_get_courier_outstanding_account,
 		handle_out_for_delivery_transition,
 		settle_delivery_party,
-		_get_courier_outstanding_account,
 	)
 	from jarz_pos.services.settlement_strategies import dispatch_settlement
 	from jarz_pos.utils.account_utils import get_creditors_account, get_pos_cash_account
@@ -798,7 +799,7 @@ def _case_batch_settlement(ctx: RunContext, env: Dict[str, Any]) -> None:
 		)
 		return
 
-	cod_invoices: List[str] = []
+	cod_invoices: list[str] = []
 	for idx in (1, 2):
 		inv = _new_invoice(ctx, env, f"{case}-COD{idx}")
 		frappe.db.commit()
@@ -872,7 +873,7 @@ def _case_batch_settlement(ctx: RunContext, env: Dict[str, Any]) -> None:
 		f"{[(r['amount'], r['shipping_amount']) for r in scope if r['reference_invoice'] == paid_invoice]}",
 	)
 
-	previews: Dict[str, Dict[str, Any]] = {}
+	previews: dict[str, dict[str, Any]] = {}
 	for inv in fixtures:
 		try:
 			previews[inv] = generate_settlement_preview(inv, party_type, party) or {}
@@ -1058,7 +1059,7 @@ def _case_batch_settlement(ctx: RunContext, env: Dict[str, Any]) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _collection_change_jes(invoice: str) -> List[str]:
+def _collection_change_jes(invoice: str) -> list[str]:
 	"""Find the collection-change JEs by user_remark, not by title.
 
 	v16 JournalEntry.validate overwrites title with the first account name, so a
@@ -1081,15 +1082,15 @@ def _collection_change_jes(invoice: str) -> List[str]:
 	)
 
 
-def _case_collection_method_change(ctx: RunContext, env: Dict[str, Any]) -> None:
+def _case_collection_method_change(ctx: RunContext, env: dict[str, Any]) -> None:
 	case = "C1-COLLECTION-CHANGE"
 
 	from jarz_pos.api.couriers import change_payment_collection_method
 	from jarz_pos.services.delivery_handling import (
-		handle_out_for_delivery_transition,
 		_get_courier_outstanding_account,
 		_get_online_collection_account,
 		_is_online_collection_method,
+		handle_out_for_delivery_transition,
 	)
 
 	courier = env["courier"]
@@ -1399,7 +1400,7 @@ _AMENDMENT_PRECONDITION_CODES = {
 }
 
 
-def _case_amendment_paid(ctx: RunContext, env: Dict[str, Any]) -> None:
+def _case_amendment_paid(ctx: RunContext, env: dict[str, Any]) -> None:
 	case = "C2-AMENDMENT-PAID"
 
 	from jarz_pos.api.manager import submit_invoice_amendment
@@ -1615,8 +1616,8 @@ def _case_amendment_paid(ctx: RunContext, env: Dict[str, Any]) -> None:
 
 
 def _prepare_c3_customer(
-	ctx: RunContext, env: Dict[str, Any], suffix: str, territory: str
-) -> Tuple[str, Optional[str]]:
+	ctx: RunContext, env: dict[str, Any], suffix: str, territory: str
+) -> tuple[str, str | None]:
 	"""Return (customer, address) with the customer's ONLY address in *territory*.
 
 	create_pos_invoice resolves the order territory from the auto-picked shipping
@@ -1625,7 +1626,7 @@ def _prepare_c3_customer(
 	address would win that auto-pick, so it is removed first.
 	"""
 	customer = _ensure_customer(ctx, suffix, territory, env["customer_group"])
-	keep: Optional[str] = None
+	keep: str | None = None
 	for name in _addresses_for_customer(customer):
 		title = str(frappe.db.get_value("Address", name, "address_title") or "")
 		if title.endswith("_ALT"):
@@ -1653,7 +1654,7 @@ def _prepare_c3_customer(
 	return customer, keep
 
 
-def _case_address_territory_change(ctx: RunContext, env: Dict[str, Any]) -> None:
+def _case_address_territory_change(ctx: RunContext, env: dict[str, Any]) -> None:
 	case = "C3-ADDRESS-TERRITORY"
 
 	from jarz_pos.api.customer import change_invoice_shipping_address
@@ -2020,8 +2021,8 @@ def _case_address_territory_change(ctx: RunContext, env: Dict[str, Any]) -> None
 
 
 def _dispatch_unpaid_online(
-	ctx: RunContext, env: Dict[str, Any], case: str, suffix: str
-) -> Optional[Tuple[str, float]]:
+	ctx: RunContext, env: dict[str, Any], case: str, suffix: str
+) -> tuple[str, float] | None:
 	"""Create an unpaid InstaPay-intent order and move it Out for Delivery."""
 	from jarz_pos.services.settlement_strategies import dispatch_settlement
 
@@ -2058,7 +2059,7 @@ def _dispatch_unpaid_online(
 	return invoice, grand
 
 
-def _case_online_unpaid_lifecycle(ctx: RunContext, env: Dict[str, Any]) -> None:
+def _case_online_unpaid_lifecycle(ctx: RunContext, env: dict[str, Any]) -> None:
 	case = "C4-ONLINE-UNPAID"
 
 	from jarz_pos.api.couriers import (
@@ -2277,7 +2278,7 @@ def _case_online_unpaid_lifecycle(ctx: RunContext, env: Dict[str, Any]) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _case_settlement_preview_token(ctx: RunContext, env: Dict[str, Any]) -> None:
+def _case_settlement_preview_token(ctx: RunContext, env: dict[str, Any]) -> None:
 	case = "C6-PREVIEW-TOKEN"
 
 	from jarz_pos.api.couriers import confirm_settlement, generate_settlement_preview
@@ -2510,7 +2511,7 @@ def _case_settlement_preview_token(ctx: RunContext, env: Dict[str, Any]) -> None
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _case_cancel_guards(ctx: RunContext, env: Dict[str, Any]) -> None:
+def _case_cancel_guards(ctx: RunContext, env: dict[str, Any]) -> None:
 	case = "C7-CANCEL-GUARDS"
 
 	from jarz_pos.api.kanban import cancel_invoice
@@ -2699,7 +2700,7 @@ _CASES = [
 ]
 
 
-def run(cleanup: bool = True) -> Dict[str, Any]:
+def run(cleanup: bool = True) -> dict[str, Any]:
 	if isinstance(cleanup, str):
 		cleanup = cleanup.strip().lower() not in {"", "0", "false", "no"}
 

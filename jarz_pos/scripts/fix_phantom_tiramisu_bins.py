@@ -24,8 +24,8 @@ cancel did not roll back. See the sibling fix in ``api/reports.py``.
 """
 
 import frappe
+from erpnext.stock.stock_balance import get_balance_qty_from_sle, repost_stock
 from frappe.utils import flt
-from erpnext.stock.stock_balance import repost_stock, get_balance_qty_from_sle
 
 TARGETS = [
 	("Tiramisu Medium", "Raw Material - J"),

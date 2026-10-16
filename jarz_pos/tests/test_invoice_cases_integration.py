@@ -17,8 +17,9 @@ Tests validate:
 """
 
 import unittest
+from unittest.mock import MagicMock, patch
+
 import frappe
-from unittest.mock import patch, MagicMock
 
 
 class TestInvoiceCasesIntegration(unittest.TestCase):
@@ -309,7 +310,7 @@ class TestInvoiceCasesIntegration(unittest.TestCase):
 	@patch("jarz_pos.services.delivery_handling.frappe")
 	def test_sales_partner_fees_with_vat(self, mock_frappe):
 		"""Test sales partner fees calculation includes VAT."""
-		from jarz_pos.services.delivery_handling import _compute_sales_partner_fees, PARTNER_FEES_VAT_RATE
+		from jarz_pos.services.delivery_handling import PARTNER_FEES_VAT_RATE, _compute_sales_partner_fees
 
 		# Mock invoice
 		mock_inv = MagicMock()
@@ -461,11 +462,11 @@ class TestInvoiceCasesIntegration(unittest.TestCase):
 
 	def test_pos_profile_required_for_settlement(self):
 		"""Test that POS profile is required for settlement operations."""
-		from jarz_pos.services.settlement_strategies import dispatch_settlement
-
 		# POS profile needed to resolve cash account
 		# If not provided, tries to get default
 		import inspect
+
+		from jarz_pos.services.settlement_strategies import dispatch_settlement
 
 		sig = inspect.signature(dispatch_settlement)
 		params = sig.parameters

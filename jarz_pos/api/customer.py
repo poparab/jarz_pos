@@ -3,8 +3,8 @@ import re
 
 import frappe
 from frappe import _
-from frappe.utils import flt
 from frappe.model.document import Document
+from frappe.utils import flt
 
 from jarz_pos.utils.customer_address_utils import (
 	ADDRESS_PHONE_FIELDS,
@@ -12,12 +12,14 @@ from jarz_pos.utils.customer_address_utils import (
 	ensure_shipping_address,
 	find_matching_customer_address,
 	format_address_text,
-	get_customer_shipping_addresses as _get_customer_shipping_addresses,
-	get_linked_customer_addresses,
 	get_linked_customer_address_names,
+	get_linked_customer_addresses,
 	link_shipping_address_to_invoice,
 	resolve_customer_shipping_address,
 	set_customer_primary_shipping_address,
+)
+from jarz_pos.utils.customer_address_utils import (
+	get_customer_shipping_addresses as _get_customer_shipping_addresses,
 )
 from jarz_pos.utils.invoice_utils import resolve_address_territory
 from jarz_pos.utils.phone import phone_search_terms, phone_variants
@@ -463,7 +465,7 @@ def get_customer_shipping_addresses(customer, invoice=None):
 
 		return _build_customer_shipping_address_book(customer, invoice=invoice)
 	except Exception as e:
-		frappe.log_error(f"get_customer_shipping_addresses: {str(e)}", frappe.get_traceback())
+		frappe.log_error(f"get_customer_shipping_addresses: {e!s}", frappe.get_traceback())
 		frappe.throw(_("Failed to fetch customer shipping addresses."))
 
 
@@ -633,7 +635,7 @@ def save_customer_shipping_address(
 		# generic string is what hid this bug from the POS floor for weeks.
 		raise
 	except Exception as e:
-		frappe.log_error(f"save_customer_shipping_address: {str(e)}", frappe.get_traceback())
+		frappe.log_error(f"save_customer_shipping_address: {e!s}", frappe.get_traceback())
 		frappe.throw(_("Failed to save customer shipping address: {0}").format(str(e)))
 
 
@@ -678,7 +680,7 @@ def get_customers(search=None):
 		return customers
 
 	except Exception as e:
-		frappe.log_error(f"Error fetching customers: {str(e)}")
+		frappe.log_error(f"Error fetching customers: {e!s}")
 		return []
 
 
@@ -706,7 +708,7 @@ def get_recent_customers(limit=10):
 		return customers
 
 	except Exception as e:
-		frappe.log_error(f"Error fetching recent customers: {str(e)}")
+		frappe.log_error(f"Error fetching recent customers: {e!s}")
 		return []
 
 
@@ -922,7 +924,7 @@ def get_territories(search=None):
 		return territories
 
 	except Exception as e:
-		frappe.log_error(f"Error fetching territories: {str(e)}")
+		frappe.log_error(f"Error fetching territories: {e!s}")
 		return []
 
 
@@ -1255,7 +1257,7 @@ def create_customer(
 
 		customer_doc = frappe.get_doc(customer_payload)
 
-		frappe.logger().info(f"Creating customer with basic data")
+		frappe.logger().info("Creating customer with basic data")
 		customer_doc.insert(ignore_permissions=True)
 		frappe.logger().info(f"Customer created successfully: {customer_doc.name}")
 
@@ -1312,7 +1314,7 @@ def create_customer(
 			if location_link:
 				address_doc.address_line2 = f"Location: {location_link}"
 
-			frappe.logger().info(f"Creating address")
+			frappe.logger().info("Creating address")
 			address_doc.insert(ignore_permissions=True)
 			frappe.logger().info(f"Address created successfully: {address_doc.name}")
 
@@ -1371,7 +1373,7 @@ def create_customer(
 			customer_doc.phone = mobile_no
 		customer_doc.save(ignore_permissions=True)
 
-		frappe.logger().info(f"Customer updated with address and contact")
+		frappe.logger().info("Customer updated with address and contact")
 
 		# Return the created customer data with territory info
 		result = {
@@ -1390,8 +1392,8 @@ def create_customer(
 		return result
 
 	except Exception as e:
-		frappe.log_error(f"Error creating customer: {str(e)}")
-		frappe.throw(f"Failed to create customer: {str(e)}")
+		frappe.log_error(f"Error creating customer: {e!s}")
+		frappe.throw(f"Failed to create customer: {e!s}")
 
 
 # ---------------------------------------------------------------------------
@@ -1470,8 +1472,8 @@ def update_default_address(customer, address, phone, invoice=None):
 		return result
 
 	except Exception as e:
-		frappe.log_error(f"Error updating customer address: {str(e)}", frappe.get_traceback())
-		frappe.throw(f"Failed to update customer address: {str(e)}")
+		frappe.log_error(f"Error updating customer address: {e!s}", frappe.get_traceback())
+		frappe.throw(f"Failed to update customer address: {e!s}")
 
 
 # ---------------------------------------------------------------------------
@@ -1545,7 +1547,7 @@ def update_customer_shipping_address(
 	except frappe.ValidationError:
 		raise
 	except Exception as e:
-		frappe.log_error(f"update_customer_shipping_address: {str(e)}", frappe.get_traceback())
+		frappe.log_error(f"update_customer_shipping_address: {e!s}", frappe.get_traceback())
 		frappe.throw(_("Failed to update address: {0}").format(str(e)))
 
 
@@ -1629,7 +1631,7 @@ def delete_customer_shipping_address(customer, address_name):
 
 		return {"success": True, "address_book": _build_customer_shipping_address_book(customer)}
 	except Exception as e:
-		frappe.log_error(f"delete_customer_shipping_address: {str(e)}", frappe.get_traceback())
+		frappe.log_error(f"delete_customer_shipping_address: {e!s}", frappe.get_traceback())
 		frappe.throw(_("Failed to delete address."))
 
 
@@ -1898,5 +1900,5 @@ def change_invoice_shipping_address(invoice_name, address_name):
 		# reason from the app, which showed "Failed to change invoice address".
 		raise
 	except Exception as e:
-		frappe.log_error(f"change_invoice_shipping_address: {str(e)}", frappe.get_traceback())
+		frappe.log_error(f"change_invoice_shipping_address: {e!s}", frappe.get_traceback())
 		frappe.throw(_("Failed to change invoice shipping address."))

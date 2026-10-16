@@ -1,7 +1,7 @@
 import contextlib
-import unittest
 import sys
 import types
+import unittest
 from unittest.mock import MagicMock, patch
 
 try:
@@ -830,8 +830,8 @@ class TestConfirmOnlinePaymentGate(unittest.TestCase):
 
 	def test_confirm_online_payment_denies_staff(self):
 		from jarz_pos.tests.test_payment_collection_change import (
-			_import_delivery_handling,
 			_FakeInvoice,
+			_import_delivery_handling,
 		)
 
 		invoice = _FakeInvoice(
@@ -864,8 +864,8 @@ class TestConfirmOnlinePaymentGate(unittest.TestCase):
 
 	def test_confirm_online_payment_validates_screenshot(self):
 		from jarz_pos.tests.test_payment_collection_change import (
-			_import_delivery_handling,
 			_FakeInvoice,
+			_import_delivery_handling,
 		)
 
 		invoice = _FakeInvoice(
@@ -1564,6 +1564,7 @@ class TestTransferProofIsMandatory(unittest.TestCase):
 	def test_the_gate_is_wired_into_pay_invoice_for_both_online_modes(self):
 		"""The rule has to hold at the endpoint, not just in the helper."""
 		import inspect
+
 		from jarz_pos.api import invoices
 
 		src = inspect.getsource(invoices.pay_invoice)

@@ -1,4 +1,4 @@
-"""Read-only GL / accounting integrity audit for jarz_pos.
+r"""Read-only GL / accounting integrity audit for jarz_pos.
 
 This is the CI entrypoint for the accounting-integrity gate. It runs the SAME
 invariants asserted by ``test_gl_verification_case1`` .. ``case6`` — but as
@@ -70,7 +70,7 @@ def _has_column(doctype: str, column: str) -> bool:
 
 
 class _Result:
-	__slots__ = ("name", "status", "message")
+	__slots__ = ("message", "name", "status")
 
 	def __init__(self, name: str, status: str, message: str = ""):
 		self.name = name

@@ -31,7 +31,8 @@ Guarantees mirrored from ``services/consumable_deduction`` and ``crm/*``:
 
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from collections.abc import Iterable, Sequence
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 try:
 	import frappe
@@ -64,7 +65,7 @@ STATUS_NOT_TRACKED = "Not Tracked"
 ALERT_STATUSES = (STATUS_OUT_OF_STOCK, STATUS_REORDER_NOW, STATUS_REORDER_SOON)
 
 # Python's ``date.weekday()``: Mon=0 ... Fri=4, Sat=5, Sun=6.
-_REST_DAY_SETS: Dict[str, Set[int]] = {
+_REST_DAY_SETS: dict[str, set[int]] = {
 	"none": set(),
 	"friday": {4},
 	"friday & saturday": {4, 5},
@@ -167,7 +168,7 @@ def _today():
 # ---------------------------------------------------------------------------
 # Settings
 # ---------------------------------------------------------------------------
-def get_label_settings() -> Dict[str, Any]:
+def get_label_settings() -> dict[str, Any]:
 	"""Effective label-printing settings, with defaults for never-written fields.
 
 	Never raises: a site whose ``Jarz POS Settings`` does not yet carry these
@@ -229,7 +230,7 @@ def get_label_settings() -> Dict[str, Any]:
 	}
 
 
-def labels_per_sheet_for(label_row: Dict[str, Any], *, settings: Optional[Dict[str, Any]] = None) -> int:
+def labels_per_sheet_for(label_row: dict[str, Any], *, settings: dict[str, Any] | None = None) -> int:
 	"""Labels on one printed sheet for this design.
 
 	The per-label override wins; otherwise the size decides — the print house
@@ -253,7 +254,7 @@ def labels_per_sheet_for(label_row: Dict[str, Any], *, settings: Optional[Dict[s
 # ---------------------------------------------------------------------------
 # Working-day date maths
 # ---------------------------------------------------------------------------
-def add_working_days(start_date: Any, days: int, rest_weekdays: Optional[Iterable[int]] = None):
+def add_working_days(start_date: Any, days: int, rest_weekdays: Iterable[int] | None = None):
 	"""Return *start_date* advanced by *days*, skipping the weekly rest day(s).
 
 	``add_working_days("2026-08-19", 3, {4})`` -- Wednesday plus three printing
@@ -282,7 +283,7 @@ def add_working_days(start_date: Any, days: int, rest_weekdays: Optional[Iterabl
 	return current
 
 
-def expected_ready_date(requested_on: Any = None, *, settings: Optional[Dict[str, Any]] = None):
+def expected_ready_date(requested_on: Any = None, *, settings: dict[str, Any] | None = None):
 	"""Date a batch requested on *requested_on* is expected to be ready.
 
 	Uses the slower end of the lead time on purpose: the date a planner needs to
@@ -295,7 +296,7 @@ def expected_ready_date(requested_on: Any = None, *, settings: Optional[Dict[str
 	return add_working_days(start, settings["lead_days_max"], settings["rest_weekdays"])
 
 
-def lead_time_calendar_days(from_date: Any = None, *, settings: Optional[Dict[str, Any]] = None) -> int:
+def lead_time_calendar_days(from_date: Any = None, *, settings: dict[str, Any] | None = None) -> int:
 	"""Lead time expressed in *calendar* days from *from_date*.
 
 	Days of cover are calendar days -- the customer keeps ordering through the
@@ -317,7 +318,7 @@ def lead_time_calendar_days(from_date: Any = None, *, settings: Optional[Dict[st
 # ---------------------------------------------------------------------------
 # Ledger reads
 # ---------------------------------------------------------------------------
-def get_position(label_name: str) -> Dict[str, Any]:
+def get_position(label_name: str) -> dict[str, Any]:
 	"""On-hand count AND value for one label, both summed over the ledger.
 
 	``avg_cost`` is the weighted average of what is left: total value over total
@@ -349,7 +350,7 @@ def get_on_hand(label_name: str) -> int:
 	return get_position(label_name)["on_hand"]
 
 
-def get_usage_stats(label_name: str, *, settings: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def get_usage_stats(label_name: str, *, settings: dict[str, Any] | None = None) -> dict[str, Any]:
 	"""Consumption rate for one label over the trailing usage window.
 
 	The divisor is the *observed* span rather than the full window, floored at a
@@ -419,7 +420,7 @@ def get_usage_stats(label_name: str, *, settings: Optional[Dict[str, Any]] = Non
 	}
 
 
-def get_open_print_orders(label_name: str) -> List[Dict[str, Any]]:
+def get_open_print_orders(label_name: str) -> list[dict[str, Any]]:
 	"""Print orders for *label_name* that have not landed or been cancelled."""
 	if not label_name or not _doctype_exists(PRINT_ORDER_DOCTYPE):
 		return []
@@ -486,7 +487,7 @@ def compute_status(
 	return STATUS_OK
 
 
-def build_snapshot(label_row: Dict[str, Any], *, settings: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def build_snapshot(label_row: dict[str, Any], *, settings: dict[str, Any] | None = None) -> dict[str, Any]:
 	"""Full computed picture of one label -- the single source of truth for status.
 
 	Used by the API, by ``refresh_label`` and by the daily alert, so the three can
@@ -579,7 +580,7 @@ def build_snapshot(label_row: Dict[str, Any], *, settings: Optional[Dict[str, An
 	}
 
 
-def _runs_out_on(on_hand: int, avg_daily_usage: float) -> Optional[str]:
+def _runs_out_on(on_hand: int, avg_daily_usage: float) -> str | None:
 	"""Projected stock-out date, or None when usage is unknown."""
 	if avg_daily_usage <= 0 or on_hand <= 0:
 		return None
@@ -591,7 +592,7 @@ def _runs_out_on(on_hand: int, avg_daily_usage: float) -> Optional[str]:
 		return None
 
 
-def write_snapshot(snapshot: Dict[str, Any]) -> None:
+def write_snapshot(snapshot: dict[str, Any]) -> None:
 	"""Persist an already-computed snapshot onto its label's cached columns.
 
 	Split out from ``refresh_label`` so a caller that has just built a snapshot
@@ -619,7 +620,7 @@ def write_snapshot(snapshot: Dict[str, Any]) -> None:
 		frappe.db.set_value(LABEL_DOCTYPE, name, field, value, update_modified=False)
 
 
-def refresh_label(label_name: str) -> Optional[Dict[str, Any]]:
+def refresh_label(label_name: str) -> dict[str, Any] | None:
 	"""Recompute the cached columns on one label and write them back.
 
 	The cached values exist only so Desk list views and reports can sort and
@@ -684,14 +685,14 @@ def post_movement(
 	movement_type: str,
 	qty: int,
 	posting_date: Any = None,
-	reference_doctype: Optional[str] = None,
-	reference_name: Optional[str] = None,
-	print_order: Optional[str] = None,
-	remarks: Optional[str] = None,
-	unit_cost: Optional[float] = None,
+	reference_doctype: str | None = None,
+	reference_name: str | None = None,
+	print_order: str | None = None,
+	remarks: str | None = None,
+	unit_cost: float | None = None,
 	post_gl: bool = True,
 	refresh: bool = True,
-) -> Optional[str]:
+) -> str | None:
 	"""Insert one ledger row, mirror its value into the GL, refresh the label.
 
 	*qty* is signed by the caller for ``Adjustment`` and ``Opening``; for the
@@ -905,7 +906,7 @@ def expensed_on_revaluation(*, difference: float, share: float, pool_value: floa
 
 
 def sync_batch_value(
-	po: Any, *, reference_doctype: Optional[str] = None, reference_name: Optional[str] = None
+	po: Any, *, reference_doctype: str | None = None, reference_name: str | None = None
 ) -> float:
 	"""Bring a received batch's ledger value to its target; return the change.
 
@@ -971,7 +972,7 @@ def _insert_value_row(
 	*,
 	label: str,
 	value: float,
-	print_order: Optional[str],
+	print_order: str | None,
 	reference_doctype: str,
 	reference_name: str,
 	remarks: str,
@@ -995,7 +996,7 @@ def _insert_value_row(
 	return doc
 
 
-def _pi_label_amount(pi: Any, settings: Optional[Dict[str, Any]] = None) -> float:
+def _pi_label_amount(pi: Any, settings: dict[str, Any] | None = None) -> float:
 	"""Net amount the PI put on Labels Inventory for the printing item (VAT excluded).
 
 	Counts only lines that are BOTH the printing item AND booked to the
@@ -1034,7 +1035,7 @@ def billed_amount(purchase_invoice: str) -> float:
 	return round(total, 2)
 
 
-def _print_order_for_pi(pi: Any) -> Optional[str]:
+def _print_order_for_pi(pi: Any) -> str | None:
 	"""The print order a PI bills: by link first, then by the idempotency key.
 
 	The key (``label-po-<name>``) is what ``bill_print_order`` stamps, and an
@@ -1051,7 +1052,7 @@ def _print_order_for_pi(pi: Any) -> Optional[str]:
 	return None
 
 
-def link_bill(print_order: str, purchase_invoice: str) -> Dict[str, Any]:
+def link_bill(print_order: str, purchase_invoice: str) -> dict[str, Any]:
 	"""Attach a submitted PI to its batch and bring the batch's value in line.
 
 	Idempotent: linking the PI that is already linked only re-syncs value.
@@ -1093,7 +1094,7 @@ def _recompute_cost_per_label(po: Any) -> None:
 	po.cost_per_label = cpl
 
 
-def link_bill_on_purchase_invoice_submit(doc: Any, method: Optional[str] = None) -> None:
+def link_bill_on_purchase_invoice_submit(doc: Any, method: str | None = None) -> None:
 	"""A PI for a label batch that was submitted outside ``bill_print_order``.
 
 	Covers an amended bill re-issued in Desk after the original was cancelled:
@@ -1115,7 +1116,7 @@ def link_bill_on_purchase_invoice_submit(doc: Any, method: Optional[str] = None)
 	link_bill(po_name, doc.name)
 
 
-def unlink_bill_on_purchase_invoice_cancel(doc: Any, method: Optional[str] = None) -> None:
+def unlink_bill_on_purchase_invoice_cancel(doc: Any, method: str | None = None) -> None:
 	"""The printer's bill was cancelled: the batch is unbilled again.
 
 	Its value comes back out of the ledger -- the share still on the shelf
@@ -1168,7 +1169,7 @@ def _resync_after_debit_note(doc: Any) -> None:
 # ---------------------------------------------------------------------------
 # Sales Invoice consumption
 # ---------------------------------------------------------------------------
-def labels_for_customer(customer: str) -> List[Dict[str, Any]]:
+def labels_for_customer(customer: str) -> list[dict[str, Any]]:
 	"""Enabled, we-print labels for *customer*, keyed for per-flavour matching."""
 	if not customer or not _doctype_exists(LABEL_DOCTYPE):
 		return []
@@ -1191,8 +1192,8 @@ LABEL_BEARING_GROUPS = {"Small", "Medium", "Meduim", "Large"}
 
 
 def invoice_label_usage(
-	doc: Any, labels: Sequence[Dict[str, Any]]
-) -> Tuple[Dict[str, int], List[Dict[str, Any]]]:
+	doc: Any, labels: Sequence[dict[str, Any]]
+) -> tuple[dict[str, int], list[dict[str, Any]]]:
 	"""Per-flavour label usage for one invoice.
 
 	Returns ``(usage, unmatched)`` where *usage* maps label name -> signed label
@@ -1206,14 +1207,14 @@ def invoice_label_usage(
 	both would double every bundled order. Lines outside the jar groups (merch,
 	services) carry no label and are ignored rather than reported unmatched.
 	"""
-	by_item: Dict[str, Dict[str, Any]] = {}
+	by_item: dict[str, dict[str, Any]] = {}
 	for label in labels:
 		item_code = str(label.get("item") or "").strip()
 		if item_code:
 			by_item.setdefault(item_code, label)
 
-	usage: Dict[str, int] = {}
-	unmatched: Dict[str, Dict[str, Any]] = {}
+	usage: dict[str, int] = {}
+	unmatched: dict[str, dict[str, Any]] = {}
 	for row in getattr(doc, "items", None) or []:
 		if _int(getattr(row, "is_bundle_parent", 0)):
 			continue
@@ -1249,8 +1250,8 @@ def invoice_label_usage(
 
 
 def _auto_create_label(
-	customer: str, unmatched_line: Dict[str, Any], peers: Sequence[Dict[str, Any]]
-) -> Optional[str]:
+	customer: str, unmatched_line: dict[str, Any], peers: Sequence[dict[str, Any]]
+) -> str | None:
 	"""Start tracking a flavour the customer ordered but has no label for.
 
 	Customers add and remove flavours at will, and an untracked flavour is a
@@ -1294,7 +1295,7 @@ def _auto_create_label(
 		return None
 
 
-def _movements_for_invoice(invoice_name: str) -> List[Dict[str, Any]]:
+def _movements_for_invoice(invoice_name: str) -> list[dict[str, Any]]:
 	try:
 		return frappe.get_all(
 			MOVEMENT_DOCTYPE,
@@ -1306,7 +1307,7 @@ def _movements_for_invoice(invoice_name: str) -> List[Dict[str, Any]]:
 		return []
 
 
-def consume_labels_on_invoice_submit(doc: Any, method: Optional[str] = None) -> None:
+def consume_labels_on_invoice_submit(doc: Any, method: str | None = None) -> None:
 	"""Draw down label stock when a Sales Invoice for a label customer is submitted.
 
 	Deliberately on submit rather than on the Out-for-Delivery transition (where
@@ -1364,7 +1365,7 @@ def consume_labels_on_invoice_submit(doc: Any, method: Optional[str] = None) -> 
 		)
 
 
-def reverse_labels_on_invoice_cancel(doc: Any, method: Optional[str] = None) -> None:
+def reverse_labels_on_invoice_cancel(doc: Any, method: str | None = None) -> None:
 	"""Put the labels back when a consumed invoice is cancelled.
 
 	Posts a compensating movement rather than deleting the original: the ledger is
@@ -1381,7 +1382,7 @@ def reverse_labels_on_invoice_cancel(doc: Any, method: Optional[str] = None) -> 
 		if not rows:
 			return
 
-		net_by_label: Dict[str, Dict[str, float]] = {}
+		net_by_label: dict[str, dict[str, float]] = {}
 		for row in rows:
 			label_name = row.get("label")
 			if not label_name:
@@ -1420,11 +1421,11 @@ def reverse_labels_on_invoice_cancel(doc: Any, method: Optional[str] = None) -> 
 # ---------------------------------------------------------------------------
 def list_label_snapshots(
 	*,
-	customer: Optional[str] = None,
-	storage_location: Optional[str] = None,
+	customer: str | None = None,
+	storage_location: str | None = None,
 	include_untracked: bool = True,
 	only_attention: bool = False,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
 	"""Snapshots for every label, most urgent first.
 
 	The list is small by nature -- one row per (B2B customer, label design) -- so
@@ -1434,7 +1435,7 @@ def list_label_snapshots(
 	if not _doctype_exists(LABEL_DOCTYPE):
 		return []
 
-	filters: Dict[str, Any] = {}
+	filters: dict[str, Any] = {}
 	if customer:
 		filters["customer"] = customer
 	if storage_location:
@@ -1494,7 +1495,7 @@ def list_label_snapshots(
 	return snapshots
 
 
-def summarise(snapshots: Sequence[Dict[str, Any]]) -> Dict[str, int]:
+def summarise(snapshots: Sequence[dict[str, Any]]) -> dict[str, int]:
 	"""Counts per status, for the dashboard header and the alert badge."""
 	summary = {
 		"total": 0,
@@ -1527,13 +1528,13 @@ def summarise(snapshots: Sequence[Dict[str, Any]]) -> Dict[str, int]:
 	return summary
 
 
-def _alert_recipients() -> List[str]:
+def _alert_recipients() -> list[str]:
 	"""Enabled users who should hear about a label shortage.
 
 	The B2B rep owns the customer relationship and the manager owns the print
 	budget, so both get the alert.
 	"""
-	users: Set[str] = set()
+	users: set[str] = set()
 	try:
 		rows = frappe.get_all(
 			"Has Role",
@@ -1553,7 +1554,7 @@ def _alert_recipients() -> List[str]:
 		if user and user != "Guest":
 			users.add(user)
 
-	recipients: List[str] = []
+	recipients: list[str] = []
 	for user in sorted(users):
 		try:
 			if frappe.db.get_value("User", user, "enabled"):
@@ -1563,7 +1564,7 @@ def _alert_recipients() -> List[str]:
 	return recipients
 
 
-def _alert_message(snap: Dict[str, Any]) -> str:
+def _alert_message(snap: dict[str, Any]) -> str:
 	size = f" ({snap['size']})" if snap.get("size") else ""
 	bits = [
 		f"{snap['customer_name']} - {snap['label_title']}{size}: {snap['on_hand_qty']} label(s) left.",
@@ -1587,7 +1588,7 @@ def _alert_message(snap: Dict[str, Any]) -> str:
 	return " ".join(bits)
 
 
-def run_label_stock_alerts() -> Dict[str, Any]:
+def run_label_stock_alerts() -> dict[str, Any]:
 	"""Daily: refresh every label and alert on the ones that need printing.
 
 	Returns a small summary so the job is inspectable from ``bench execute``.
@@ -1682,7 +1683,7 @@ def run_label_stock_alerts() -> Dict[str, Any]:
 		return result
 
 
-def _publish_alert(snap: Dict[str, Any], recipients: Sequence[str]) -> None:
+def _publish_alert(snap: dict[str, Any], recipients: Sequence[str]) -> None:
 	"""Push the alert to connected clients, one addressed room per user.
 
 	A bare ``publish_realtime`` lands in the site-wide ``all`` room and a

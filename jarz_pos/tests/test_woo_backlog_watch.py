@@ -26,7 +26,6 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-
 # ---------------------------------------------------------------------------
 # Minimal frappe stub so the service module can be imported outside a bench
 # ---------------------------------------------------------------------------
@@ -80,7 +79,7 @@ def _make_frappe_stub():
 
 
 try:  # pragma: no cover - depends on whether the runner has a bench
-	import frappe as _real_frappe  # noqa: F401
+	import frappe as _real_frappe
 except Exception:  # pragma: no cover
 	_stub = _make_frappe_stub()
 	sys.modules["frappe"] = _stub
@@ -90,8 +89,7 @@ else:  # pragma: no cover
 		_real_frappe.whitelist = lambda *a, **k: (lambda fn: fn)  # type: ignore
 
 
-from jarz_pos.services import woo_backlog_watch as mod  # noqa: E402
-
+from jarz_pos.services import woo_backlog_watch as mod
 
 # ---------------------------------------------------------------------------
 # Fake frappe used for the behavioural tests

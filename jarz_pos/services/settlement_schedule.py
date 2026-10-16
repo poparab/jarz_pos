@@ -30,7 +30,8 @@ import calendar
 import datetime
 import json
 import re
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from collections.abc import Iterable, Sequence
+from typing import Any, Dict, List, Optional, Tuple
 
 # ---------------------------------------------------------------------------
 # Vocabulary (wire contract with the DocType Select options and the client)
@@ -43,7 +44,7 @@ CYCLE_DAYS_OF_MONTH = "Days of Month"
 CYCLE_EVERY_N_DAYS = "Every N Days"
 
 #: Exactly the DocType's Select options, in the same order.
-CYCLES: Tuple[str, ...] = (
+CYCLES: tuple[str, ...] = (
 	CYCLE_ON_DELIVERY,
 	CYCLE_INVOICE_AFTER_INVOICE,
 	CYCLE_WEEKLY,
@@ -52,7 +53,7 @@ CYCLES: Tuple[str, ...] = (
 )
 
 #: Cycles that produce calendar due dates.
-DATE_CYCLES: Tuple[str, ...] = (CYCLE_WEEKLY, CYCLE_DAYS_OF_MONTH, CYCLE_EVERY_N_DAYS)
+DATE_CYCLES: tuple[str, ...] = (CYCLE_WEEKLY, CYCLE_DAYS_OF_MONTH, CYCLE_EVERY_N_DAYS)
 
 STATE_OVERDUE = "overdue"
 STATE_DUE_TODAY = "due_today"
@@ -63,7 +64,7 @@ STATE_NONE = "none"
 STATE_UNSCHEDULED = "unscheduled"
 
 #: Collections list order (``none`` is never listed).
-STATE_ORDER: Tuple[str, ...] = (
+STATE_ORDER: tuple[str, ...] = (
 	STATE_OVERDUE,
 	STATE_DUE_TODAY,
 	STATE_DUE_SOON,
@@ -78,7 +79,7 @@ KIND_OVERDUE = "overdue"
 #: The on-submit "collect the previous invoice(s) with this delivery" push.
 KIND_COLLECT_ON_DELIVERY = "collect_on_delivery"
 
-WEEKDAY_CODES: Tuple[str, ...] = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+WEEKDAY_CODES: tuple[str, ...] = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 _WEEKDAY_NAMES_EN = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
 _WEEKDAY_NAMES_AR = ("الاثنين", "الثلاثاء", "الأربعاء", "الخميس", "الجمعة", "السبت", "الأحد")
 _WEEKDAY_LOOKUP = {code.lower(): idx for idx, code in enumerate(WEEKDAY_CODES)}
@@ -126,7 +127,7 @@ def _get(row: Any, key: str, default: Any = None) -> Any:
 	return getattr(row, key, default)
 
 
-def to_date(value: Any) -> Optional[datetime.date]:
+def to_date(value: Any) -> datetime.date | None:
 	"""``date`` / ``datetime`` / ISO string -> ``date``; empty -> ``None``.
 
 	Raises :class:`SettlementTermsError` for a non-empty value that is not a date.
@@ -146,14 +147,14 @@ def to_date(value: Any) -> Optional[datetime.date]:
 		raise SettlementTermsError(f"'{value}' is not a valid date (use YYYY-MM-DD).")
 
 
-def _to_date_lenient(value: Any) -> Optional[datetime.date]:
+def _to_date_lenient(value: Any) -> datetime.date | None:
 	try:
 		return to_date(value)
 	except SettlementTermsError:
 		return None
 
 
-def _iso(value: Optional[datetime.date]) -> Optional[str]:
+def _iso(value: datetime.date | None) -> str | None:
 	return value.isoformat() if value else None
 
 
@@ -164,7 +165,7 @@ def _money(value: Any) -> float:
 		return 0.0
 
 
-def _int_lenient(value: Any, default: Optional[int]) -> Optional[int]:
+def _int_lenient(value: Any, default: int | None) -> int | None:
 	if value is None or value == "":
 		return default
 	try:
@@ -173,9 +174,7 @@ def _int_lenient(value: Any, default: Optional[int]) -> Optional[int]:
 		return default
 
 
-def _int_strict(
-	value: Any, default: Optional[int], label: str, minimum: Optional[int] = None
-) -> Optional[int]:
+def _int_strict(value: Any, default: int | None, label: str, minimum: int | None = None) -> int | None:
 	if value is None or (isinstance(value, str) and not value.strip()):
 		return default
 	try:
@@ -201,7 +200,7 @@ def _truthy(value: Any, default: bool = True) -> bool:
 		return bool(value)
 
 
-def _split_tokens(value: Any) -> List[str]:
+def _split_tokens(value: Any) -> list[str]:
 	"""Comma string, JSON list string, or a real list -> list of tokens."""
 	if value is None:
 		return []
@@ -222,7 +221,7 @@ def _split_tokens(value: Any) -> List[str]:
 	return [tok for tok in re.split(r"[,;\s]+", text) if tok]
 
 
-def canonical_cycle(value: Any) -> Optional[str]:
+def canonical_cycle(value: Any) -> str | None:
 	"""The Select option this value names (case/space-insensitive), else None."""
 	key = re.sub(r"\s+", " ", str(value or "").strip()).lower()
 	if not key:
@@ -238,7 +237,7 @@ def canonical_cycle(value: Any) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 
-def parse_weekdays(value: Any, strict: bool = True) -> List[int]:
+def parse_weekdays(value: Any, strict: bool = True) -> list[int]:
 	"""``"Thu"`` / ``"Mon,Thu"`` / ``["thursday"]`` -> sorted weekday indexes (Mon=0)."""
 	days = set()
 	for token in _split_tokens(value):
@@ -255,7 +254,7 @@ def format_weekdays(days: Iterable[int]) -> str:
 	return ",".join(WEEKDAY_CODES[d] for d in sorted(set(days)))
 
 
-def parse_month_days(value: Any, strict: bool = True) -> Tuple[List[int], bool]:
+def parse_month_days(value: Any, strict: bool = True) -> tuple[list[int], bool]:
 	"""``"15,last"`` -> ``([15], True)``. Days are 1..31; ``last`` is the month end."""
 	days = set()
 	last = False
@@ -293,7 +292,7 @@ def format_month_days(days: Iterable[int], last: bool) -> str:
 # ---------------------------------------------------------------------------
 
 
-def normalize_terms_input(values: Dict[str, Any]) -> Dict[str, Any]:
+def normalize_terms_input(values: dict[str, Any]) -> dict[str, Any]:
 	"""Validate a terms record and return the values to STORE.
 
 	Shared by ``save_settlement_terms`` and the DocType controller, so the API
@@ -309,7 +308,7 @@ def normalize_terms_input(values: Dict[str, Any]) -> Dict[str, Any]:
 	if not cycle:
 		raise SettlementTermsError("Choose a settlement cycle: " + ", ".join(CYCLES) + ".")
 
-	out: Dict[str, Any] = {
+	out: dict[str, Any] = {
 		"cycle": cycle,
 		"enabled": 1 if _truthy(values.get("enabled"), True) else 0,
 		"weekdays": None,
@@ -352,7 +351,7 @@ def normalize_terms_input(values: Dict[str, Any]) -> Dict[str, Any]:
 	return out
 
 
-def needs_anchor(normalized: Dict[str, Any]) -> bool:
+def needs_anchor(normalized: dict[str, Any]) -> bool:
 	"""True when the cycle counts from ``anchor_date`` (so a default must be set)."""
 	cycle = normalized.get("cycle")
 	if cycle == CYCLE_EVERY_N_DAYS:
@@ -360,7 +359,7 @@ def needs_anchor(normalized: Dict[str, Any]) -> bool:
 	return cycle == CYCLE_WEEKLY and int(normalized.get("week_interval") or 1) > 1
 
 
-def parse_terms(row: Any) -> Optional[Dict[str, Any]]:
+def parse_terms(row: Any) -> dict[str, Any] | None:
 	"""A stored terms row (dict or Document) -> normalized dict. Never raises.
 
 	Lenient on purpose: this runs inside the daily reminder pass and the
@@ -401,7 +400,7 @@ def parse_terms(row: Any) -> Optional[Dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
-def has_schedule(terms: Optional[Dict[str, Any]]) -> bool:
+def has_schedule(terms: dict[str, Any] | None) -> bool:
 	"""True when *terms* produce calendar due dates."""
 	if not terms:
 		return False
@@ -415,7 +414,7 @@ def has_schedule(terms: Optional[Dict[str, Any]]) -> bool:
 	return False
 
 
-def _anchor(terms: Dict[str, Any]) -> datetime.date:
+def _anchor(terms: dict[str, Any]) -> datetime.date:
 	return terms.get("anchor_date") or DEFAULT_ANCHOR
 
 
@@ -423,7 +422,7 @@ def _monday(value: datetime.date) -> datetime.date:
 	return value - datetime.timedelta(days=value.weekday())
 
 
-def _is_due(terms: Dict[str, Any], day: datetime.date) -> bool:
+def _is_due(terms: dict[str, Any], day: datetime.date) -> bool:
 	cycle = terms.get("cycle")
 	if cycle == CYCLE_WEEKLY:
 		if day.weekday() not in (terms.get("weekdays") or []):
@@ -451,7 +450,7 @@ def _is_due(terms: Dict[str, Any], day: datetime.date) -> bool:
 	return False
 
 
-def _horizon(terms: Dict[str, Any]) -> int:
+def _horizon(terms: dict[str, Any]) -> int:
 	cycle = terms.get("cycle")
 	if cycle == CYCLE_WEEKLY:
 		return 7 * max(1, int(terms.get("week_interval") or 1)) + 7
@@ -462,7 +461,7 @@ def _horizon(terms: Dict[str, Any]) -> int:
 	return 0
 
 
-def next_due_date(terms: Optional[Dict[str, Any]], today: Any) -> Optional[datetime.date]:
+def next_due_date(terms: dict[str, Any] | None, today: Any) -> datetime.date | None:
 	"""First due date on or after *today* (today counts). ``None`` for
 	On Delivery / Invoice after Invoice or a schedule with no dates."""
 	if not has_schedule(terms):
@@ -484,7 +483,7 @@ def next_due_date(terms: Optional[Dict[str, Any]], today: Any) -> Optional[datet
 	return None
 
 
-def previous_due_date(terms: Optional[Dict[str, Any]], today: Any) -> Optional[datetime.date]:
+def previous_due_date(terms: dict[str, Any] | None, today: Any) -> datetime.date | None:
 	"""Last due date strictly BEFORE *today*, or ``None``."""
 	if not has_schedule(terms):
 		return None
@@ -505,7 +504,7 @@ def previous_due_date(terms: Optional[Dict[str, Any]], today: Any) -> Optional[d
 	return None
 
 
-def due_dates_between(terms: Optional[Dict[str, Any]], start: Any, end: Any) -> List[datetime.date]:
+def due_dates_between(terms: dict[str, Any] | None, start: Any, end: Any) -> list[datetime.date]:
 	"""Every due date in ``[start, end]`` (inclusive), ascending."""
 	first = to_date(start)
 	last = to_date(end)
@@ -514,7 +513,7 @@ def due_dates_between(terms: Optional[Dict[str, Any]], start: Any, end: Any) -> 
 	if (last - first).days > _MAX_SCAN_DAYS:
 		last = first + datetime.timedelta(days=_MAX_SCAN_DAYS)
 	if terms["cycle"] == CYCLE_EVERY_N_DAYS:
-		out: List[datetime.date] = []
+		out: list[datetime.date] = []
 		day = next_due_date(terms, first)
 		step = datetime.timedelta(days=int(terms["interval_days"]))
 		while day is not None and day <= last:
@@ -532,10 +531,10 @@ def due_dates_between(terms: Optional[Dict[str, Any]], start: Any, end: Any) -> 
 
 
 def upcoming_due_dates(
-	terms: Optional[Dict[str, Any]], today: Any, count: int = UPCOMING_COUNT
-) -> List[datetime.date]:
+	terms: dict[str, Any] | None, today: Any, count: int = UPCOMING_COUNT
+) -> list[datetime.date]:
 	"""The next *count* due dates, today included."""
-	out: List[datetime.date] = []
+	out: list[datetime.date] = []
 	day = next_due_date(terms, today)
 	while day is not None and len(out) < count:
 		out.append(day)
@@ -579,7 +578,7 @@ def _ar_count(n: int, one: str, two: str, few: str, many: str) -> str:
 	return f"{n} {many}"
 
 
-def describe(terms: Optional[Dict[str, Any]], lang: str = "en") -> str:
+def describe(terms: dict[str, Any] | None, lang: str = "en") -> str:
 	"""One line a person reads: "Every Thursday", "Every 10 days", ..."""
 	arabic = str(lang or "en").lower().startswith("ar")
 	if not terms or not terms.get("cycle"):
@@ -635,8 +634,8 @@ def describe(terms: Optional[Dict[str, Any]], lang: str = "en") -> str:
 # ---------------------------------------------------------------------------
 
 
-def _invoice_rows(open_invoices: Optional[Iterable[Any]], today: datetime.date) -> List[Dict[str, Any]]:
-	rows: List[Dict[str, Any]] = []
+def _invoice_rows(open_invoices: Iterable[Any] | None, today: datetime.date) -> list[dict[str, Any]]:
+	rows: list[dict[str, Any]] = []
 	for index, inv in enumerate(open_invoices or []):
 		amount = _money(_get(inv, "outstanding_amount"))
 		if amount <= MONEY_EPSILON:
@@ -668,7 +667,7 @@ def _invoice_rows(open_invoices: Optional[Iterable[Any]], today: datetime.date) 
 UNASSIGNED_BRANCH = ""
 
 
-def splits_by_branch(terms: Optional[Dict[str, Any]]) -> bool:
+def splits_by_branch(terms: dict[str, Any] | None) -> bool:
 	"""Whether this schedule settles each branch of the shop on its own.
 
 	Invoice after Invoice does (owner, 2026-10-07: "we deal with every branch
@@ -680,7 +679,7 @@ def splits_by_branch(terms: Optional[Dict[str, Any]]) -> bool:
 	return canonical_cycle((terms or {}).get("cycle")) == CYCLE_INVOICE_AFTER_INVOICE
 
 
-def due_branch_label(status: Dict[str, Any]) -> Optional[str]:
+def due_branch_label(status: dict[str, Any]) -> str | None:
 	"""Names of the branches with money due now, for a push or ToDo line.
 
 	``None`` when the status carries no branch split, or nothing is due.
@@ -699,11 +698,11 @@ def _round(value: float) -> float:
 
 
 def compute_status(
-	terms: Optional[Dict[str, Any]],
-	open_invoices: Optional[Iterable[Any]],
+	terms: dict[str, Any] | None,
+	open_invoices: Iterable[Any] | None,
 	today: Any,
-	soon_days: Optional[int] = None,
-) -> Dict[str, Any]:
+	soon_days: int | None = None,
+) -> dict[str, Any]:
 	"""Where a customer stands against their schedule on *today*.
 
 	*terms* is a :func:`parse_terms` dict (or ``None`` = no terms record);
@@ -722,7 +721,7 @@ def compute_status(
 	cycle = (terms or {}).get("cycle")
 	dated = has_schedule(terms)
 
-	result: Dict[str, Any] = {
+	result: dict[str, Any] = {
 		"state": STATE_NONE,
 		"cycle": cycle,
 		"next_due_date": None,
@@ -741,7 +740,7 @@ def compute_status(
 	if dated:
 		result["next_due_date"] = _iso(next_due_date(terms, day))
 
-	def _emit(row: Dict[str, Any], due: Optional[datetime.date], overdue: bool) -> None:
+	def _emit(row: dict[str, Any], due: datetime.date | None, overdue: bool) -> None:
 		entry = {
 			"name": row["name"],
 			"posting_date": _iso(row["posting_date"]),
@@ -765,7 +764,7 @@ def compute_status(
 
 	due_now = 0.0
 	overdue = 0.0
-	oldest_overdue: Optional[datetime.date] = None
+	oldest_overdue: datetime.date | None = None
 
 	if cycle == CYCLE_ON_DELIVERY:
 		# A cash shop should owe nothing: anything open was due at the door.
@@ -784,10 +783,10 @@ def compute_status(
 		# delivery to ANY door, so an unattributable invoice can never sit
 		# forever as its own "newest". Out-of-scope rows (another POS Profile)
 		# still decide which invoice is newest, but add no amounts.
-		groups: Dict[Any, List[Dict[str, Any]]] = {}
+		groups: dict[Any, list[dict[str, Any]]] = {}
 		for row in all_rows:
 			groups.setdefault(row.get("branch"), []).append(row)
-		verdict: Dict[int, Tuple[Optional[datetime.date], bool]] = {}
+		verdict: dict[int, tuple[datetime.date | None, bool]] = {}
 		collect_next = 0.0
 		for key, group in groups.items():
 			newest = all_rows[-1] if key in (None, UNASSIGNED_BRANCH) else group[-1]
@@ -842,7 +841,7 @@ def compute_status(
 			result["state"] = STATE_OK
 
 	else:
-		dues: List[Tuple[Dict[str, Any], Optional[datetime.date]]] = []
+		dues: list[tuple[dict[str, Any], datetime.date | None]] = []
 		for row in rows:
 			due = next_due_date(terms, row["posting_date"] + datetime.timedelta(days=1))
 			is_late = due is not None and due < day
@@ -885,7 +884,7 @@ def compute_status(
 # ---------------------------------------------------------------------------
 
 
-def plan_reminder(terms: Optional[Dict[str, Any]], status: Dict[str, Any], today: Any) -> Optional[str]:
+def plan_reminder(terms: dict[str, Any] | None, status: dict[str, Any], today: Any) -> str | None:
 	"""Which reminder (if any) the daily pass sends for this customer today.
 
 	* never twice in one day (``last_reminder_on == today``);
@@ -935,7 +934,7 @@ def plan_reminder(terms: Optional[Dict[str, Any]], status: Dict[str, Any], today
 	return None
 
 
-def reminder_amount(kind: str, status: Dict[str, Any]) -> float:
+def reminder_amount(kind: str, status: dict[str, Any]) -> float:
 	"""The figure a reminder of *kind* asks the manager to collect."""
 	if kind == KIND_DUE_SOON:
 		return _round(_money(status.get("next_due_amount")))
@@ -944,7 +943,7 @@ def reminder_amount(kind: str, status: Dict[str, Any]) -> float:
 	return _round(_money(status.get("due_now_amount")))
 
 
-def reminder_due_date(kind: str, status: Dict[str, Any], today: Any) -> Optional[str]:
+def reminder_due_date(kind: str, status: dict[str, Any], today: Any) -> str | None:
 	if kind == KIND_OVERDUE:
 		return status.get("oldest_overdue_date") or _iso(to_date(today))
 	if kind == KIND_DUE_SOON:
@@ -957,10 +956,10 @@ def reminder_text(
 	customer_name: str,
 	amount: float,
 	currency: str,
-	due_date: Optional[str],
-	description: Optional[str] = None,
-	branch_name: Optional[str] = None,
-) -> Tuple[str, str]:
+	due_date: str | None,
+	description: str | None = None,
+	branch_name: str | None = None,
+) -> tuple[str, str]:
 	"""(title, body) for a settlement push. English, like every other push.
 
 	*branch_name* names the shop branch(es) the money is for, when the terms
@@ -990,7 +989,7 @@ def reminder_text(
 	return title, body
 
 
-def todo_date(status: Dict[str, Any], today: Any) -> Optional[str]:
+def todo_date(status: dict[str, Any], today: Any) -> str | None:
 	"""Date the customer's settlement ToDo should carry, or ``None`` to close it.
 
 	Open while something is due, overdue or coming due; closed once nothing is
@@ -1011,7 +1010,7 @@ def todo_date(status: Dict[str, Any], today: Any) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 
-def _sort_key(row: Dict[str, Any]) -> Tuple[Any, ...]:
+def _sort_key(row: dict[str, Any]) -> tuple[Any, ...]:
 	state = row.get("state")
 	rank = STATE_ORDER.index(state) if state in STATE_ORDER else len(STATE_ORDER)
 	far = "9999-12-31"
@@ -1030,10 +1029,10 @@ def _sort_key(row: Dict[str, Any]) -> Tuple[Any, ...]:
 
 
 def build_collection_rows(
-	entries: Iterable[Dict[str, Any]],
+	entries: Iterable[dict[str, Any]],
 	today: Any,
-	soon_days: Optional[int] = None,
-) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
+	soon_days: int | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
 	"""Rows + counts for the collections view. Pure.
 
 	*entries*: ``{customer, customer_name, terms (parse_terms dict|None),
@@ -1042,7 +1041,7 @@ def build_collection_rows(
 	unscheduled -> ok; within a state the most urgent first (oldest overdue,
 	nearest date), then the biggest amount, then the name.
 	"""
-	rows: List[Dict[str, Any]] = []
+	rows: list[dict[str, Any]] = []
 	counts = {STATE_OVERDUE: 0, STATE_DUE_TODAY: 0, STATE_DUE_SOON: 0, STATE_UNSCHEDULED: 0}
 	for entry in entries or []:
 		terms = entry.get("terms")
@@ -1076,6 +1075,6 @@ def build_collection_rows(
 	return rows, counts
 
 
-def needs_attention(state: Optional[str]) -> bool:
+def needs_attention(state: str | None) -> bool:
 	"""States the approvals badge counts."""
 	return state in (STATE_OVERDUE, STATE_DUE_TODAY)

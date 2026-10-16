@@ -740,8 +740,8 @@ try:
 	# Courier app (COURIER_CONTRACTS): door-pin geo endpoints and the per-invoice
 	# delivery transitions. Touched here so their @frappe.whitelist() decorators
 	# register at startup like every other API module in this file.
-	from jarz_pos.api import geo as _geo_api
 	from jarz_pos.api import courier_delivery as _courier_api
+	from jarz_pos.api import geo as _geo_api
 
 	_geo_api.preview_maps_link
 	_geo_api.get_address_pin
@@ -804,9 +804,9 @@ except Exception:
 	pass
 
 try:
-	from jarz_pos.api import user as _user
 	from jarz_pos.api import notifications as _notif
 	from jarz_pos.api import shift as _shift
+	from jarz_pos.api import user as _user
 
 	# Touch the functions to ensure they're loaded
 	_user.get_current_user_roles

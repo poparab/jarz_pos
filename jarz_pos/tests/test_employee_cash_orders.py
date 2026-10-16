@@ -183,7 +183,7 @@ class EmployeeCashGateTests(unittest.TestCase):
 			try:
 				result = ic._ensure_employee_cash_can_be_taken(branch, _COMPANY)
 				error = None
-			except Exception as exc:  # noqa: BLE001 - asserted by the caller
+			except Exception as exc:
 				result = None
 				error = exc
 		return SimpleNamespace(result=result, error=error, lookup=lookup, till=till)

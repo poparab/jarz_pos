@@ -60,7 +60,7 @@ def _install_frappe_utils_stub() -> None:
 
 _install_frappe_utils_stub()
 
-from jarz_pos.services import replenishment_planning as plan  # noqa: E402
+from jarz_pos.services import replenishment_planning as plan
 
 
 class TestSellsPerDay(unittest.TestCase):

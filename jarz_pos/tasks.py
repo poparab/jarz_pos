@@ -157,6 +157,7 @@ def escalate_unconfirmed_online_payments():
 	Guarded: never raises out of the scheduler.
 	"""
 	import frappe
+
 	from jarz_pos.constants import WS_EVENTS
 
 	try:

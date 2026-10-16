@@ -18,7 +18,7 @@ def _ensure_frappe_model_stub():
 	be imported without a bench.
 	"""
 	try:
-		import frappe.model.document  # noqa: F401
+		import frappe.model.document
 
 		return
 	except Exception:

@@ -5,11 +5,14 @@ import html
 import json
 import math
 import re
-from datetime import date as _date_cls, datetime as _datetime_cls, timedelta as _timedelta_cls
+from datetime import date as _date_cls
+from datetime import datetime as _datetime_cls
+from datetime import timedelta as _timedelta_cls
 from typing import Any, Dict, List, Optional
 
 import frappe
 from frappe import _
+
 from jarz_pos.constants import DEFAULT_UOM, QUERY_LIMITS, ROLES
 
 # The one implementation of the component-unit chain (stock_uom -> uom ->
@@ -159,7 +162,7 @@ def _get_item_default_warehouse(item_code: str, company: str) -> str | None:
 	return None
 
 
-def _get_mfg_defaults(company: str) -> Dict[str, str]:
+def _get_mfg_defaults(company: str) -> dict[str, str]:
 	"""Best-effort WIP/FG warehouse defaults for ``company``.
 
 	Read off the **Company**, not Manufacturing Settings: v16's
@@ -171,7 +174,7 @@ def _get_mfg_defaults(company: str) -> Dict[str, str]:
 	Anything missing falls through to ``_find_company_warehouse`` in
 	``_resolve_work_order_warehouses``.
 	"""
-	out: Dict[str, str] = {"company": company}
+	out: dict[str, str] = {"company": company}
 	try:
 		row = frappe.db.get_value(
 			"Company",
@@ -270,7 +273,7 @@ def _resolve_valuation_rate(item_code: str, warehouse: Any = None) -> float:
 		return 0.0
 
 
-def _resolve_stock_entry_detail_rows(work_order: str, purpose: str) -> List[Dict[str, Any]]:
+def _resolve_stock_entry_detail_rows(work_order: str, purpose: str) -> list[dict[str, Any]]:
 	"""Submitted Stock Entry lines for one Work Order and one purpose."""
 	try:
 		rows = frappe.db.sql(
@@ -311,7 +314,7 @@ def _resolve_stock_entry_detail_rows(work_order: str, purpose: str) -> List[Dict
 		return []
 
 
-def _resolve_bom_cost(bom_name: Any) -> Optional[Dict[str, float]]:
+def _resolve_bom_cost(bom_name: Any) -> dict[str, float] | None:
 	"""``{total_cost, quantity}`` for a BOM, or ``None`` when unreadable."""
 	if not bom_name:
 		return None
@@ -343,7 +346,7 @@ def _resolve_update_work_order_status(work_order: str):
 	return doc
 
 
-def _resolve_wip_available_materials(work_order: str) -> List[Dict[str, Any]]:
+def _resolve_wip_available_materials(work_order: str) -> list[dict[str, Any]]:
 	"""What is physically still sitting in WIP for this Work Order.
 
 	ERPNext already nets transferred-minus-consumed per (item, warehouse); no
@@ -365,7 +368,7 @@ def _resolve_wip_available_materials(work_order: str) -> List[Dict[str, Any]]:
 	if not getter:
 		frappe.throw(_("Could not resolve ERPNext get_available_materials helper"))
 
-	rows: List[Dict[str, Any]] = []
+	rows: list[dict[str, Any]] = []
 	for key, data in (getter(work_order) or {}).items():
 		try:
 			item_code, warehouse = key
@@ -381,7 +384,7 @@ def _resolve_wip_available_materials(work_order: str) -> List[Dict[str, Any]]:
 	return rows
 
 
-def _resolve_work_order_source_warehouses(work_order: str) -> Dict[str, str]:
+def _resolve_work_order_source_warehouses(work_order: str) -> dict[str, str]:
 	"""Source warehouses for recipe Items and the alternatives actually moved."""
 	try:
 		rows = frappe.get_all(
@@ -391,7 +394,7 @@ def _resolve_work_order_source_warehouses(work_order: str) -> Dict[str, str]:
 		)
 	except Exception:
 		rows = []
-	out: Dict[str, str] = {}
+	out: dict[str, str] = {}
 	for row in rows or []:
 		try:
 			if row.get("source_warehouse"):
@@ -642,7 +645,7 @@ def _assert_finish_not_before_transfer(work_order: str, scheduled_dt: Any) -> No
 		)
 
 
-def _price_batch_components(line: Dict[str, Any], company: str) -> Dict[str, Any]:
+def _price_batch_components(line: dict[str, Any], company: str) -> dict[str, Any]:
 	"""Read the BOM once and value it at current valuation rates.
 
 	``fetch_exploded=0``: the operator batch-value cap bounds what one person
@@ -658,7 +661,7 @@ def _price_batch_components(line: Dict[str, Any], company: str) -> Dict[str, Any
 		fetch_exploded=0,
 		material_selections=line.get("material_selections"),
 	)
-	priced: List[Dict[str, Any]] = []
+	priced: list[dict[str, Any]] = []
 	total = 0.0
 	for row in rows:
 		rate = _resolve_valuation_rate(row["item_code"], row.get("source_warehouse"))
@@ -669,10 +672,10 @@ def _price_batch_components(line: Dict[str, Any], company: str) -> Dict[str, Any
 
 
 def _assert_batch_value_within_threshold(
-	line: Dict[str, Any],
+	line: dict[str, Any],
 	company: str,
-	priced: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
+	priced: dict[str, Any] | None = None,
+) -> dict[str, Any]:
 	"""Cap the material value one operator may commit in a single batch.
 
 	A limit of ``0`` means no limit.  Anybody in ``ROLES.MANUFACTURING`` bypasses
@@ -813,9 +816,9 @@ def _find_company_warehouse(company: str, warehouse_type: str | None, name_hints
 
 
 def _resolve_work_order_warehouses(
-	line: Dict[str, Any], company: str, defaults: Dict[str, str]
-) -> Dict[str, str]:
-	resolved: Dict[str, str] = {"company": company}
+	line: dict[str, Any], company: str, defaults: dict[str, str]
+) -> dict[str, str]:
+	resolved: dict[str, str] = {"company": company}
 
 	requested_wip = _coerce_str(line.get("wip_warehouse"))
 	requested_fg = _coerce_str(line.get("fg_warehouse") or line.get("target_warehouse"))
@@ -918,7 +921,7 @@ def _format_posting_moment(value: Any) -> str:
 		return str(value or "")
 
 
-def _read_later_ledger(item_code: str, warehouse: str, posting_dt: Any) -> Optional[List[Dict[str, Any]]]:
+def _read_later_ledger(item_code: str, warehouse: str, posting_dt: Any) -> list[dict[str, Any]] | None:
 	"""Ledger rows for the pair after ``posting_dt``, oldest first; ``None`` if unreadable."""
 	try:
 		rows = frappe.db.sql(
@@ -940,7 +943,7 @@ def _read_later_ledger(item_code: str, warehouse: str, posting_dt: Any) -> Optio
 	return list(rows)
 
 
-def _segment_minimums(rows: List[Dict[str, Any]]) -> List[float]:
+def _segment_minimums(rows: list[dict[str, Any]]) -> list[float]:
 	"""For each row, the lowest balance from it until the next Stock Reconciliation.
 
 	A deduction posted before row ``i`` is carried through every later balance
@@ -960,7 +963,7 @@ def _segment_minimums(rows: List[Dict[str, Any]]) -> List[float]:
 	return minimums
 
 
-def _get_stock_qty_at(item_code: str, warehouse: str, posting_dt: Any) -> Optional[float]:
+def _get_stock_qty_at(item_code: str, warehouse: str, posting_dt: Any) -> float | None:
 	"""What a batch posted at ``posting_dt`` can take from the pair.
 
 	The balance at that moment, capped by the lowest balance after it up to the
@@ -1002,7 +1005,7 @@ def _get_stock_qty_at(item_code: str, warehouse: str, posting_dt: Any) -> Option
 
 def _find_stock_sufficient_from(
 	item_code: str, warehouse: str, posting_dt: Any, required_qty: float
-) -> Optional[Dict[str, str]]:
+) -> dict[str, str] | None:
 	"""The first ledger entry after ``posting_dt`` from which ``required_qty`` could
 	be taken without any later balance (up to the next count) going negative —
 	the earliest moment this batch could have been posted."""
@@ -1025,7 +1028,7 @@ def _find_stock_sufficient_from(
 	return None
 
 
-def _stamp_backdated_shortage(issue: Dict[str, Any], as_of: Any, available_now: Any) -> None:
+def _stamp_backdated_shortage(issue: dict[str, Any], as_of: Any, available_now: Any) -> None:
 	"""Explain a shortage that exists only because the batch is backdated.
 
 	Stamped only when the stock that is there **now** would cover the batch:
@@ -1049,7 +1052,7 @@ def _stamp_backdated_shortage(issue: Dict[str, Any], as_of: Any, available_now: 
 			issue["sufficient_from"] = found
 
 
-def _format_backdated_shortage(issue: Dict[str, Any]) -> str:
+def _format_backdated_shortage(issue: dict[str, Any]) -> str:
 	"""The "this is the stock at the batch's date, not today's" tail, or ""."""
 	as_of = issue.get("as_of")
 	if not as_of:
@@ -1080,7 +1083,7 @@ def _plain_error_text(error: Any) -> str:
 	return re.sub(r"\s+", " ", html.unescape(text)).strip()
 
 
-def _coerce_material_selections(value: Any) -> Dict[str, str]:
+def _coerce_material_selections(value: Any) -> dict[str, str]:
 	"""Normalize ``{BOM item: actual stock item}`` from an HTTP argument."""
 	if value in (None, ""):
 		return {}
@@ -1092,7 +1095,7 @@ def _coerce_material_selections(value: Any) -> Dict[str, str]:
 	if not isinstance(value, dict):
 		frappe.throw(_("material_selections must be an object"))
 
-	selections: Dict[str, str] = {}
+	selections: dict[str, str] = {}
 	for original, selected in value.items():
 		original_code = _coerce_str(original)
 		selected_code = _coerce_str(selected)
@@ -1102,7 +1105,7 @@ def _coerce_material_selections(value: Any) -> Dict[str, str]:
 	return selections
 
 
-def _get_material_item(item_code: str) -> Optional[Dict[str, Any]]:
+def _get_material_item(item_code: str) -> dict[str, Any] | None:
 	row = frappe.db.get_value(
 		"Item",
 		item_code,
@@ -1124,7 +1127,7 @@ def _get_material_item(item_code: str) -> Optional[Dict[str, Any]]:
 	return dict(row) if row else None
 
 
-def _direct_two_way_alternative_codes(item_code: str) -> List[str]:
+def _direct_two_way_alternative_codes(item_code: str) -> list[str]:
 	"""Return direct symmetric links only; directed links never imply a family."""
 	forward = frappe.get_all(
 		"Item Alternative",
@@ -1150,7 +1153,7 @@ def _validate_material_selection(
 	selected_item: str,
 	company: str,
 	source_warehouse: Any = None,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	"""Validate an explicit one-for-one recipe substitution at use time."""
 	original_item = _coerce_str(original_item)
 	selected_item = _coerce_str(selected_item)
@@ -1227,8 +1230,8 @@ def _validate_material_selection(
 
 
 def _apply_material_selections(
-	rows: List[Dict[str, Any]], selections: Any, company: str
-) -> List[Dict[str, Any]]:
+	rows: list[dict[str, Any]], selections: Any, company: str
+) -> list[dict[str, Any]]:
 	selections = _coerce_material_selections(selections)
 	if not selections:
 		return rows
@@ -1240,8 +1243,8 @@ def _apply_material_selections(
 			_("material_selections contains Items that are not in this BOM: {0}").format(", ".join(unknown))
 		)
 
-	selected_rows: List[Dict[str, Any]] = []
-	selected_by_original: Dict[str, str] = {}
+	selected_rows: list[dict[str, Any]] = []
+	selected_by_original: dict[str, str] = {}
 	for row in rows:
 		original_item = str(row.get("item_code") or "")
 		selected_item = selections.get(original_item, original_item)
@@ -1273,7 +1276,7 @@ def _apply_material_selections(
 	return selected_rows
 
 
-def _material_selection_uom_error(row: Dict[str, Any]) -> str:
+def _material_selection_uom_error(row: dict[str, Any]) -> str:
 	"""Explain when core backflush cannot preserve an alternative's stock qty."""
 	bom_uom = _coerce_str(row.get("bom_uom") or row.get("uom"))
 	stock_uom = _coerce_str(row.get("stock_uom") or row.get("uom"))
@@ -1299,7 +1302,7 @@ def _get_required_material_rows(
 	qty: float,
 	fetch_exploded: int = 0,
 	material_selections: Any = None,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
 	"""Required-material rows for a BOM, at either level of the bill.
 
 	``fetch_exploded`` decides **which bill of materials this answers about**,
@@ -1337,7 +1340,7 @@ def _get_required_material_rows(
 		frappe.throw(_("Could not resolve ERPNext BOM items helper"))
 
 	item_dict = getter(bom_name, company, qty=qty, fetch_exploded=1 if fetch_exploded else 0)
-	rows: List[Dict[str, Any]] = []
+	rows: list[dict[str, Any]] = []
 	for item in sorted(item_dict.values(), key=lambda row: row.get("idx") or float("inf")):
 		if item.get("include_item_in_manufacturing") in (0, "0", False):
 			continue
@@ -1368,8 +1371,8 @@ def _get_required_material_rows(
 
 
 def _get_material_precheck_issues(
-	line: Dict[str, Any], company: str, posting_dt: Any = None
-) -> List[Dict[str, Any]]:
+	line: dict[str, Any], company: str, posting_dt: Any = None
+) -> list[dict[str, Any]]:
 	"""Per-line "will this batch's material transfer succeed" check.
 
 	``posting_dt`` (default: the line's ``scheduled_at``) is when the transfer
@@ -1386,7 +1389,7 @@ def _get_material_precheck_issues(
 	company holds plenty of the item one branch away.  The block is unchanged —
 	the fix is a stock transfer, and the message now says so.
 	"""
-	issues: List[Dict[str, Any]] = []
+	issues: list[dict[str, Any]] = []
 	as_of = _resolve_backdated_posting(posting_dt if posting_dt is not None else line.get("scheduled_at"))
 	required_rows = _get_required_material_rows(
 		line["bom_name"],
@@ -1473,7 +1476,7 @@ def _format_qty(value: Any) -> str:
 	return text or "0"
 
 
-def _format_stock_elsewhere(issue: Dict[str, Any]) -> str:
+def _format_stock_elsewhere(issue: dict[str, Any]) -> str:
 	"""The "; 40.5 Kg is available in Nasr City - J" tail, or "" when there is none.
 
 	At most two warehouses are named and the rest collapse into "and N more":
@@ -1504,12 +1507,12 @@ def _format_stock_elsewhere(issue: Dict[str, Any]) -> str:
 	)
 
 
-def _assert_material_availability(line: Dict[str, Any], company: str, posting_dt: Any = None) -> None:
+def _assert_material_availability(line: dict[str, Any], company: str, posting_dt: Any = None) -> None:
 	issues = _get_material_precheck_issues(line, company, posting_dt)
 	if not issues:
 		return
 
-	detail_parts: List[str] = []
+	detail_parts: list[str] = []
 	for issue in issues:
 		item_label = _format_precheck_issue(issue.get("item_name") or issue["item_code"], issue["item_code"])
 		issue_type = issue.get("type")
@@ -1554,7 +1557,7 @@ def _resolve_build_basket_rollup():
 	return build_basket_rollup
 
 
-def _get_basket_shortages(lines: List[Dict[str, Any]], company: str) -> List[Dict[str, Any]]:
+def _get_basket_shortages(lines: list[dict[str, Any]], company: str) -> list[dict[str, Any]]:
 	"""Raw-material shortages across the WHOLE basket, not line by line.
 
 	``_assert_material_availability`` measures each line against the same
@@ -1575,8 +1578,8 @@ def _get_basket_shortages(lines: List[Dict[str, Any]], company: str) -> List[Dic
 		return []
 
 
-def _format_basket_shortage_message(shortages: List[Dict[str, Any]]) -> str:
-	parts: List[str] = []
+def _format_basket_shortage_message(shortages: list[dict[str, Any]]) -> str:
+	parts: list[str] = []
 	for row in shortages:
 		label = _format_precheck_issue(row.get("item_name") or row["item_code"], row["item_code"])
 		if row.get("reason") == "missing_source_warehouse":
@@ -1601,7 +1604,7 @@ def _format_basket_shortage_message(shortages: List[Dict[str, Any]]) -> str:
 	return _("Combined material shortage across the batch: {0}").format("; ".join(parts))
 
 
-def _log_basket_refusal(route: str, lines: List[Dict[str, Any]], message: str) -> None:
+def _log_basket_refusal(route: str, lines: list[dict[str, Any]], message: str) -> None:
 	"""Leave a trace of a basket the shortage check refused.
 
 	The refusal reaches the app as ``ok: False`` inside an HTTP 200, so neither
@@ -1620,7 +1623,7 @@ def _log_basket_refusal(route: str, lines: List[Dict[str, Any]], message: str) -
 		pass
 
 
-def _assert_basket_material_availability(lines: List[Dict[str, Any]], company: str) -> None:
+def _assert_basket_material_availability(lines: list[dict[str, Any]], company: str) -> None:
 	shortages = _get_basket_shortages(lines, company)
 	if shortages:
 		frappe.throw(_format_basket_shortage_message(shortages))
@@ -1629,7 +1632,7 @@ def _assert_basket_material_availability(lines: List[Dict[str, Any]], company: s
 # ── Where a component is demanded from, and how to get it there ─────────
 
 
-def _component_demand_warehouses(item_code: str, company: str) -> List[str]:
+def _component_demand_warehouses(item_code: str, company: str) -> list[str]:
 	"""Every warehouse a Work Order might legitimately draw ``item_code`` from.
 
 	Mirrors ``_get_required_material_rows`` exactly — ``BOM Item.source_warehouse``
@@ -1648,7 +1651,7 @@ def _component_demand_warehouses(item_code: str, company: str) -> List[str]:
 	if not item_code or not company:
 		return []
 
-	warehouses: List[str] = []
+	warehouses: list[str] = []
 	try:
 		rows = frappe.db.sql(
 			"""
@@ -1772,7 +1775,7 @@ def _resolve_invalidate_suggestions_cache():
 
 
 @frappe.whitelist()
-def get_production_policy() -> Dict[str, Any]:
+def get_production_policy() -> dict[str, Any]:
 	"""What the server will actually accept from *this* user on the board.
 
 	The app used to hardcode its own backdating window while the server read a
@@ -1811,7 +1814,7 @@ def transfer_material_for_production(
 	qty: Any,
 	to_warehouse: str | None = None,
 	company: str | None = None,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	"""Move a short component into the warehouse its recipe draws from.
 
 	The board measures a shortage in one warehouse only, so stock received or
@@ -1954,7 +1957,7 @@ def transfer_material_for_production(
 
 
 @frappe.whitelist()
-def list_default_bom_items(search: str | None = None) -> List[Dict[str, Any]]:
+def list_default_bom_items(search: str | None = None) -> list[dict[str, Any]]:
 	"""List Items that have a default BOM, with basic info.
 
 	Returns: [{ item_code, item_name, stock_uom, default_bom, bom_qty }]
@@ -1962,7 +1965,7 @@ def list_default_bom_items(search: str | None = None) -> List[Dict[str, Any]]:
 	_ensure_manager_access()
 	term = (search or "").strip()
 	cond = ""
-	vals: Dict[str, Any] = {}
+	vals: dict[str, Any] = {}
 	if term:
 		cond = "AND (i.name LIKE %(q)s OR i.item_name LIKE %(q)s)"
 		vals["q"] = f"%{term}%"
@@ -1987,19 +1990,19 @@ def list_default_bom_items(search: str | None = None) -> List[Dict[str, Any]]:
 
 
 @frappe.whitelist()
-def list_bom_items(limit: int = 100) -> List[Dict[str, Any]]:
+def list_bom_items(limit: int = 100) -> list[dict[str, Any]]:
 	"""Alias for list_default_bom_items for consistency with mobile app expectations"""
 	return list_default_bom_items(search=None)
 
 
 @frappe.whitelist()
-def search_bom_items(search: str | None = None) -> List[Dict[str, Any]]:
+def search_bom_items(search: str | None = None) -> list[dict[str, Any]]:
 	"""Search BOM items - alias for list_default_bom_items with search"""
 	return list_default_bom_items(search=search)
 
 
 @frappe.whitelist()
-def get_bom_details(item_code: str) -> Dict[str, Any]:
+def get_bom_details(item_code: str) -> dict[str, Any]:
 	"""Return default BOM details for an Item, including components.
 
 	Structure:
@@ -2052,7 +2055,7 @@ def get_bom_details(item_code: str) -> Dict[str, Any]:
 
 
 @frappe.whitelist()
-def get_material_options(bom_name: str, qty: Any = 1) -> Dict[str, Any]:
+def get_material_options(bom_name: str, qty: Any = 1) -> dict[str, Any]:
 	"""Return explicit compatible Item Alternatives for every BOM component."""
 	_ensure_production_view_access()
 	bom_name = _coerce_str(bom_name)
@@ -2071,12 +2074,12 @@ def get_material_options(bom_name: str, qty: Any = 1) -> Dict[str, Any]:
 
 	from jarz_pos.api.inventory_count import _get_uom_conversions
 
-	components: List[Dict[str, Any]] = []
+	components: list[dict[str, Any]] = []
 	for row in _get_required_material_rows(bom_name, company, requested_qty, fetch_exploded=0):
 		original_item = str(row.get("item_code") or "")
 		blocked_reason = _material_selection_uom_error(row)
 		candidate_codes = [original_item, *_direct_two_way_alternative_codes(original_item)]
-		options: List[Dict[str, Any]] = []
+		options: list[dict[str, Any]] = []
 		for candidate in dict.fromkeys(candidate_codes):
 			if candidate != original_item and blocked_reason:
 				continue
@@ -2126,7 +2129,7 @@ def get_material_options(bom_name: str, qty: Any = 1) -> Dict[str, Any]:
 
 
 def _ensure_work_order(
-	line: Dict[str, Any], company: str, defaults: Dict[str, str], scheduled_dt: Any
+	line: dict[str, Any], company: str, defaults: dict[str, str], scheduled_dt: Any
 ) -> str:
 	# Create and submit a Work Order for the given line dict
 	resolved_defaults = _resolve_work_order_warehouses(line, company, defaults)
@@ -2382,7 +2385,7 @@ def _make_and_submit_se(
 	return name
 
 
-def _build_submit_savepoint_name(index: int, line: Dict[str, Any]) -> str:
+def _build_submit_savepoint_name(index: int, line: dict[str, Any]) -> str:
 	payload = json.dumps(
 		{
 			"index": index,
@@ -2398,7 +2401,7 @@ def _build_submit_savepoint_name(index: int, line: Dict[str, Any]) -> str:
 	return f"mfg_submit_{token}"
 
 
-def _coerce_lines(lines: Any) -> List[Dict[str, Any]]:
+def _coerce_lines(lines: Any) -> list[dict[str, Any]]:
 	if isinstance(lines, str):
 		try:
 			lines = json.loads(lines)
@@ -2406,7 +2409,7 @@ def _coerce_lines(lines: Any) -> List[Dict[str, Any]]:
 			frappe.throw(_("Invalid JSON payload for lines"))
 	if not isinstance(lines, list):
 		frappe.throw(_("lines must be a list"))
-	out: List[Dict[str, Any]] = []
+	out: list[dict[str, Any]] = []
 	for i, it in enumerate(lines):
 		if not isinstance(it, dict):
 			frappe.throw(_(f"lines[{i}] must be an object"))
@@ -2437,7 +2440,7 @@ def _coerce_flag(value: Any, *, default: bool) -> bool:
 
 
 @frappe.whitelist()
-def submit_work_orders(lines: Any, strict_basket: Any = True) -> Dict[str, Any]:
+def submit_work_orders(lines: Any, strict_basket: Any = True) -> dict[str, Any]:
 	"""Create and submit Work Orders, then create Stock Entries for:
 	- Material Transfer for Manufacture
 	- Manufacture (to finish with same quantity)
@@ -2454,7 +2457,7 @@ def submit_work_orders(lines: Any, strict_basket: Any = True) -> Dict[str, Any]:
 
 
 @frappe.whitelist()
-def produce_now(lines: Any, strict_basket: Any = 1) -> Dict[str, Any]:
+def produce_now(lines: Any, strict_basket: Any = 1) -> dict[str, Any]:
 	"""One-shot produce for the floor: identical work, a wider gate.
 
 	Does exactly what :func:`submit_work_orders` does — same Work Orders, same
@@ -2495,7 +2498,7 @@ def produce_now(lines: Any, strict_basket: Any = 1) -> Dict[str, Any]:
 
 def _submit_work_orders_impl(
 	lines: Any, strict_basket: Any, enforce_operator_cap: bool = False
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	"""The whole one-shot produce, with no access gate of its own.
 
 	Shared verbatim by :func:`submit_work_orders` (manager) and
@@ -2536,7 +2539,7 @@ def _submit_work_orders_impl(
 				"basket_shortages": basket_shortages,
 			}
 
-	results: List[Dict[str, Any]] = []
+	results: list[dict[str, Any]] = []
 	release_savepoint = getattr(frappe.db, "release_savepoint", None)
 	for index, ln in enumerate(lines):
 		save_point = _build_submit_savepoint_name(index, ln)
@@ -2596,7 +2599,7 @@ def _submit_work_orders_impl(
 			# "already used in production" guard never fires. `_stamp_work_order`
 			# logs and swallows, so a stamp can never fail a batch that is
 			# already in the ledger.
-			one_shot_stamps: Dict[str, Any] = {
+			one_shot_stamps: dict[str, Any] = {
 				"jarz_started_by": _resolve_current_user(),
 				"jarz_started_at": scheduled_dt,
 				"jarz_finished_by": _resolve_current_user(),
@@ -2661,7 +2664,7 @@ def submit_single_work_order(
 	item_qty: float,
 	scheduled_at: str | None = None,
 	material_selections: Any = None,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	_ensure_manager_access()
 	line = {
 		"item_code": item_code,
@@ -2696,12 +2699,12 @@ RECENT_WORK_ORDER_DATE_BASES = ("creation", "posting")
 @frappe.whitelist()
 def list_recent_work_orders(
 	limit: int = 50,
-	search: Optional[str] = None,
-	status: Optional[str] = None,
-	from_date: Optional[str] = None,
-	to_date: Optional[str] = None,
+	search: str | None = None,
+	status: str | None = None,
+	from_date: str | None = None,
+	to_date: str | None = None,
 	date_basis: str = "creation",
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
 	"""Return recent Work Orders, newest first, with the date each hit stock.
 
 	``creation`` is when the Work Order record was made. ``posted_at`` is the
@@ -2720,8 +2723,8 @@ def list_recent_work_orders(
 		date_basis = "creation"
 	date_expr = "DATE(se.posted_at)" if date_basis == "posting" else "DATE(wo.creation)"
 
-	conditions: List[str] = []
-	params: Dict[str, Any] = {"limit": limit}
+	conditions: list[str] = []
+	params: dict[str, Any] = {"limit": limit}
 	if search and str(search).strip():
 		conditions.append(
 			"(wo.name LIKE %(search)s OR wo.production_item LIKE %(search)s"
@@ -2766,7 +2769,7 @@ def list_recent_work_orders(
 		as_dict=True,
 	)
 	# Cast/normalize types
-	out: List[Dict[str, Any]] = []
+	out: list[dict[str, Any]] = []
 	for r in rows:
 		out.append(
 			{
@@ -2850,7 +2853,7 @@ def _resolve_active_sop_stamp(item_code: str) -> str:
 		return ""
 
 
-def _stamp_work_order(work_order: str, values: Dict[str, Any]) -> None:
+def _stamp_work_order(work_order: str, values: dict[str, Any]) -> None:
 	"""Write the Jarz floor-tracking fields onto a *submitted* Work Order.
 
 	``db.set_value`` rather than a save: these are plain custom fields on a
@@ -2871,7 +2874,7 @@ def _stamp_work_order(work_order: str, values: Dict[str, Any]) -> None:
 		)
 
 
-def _elapsed_minutes(started_at: Any, now: Any = None) -> Optional[float]:
+def _elapsed_minutes(started_at: Any, now: Any = None) -> float | None:
 	if not started_at:
 		return None
 	try:
@@ -2886,7 +2889,7 @@ def _compute_batch_cost(
 	work_order: str,
 	produced_qty: Any = None,
 	bom_no: Any = None,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	"""What the batch actually consumed, against what the BOM said it would.
 
 	``material_cost`` is the sum of the submitted *transfer* Stock Entry lines —
@@ -2940,7 +2943,7 @@ def _compute_batch_cost(
 	}
 
 
-def _get_wip_leftover_rows(work_order: str) -> List[Dict[str, Any]]:
+def _get_wip_leftover_rows(work_order: str) -> list[dict[str, Any]]:
 	"""Material still physically in WIP for this Work Order.
 
 	ERPNext's own reconciliation only counts the three manufacturing purposes,
@@ -2948,12 +2951,12 @@ def _get_wip_leftover_rows(work_order: str) -> List[Dict[str, Any]]:
 	own returns are therefore netted off here — otherwise a second call would
 	cheerfully try to move stock that already went back to the store.
 	"""
-	returned: Dict[Any, float] = {}
+	returned: dict[Any, float] = {}
 	for row in _resolve_stock_entry_detail_rows(work_order, "Material Transfer"):
 		key = (row.get("item_code"), row.get("s_warehouse"))
 		returned[key] = returned.get(key, 0.0) + _flt(row.get("qty"))
 
-	out: List[Dict[str, Any]] = []
+	out: list[dict[str, Any]] = []
 	for row in _resolve_wip_available_materials(work_order):
 		remaining = _flt(row.get("qty")) - returned.get((row.get("item_code"), row.get("warehouse")), 0.0)
 		if remaining > QTY_TOLERANCE:
@@ -2970,7 +2973,7 @@ def start_production_batch(
 	wip_warehouse: str | None = None,
 	fg_warehouse: str | None = None,
 	material_selections: Any = None,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	"""Open a batch: create the Work Order and move its materials into WIP.
 
 	Posts **exactly one** Stock Entry — ``Material Transfer for Manufacture``.
@@ -2991,7 +2994,7 @@ def start_production_batch(
 	if qty <= 0:
 		frappe.throw(_("Quantity to produce must be greater than zero"))
 
-	line: Dict[str, Any] = {
+	line: dict[str, Any] = {
 		"item_code": item_code,
 		"bom_name": bom_name,
 		"item_qty": qty,
@@ -3006,9 +3009,9 @@ def start_production_batch(
 
 
 def _start_production_batch_impl(
-	line: Dict[str, Any],
+	line: dict[str, Any],
 	scheduled_at: str | None = None,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	"""Open one batch, with no access gate of its own.
 
 	Shared verbatim by :func:`start_production_batch` (one line, its own
@@ -3062,7 +3065,7 @@ def _start_production_batch_impl(
 			wo_name, "Material Transfer for Manufacture", qty, scheduled_dt
 		)
 
-	stamp_values: Dict[str, Any] = {
+	stamp_values: dict[str, Any] = {
 		"jarz_started_by": _resolve_current_user(),
 		"jarz_started_at": scheduled_dt,
 	}
@@ -3113,7 +3116,7 @@ def _start_production_batch_impl(
 
 
 @frappe.whitelist()
-def start_production_batches(lines: Any, strict_basket: Any = 1) -> Dict[str, Any]:
+def start_production_batches(lines: Any, strict_basket: Any = 1) -> dict[str, Any]:
 	"""Open several batches in one call — "make these three mixes".
 
 	Posts **only** the ``Material Transfer for Manufacture`` per line, exactly as
@@ -3163,7 +3166,7 @@ def start_production_batches(lines: Any, strict_basket: Any = 1) -> Dict[str, An
 				"basket_shortages": basket_shortages,
 			}
 
-	results: List[Dict[str, Any]] = []
+	results: list[dict[str, Any]] = []
 	release_savepoint = getattr(frappe.db, "release_savepoint", None)
 	for index, ln in enumerate(lines):
 		save_point = _build_submit_savepoint_name(index, ln)
@@ -3207,7 +3210,7 @@ def finish_production_batch(
 	scheduled_at: str | None = None,
 	notes: str | None = None,
 	return_leftover: Any = 0,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	"""Close a batch: post the Manufacture entry for what was ACTUALLY made.
 
 	Scrap model, decided and implemented exactly as follows:
@@ -3350,7 +3353,7 @@ def finish_production_batch(
 
 	wip_leftover_qty = max(0.0, transferred - produced_after)
 
-	out: Dict[str, Any] = {
+	out: dict[str, Any] = {
 		"work_order": work_order,
 		"manufacture_entry": manufacture_entry,
 		"actual_qty": actual,
@@ -3371,7 +3374,7 @@ def finish_production_batch(
 	return out
 
 
-def _return_leftover_on_finish(out: Dict[str, Any], wo: Any, work_order: str, leftover_qty: float) -> None:
+def _return_leftover_on_finish(out: dict[str, Any], wo: Any, work_order: str, leftover_qty: float) -> None:
 	"""Send the unconsumed material home, without ever risking the finish.
 
 	Runs inside its own savepoint on purpose.  The Manufacture entry is already
@@ -3445,7 +3448,7 @@ def _return_leftover_on_finish(out: Dict[str, Any], wo: Any, work_order: str, le
 
 
 @frappe.whitelist()
-def list_running_work_orders(limit: Any = 50) -> List[Dict[str, Any]]:
+def list_running_work_orders(limit: Any = 50) -> list[dict[str, Any]]:
 	"""Batches that are open on the floor right now.
 
 	"Running" means submitted, not yet complete, **and** with material actually
@@ -3468,7 +3471,7 @@ def list_running_work_orders(limit: Any = 50) -> List[Dict[str, Any]]:
 	rows = _fetch_running_work_orders(filters, limit)
 
 	now = _resolve_now_datetime()
-	out: List[Dict[str, Any]] = []
+	out: list[dict[str, Any]] = []
 	for r in rows or []:
 		transferred = _flt(r.get("material_transferred_for_manufacturing"))
 		produced = _flt(r.get("produced_qty"))
@@ -3540,7 +3543,7 @@ def _running_wip_leftover(work_order: Any, transferred: float, produced: float) 
 	return claimed
 
 
-def _fetch_running_work_orders(filters: Dict[str, Any], limit: int) -> List[Dict[str, Any]]:
+def _fetch_running_work_orders(filters: dict[str, Any], limit: int) -> list[dict[str, Any]]:
 	try:
 		return frappe.get_all(
 			"Work Order",
@@ -3568,7 +3571,7 @@ def _fetch_running_work_orders(filters: Dict[str, Any], limit: int) -> List[Dict
 
 
 @frappe.whitelist()
-def get_batch_cost(work_order: str) -> Dict[str, Any]:
+def get_batch_cost(work_order: str) -> dict[str, Any]:
 	"""Material cost of one batch against its BOM standard."""
 	_ensure_production_view_access()
 
@@ -3585,7 +3588,7 @@ def get_batch_cost(work_order: str) -> Dict[str, Any]:
 
 
 @frappe.whitelist()
-def return_wip_to_store(work_order: str) -> Dict[str, Any]:
+def return_wip_to_store(work_order: str) -> dict[str, Any]:
 	"""Send material that never got consumed back out of WIP.
 
 	Stranded WIP is the single biggest risk in splitting start from finish:
@@ -3615,7 +3618,7 @@ def return_wip_to_store(work_order: str) -> Dict[str, Any]:
 	)
 
 
-def _post_wip_return(wo: Any, work_order: str, remarks: str) -> Dict[str, Any]:
+def _post_wip_return(wo: Any, work_order: str, remarks: str) -> dict[str, Any]:
 	"""Post the WIP -> source-warehouse Material Transfer for one Work Order.
 
 	Shared by :func:`return_wip_to_store` (a manager clearing stranded material
@@ -3632,8 +3635,8 @@ def _post_wip_return(wo: Any, work_order: str, remarks: str) -> Dict[str, Any]:
 	sources = _resolve_work_order_source_warehouses(work_order)
 	fallback_source = _coerce_str(getattr(wo, "source_warehouse", "") or "")
 
-	items: List[Dict[str, Any]] = []
-	unplaced: List[str] = []
+	items: list[dict[str, Any]] = []
+	unplaced: list[str] = []
 	for row in leftover:
 		target = sources.get(row["item_code"]) or fallback_source
 		if not target:
@@ -3691,7 +3694,7 @@ def _post_wip_return(wo: Any, work_order: str, remarks: str) -> Dict[str, Any]:
 
 
 @frappe.whitelist()
-def cancel_production_batch(work_order: str, reason: str) -> Dict[str, Any]:
+def cancel_production_batch(work_order: str, reason: str) -> dict[str, Any]:
 	"""Abort a batch that was started but must not be finished.
 
 	Splitting production into ``start`` and ``finish`` created a state the old
@@ -3762,8 +3765,8 @@ def cancel_production_batch(work_order: str, reason: str) -> Dict[str, Any]:
 	# there — someone already returned it by hand — and that must not block the
 	# cancel, so the "nothing left" throw is caught here rather than in the
 	# shared helper, which is right to refuse for its own caller.
-	stock_entry: Optional[str] = None
-	returned_items: List[Dict[str, Any]] = []
+	stock_entry: str | None = None
+	returned_items: list[dict[str, Any]] = []
 	if _get_wip_leftover_rows(work_order):
 		result = _post_wip_return(
 			wo,

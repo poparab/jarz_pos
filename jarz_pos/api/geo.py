@@ -44,10 +44,10 @@ def _ensure_geo_write_permission() -> None:
 
 @frappe.whitelist(allow_guest=False)
 def preview_maps_link(
-	link: Optional[str] = None,
-	url: Optional[str] = None,
-	request_id: Optional[str] = None,
-) -> Dict[str, Any]:
+	link: str | None = None,
+	url: str | None = None,
+	request_id: str | None = None,
+) -> dict[str, Any]:
 	"""Parse *link* and report the coordinates it yields. Reads no document.
 
 	The parameter is ``link`` — frozen in COURIER_CONTRACTS §10a and the name the
@@ -82,7 +82,7 @@ def preview_maps_link(
 
 
 @frappe.whitelist(allow_guest=False)
-def get_address_pin(address: str) -> Dict[str, Any]:
+def get_address_pin(address: str) -> dict[str, Any]:
 	"""Everything the pin editor needs about one Address. Read-only."""
 	_ensure_geo_read_permission()
 	try:
@@ -120,14 +120,14 @@ def get_address_pin(address: str) -> Dict[str, Any]:
 @frappe.whitelist(allow_guest=False)
 def set_address_pin(
 	address: str,
-	link: Optional[str] = None,
-	url: Optional[str] = None,
-	latitude: Optional[Any] = None,
-	longitude: Optional[Any] = None,
+	link: str | None = None,
+	url: str | None = None,
+	latitude: Any | None = None,
+	longitude: Any | None = None,
 	source: str = _geo.SOURCE_POS_LINK,
-	accuracy_m: Optional[Any] = None,
-	note: Optional[str] = None,
-) -> Dict[str, Any]:
+	accuracy_m: Any | None = None,
+	note: str | None = None,
+) -> dict[str, Any]:
 	"""Execute: write a pin onto *address*.
 
 	Accepts either a Maps *link* to parse, or an explicit *latitude*/*longitude*
@@ -172,13 +172,13 @@ def set_address_pin(
 @frappe.whitelist(allow_guest=False)
 def dry_run_address_pin(
 	address: str,
-	link: Optional[str] = None,
-	url: Optional[str] = None,
-	latitude: Optional[Any] = None,
-	longitude: Optional[Any] = None,
+	link: str | None = None,
+	url: str | None = None,
+	latitude: Any | None = None,
+	longitude: Any | None = None,
 	source: str = _geo.SOURCE_POS_LINK,
-	accuracy_m: Optional[Any] = None,
-) -> Dict[str, Any]:
+	accuracy_m: Any | None = None,
+) -> dict[str, Any]:
 	"""Resolve the link and run the full ladder decision. Writes nothing.
 
 	Exposed so a staging harness can sweep every production-cloned Address, prove

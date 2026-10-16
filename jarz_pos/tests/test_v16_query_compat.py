@@ -95,7 +95,7 @@ class TestV16QueryCompatibility(unittest.TestCase):
 		root = _app_package_root()
 
 		for path in _iter_python_files(root):
-			with open(path, "r", encoding="utf-8") as handle:
+			with open(path, encoding="utf-8") as handle:
 				source = handle.read()
 			try:
 				tree = ast.parse(source, filename=path)

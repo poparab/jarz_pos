@@ -54,7 +54,7 @@ def _warehouse_is_usable(warehouse: str) -> bool:
 	return not int(row.get("is_group") or 0) and not int(row.get("disabled") or 0)
 
 
-def _resolve_company() -> Optional[str]:
+def _resolve_company() -> str | None:
 	"""The company these defaults belong to, or None if it is ambiguous.
 
 	Same resolution order as ``create_purchase_invoice``: the global default,
@@ -73,7 +73,7 @@ def _resolve_company() -> Optional[str]:
 	return None
 
 
-def _resolve_tax_account(company: str) -> Optional[str]:
+def _resolve_tax_account(company: str) -> str | None:
 	"""An existing postable tax account for the company, or None.
 
 	Deliberately resolved, never created. Which account VAT lands in is a real
@@ -108,7 +108,7 @@ def _resolve_tax_account(company: str) -> Optional[str]:
 	return rows[0]["name"]
 
 
-def default_item_tax_template_name(company: Optional[str] = None) -> Optional[str]:
+def default_item_tax_template_name(company: str | None = None) -> str | None:
 	"""Name of the seeded default VAT template if it exists on this site.
 
 	Read-only. Used by ``settings_defaults`` to decide whether the Jarz POS

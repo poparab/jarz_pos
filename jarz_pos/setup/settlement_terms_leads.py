@@ -65,7 +65,7 @@ def _json_fieldtype() -> str:
 	return "Long Text"
 
 
-def lead_field_spec() -> Dict[str, Any]:
+def lead_field_spec() -> dict[str, Any]:
 	return {
 		"fieldname": LEAD_FIELD,
 		"label": "Agreed Settlement Terms",
@@ -86,9 +86,9 @@ def _logger():
 	return frappe.logger(LOGGER_NAME, allow_site=True)
 
 
-def ensure_lead_settlement_terms_field() -> Dict[str, List[str]]:
+def ensure_lead_settlement_terms_field() -> dict[str, list[str]]:
 	"""Idempotently seed ``Lead.custom_settlement_terms``. Never raises."""
-	log: Dict[str, List[str]] = {"created": [], "existing": [], "skipped": [], "warnings": []}
+	log: dict[str, list[str]] = {"created": [], "existing": [], "skipped": [], "warnings": []}
 	logger = _logger()
 	try:
 		if not frappe.db.exists("DocType", "Lead"):

@@ -35,7 +35,7 @@ FROZEN_OPTIONS = "Recieved\nIn Progress\nOut for Delivery\nDelivered\nCancelled\
 
 
 def _state_entries():
-	with open(FIXTURE_PATH, "r", encoding="utf-8") as handle:
+	with open(FIXTURE_PATH, encoding="utf-8") as handle:
 		data = json.load(handle)
 	return [e for e in data if e.get("dt") == "Sales Invoice" and e.get("fieldname") == STATE_FIELD]
 

@@ -29,7 +29,8 @@ staging site, and a rollback cannot recall a push already handed to Google.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Sequence
+from collections.abc import Sequence
+from typing import Any, Dict, List, Optional
 
 import frappe
 from frappe.utils import getdate, nowdate
@@ -102,7 +103,7 @@ def _suppressed(context: str) -> bool:
 		return True
 
 
-def _recipients(responsible_user: Optional[str]) -> List[str]:
+def _recipients(responsible_user: str | None) -> list[str]:
 	"""The responsible user when set and enabled, else every JARZ Manager."""
 	user = str(responsible_user or "").strip()
 	if user:
@@ -117,7 +118,7 @@ def _recipients(responsible_user: Optional[str]) -> List[str]:
 	return list(_get_users_with_roles([ROLES.JARZ_MANAGER]) or [])
 
 
-def _clean(recipients: Sequence[str]) -> List[str]:
+def _clean(recipients: Sequence[str]) -> list[str]:
 	return sorted({str(u).strip() for u in recipients or [] if str(u or "").strip() and u != "Guest"})
 
 
@@ -132,11 +133,11 @@ def enqueue_settlement_push(
 	kind: str,
 	amount: float,
 	currency: str,
-	due_date: Optional[str],
+	due_date: str | None,
 	recipients: Sequence[str],
-	description: Optional[str] = None,
-	invoice: Optional[str] = None,
-	branch_name: Optional[str] = None,
+	description: str | None = None,
+	invoice: str | None = None,
+	branch_name: str | None = None,
 ) -> bool:
 	"""Queue a settlement push for after the current transaction commits.
 
@@ -178,12 +179,12 @@ def build_push_data(
 	kind: str,
 	amount: float,
 	currency: str,
-	due_date: Optional[str],
-	description: Optional[str] = None,
-	invoice: Optional[str] = None,
+	due_date: str | None,
+	description: str | None = None,
+	invoice: str | None = None,
 	now: Any = None,
-	branch_name: Optional[str] = None,
-) -> Dict[str, str]:
+	branch_name: str | None = None,
+) -> dict[str, str]:
 	"""The string-only FCM / web-push data map for a settlement push."""
 	now = now or frappe.utils.now_datetime()
 	title, body = ss.reminder_text(
@@ -225,19 +226,19 @@ def send_settlement_reminder(
 	kind: str,
 	amount: float,
 	currency: str,
-	due_date: Optional[str],
+	due_date: str | None,
 	recipients: Sequence[str],
-	description: Optional[str] = None,
-	invoice: Optional[str] = None,
-	branch_name: Optional[str] = None,
-) -> Dict[str, Any]:
+	description: str | None = None,
+	invoice: str | None = None,
+	branch_name: str | None = None,
+) -> dict[str, Any]:
 	"""Background-worker entry point: deliver one settlement push. Never raises.
 
 	FCM + web push on the approvals Android channel (``jarz_approvals``, via
 	``APPROVAL_NOTIFICATION_TYPES``). A recipient set with no device at all is
 	recorded as a notification gap in Error Log rather than passing silently.
 	"""
-	result: Dict[str, Any] = {"ok": True, "status": "skipped", "recipients": 0}
+	result: dict[str, Any] = {"ok": True, "status": "skipped", "recipients": 0}
 	try:
 		if _suppressed(f"settlement_reminder:{kind}"):
 			result["status"] = "suppressed_test_run"
@@ -308,7 +309,7 @@ def send_settlement_reminder(
 # ---------------------------------------------------------------------------
 
 
-def _open_settlement_todos(customer: str) -> List[Dict[str, Any]]:
+def _open_settlement_todos(customer: str) -> list[dict[str, Any]]:
 	return (
 		frappe.get_all(
 			"ToDo",
@@ -336,10 +337,10 @@ def _close_todo(name: str) -> None:
 
 def sync_settlement_todo(
 	customer: str,
-	due_date: Optional[str],
+	due_date: str | None,
 	recipients: Sequence[str],
 	text: str,
-	summary: Optional[Dict[str, int]] = None,
+	summary: dict[str, int] | None = None,
 ) -> None:
 	"""Make the customer's tagged ToDos match the current state.
 
@@ -396,11 +397,11 @@ def sync_settlement_todo(
 
 
 def _process_terms_row(
-	row: Dict[str, Any],
-	invoices: List[Dict[str, Any]],
+	row: dict[str, Any],
+	invoices: list[dict[str, Any]],
 	today,
 	currency: str,
-	summary: Dict[str, int],
+	summary: dict[str, int],
 ) -> None:
 	customer = str(row.get("customer") or "")
 	if not customer:
@@ -467,7 +468,7 @@ def _process_terms_row(
 		summary["sent"] += 1
 
 
-def run_settlement_reminders() -> Dict[str, int]:
+def run_settlement_reminders() -> dict[str, int]:
 	"""Scheduler entry point. Returns counters. Never raises."""
 	summary = {"checked": 0, "sent": 0, "todos_opened": 0, "todos_closed": 0, "errors": 0}
 	try:
@@ -497,7 +498,7 @@ def run_settlement_reminders() -> Dict[str, int]:
 			rows = rows[:REMINDER_BATCH_CAP]
 
 		customers = [str(r.get("customer")) for r in rows if r.get("customer")]
-		by_customer: Dict[str, List[Dict[str, Any]]] = {}
+		by_customer: dict[str, list[dict[str, Any]]] = {}
 		for inv in _open_credit_invoices(customers=customers) if customers else []:
 			by_customer.setdefault(str(inv.get("customer") or ""), []).append(
 				{
@@ -540,7 +541,7 @@ def _is_credit_invoice(doc: Any) -> bool:
 		return False
 
 
-def on_sales_invoice_submit(doc: Any, method: Optional[str] = None) -> None:
+def on_sales_invoice_submit(doc: Any, method: str | None = None) -> None:
 	"""Sales Invoice ``on_submit``: "collect the previous invoice(s) with this delivery".
 
 	Fires only for a CREDIT invoice (same OR as ``utils/credit_utils``: the

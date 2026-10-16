@@ -60,6 +60,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import frappe
 from frappe.utils import cint, flt, get_datetime, get_url, now_datetime
+
 from jarz_pos.services import delivery_leg
 from jarz_pos.utils.settings_utils import single_flag, single_int
 
@@ -172,7 +173,7 @@ STATUS_PROCESSING = "processing"
 #: historical row (COURIER_CONTRACTS §1); the correctly spelled key is mapped too
 #: so a future data migration does not silently drop every order into
 #: ``processing``.
-_STATE_TO_STATUS: Dict[str, str] = {
+_STATE_TO_STATUS: dict[str, str] = {
 	"recieved": STATUS_RECEIVED,
 	"received": STATUS_RECEIVED,
 	"in_progress": STATUS_PREPARING,
@@ -192,7 +193,7 @@ _STATE_TO_STATUS: Dict[str, str] = {
 #: hand an Arabic-speaking customer English. Returning the pair and choosing in
 #: the browser is the only version that works for a link forwarded to somebody
 #: whose phone is set to the other language.
-STATUS_LABELS: Dict[str, Tuple[str, str]] = {
+STATUS_LABELS: dict[str, tuple[str, str]] = {
 	STATUS_RECEIVED: ("We have your order", "استلمنا طلبك"),
 	STATUS_PREPARING: ("Preparing your order", "جاري تحضير طلبك"),
 	STATUS_READY: ("Ready to leave the branch", "جاهز للخروج من الفرع"),
@@ -223,7 +224,7 @@ _STATE_FIELD_ALIASES = (
 #: here is a two-file change and a reviewer sees it. That is the whole point:
 #: the risk on a public endpoint is not a deliberate leak, it is a convenient
 #: ``**invoice_dict`` somebody adds on a Friday.
-PUBLIC_STATUS_KEYS: Tuple[str, ...] = (
+PUBLIC_STATUS_KEYS: tuple[str, ...] = (
 	"success",
 	"status",
 	"status_label_en",
@@ -253,12 +254,12 @@ NOT_FOUND_ERROR = "not found"
 RATE_LIMITED_ERROR = "too many requests"
 
 
-def not_found() -> Dict[str, Any]:
+def not_found() -> dict[str, Any]:
 	"""The generic public failure. Never says which of the reasons applied."""
 	return {"success": False, "error": NOT_FOUND_ERROR}
 
 
-def rate_limited() -> Dict[str, Any]:
+def rate_limited() -> dict[str, Any]:
 	"""Public failure for a token being polled too hard.
 
 	Distinct from :func:`not_found` on purpose and safely so: the limiter runs
@@ -344,7 +345,7 @@ def token_field_present() -> bool:
 		return False
 
 
-def _state_fields_present() -> List[str]:
+def _state_fields_present() -> list[str]:
 	"""Whichever board-state aliases this site carries, in probe order."""
 	try:
 		meta = frappe.get_meta("Sales Invoice")
@@ -361,7 +362,7 @@ SLOT_FIELDS = (
 )
 
 
-def _slot_fields_present() -> List[str]:
+def _slot_fields_present() -> list[str]:
 	"""The delivery-slot columns this site carries. ``get_all`` throws on a missing one."""
 	try:
 		meta = frappe.get_meta("Sales Invoice")
@@ -384,7 +385,7 @@ def new_token() -> str:
 	return secrets.token_urlsafe(TOKEN_BYTES)
 
 
-def ensure_tracking_token(invoice: Any) -> Optional[str]:
+def ensure_tracking_token(invoice: Any) -> str | None:
 	"""Mint the token for *invoice* if it has none. Idempotent.
 
 	Called from ``events.sales_invoice.mint_tracking_token_on_ofd`` on
@@ -442,7 +443,7 @@ def ensure_tracking_token(invoice: Any) -> Optional[str]:
 		return None
 
 
-def get_tracking_token(invoice_name: str, *, ensure: bool = False) -> Optional[str]:
+def get_tracking_token(invoice_name: str, *, ensure: bool = False) -> str | None:
 	"""The token for *invoice_name*, or ``None``.
 
 	``ensure=True`` mints one if the invoice has none. Off by default so a read
@@ -469,7 +470,7 @@ def get_tracking_token(invoice_name: str, *, ensure: bool = False) -> Optional[s
 		return None
 
 
-def get_tracking_url(invoice_name: str, *, ensure: bool = False) -> Optional[str]:
+def get_tracking_url(invoice_name: str, *, ensure: bool = False) -> str | None:
 	"""Absolute customer tracking URL for *invoice_name*, or ``None``.
 
 	**This is the seam the WooCommerce app consumes.** Woo needs to put a "track
@@ -490,7 +491,7 @@ def get_tracking_url(invoice_name: str, *, ensure: bool = False) -> Optional[str
 	return f"{base}{TRACKING_ROUTE_PREFIX}/{token}"
 
 
-def delivery_code_for_token(token: Any) -> Optional[str]:
+def delivery_code_for_token(token: Any) -> str | None:
 	"""The 4-digit delivery code for *token*, or ``None`` for a blank token.
 
 	``sha256(token + ":delivery-code") mod 10000``, zero-padded. The token is a
@@ -504,7 +505,7 @@ def delivery_code_for_token(token: Any) -> Optional[str]:
 	return "%04d" % (int(digest, 16) % 10000)
 
 
-def delivery_code_for_invoice(invoice_name: str, ensure: bool = True) -> Optional[str]:
+def delivery_code_for_invoice(invoice_name: str, ensure: bool = True) -> str | None:
 	"""The delivery code for *invoice_name*; mints the token when ``ensure``.
 
 	``None`` when the invoice has no token and ``ensure`` is false, or on a site
@@ -581,7 +582,7 @@ def consume_rate_budget(token: str) -> bool:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _invoice_fields() -> List[str]:
+def _invoice_fields() -> list[str]:
 	"""Columns the public read needs. Everything else stays unread on purpose."""
 	fields = [
 		"name",
@@ -607,14 +608,14 @@ def _invoice_fields() -> List[str]:
 	fields.extend(_state_fields_present())
 	# De-duplicate while keeping order; a site carrying only the custom alias
 	# would otherwise ask for the same column twice.
-	seen: List[str] = []
+	seen: list[str] = []
 	for field in fields:
 		if field not in seen:
 			seen.append(field)
 	return seen
 
 
-def _resolve_token_to_invoice(token: str) -> Optional[Dict[str, Any]]:
+def _resolve_token_to_invoice(token: str) -> dict[str, Any] | None:
 	"""Load the invoice row a token points at, or ``None``.
 
 	Two-step by necessity. :data:`TOKEN_FIELD` is a TEXT column (see its
@@ -659,7 +660,7 @@ def _resolve_token_to_invoice(token: str) -> Optional[Dict[str, Any]]:
 	return dict(row)
 
 
-def _status_for(row: Dict[str, Any]) -> str:
+def _status_for(row: dict[str, Any]) -> str:
 	for field in _STATE_FIELD_ALIASES:
 		if field in row and row.get(field):
 			mapped = _STATE_TO_STATUS.get(_state_key(row.get(field)))
@@ -672,7 +673,7 @@ def _status_for(row: Dict[str, Any]) -> str:
 	return STATUS_PROCESSING
 
 
-def _terminal_reference_time(row: Dict[str, Any], status: str) -> Any:
+def _terminal_reference_time(row: dict[str, Any], status: str) -> Any:
 	"""When the TTL clock started for a terminal order.
 
 	``custom_delivered_at`` when the courier stamped one, otherwise ``modified``
@@ -686,7 +687,7 @@ def _terminal_reference_time(row: Dict[str, Any], status: str) -> Any:
 	return row.get("modified")
 
 
-def _is_expired(row: Dict[str, Any], status: str) -> bool:
+def _is_expired(row: dict[str, Any], status: str) -> bool:
 	if status not in TERMINAL_STATUSES:
 		return False
 	ttl_hours = tracking_link_ttl_hours()
@@ -704,7 +705,7 @@ def _is_expired(row: Dict[str, Any], status: str) -> bool:
 	return age_hours > ttl_hours
 
 
-def _destination_pin(row: Dict[str, Any]) -> Tuple[Optional[float], Optional[float]]:
+def _destination_pin(row: dict[str, Any]) -> tuple[float | None, float | None]:
 	"""The delivery address's door pin, or ``(None, None)``."""
 	from jarz_pos.utils.geo import is_valid_coordinate
 
@@ -726,7 +727,7 @@ def _destination_pin(row: Dict[str, Any]) -> Tuple[Optional[float], Optional[flo
 	return (float(lat), float(lng))
 
 
-def _item_summary(invoice_name: str) -> Tuple[int, float]:
+def _item_summary(invoice_name: str) -> tuple[int, float]:
 	"""``(line_count, total_qty)`` — deliberately no item names or codes.
 
 	"Two items, four units" is enough for a customer to recognise their own
@@ -750,7 +751,7 @@ def _item_summary(invoice_name: str) -> Tuple[int, float]:
 	return (len(rows or []), round(total_qty, 3))
 
 
-def _courier_identity(row: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
+def _courier_identity(row: dict[str, Any]) -> tuple[str | None, str | None]:
 	"""``(first_name, phone)`` for the assigned courier.
 
 	**First name only, always.** A full name plus a live position is a
@@ -794,7 +795,7 @@ def courier_location_key(branch: str, party: str) -> str:
 	)
 
 
-def courier_last_known_position(branch: str, party: str) -> Dict[str, Any]:
+def courier_last_known_position(branch: str, party: str) -> dict[str, Any]:
 	"""Last-known courier fix from the cache, or ``{}``.
 
 	Tolerant by design, because the producer (lane B7) does not exist yet: a
@@ -858,11 +859,11 @@ def courier_last_known_position(branch: str, party: str) -> Dict[str, Any]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _empty_eta() -> Dict[str, Any]:
+def _empty_eta() -> dict[str, Any]:
 	return {"eta_minutes": None, "eta_at": None, "eta_window": None, "eta_basis": None}
 
 
-def _slot_window(row: Dict[str, Any]) -> Optional[Tuple[_dt.datetime, _dt.datetime]]:
+def _slot_window(row: dict[str, Any]) -> tuple[_dt.datetime, _dt.datetime] | None:
 	"""The order's delivery slot as ``(start, end)``, or ``None`` without one.
 
 	``custom_delivery_time_from`` is a Time (arrives as ``timedelta`` from the
@@ -909,7 +910,7 @@ def _fix_is_fresh(updated_at: Any) -> bool:
 	return age <= ETA_MAX_FIX_AGE_SEC
 
 
-def _other_open_stops(row: Dict[str, Any]) -> List[Tuple[float, float]]:
+def _other_open_stops(row: dict[str, Any]) -> list[tuple[float, float]]:
 	"""Pins of the courier's OTHER Out-for-Delivery orders (pinned ones only)."""
 	party = str(row.get("custom_courier_party") or "").strip()
 	if not party:
@@ -928,7 +929,7 @@ def _other_open_stops(row: Dict[str, Any]) -> List[Tuple[float, float]]:
 		)
 	except Exception:
 		return []
-	pins: List[Tuple[float, float]] = []
+	pins: list[tuple[float, float]] = []
 	for stop in stops or []:
 		lat, lng = _destination_pin(stop)
 		if lat is not None and lng is not None:
@@ -937,8 +938,8 @@ def _other_open_stops(row: Dict[str, Any]) -> List[Tuple[float, float]]:
 
 
 def _live_eta(
-	row: Dict[str, Any], destination: Tuple[Optional[float], Optional[float]], fix: Dict[str, Any]
-) -> Optional[Dict[str, Any]]:
+	row: dict[str, Any], destination: tuple[float | None, float | None], fix: dict[str, Any]
+) -> dict[str, Any] | None:
 	"""OSRM drive time courier -> nearer open stops -> this door, or ``None``.
 
 	Greedy nearest-first: from wherever the courier is "now", take the closest
@@ -990,11 +991,11 @@ def _live_eta(
 
 
 def resolve_eta(
-	row: Dict[str, Any],
+	row: dict[str, Any],
 	status: str,
-	destination: Tuple[Optional[float], Optional[float]],
-	fix: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
+	destination: tuple[float | None, float | None],
+	fix: dict[str, Any] | None = None,
+) -> dict[str, Any]:
 	"""The four ``eta_*`` keys for one order. Never raises.
 
 	``live`` while the order is out and the courier has a fresh server-side fix
@@ -1057,7 +1058,7 @@ def resolve_eta(
 		return empty
 
 
-def resolve_public_status(token: Any) -> Dict[str, Any]:
+def resolve_public_status(token: Any) -> dict[str, Any]:
 	"""Everything the customer page may know about one order.
 
 	The entire public contract of this feature. Returns either the full
@@ -1111,10 +1112,10 @@ def resolve_public_status(token: Any) -> Dict[str, Any]:
 	# services.delivery_leg answers the second half: is the courier driving
 	# toward THIS customer right now. See its module docstring for what happens
 	# on a site that has not migrated the leg fields yet.
-	position: Dict[str, Any] = {}
+	position: dict[str, Any] = {}
 	show_courier = status == STATUS_ON_THE_WAY and delivery_leg.live_map_gate_open(row)
-	courier_first_name: Optional[str] = None
-	courier_phone: Optional[str] = None
+	courier_first_name: str | None = None
+	courier_phone: str | None = None
 	if show_courier:
 		position = courier_last_known_position(
 			str(row.get("custom_kanban_profile") or row.get("pos_profile") or ""),

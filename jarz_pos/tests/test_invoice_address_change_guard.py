@@ -25,7 +25,6 @@ import frappe
 
 from jarz_pos.api import customer as customer_api
 
-
 INVOICE = "ACC-SINV-TEST-0001"
 ADDRESS = "Engi-Billing"
 OLD_TERRITORY = "EGGIZA"
@@ -110,7 +109,7 @@ class AddressChangeFeeGuardTests(unittest.TestCase):
 		):
 			try:
 				return customer_api.change_invoice_shipping_address(INVOICE, ADDRESS), None, link, db
-			except Exception as exc:  # noqa: BLE001 - the type is asserted by the caller
+			except Exception as exc:
 				return None, exc, link, db
 
 	# ── the 17176 shape ────────────────────────────────────────────────────────

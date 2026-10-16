@@ -20,7 +20,6 @@ from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-
 NOW = datetime(2026, 9, 2, 10, 15, 0)
 
 

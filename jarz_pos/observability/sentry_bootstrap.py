@@ -35,21 +35,21 @@ _SENSITIVE_KEYS = (
 )
 
 
-def before_request(*args, **kwargs):  # noqa: ANN002, ANN003
+def before_request(*args, **kwargs):
 	ensure_sentry()
 
 
-def after_request(response=None, request=None, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ARG001
+def after_request(response=None, request=None, *args, **kwargs):
 	error_id = getattr(getattr(frappe, "flags", None), "jarz_error_id", None)
 	if response is not None and error_id:
 		response.headers["X-Error-Id"] = str(error_id)
 
 
-def before_job(method=None, kwargs=None, transaction_type=None, *args, **ignored):  # noqa: ANN001, ANN002, ANN003, ARG001
+def before_job(method=None, kwargs=None, transaction_type=None, *args, **ignored):
 	ensure_sentry()
 
 
-def after_job(method=None, kwargs=None, result=None, *args, **ignored):  # noqa: ANN001, ANN002, ANN003, ARG001
+def after_job(method=None, kwargs=None, result=None, *args, **ignored):
 	return None
 
 
@@ -197,7 +197,7 @@ def _current_scope_context() -> dict[str, Any]:
 	}
 
 
-def _before_send(event: dict[str, Any], hint: Mapping[str, Any]) -> dict[str, Any]:  # noqa: ARG001
+def _before_send(event: dict[str, Any], hint: Mapping[str, Any]) -> dict[str, Any]:
 	request = event.get("request") or {}
 	if request:
 		headers = request.get("headers") or {}

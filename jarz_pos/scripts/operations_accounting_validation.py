@@ -34,12 +34,12 @@ from frappe.utils import flt, nowdate
 
 from jarz_pos.scripts.b2b_accounting_validation import (
 	RunContext,
-	assert_gl_balanced,
 	_cleanup,
 	_ensure_item_prices,
 	_ensure_stock,
 	_pick_pos_profile,
 	_pick_sellable_items,
+	assert_gl_balanced,
 )
 
 _TOL = 0.01
@@ -61,7 +61,7 @@ def _guard_environment() -> None:
 		raise RuntimeError(f"operations_accounting_validation refuses to run on production ({base_url!r})")
 
 
-def _gl_by_account(voucher_type: str, voucher_no: str) -> Dict[str, float]:
+def _gl_by_account(voucher_type: str, voucher_no: str) -> dict[str, float]:
 	rows = frappe.db.sql(
 		"""
         SELECT account, ROUND(SUM(debit - credit), 2) AS net
@@ -83,7 +83,7 @@ class _Artifacts:
 	"""Documents this run created, unwound newest-first."""
 
 	def __init__(self) -> None:
-		self.rows: List[tuple] = []
+		self.rows: list[tuple] = []
 
 	def add(self, doctype: str, name: str) -> None:
 		if name and (doctype, name) not in self.rows:
@@ -110,7 +110,7 @@ class _Artifacts:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _case_cash_transfer(ctx: RunContext, env: Dict[str, Any], art: _Artifacts) -> None:
+def _case_cash_transfer(ctx: RunContext, env: dict[str, Any], art: _Artifacts) -> None:
 	"""Money must leave one account and arrive in the other, to the piastre."""
 	case = "OPS-CASH-TRANSFER"
 	from jarz_pos.api.cash_transfer import list_accounts, submit_transfer
@@ -164,7 +164,7 @@ def _case_cash_transfer(ctx: RunContext, env: Dict[str, Any], art: _Artifacts) -
 	)
 
 
-def _case_expense_request(ctx: RunContext, env: Dict[str, Any], art: _Artifacts) -> None:
+def _case_expense_request(ctx: RunContext, env: dict[str, Any], art: _Artifacts) -> None:
 	"""An approved expense debits the expense head and credits what paid it."""
 	case = "OPS-EXPENSE"
 	from jarz_pos.api.expenses import approve_expense, create_expense
@@ -289,7 +289,7 @@ def _case_expense_request(ctx: RunContext, env: Dict[str, Any], art: _Artifacts)
 	)
 
 
-def _case_stock_transfer(ctx: RunContext, env: Dict[str, Any], art: _Artifacts) -> None:
+def _case_stock_transfer(ctx: RunContext, env: dict[str, Any], art: _Artifacts) -> None:
 	"""Quantity must leave the source warehouse and arrive in the target."""
 	case = "OPS-STOCK-TRANSFER"
 	from jarz_pos.api.transfer import submit_transfer
@@ -349,7 +349,7 @@ def _case_stock_transfer(ctx: RunContext, env: Dict[str, Any], art: _Artifacts) 
 	)
 
 
-def _case_inventory_count(ctx: RunContext, env: Dict[str, Any], art: _Artifacts) -> None:
+def _case_inventory_count(ctx: RunContext, env: dict[str, Any], art: _Artifacts) -> None:
 	"""A count must move the book quantity to the counted quantity, and no further."""
 	case = "OPS-INVENTORY-COUNT"
 	from jarz_pos.api.inventory_count import submit_reconciliation
@@ -395,7 +395,7 @@ def _case_inventory_count(ctx: RunContext, env: Dict[str, Any], art: _Artifacts)
 	ctx.record(f"{case}.variance_gl_balanced", passed, detail)
 
 
-def _case_shift_discrepancy(ctx: RunContext, env: Dict[str, Any], art: _Artifacts) -> None:
+def _case_shift_discrepancy(ctx: RunContext, env: dict[str, Any], art: _Artifacts) -> None:
 	"""Closing short or over must post a Cash Over/Short entry for exactly the gap.
 
 	This path has failed silently before — a dangling account made the
@@ -654,7 +654,7 @@ _CASES = [
 ]
 
 
-def run(cleanup: bool = True) -> Dict[str, Any]:
+def run(cleanup: bool = True) -> dict[str, Any]:
 	if isinstance(cleanup, str):
 		cleanup = cleanup.strip().lower() not in {"", "0", "false", "no"}
 
@@ -664,7 +664,7 @@ def run(cleanup: bool = True) -> Dict[str, Any]:
 
 	ctx = RunContext()
 	art = _Artifacts()
-	summary: Dict[str, Any] = {}
+	summary: dict[str, Any] = {}
 	try:
 		pos_profile = _pick_pos_profile()
 		company = frappe.db.get_value("POS Profile", pos_profile, "company")

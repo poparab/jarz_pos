@@ -7,7 +7,6 @@ from unittest.mock import patch
 
 from jarz_pos.services import lead_place_match as match_mod
 
-
 #: The real pair verified on 2026-09-07: opening the stored ?cid= URL landed on
 #: a place URL whose FTID second word is that CID in hex.
 REAL_CID = "8118497466869163611"

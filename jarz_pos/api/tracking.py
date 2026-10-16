@@ -25,7 +25,8 @@ The endpoint below carries two limiters, on purpose:
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, Optional
+from collections.abc import Callable
+from typing import Any, Dict, Optional
 
 import frappe
 
@@ -117,7 +118,7 @@ def _may_see_delivery_code() -> bool:
 		return False
 
 
-def _tracking_customer_phone(invoice_id: str) -> Optional[str]:
+def _tracking_customer_phone(invoice_id: str) -> str | None:
 	"""Customer's phone for the "send the link on WhatsApp" button, or None.
 
 	Best effort and read-only: the order's own contact number first, then the
@@ -143,7 +144,7 @@ def _tracking_customer_phone(invoice_id: str) -> Optional[str]:
 
 @frappe.whitelist(allow_guest=True)
 @_rate_limited
-def get_public_status(token: Optional[str] = None) -> Dict[str, Any]:
+def get_public_status(token: str | None = None) -> dict[str, Any]:
 	"""Customer-visible state of one order, addressed by its tracking token.
 
 	Returns either the full allow-listed payload
@@ -185,7 +186,7 @@ def get_public_status(token: Optional[str] = None) -> Dict[str, Any]:
 
 
 @frappe.whitelist(allow_guest=False)
-def get_tracking_link(invoice_id: str) -> Dict[str, Any]:
+def get_tracking_link(invoice_id: str) -> dict[str, Any]:
 	"""Absolute tracking URL for an order. Staff-only.
 
 	The internal counterpart to the public read: it exists so the POS/Desk side

@@ -31,7 +31,6 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-
 # ── frappe stub, installed only when there is no bench ────────────────────
 
 
@@ -69,7 +68,7 @@ def _fake_throw(message, exc=Exception, **kwargs):
 def _ensure_document_base():
 	"""Make ``from frappe.model.document import Document`` importable."""
 	try:
-		import frappe.model.document  # noqa: F401
+		import frappe.model.document
 
 		return
 	except Exception:
@@ -133,8 +132,7 @@ for _name, _value in (("flt", _flt), ("getdate", _getdate), ("today", lambda: "2
 
 _ensure_document_base()
 
-from jarz_pos.doctype.jarz_employee_penalty import jarz_employee_penalty as module  # noqa: E402
-
+from jarz_pos.doctype.jarz_employee_penalty import jarz_employee_penalty as module
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 # This module lives in `jarz_pos/tests/`, not next to the DocType, because the

@@ -5,59 +5,62 @@ This module handles the main POS invoice creation logic,
 including validation, document creation, and submission.
 """
 
-import frappe
 import json
 import traceback
 from datetime import timedelta
-from .bundle_processing import process_bundle_for_invoice, validate_bundle_configuration_by_item
+
+import frappe
+
 from jarz_pos.constants import PAYMENT_MODES, ROLES
-from jarz_pos.services import delivery_promotions as _delivery_promotions
-from jarz_pos.services import promo_codes as _promo_codes
+from jarz_pos.services import branch_fulfilment as _branch_fulfilment
 from jarz_pos.services import commercial_policy as _commercial_policy
 from jarz_pos.services import customer_deals as _customer_deals
-from jarz_pos.services import branch_fulfilment as _branch_fulfilment
-from jarz_pos.services import delivery_pin_requirement as _delivery_pin
-from jarz_pos.utils.validation_utils import (
-	validate_cart_data,
-	validate_customer,
-	validate_pos_profile,
-	validate_delivery_datetime,
-)
-from jarz_pos.utils.invoice_utils import (
-	set_invoice_fields,
-	add_items_to_invoice,
-	verify_invoice_totals,
-	resolve_order_territory,
-	append_pos_audit_marker,
-	stamp_order_channel,
-	is_unresolved_territory,
-	_log_loud,
-)
-from jarz_pos.utils.customer_address_utils import (
-	ensure_shipping_address,
-	preferred_address_was_honoured,
-	resolve_customer_shipping_address,
-)
-from jarz_pos.utils.credit_utils import (
-	CREDIT_PAYMENT_METHOD,
-	is_credit_payment_method,
-)
 from jarz_pos.services import delivery_handling as _delivery
-from jarz_pos.utils.delivery_utils import add_delivery_charges_to_taxes
+from jarz_pos.services import delivery_pin_requirement as _delivery_pin
+from jarz_pos.services import delivery_promotions as _delivery_promotions
+from jarz_pos.services import promo_codes as _promo_codes
+from jarz_pos.utils.access_control import ShiftRequiredError, get_open_shift_for_profile
 from jarz_pos.utils.account_utils import (
+	ensure_partner_receivable_subaccount,
+	get_company_receivable_account,
 	# NOTE: no longer called from this module (see _resolve_item_rate_with_provenance's
 	# docstring, FIX 3c) — it ran the identical query as this module's own generic
 	# Item Price lookup and could never return a different answer. Import kept ONLY
 	# because existing tests patch `jarz_pos.services.invoice_creation.get_item_price`
 	# and `jarz_pos.page.custom_pos.custom_pos` re-exports the real one separately.
 	get_item_price,
-	get_company_receivable_account,
 	get_pos_cash_account,
-	ensure_partner_receivable_subaccount,
 	resolve_online_partner_paid_to,
 )
-from jarz_pos.utils.access_control import ShiftRequiredError, get_open_shift_for_profile
+from jarz_pos.utils.credit_utils import (
+	CREDIT_PAYMENT_METHOD,
+	is_credit_payment_method,
+)
+from jarz_pos.utils.customer_address_utils import (
+	ensure_shipping_address,
+	preferred_address_was_honoured,
+	resolve_customer_shipping_address,
+)
+from jarz_pos.utils.delivery_utils import add_delivery_charges_to_taxes
 from jarz_pos.utils.employee_link import EMPLOYEE_ORDER_PURPOSE
+from jarz_pos.utils.invoice_utils import (
+	_log_loud,
+	add_items_to_invoice,
+	append_pos_audit_marker,
+	is_unresolved_territory,
+	resolve_order_territory,
+	set_invoice_fields,
+	stamp_order_channel,
+	verify_invoice_totals,
+)
+from jarz_pos.utils.validation_utils import (
+	validate_cart_data,
+	validate_customer,
+	validate_delivery_datetime,
+	validate_pos_profile,
+)
+
+from .bundle_processing import process_bundle_for_invoice, validate_bundle_configuration_by_item
 
 # Territory / branch exception logging lives in its own service so a logging
 # failure can never reach invoice creation.  Imported defensively (same pattern as
@@ -383,7 +386,8 @@ def _resolve_b2b_baseline_price_list(order_purpose: str | None) -> str | None:
 	but it is a retail order with the shipping income waived and must keep pricing at
 	retail — returning the B2B list for it would quietly discount every waiver order.
 	"""
-	from jarz_pos.setup.b2b_pricing import B2B_SUPPLY_PURPOSE, PRICE_LIST as B2B_PRICE_LIST
+	from jarz_pos.setup.b2b_pricing import B2B_SUPPLY_PURPOSE
+	from jarz_pos.setup.b2b_pricing import PRICE_LIST as B2B_PRICE_LIST
 
 	if (order_purpose or "").strip() != B2B_SUPPLY_PURPOSE:
 		return None
@@ -2982,7 +2986,7 @@ def _parse_delivery_charges(delivery_charges_json, logger):
 			print(f"   ❌ {error_msg}")
 			frappe.throw(error_msg)
 	else:
-		print(f"   📦 No delivery charges provided")
+		print("   📦 No delivery charges provided")
 	return delivery_charges
 
 
@@ -3011,7 +3015,7 @@ def _process_cart_items(
 		is_bundle = item_data.get("is_bundle", False)
 
 		# Enhanced logging for debugging
-		print(f"      📋 Item Details:")
+		print("      📋 Item Details:")
 		print(f"         - item_code: {item_code}")
 		print(f"         - qty: {qty}")
 		print(f"         - rate: {rate}")
@@ -3044,7 +3048,7 @@ def _process_cart_items(
 		# Validate required fields
 		if not item_code:
 			logger.warning(f"Item {i} missing item_code, skipping")
-			print(f"      ❌ Missing item_code, skipping")
+			print("      ❌ Missing item_code, skipping")
 			continue
 
 		# FIX 2 (bundle half): these used to CLAMP -- qty<=0 became 1, rate<0
@@ -3322,7 +3326,7 @@ def _log_processing_summary(processed_items, logger):
 	print(f"      - Bundle items: {bundle_items_count}")
 
 	# CRITICAL DEBUG: List all processed items before moving to validation
-	print(f"   🔍 ALL PROCESSED ITEMS DETAILS:")
+	print("   🔍 ALL PROCESSED ITEMS DETAILS:")
 	total_main_items = 0
 	total_child_items = 0
 	total_regular_items = 0
@@ -3347,7 +3351,7 @@ def _log_processing_summary(processed_items, logger):
 			f"      Processed Item {i}: {item['item_code']} - Bundle: {is_bundle}, Type: {bundle_type}, Qty: {item['qty']}, Rate: {rate}, Discount: ${discount}"
 		)
 
-	print(f"   📊 PROCESSING SUMMARY:")
+	print("   📊 PROCESSING SUMMARY:")
 	print(f"      - Total processed items: {len(processed_items)}")
 	print(f"      - Regular items: {total_regular_items}")
 	print(f"      - Bundle main items: {total_main_items}")
@@ -3358,9 +3362,9 @@ def _log_processing_summary(processed_items, logger):
 	print(f"      - Expected items in final invoice: {expected_items_in_invoice}")
 
 	if len(processed_items) != expected_items_in_invoice:
-		print(f"      ⚠️ WARNING: Item count mismatch!")
+		print("      ⚠️ WARNING: Item count mismatch!")
 	else:
-		print(f"      ✅ Item counts match expected structure")
+		print("      ✅ Item counts match expected structure")
 
 
 def _create_invoice_document(logger):
@@ -3370,7 +3374,7 @@ def _create_invoice_document(logger):
 		# Frappe best practice: Use frappe.new_doc()
 		invoice_doc = frappe.new_doc("Sales Invoice")
 		logger.debug("Sales Invoice document created")
-		print(f"   ✅ New document created")
+		print("   ✅ New document created")
 		return invoice_doc
 	except Exception as e:
 		error_msg = f"Error creating Sales Invoice document: {_exception_detail(e)}"
@@ -3430,7 +3434,7 @@ def _validate_and_calculate_document(invoice_doc, logger):
 	"""Validate and calculate document totals using native ERPNext logic."""
 	logger.debug("Running ERPNext document validation (native discount logic)...")
 	try:
-		print(f"   📋 Pre-calculation item summary:")
+		print("   📋 Pre-calculation item summary:")
 		for idx, item in enumerate(invoice_doc.items, 1):
 			price_list_rate = getattr(item, "price_list_rate", 0) or 0
 			discount_pct = getattr(item, "discount_percentage", 0) or 0
@@ -3446,18 +3450,18 @@ def _validate_and_calculate_document(invoice_doc, logger):
 		# including bundle and operator discounts, across that native defaults pass.
 		resolved_pricing = _attach_resolved_item_pricing(invoice_doc)
 
-		print(f"   Running set_missing_values()...")
+		print("   Running set_missing_values()...")
 		invoice_doc.set_missing_values()
 
 		_restore_resolved_item_pricing(invoice_doc, resolved_pricing)
 
-		print(f"   Running calculate_taxes_and_totals()...")
+		print("   Running calculate_taxes_and_totals()...")
 		invoice_doc.calculate_taxes_and_totals()
 
 		_log_discount_diagnostics_final(invoice_doc)
 
 		logger.debug(f"Document validated - Total: {invoice_doc.grand_total}")
-		print(f"   ✅ Document validated:")
+		print("   ✅ Document validated:")
 		print(f"      - Net Total: {invoice_doc.net_total}")
 		print(f"      - Grand Total: {invoice_doc.grand_total}")
 	except Exception as e:
@@ -3469,7 +3473,7 @@ def _validate_and_calculate_document(invoice_doc, logger):
 
 def _log_discount_diagnostics_final(invoice_doc):
 	"""Log final discount application after ERPNext processing."""
-	print(f"   🔍 FINAL DISCOUNT DIAGNOSTICS (after ERPNext processing):")
+	print("   🔍 FINAL DISCOUNT DIAGNOSTICS (after ERPNext processing):")
 	total_discount_amount = 0.0
 	total_net_amount = 0.0
 
@@ -3504,7 +3508,7 @@ def _log_discount_diagnostics_final(invoice_doc):
 			if abs(rate - expected_rate) > 0.01:
 				print(f"         ⚠️ Expected rate={expected_rate}, got rate={rate}")
 
-	print(f"   💰 FINAL TOTALS:")
+	print("   💰 FINAL TOTALS:")
 	print(f"      - Total discount applied: {total_discount_amount}")
 	print(f"      - Net amount (sum of line amounts): {total_net_amount}")
 	print(f"      - Document net_total: {invoice_doc.net_total}")
@@ -3514,7 +3518,7 @@ def _log_discount_diagnostics_final(invoice_doc):
 	if abs(total_net_amount - float(invoice_doc.net_total)) > 0.01:
 		print(f"      ⚠️ Net total mismatch! Line sum: {total_net_amount}, Doc total: {invoice_doc.net_total}")
 	else:
-		print(f"      ✅ Net total verified correctly")
+		print("      ✅ Net total verified correctly")
 
 
 def _save_document(invoice_doc, delivery_datetime, logger, delivery_end_datetime=None):
@@ -3543,7 +3547,7 @@ def _save_document(invoice_doc, delivery_datetime, logger, delivery_end_datetime
 
 def _verify_delivery_field_after_save(invoice_doc, delivery_datetime, logger, delivery_end_datetime=None):
 	"""Verify delivery slot fields were set correctly after save."""
-	print(f"\n🔍 DELIVERY SLOT VERIFICATION AFTER SAVE:")
+	print("\n🔍 DELIVERY SLOT VERIFICATION AFTER SAVE:")
 	resolved_pricing = _capture_resolved_item_pricing(invoice_doc)
 	# Reload document to get fresh state from database
 	invoice_doc.reload()
@@ -3569,10 +3573,10 @@ def _verify_delivery_field_after_save(invoice_doc, delivery_datetime, logger, de
 			date_attr = getattr(invoice_doc, "custom_delivery_date", None)
 			time_from_attr = getattr(invoice_doc, "custom_delivery_time_from", None)
 			duration_attr = getattr(invoice_doc, "custom_delivery_duration", None)
-			print(f"   ✅ Re-saved with delivery slot fields")
+			print("   ✅ Re-saved with delivery slot fields")
 		except Exception as correction_error:
-			print(f"   ❌ Could not set delivery slot fields: {str(correction_error)}")
-			logger.warning(f"Delivery slot fields could not be set: {str(correction_error)}")
+			print(f"   ❌ Could not set delivery slot fields: {correction_error!s}")
+			logger.warning(f"Delivery slot fields could not be set: {correction_error!s}")
 
 
 def _submit_document(invoice_doc, logger):
@@ -3588,7 +3592,7 @@ def _submit_document(invoice_doc, logger):
 		# Frappe best practice: Submit after successful save
 		invoice_doc.submit()
 		logger.info(f"Invoice submitted: {invoice_doc.name}")
-		print(f"   ✅ Document submitted successfully!")
+		print("   ✅ Document submitted successfully!")
 
 		# Verify discount amounts persisted after submission
 		verify_invoice_totals(invoice_doc, logger)
@@ -3669,7 +3673,7 @@ def _prepare_response(invoice_doc, delivery_datetime, logger):
 			pass
 
 	logger.info(f"Invoice creation successful: {invoice_doc.name}")
-	print(f"   ✅ Response prepared:")
+	print("   ✅ Response prepared:")
 	for key, value in result.items():
 		print(f"      {key}: {value}")
 
@@ -3820,13 +3824,13 @@ def _handle_invoice_creation_error(e, customer_name, pos_profile_name, logger):
 	# chained traceback. Every inner pre-throw log is a warning so one failure
 	# files one issue, not two or three.
 	logger.error(error_msg, exc_info=True)
-	print(f"\n❌ FUNCTION ERROR:")
+	print("\n❌ FUNCTION ERROR:")
 	print(f"   Type: {type(e).__name__}")
 	print(f"   Message: {detail}")
 
 	# Log full error details for debugging
 	full_traceback = traceback.format_exc()
-	print(f"   Traceback:")
+	print("   Traceback:")
 	print(full_traceback)
 
 	# Frappe best practice: Use frappe.log_error for persistent logging

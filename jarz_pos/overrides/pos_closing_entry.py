@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import frappe
-
 from erpnext.accounts.doctype.pos_closing_entry.pos_closing_entry import (
 	POSClosingEntry as ERPNextPOSClosingEntry,
 )

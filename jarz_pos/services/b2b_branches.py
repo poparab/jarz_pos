@@ -68,7 +68,7 @@ def _flt(value: Any) -> float:
 		return 0.0
 
 
-def _str_or_none(value: Any) -> Optional[str]:
+def _str_or_none(value: Any) -> str | None:
 	return str(value) if value else None
 
 
@@ -79,7 +79,7 @@ def _norm(value: Any) -> str:
 # ---------------------------------------------------------------------------
 # Branch book
 # ---------------------------------------------------------------------------
-def customer_branches(customer: str) -> List[Dict[str, Any]]:
+def customer_branches(customer: str) -> list[dict[str, Any]]:
 	"""The customer's physical branches, as the order flow sees them."""
 	from jarz_pos.api.customer import _build_customer_shipping_address_book
 
@@ -109,7 +109,7 @@ def customer_branches(customer: str) -> List[Dict[str, Any]]:
 	return branches
 
 
-def _address_coordinates(names: List[str]) -> Dict[str, tuple]:
+def _address_coordinates(names: list[str]) -> dict[str, tuple]:
 	if not names or not (
 		_has_column("Address", "custom_latitude") and _has_column("Address", "custom_longitude")
 	):
@@ -132,7 +132,7 @@ def _address_coordinates(names: List[str]) -> Dict[str, tuple]:
 	return out
 
 
-def _member_index(branches: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+def _member_index(branches: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
 	"""Address docname -> the branch it belongs to."""
 	index = {}
 	for branch in branches:
@@ -142,7 +142,7 @@ def _member_index(branches: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
 	return index
 
 
-def _invoice_address(row: Dict[str, Any]) -> str:
+def _invoice_address(row: dict[str, Any]) -> str:
 	return str(row.get("shipping_address_name") or row.get("customer_address") or "").strip()
 
 
@@ -150,7 +150,7 @@ def _branch_for_invoice(row, index):
 	return index.get(_invoice_address(row))
 
 
-def tag_invoice_branches(customer: str, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def tag_invoice_branches(customer: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 	"""Stamp each invoice row of *customer* with the door it was delivered to.
 
 	Sets ``branch`` (the branch's canonical address_name) and ``branch_name``
@@ -192,7 +192,7 @@ def tag_invoice_branches(customer: str, rows: List[Dict[str, Any]]) -> List[Dict
 # ---------------------------------------------------------------------------
 # Per-branch invoice separation
 # ---------------------------------------------------------------------------
-def _invoice_fields() -> List[str]:
+def _invoice_fields() -> list[str]:
 	fields = [
 		"name",
 		"posting_date",
@@ -209,7 +209,7 @@ def _invoice_fields() -> List[str]:
 	return fields
 
 
-def _submitted_invoices(customer: str, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+def _submitted_invoices(customer: str, limit: int | None = None) -> list[dict[str, Any]]:
 	return (
 		frappe.get_all(
 			"Sales Invoice",
@@ -222,11 +222,11 @@ def _submitted_invoices(customer: str, limit: Optional[int] = None) -> List[Dict
 	)
 
 
-def _empty_stats() -> Dict[str, Any]:
+def _empty_stats() -> dict[str, Any]:
 	return {"invoice_count": 0, "total_billed": 0.0, "outstanding": 0.0, "last_order_date": None}
 
 
-def _add_to_stats(stats: Dict[str, Any], row: Dict[str, Any]) -> None:
+def _add_to_stats(stats: dict[str, Any], row: dict[str, Any]) -> None:
 	stats["invoice_count"] += 1
 	stats["total_billed"] = _flt(stats["total_billed"] + _flt(row.get("grand_total")))
 	stats["outstanding"] = _flt(stats["outstanding"] + _flt(row.get("outstanding_amount")))
@@ -235,7 +235,7 @@ def _add_to_stats(stats: Dict[str, Any], row: Dict[str, Any]) -> None:
 		stats["last_order_date"] = posted
 
 
-def _invoice_totals_by_address(customer: str) -> List[Dict[str, Any]]:
+def _invoice_totals_by_address(customer: str) -> list[dict[str, Any]]:
 	"""Submitted-invoice totals per address the invoice was sent to."""
 	return (
 		frappe.db.sql(
@@ -254,7 +254,7 @@ def _invoice_totals_by_address(customer: str) -> List[Dict[str, Any]]:
 	)
 
 
-def account_branches(customer: str) -> Dict[str, Any]:
+def account_branches(customer: str) -> dict[str, Any]:
 	"""Branches with their own invoice totals and outstanding balance.
 
 	``unassigned`` holds invoices whose address is none of the branches (no
@@ -316,7 +316,7 @@ _MAPS_ROW_FIELDS = (
 _MAPS_OPTIONAL_FIELDS = ("on_talabat", "linked_address", "match_dismissed")
 
 
-def _float_or_none(value: Any) -> Optional[float]:
+def _float_or_none(value: Any) -> float | None:
 	if value in (None, ""):
 		return None
 	try:
@@ -325,7 +325,7 @@ def _float_or_none(value: Any) -> Optional[float]:
 		return None
 
 
-def _int_or_none(value: Any) -> Optional[int]:
+def _int_or_none(value: Any) -> int | None:
 	if value in (None, ""):
 		return None
 	try:
@@ -341,7 +341,7 @@ def _truthy(value: Any) -> bool:
 		return bool(value)
 
 
-def _pin(row: Dict[str, Any]) -> Optional[tuple]:
+def _pin(row: dict[str, Any]) -> tuple | None:
 	lat = _float_or_none(row.get("latitude"))
 	lng = _float_or_none(row.get("longitude"))
 	return (lat, lng) if lat and lng else None
@@ -385,7 +385,7 @@ def _log_quietly(title: str) -> None:
 		pass
 
 
-def _lead_maps_rows(lead: str) -> List[Dict[str, Any]]:
+def _lead_maps_rows(lead: str) -> list[dict[str, Any]]:
 	"""The lead's Jarz Lead Branch rows in idx order. Never raises."""
 	try:
 		fields = list(_MAPS_ROW_FIELDS) + [
@@ -406,7 +406,7 @@ def _lead_maps_rows(lead: str) -> List[Dict[str, Any]]:
 		return []
 
 
-def _lead_self_row(lead: str) -> Optional[Dict[str, Any]]:
+def _lead_self_row(lead: str) -> dict[str, Any] | None:
 	"""A branch-less Lead's own location as one virtual row, or None."""
 	try:
 		from jarz_pos.api.leads import _lead_self_branch
@@ -422,7 +422,7 @@ def _lead_self_row(lead: str) -> Optional[Dict[str, Any]]:
 	return row
 
 
-def _lead_title(lead: Optional[str]) -> Optional[str]:
+def _lead_title(lead: str | None) -> str | None:
 	if not lead:
 		return None
 	try:
@@ -432,7 +432,7 @@ def _lead_title(lead: Optional[str]) -> Optional[str]:
 	return row.get("lead_name") or row.get("company_name") or lead
 
 
-def _maps_payload(row: Dict[str, Any]) -> Dict[str, Any]:
+def _maps_payload(row: dict[str, Any]) -> dict[str, Any]:
 	return {
 		"row": row.get("name"),
 		"branch_name": row.get("branch_name"),
@@ -452,7 +452,7 @@ def _maps_payload(row: Dict[str, Any]) -> Dict[str, Any]:
 	}
 
 
-def _territory_labels(names: List[str]) -> Dict[str, List[Any]]:
+def _territory_labels(names: list[str]) -> dict[str, list[Any]]:
 	"""Territory docname -> [name, territory_name, Arabic name]. One query."""
 	names = sorted({n for n in names if n})
 	if not names:
@@ -470,7 +470,7 @@ def _territory_labels(names: List[str]) -> Dict[str, List[Any]]:
 	return {row.get("name"): [row.get(f) for f in fields] for row in rows}
 
 
-def _match_rows(branches: List[Dict[str, Any]], rows: List[Dict[str, Any]]) -> Dict[int, tuple]:
+def _match_rows(branches: list[dict[str, Any]], rows: list[dict[str, Any]]) -> dict[int, tuple]:
 	"""Pair maps rows with address branches. -> {row index: (branch index, how)}.
 
 	Each side is used at most once. In order: a hand link; the nearest pins
@@ -479,7 +479,7 @@ def _match_rows(branches: List[Dict[str, Any]], rows: List[Dict[str, Any]]) -> D
 	what is still unpaired -- two Sheikh Zayed rows and one Sheikh Zayed address
 	stay apart, because either guess could be the wrong door.
 	"""
-	pairs: Dict[int, tuple] = {}
+	pairs: dict[int, tuple] = {}
 	taken = set()
 	index = {}
 	for b_idx, branch in enumerate(branches):
@@ -563,7 +563,7 @@ def _match_rows(branches: List[Dict[str, Any]], rows: List[Dict[str, Any]]) -> D
 	return pairs
 
 
-def _maps_only_entry(row: Dict[str, Any], lead_title: Optional[str]) -> Dict[str, Any]:
+def _maps_only_entry(row: dict[str, Any], lead_title: str | None) -> dict[str, Any]:
 	maps = _maps_payload(row)
 	return {
 		"source": "maps",
@@ -588,7 +588,7 @@ def _maps_only_entry(row: Dict[str, Any], lead_title: Optional[str]) -> Dict[str
 	}
 
 
-def unified_branches(customer: Optional[str], lead: Optional[str]) -> Dict[str, Any]:
+def unified_branches(customer: str | None, lead: str | None) -> dict[str, Any]:
 	"""Every door of the account once, with delivery and Maps data side by side.
 
 	Address branches (with their invoice totals) come first, each carrying the
@@ -607,7 +607,7 @@ def unified_branches(customer: Optional[str], lead: Optional[str]) -> Dict[str, 
 		branch["maps"] = None
 		branch["maps_match"] = None
 
-	rows: List[Dict[str, Any]] = []
+	rows: list[dict[str, Any]] = []
 	if lead:
 		try:
 			exists = frappe.db.exists("Lead", lead)
@@ -642,7 +642,7 @@ def unified_branches(customer: Optional[str], lead: Optional[str]) -> Dict[str, 
 	return {"branches": branches, "unassigned": unassigned}
 
 
-def map_invoice(row: Dict[str, Any], index: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+def map_invoice(row: dict[str, Any], index: dict[str, dict[str, Any]]) -> dict[str, Any]:
 	from jarz_pos.utils.invoice_utils import normalize_woo_order_id
 
 	branch = _branch_for_invoice(row, index)
@@ -661,7 +661,7 @@ def map_invoice(row: Dict[str, Any], index: Dict[str, Dict[str, Any]]) -> Dict[s
 	}
 
 
-def account_invoices(customer: str, branch: Optional[str] = None, limit: int = 100) -> Dict[str, Any]:
+def account_invoices(customer: str, branch: str | None = None, limit: int = 100) -> dict[str, Any]:
 	"""Every submitted invoice of the customer, optionally for one branch.
 
 	All order purposes are listed: a shop's history before it became a B2B
@@ -698,13 +698,13 @@ def account_invoices(customer: str, branch: Optional[str] = None, limit: int = 1
 # ---------------------------------------------------------------------------
 # Merge-as-branch: party resolution and plan
 # ---------------------------------------------------------------------------
-def _merged_into(lead: str) -> Optional[str]:
+def _merged_into(lead: str) -> str | None:
 	if not _has_column("Lead", "custom_merged_into"):
 		return None
 	return frappe.db.get_value("Lead", lead, "custom_merged_into") or None
 
 
-def _leads_for_customer(customer: str) -> List[str]:
+def _leads_for_customer(customer: str) -> list[str]:
 	"""Live (not merged-away) Leads that resolve to this Customer."""
 	names = set(frappe.get_all("Lead", filters={"customer": customer}, pluck="name") or [])
 	converted = frappe.db.get_value("Customer", customer, "lead_name")
@@ -713,7 +713,7 @@ def _leads_for_customer(customer: str) -> List[str]:
 	return sorted(n for n in names if not _merged_into(n))
 
 
-def resolve_party(doctype: str, name: str) -> Dict[str, Any]:
+def resolve_party(doctype: str, name: str) -> dict[str, Any]:
 	"""{"doctype","name","title","lead","customer"} for a Lead or Customer card."""
 	from jarz_pos.api.crm import _resolve_lead_customer
 
@@ -752,7 +752,7 @@ def resolve_party(doctype: str, name: str) -> Dict[str, Any]:
 	}
 
 
-def build_plan(source: Dict[str, Any], target: Dict[str, Any]) -> Dict[str, Any]:
+def build_plan(source: dict[str, Any], target: dict[str, Any]) -> dict[str, Any]:
 	"""Decide what a merge will do, without doing any of it."""
 	s_cust, t_cust = source.get("customer"), target.get("customer")
 	s_lead, t_lead = source.get("lead"), target.get("lead")
@@ -791,7 +791,7 @@ def build_plan(source: Dict[str, Any], target: Dict[str, Any]) -> Dict[str, Any]
 	}
 
 
-def _structural_use(customer: str) -> Optional[str]:
+def _structural_use(customer: str) -> str | None:
 	"""Why this Customer must never be merged away or absorb another, or None.
 
 	``rename_doc`` rewrites EVERY link to the source, including a POS
@@ -819,7 +819,7 @@ def _structural_use(customer: str) -> Optional[str]:
 	return None
 
 
-def _label_clash(source: str, target: str) -> List[str]:
+def _label_clash(source: str, target: str) -> list[str]:
 	"""Flavours both customers track a printed label for (one ledger each)."""
 	try:
 		if not frappe.db.table_exists("Jarz Customer Label"):
@@ -837,13 +837,13 @@ def _label_clash(source: str, target: str) -> List[str]:
 		return []
 
 
-def _woo_id(customer: str) -> Optional[str]:
+def _woo_id(customer: str) -> str | None:
 	if not _has_column("Customer", "woo_customer_id"):
 		return None
 	return _norm_woo_id(frappe.db.get_value("Customer", customer, "woo_customer_id"))
 
 
-def _norm_woo_id(value) -> Optional[str]:
+def _norm_woo_id(value) -> str | None:
 	"""A Woo id as the Woo app compares it: positive digits, no leading zeros."""
 	text = str(value if value is not None else "").strip()
 	if not text.isdigit() or int(text) <= 0:
@@ -851,7 +851,7 @@ def _norm_woo_id(value) -> Optional[str]:
 	return str(int(text))
 
 
-def customer_merge_blockers(source: str, target: str) -> List[str]:
+def customer_merge_blockers(source: str, target: str) -> list[str]:
 	"""Reasons a customer merge must not run. Empty means it may."""
 	blockers = []
 	for role, customer in (("source", source), ("target", target)):
@@ -878,14 +878,14 @@ def customer_merge_blockers(source: str, target: str) -> List[str]:
 	return blockers
 
 
-def _woo_aliases(customer: str) -> List[str]:
+def _woo_aliases(customer: str) -> list[str]:
 	if not _has_column("Customer", _WOO_ALIAS_FIELD):
 		return []
 	raw = frappe.db.get_value("Customer", customer, _WOO_ALIAS_FIELD) or ""
 	return [n for n in (_norm_woo_id(part) for part in str(raw).split(",")) if n]
 
 
-def _customer_summary(customer: Optional[str]) -> Optional[Dict[str, Any]]:
+def _customer_summary(customer: str | None) -> dict[str, Any] | None:
 	if not customer:
 		return None
 	fields = ["name", "customer_name", "customer_type", "customer_group", "mobile_no"]
@@ -924,7 +924,7 @@ def _customer_summary(customer: Optional[str]) -> Optional[Dict[str, Any]]:
 	}
 
 
-def preview(source: Dict[str, Any], target: Dict[str, Any]) -> Dict[str, Any]:
+def preview(source: dict[str, Any], target: dict[str, Any]) -> dict[str, Any]:
 	plan = build_plan(source, target)
 	s_sum = _customer_summary(source.get("customer"))
 	t_sum = _customer_summary(target.get("customer"))
@@ -953,7 +953,7 @@ def preview(source: Dict[str, Any], target: Dict[str, Any]) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Merge-as-branch: execution
 # ---------------------------------------------------------------------------
-def _snapshot(names: List[str]) -> Dict[str, float]:
+def _snapshot(names: list[str]) -> dict[str, float]:
 	"""Money and row totals that a merge must move but never change."""
 	placeholders = ", ".join(["%s"] * len(names))
 	si = frappe.db.sql(
@@ -1029,7 +1029,7 @@ def _stamp_unaddressed_invoices(source: str) -> int:
 	return len(rows)
 
 
-def _title_source_addresses(source: str, branch_name: Optional[str]) -> int:
+def _title_source_addresses(source: str, branch_name: str | None) -> int:
 	branch_name = _norm(branch_name)
 	if not branch_name:
 		return 0
@@ -1081,7 +1081,7 @@ def _carry_credit_terms(source: str, target: str) -> bool:
 	return True
 
 
-def merge_customers(source: str, target: str, branch_name: Optional[str] = None) -> Dict[str, Any]:
+def merge_customers(source: str, target: str, branch_name: str | None = None) -> dict[str, Any]:
 	"""Fold Customer ``source`` into ``target`` as one of its branches."""
 	from frappe.model.rename_doc import rename_doc
 
@@ -1206,9 +1206,7 @@ def _link_lead_addresses(lead: str, customer: str) -> int:
 	return linked
 
 
-def execute(
-	source: Dict[str, Any], target: Dict[str, Any], branch_name: Optional[str] = None
-) -> Dict[str, Any]:
+def execute(source: dict[str, Any], target: dict[str, Any], branch_name: str | None = None) -> dict[str, Any]:
 	"""Run the plan. Raises (and so rolls the request back) on any failure."""
 	plan = build_plan(source, target)
 	if plan["requires_manager"] and not _is_manager():
@@ -1219,7 +1217,7 @@ def execute(
 
 	s_cust, t_cust = source.get("customer"), target.get("customer")
 	s_lead, t_lead = source.get("lead"), target.get("lead")
-	result: Dict[str, Any] = {
+	result: dict[str, Any] = {
 		"plan": plan,
 		"customer": plan["final_customer"],
 		"merged_customer": None,

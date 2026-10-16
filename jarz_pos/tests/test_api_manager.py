@@ -3,8 +3,8 @@
 This module tests manager dashboard and order management API endpoints.
 """
 
-from contextlib import nullcontext
 import unittest
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 

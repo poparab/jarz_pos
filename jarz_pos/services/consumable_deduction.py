@@ -91,7 +91,8 @@ from __future__ import annotations
 
 import hashlib
 import math
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from collections.abc import Sequence
+from typing import Any, Dict, List, Optional, Tuple
 
 try:
 	import frappe
@@ -159,7 +160,7 @@ _LARGE_GROUPS = {"Large"}
 # ---------------------------------------------------------------------------
 
 
-def deduct_consumables_on_ofd(doc: Any, method: Optional[str] = None) -> None:
+def deduct_consumables_on_ofd(doc: Any, method: str | None = None) -> None:
 	"""Create a Material Issue SE for consumables when the invoice first goes Out for Delivery.
 
 	Safe no-op on every subsequent save — guarded by custom_was_out_for_delivery.
@@ -238,7 +239,7 @@ def deduct_consumables_on_ofd(doc: Any, method: Optional[str] = None) -> None:
 			pass
 
 
-def reverse_consumable_deduction_on_cancel(doc: Any, method: Optional[str] = None) -> None:
+def reverse_consumable_deduction_on_cancel(doc: Any, method: str | None = None) -> None:
 	"""Cancel the consumable Material Issue SE when its parent invoice is cancelled.
 
 	Safe no-op if the invoice never reached Out for Delivery (no SE was created).
@@ -302,7 +303,7 @@ def _requested_consumables(
 	medium_qty: float,
 	large_qty: float,
 	is_b2b: bool,
-) -> List[Tuple[str, float]]:
+) -> list[tuple[str, float]]:
 	"""The ``(item_code, qty)`` lines to issue for one order; ``[]`` for no jars.
 
 	Retail: one covier per jar, bags by the jars each bag holds per size, one
@@ -335,7 +336,7 @@ def _requested_consumables(
 	]
 
 
-def _get_warehouse(item_code: str, company: str) -> Optional[str]:
+def _get_warehouse(item_code: str, company: str) -> str | None:
 	"""Resolve where THIS consumable actually lives — never the POS Profile warehouse.
 
 	Why not the invoice's POS Profile / kanban-profile warehouse (the
@@ -389,10 +390,10 @@ def _bin_actual_qty(item_code: str, warehouse: str) -> float:
 
 def _build_coverable_lines(
 	company: str,
-	requested: List[Tuple[str, float]],
+	requested: list[tuple[str, float]],
 	*,
 	invoice_name: str,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
 	"""Resolve a warehouse and clamp each requested line to what stock can cover.
 
 	Deliberately does NOT enable ``allow_negative_stock`` and does NOT set a
@@ -405,7 +406,7 @@ def _build_coverable_lines(
 	``make_sl_entries`` for the WHOLE document on the first row it cannot
 	post, so one uncoverable line previously meant zero SLEs for all three.
 	"""
-	lines: List[Dict[str, Any]] = []
+	lines: list[dict[str, Any]] = []
 	for item_code, qty in requested:
 		qty = float(qty or 0)
 		if qty <= 0:
@@ -467,8 +468,8 @@ def _create_material_issue(
 	*,
 	invoice_name: str,
 	company: str,
-	lines: Sequence[Tuple[str, float]],
-) -> Optional[str]:
+	lines: Sequence[tuple[str, float]],
+) -> str | None:
 	"""Build, insert, and submit a Material Issue Stock Entry. Returns the SE name.
 
 	``lines`` is the ``(item_code, qty)`` list from ``_requested_consumables``

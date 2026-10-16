@@ -340,7 +340,7 @@ def build_derivatives(material: str, force: bool = False) -> dict[str, Any]:
 			pages = _load_image_pages(path)
 		else:
 			status = RENDER_DOWNLOAD_ONLY
-	except Exception as exc:  # noqa: BLE001 - recorded on the doc, never swallowed
+	except Exception as exc:
 		_logger().error(f"build_derivatives({material}) rasterise failed", exc_info=True)
 		status = RENDER_FAILED
 		error = str(exc)[:1000]
@@ -372,7 +372,7 @@ def build_derivatives(material: str, force: bool = False) -> dict[str, Any]:
 			manifest["count"] = len(manifest["pages"])
 			with open(manifest_path, "w", encoding="utf-8") as handle:
 				json.dump(manifest, handle)
-		except Exception as exc:  # noqa: BLE001
+		except Exception as exc:
 			_logger().error(f"build_derivatives({material}) write failed", exc_info=True)
 			status = RENDER_FAILED
 			error = str(exc)[:1000]

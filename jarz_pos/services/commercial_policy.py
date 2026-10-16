@@ -159,7 +159,8 @@ def reserved_price_lists(
 	stored; callers compare case-insensitively (MariaDB's collation treats
 	"sample" and "Sample" as the same list).
 	"""
-	from jarz_pos.setup.b2b_pricing import B2B_SUPPLY_PURPOSE, PRICE_LIST as B2B_PRICE_LIST
+	from jarz_pos.setup.b2b_pricing import B2B_SUPPLY_PURPOSE
+	from jarz_pos.setup.b2b_pricing import PRICE_LIST as B2B_PRICE_LIST
 
 	profile = (pos_profile_name or "").strip()
 	if default_price_list is _UNSET:

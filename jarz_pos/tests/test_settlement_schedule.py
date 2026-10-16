@@ -32,7 +32,7 @@ import unittest
 from types import SimpleNamespace
 
 try:  # pragma: no cover - depends on the environment
-	import frappe  # noqa: F401
+	import frappe
 except ImportError:  # pragma: no cover
 	_fake = types.ModuleType("frappe")
 	_fake.whitelist = lambda *a, **k: (a[0] if a and callable(a[0]) else (lambda fn: fn))

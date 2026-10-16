@@ -84,12 +84,12 @@ def _bool(value: Any, default: bool = False) -> bool:
 	return bool(value)
 
 
-def _clean(value: Any) -> Optional[str]:
+def _clean(value: Any) -> str | None:
 	text = str(value or "").strip()
 	return text or None
 
 
-def _coerce_list(value: Any) -> List[Any]:
+def _coerce_list(value: Any) -> list[Any]:
 	if isinstance(value, str):
 		import json
 
@@ -137,7 +137,7 @@ def get_label_dashboard(customer=None, storage_location=None, only_attention=0, 
 	}
 
 
-def _settings_payload(settings: Dict[str, Any]) -> Dict[str, Any]:
+def _settings_payload(settings: dict[str, Any]) -> dict[str, Any]:
 	return {
 		"lead_days_min": settings["lead_days_min"],
 		"lead_days_max": settings["lead_days_max"],
@@ -267,7 +267,7 @@ def get_label_detail(label, movement_limit=40):
 	return snapshot
 
 
-def _print_order_payload(p: Dict[str, Any]) -> Dict[str, Any]:
+def _print_order_payload(p: dict[str, Any]) -> dict[str, Any]:
 	return {
 		"name": p.get("name"),
 		"qty": _int(p.get("qty")),
@@ -293,7 +293,7 @@ def search_label_customers(query=""):
 	"""Company customers, flagged with whether they already have a label."""
 	_ensure_access()
 
-	filters: Dict[str, Any] = {}
+	filters: dict[str, Any] = {}
 	try:
 		if frappe.get_meta("Customer").get_field("customer_type"):
 			filters["customer_type"] = "Company"
@@ -318,7 +318,7 @@ def search_label_customers(query=""):
 		frappe.log_error(frappe.get_traceback(), "labels.search_label_customers")
 		rows = []
 
-	existing: Dict[str, int] = {}
+	existing: dict[str, int] = {}
 	if rows:
 		try:
 			for row in frappe.get_all(
@@ -365,7 +365,7 @@ def get_flavour_options(customer):
 
 	price_list = (frappe.db.get_value("Customer", name, "default_price_list") or "").strip()
 
-	options: Dict[str, Dict[str, Any]] = {}
+	options: dict[str, dict[str, Any]] = {}
 
 	def add(item_code: str, source: str) -> None:
 		if not item_code or item_code in options:
@@ -620,8 +620,8 @@ def setup_customer_labels(
 	location = _clean(storage_location)
 	sheets = max(_int(default_print_sheets), 0)
 
-	created: List[str] = []
-	skipped: List[Dict[str, Any]] = []
+	created: list[str] = []
+	skipped: list[dict[str, Any]] = []
 	for row in rows:
 		if not isinstance(row, dict):
 			continue

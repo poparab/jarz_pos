@@ -21,7 +21,8 @@ all of this, which is the whole point of keeping the fee on its own column.
 """
 
 import unittest
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
+
 import frappe
 
 
@@ -87,7 +88,7 @@ class TestPartnerDispatch(unittest.TestCase):
 
 	@patch("jarz_pos.services.settlement_strategies.frappe")
 	def test_dispatch_routes_to_partner_when_linked(self, mock_frappe):
-		from jarz_pos.services.settlement_strategies import dispatch_settlement, PARTNER_STRATEGY
+		from jarz_pos.services.settlement_strategies import PARTNER_STRATEGY, dispatch_settlement
 
 		mock_inv = MagicMock()
 		mock_inv.name = "INV-P001"

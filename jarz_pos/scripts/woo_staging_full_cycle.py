@@ -22,7 +22,6 @@ import frappe
 from frappe.utils import now_datetime
 from frappe.utils.password import get_decrypted_password
 
-
 FLAGS = [
 	"enable_inbound_orders",
 	"enable_inbound_amendment",
@@ -214,7 +213,7 @@ class FullCycleRunner:
 				self._case("EO-AMEND-01", "ERP invoice amendment outbound", self._outbound_amendment)
 				self._case("EO-STATE-01", "ERP invoice state outbound", self._outbound_state_transition)
 				self._case("EO-CANCEL-01", "ERP invoice cancellation outbound", self._outbound_cancel)
-		except Exception as exc:  # noqa: BLE001
+		except Exception as exc:
 			self.report["errors"].append(
 				{
 					"error": str(exc),
@@ -293,7 +292,7 @@ class FullCycleRunner:
 					"reason": skip.reason,
 				}
 			)
-		except Exception as exc:  # noqa: BLE001
+		except Exception as exc:
 			case["status"] = "Fail"
 			case["error"] = str(exc)
 			case["traceback"] = traceback.format_exc(limit=12)
@@ -347,13 +346,13 @@ class FullCycleRunner:
 		if not host_name:
 			try:
 				host_name = str((frappe.get_site_config() or {}).get("host_name", "") or "").rstrip("/")
-			except Exception:  # noqa: BLE001
+			except Exception:
 				host_name = ""
 
 		connection_result: dict[str, Any]
 		try:
 			connection_result = test_saved_connection()
-		except Exception as exc:  # noqa: BLE001
+		except Exception as exc:
 			connection_result = {"success": False, "error": str(exc)}
 
 		db_version = frappe.db.sql("SELECT VERSION() AS version", as_dict=True)[0].version
@@ -741,7 +740,7 @@ class FullCycleRunner:
 			case,
 			"WI-CUST-01.04",
 			"Inbound customer event reaches Succeeded",
-			str(((inbound_sync.get("latest_event") or {}).get("status") or "")) == "Succeeded",
+			str((inbound_sync.get("latest_event") or {}).get("status") or "") == "Succeeded",
 			expected="Succeeded",
 			actual=inbound_sync,
 		)
@@ -928,7 +927,7 @@ class FullCycleRunner:
 			case,
 			"WI-CUST-02.02",
 			"Inbound customer update event reaches Succeeded",
-			str(((inbound_sync.get("latest_event") or {}).get("status") or "")) == "Succeeded",
+			str((inbound_sync.get("latest_event") or {}).get("status") or "") == "Succeeded",
 			expected="Succeeded",
 			actual=inbound_sync,
 		)
@@ -1056,7 +1055,7 @@ class FullCycleRunner:
 			case,
 			"WI-ADDR-01.02",
 			"Inbound address update event reaches Succeeded",
-			str(((inbound_sync.get("latest_event") or {}).get("status") or "")) == "Succeeded",
+			str((inbound_sync.get("latest_event") or {}).get("status") or "") == "Succeeded",
 			expected="Succeeded",
 			actual=inbound_sync,
 		)
@@ -1205,7 +1204,7 @@ class FullCycleRunner:
 			case,
 			"REL-02.03",
 			"Replay inbound customer event reaches Succeeded",
-			str(((inbound_sync.get("latest_event") or {}).get("status") or "")) == "Succeeded",
+			str((inbound_sync.get("latest_event") or {}).get("status") or "") == "Succeeded",
 			expected="Succeeded",
 			actual=inbound_sync,
 		)
@@ -1393,7 +1392,7 @@ class FullCycleRunner:
 			case,
 			"WI-ORD-01.04",
 			"Inbound order event reaches Succeeded",
-			str(((inbound_sync.get("latest_event") or {}).get("status") or "")) == "Succeeded",
+			str((inbound_sync.get("latest_event") or {}).get("status") or "") == "Succeeded",
 			expected="Succeeded",
 			actual=inbound_sync,
 		)
@@ -2699,7 +2698,7 @@ class FullCycleRunner:
 			case,
 			"X-CUST-01.02",
 			"Round-trip inbound customer event reaches Succeeded",
-			str(((inbound_sync.get("latest_event") or {}).get("status") or "")) == "Succeeded",
+			str((inbound_sync.get("latest_event") or {}).get("status") or "") == "Succeeded",
 			expected="Succeeded",
 			actual=inbound_sync,
 		)
@@ -3193,7 +3192,7 @@ class FullCycleRunner:
 				pos_profile=fixture["pos_profile"],
 			)
 			frappe.db.commit()
-		except Exception as exc:  # noqa: BLE001 - recorded as a failed assertion; the online leg still runs
+		except Exception as exc:
 			cash_pay_result = {}
 			cash_pay_error = f"{type(exc).__name__}: {exc}"
 			frappe.db.rollback()
@@ -4057,7 +4056,7 @@ class FullCycleRunner:
 		if not host_name:
 			try:
 				host_name = str((frappe.get_site_config() or {}).get("host_name", "") or "").rstrip("/")
-			except Exception:  # noqa: BLE001
+			except Exception:
 				host_name = ""
 		if not host_name:
 			raise RuntimeError("Site host_name is not configured")
@@ -4874,7 +4873,7 @@ class FullCycleRunner:
 def _get_decrypted_single_password(docname: str, fieldname: str) -> str:
 	try:
 		return get_decrypted_password("WooCommerce Settings", docname, fieldname) or ""
-	except Exception:  # noqa: BLE001
+	except Exception:
 		return ""
 
 
@@ -4965,7 +4964,7 @@ def _next_delivery_slot() -> dict[str, str]:
 def _safe_json_body(response: Any) -> Any:
 	try:
 		return response.json()
-	except Exception:  # noqa: BLE001
+	except Exception:
 		return {"raw": getattr(response, "text", "")}
 
 
@@ -4981,7 +4980,7 @@ def _json_safe(value: Any) -> Any:
 	if hasattr(value, "as_dict"):
 		try:
 			return _json_safe(value.as_dict())
-		except Exception:  # noqa: BLE001
+		except Exception:
 			return str(value)
 	return str(value)
 

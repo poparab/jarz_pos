@@ -36,7 +36,6 @@ from urllib.parse import unquote
 
 import frappe
 
-
 #: ``!1s0x<hex>:0x<hex>`` -- the Maps "feature id". The second word is the CID.
 FTID_RE = re.compile(r"!1s(0x[0-9a-f]{6,20}):(0x[0-9a-f]{6,20})", re.IGNORECASE)
 #: ``!16s%2Fg%2F1tdtyp2w`` -- the Knowledge Graph id, stable across locales.

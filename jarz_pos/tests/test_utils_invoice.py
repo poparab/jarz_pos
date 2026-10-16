@@ -149,6 +149,7 @@ class TestTerritoryLabels(unittest.TestCase):
 	def _patched(self, values):
 		"""Patch the single Territory read both helpers make."""
 		from unittest import mock
+
 		from jarz_pos.utils import invoice_utils
 
 		return mock.patch.object(invoice_utils.frappe.db, "get_value", return_value=values)
@@ -189,6 +190,7 @@ class TestTerritoryLabels(unittest.TestCase):
 		"""``Address.city`` holds the Woo code on every Woo-sourced address."""
 		from types import SimpleNamespace
 		from unittest import mock
+
 		from jarz_pos.utils import invoice_utils
 
 		address = SimpleNamespace(

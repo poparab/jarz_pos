@@ -12,7 +12,7 @@ import unittest
 from types import SimpleNamespace
 
 try:  # pragma: no cover - depends on the environment
-	import frappe  # noqa: F401
+	import frappe
 except ImportError:  # pragma: no cover
 	_fake = types.ModuleType("frappe")
 	_fake.whitelist = lambda *a, **k: (a[0] if a and callable(a[0]) else (lambda fn: fn))
@@ -33,8 +33,8 @@ except ImportError:  # pragma: no cover
 	sys.modules["frappe.utils"] = _utils
 	_fake.utils = _utils
 
-from jarz_pos.services import customer_followups as f  # noqa: E402
-from jarz_pos.services import rfm_segmentation as rfm  # noqa: E402
+from jarz_pos.services import customer_followups as f
+from jarz_pos.services import rfm_segmentation as rfm
 
 D = datetime.datetime
 T = datetime.time

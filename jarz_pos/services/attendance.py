@@ -114,16 +114,17 @@ is the single row a manager most needs to ask about.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import date as date_cls
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import frappe
 from frappe import _
 from frappe.utils import add_days, flt, get_datetime, get_first_day, get_last_day, getdate
 
 from jarz_pos.events.employee_checkin import EMPLOYEE_EXEMPT_FIELD
-from jarz_pos.services.checkin_device import CHECKIN_FLAG_FIELDS, FLAG_ORDER, mask_tokens_in_detail
 from jarz_pos.services import roster as roster_service
+from jarz_pos.services.checkin_device import CHECKIN_FLAG_FIELDS, FLAG_ORDER, mask_tokens_in_detail
 from jarz_pos.utils.settings_utils import single_flag, single_int
 
 SETTINGS = "Jarz POS Settings"
@@ -181,7 +182,7 @@ STATUS_NOT_ROSTERED = "not_rostered"
 
 #: The exact strings the Flutter client switches on. Order is the order the
 #: client renders its legend in; it is part of the contract.
-STATUSES: Tuple[str, ...] = (
+STATUSES: tuple[str, ...] = (
 	STATUS_PRESENT,
 	STATUS_LATE,
 	STATUS_LATE_UNMATCHED,
@@ -234,12 +235,12 @@ def ensure_attendance_access() -> None:
 		frappe.throw(_("Not permitted: attendance access required"), frappe.PermissionError)
 
 
-def allowed_shift_locations() -> Optional[Set[str]]:
+def allowed_shift_locations() -> set[str] | None:
 	"""Branch scope, identical to the roster's. ``None`` means unrestricted."""
 	return roster_service.allowed_shift_locations()
 
 
-def scope_payload(allowed: Optional[Set[str]]) -> Dict[str, Any]:
+def scope_payload(allowed: set[str] | None) -> dict[str, Any]:
 	return {
 		"configured": roster_service.roster_scope_configured(),
 		"unrestricted": allowed is None,
@@ -264,7 +265,7 @@ def ensure_employee_in_scope(employee: str) -> None:
 	if allowed is None:
 		return
 
-	locations: Set[str] = set()
+	locations: set[str] = set()
 	try:
 		for row in frappe.get_all(
 			"Shift Assignment",
@@ -345,7 +346,7 @@ def _hrms_notice() -> str:
 # ---------------------------------------------------------------------------
 
 
-def _hhmm(value: Any) -> Optional[str]:
+def _hhmm(value: Any) -> str | None:
 	"""Render a Shift Type time as ``HH:mm``, keeping midnight visible.
 
 	A Frappe ``Time`` field comes back as ``datetime.timedelta``, and midnight is
@@ -360,7 +361,7 @@ def _hhmm(value: Any) -> Optional[str]:
 	return f"{total // 3600:02d}:{(total % 3600) // 60:02d}"
 
 
-def _dt_text(value: Any) -> Optional[str]:
+def _dt_text(value: Any) -> str | None:
 	if value is None:
 		return None
 	try:
@@ -369,7 +370,7 @@ def _dt_text(value: Any) -> Optional[str]:
 		return None
 
 
-def _float_or_none(value: Any) -> Optional[float]:
+def _float_or_none(value: Any) -> float | None:
 	if value is None or value == "":
 		return None
 	try:
@@ -378,7 +379,7 @@ def _float_or_none(value: Any) -> Optional[float]:
 		return None
 
 
-def _distance_m(lat1: Any, lng1: Any, lat2: Any, lng2: Any) -> Optional[float]:
+def _distance_m(lat1: Any, lng1: Any, lat2: Any, lng2: Any) -> float | None:
 	"""Metres between two points, or ``None`` when they cannot be measured.
 
 	Uses HRMS's own ``get_distance_between_coordinates`` so that ``geo_ok``
@@ -402,7 +403,7 @@ def _distance_m(lat1: Any, lng1: Any, lat2: Any, lng2: Any) -> Optional[float]:
 		return distance_m_or_none(a_lat, a_lng, b_lat, b_lng)
 
 
-def _geo_ok(coords: List[Tuple[Any, Any]], location_row: Optional[Dict[str, Any]]) -> Optional[bool]:
+def _geo_ok(coords: list[tuple[Any, Any]], location_row: dict[str, Any] | None) -> bool | None:
 	"""Whether every located check-in of the day sat inside the branch radius.
 
 	``None`` -- not False -- whenever the question cannot be answered: no
@@ -433,9 +434,9 @@ def _geo_ok(coords: List[Tuple[Any, Any]], location_row: Optional[Dict[str, Any]
 # ---------------------------------------------------------------------------
 
 
-def shift_time_map() -> Dict[str, Tuple[Optional[str], Optional[str]]]:
+def shift_time_map() -> dict[str, tuple[str | None, str | None]]:
 	"""``{shift_type: (start "HH:mm", end "HH:mm")}`` from the roster catalogue."""
-	out: Dict[str, Tuple[Optional[str], Optional[str]]] = {}
+	out: dict[str, tuple[str | None, str | None]] = {}
 	try:
 		catalog = roster_service.shift_catalog()
 	except Exception:
@@ -448,8 +449,8 @@ def shift_time_map() -> Dict[str, Tuple[Optional[str], Optional[str]]]:
 	return out
 
 
-def shift_location_map() -> Dict[str, Dict[str, Any]]:
-	out: Dict[str, Dict[str, Any]] = {}
+def shift_location_map() -> dict[str, dict[str, Any]]:
+	out: dict[str, dict[str, Any]] = {}
 	try:
 		rows = roster_service.shift_locations()
 	except Exception:
@@ -459,7 +460,7 @@ def shift_location_map() -> Dict[str, Dict[str, Any]]:
 	return out
 
 
-def _holidays(employees: List[str], start: date_cls, end: date_cls) -> Dict[str, Set[str]]:
+def _holidays(employees: list[str], start: date_cls, end: date_cls) -> dict[str, set[str]]:
 	try:
 		return roster_service._holidays_by_employee(employees, start, end)
 	except Exception:
@@ -468,7 +469,7 @@ def _holidays(employees: List[str], start: date_cls, end: date_cls) -> Dict[str,
 		return {}
 
 
-def _is_courier(employee: str, designation: Optional[str]) -> bool:
+def _is_courier(employee: str, designation: str | None) -> bool:
 	try:
 		return roster_service.is_courier(employee, designation)
 	except Exception:
@@ -487,7 +488,7 @@ def _employee_exempt_field_exists() -> bool:
 # ---------------------------------------------------------------------------
 
 
-def group_checkins(rows: Iterable[Dict[str, Any]]) -> Dict[Tuple[str, str], Dict[str, Any]]:
+def group_checkins(rows: Iterable[dict[str, Any]]) -> dict[tuple[str, str], dict[str, Any]]:
 	"""Fold raw check-ins into one group per ``(employee, shift day)``.
 
 	The day a group belongs to is the date of its ``shift_start``, NOT the wall
@@ -500,7 +501,7 @@ def group_checkins(rows: Iterable[Dict[str, Any]]) -> Dict[Tuple[str, str], Dict
 	to its wall-clock date -- that is the ``late_unmatched`` case, an arrival
 	outside the window rather than an absence.
 	"""
-	groups: Dict[Tuple[str, str], Dict[str, Any]] = {}
+	groups: dict[tuple[str, str], dict[str, Any]] = {}
 	for row in rows or []:
 		employee = row.get("employee")
 		if not employee or not row.get("time"):
@@ -564,7 +565,7 @@ def group_checkins(rows: Iterable[Dict[str, Any]]) -> Dict[Tuple[str, str], Dict
 	return groups
 
 
-def device_flags_for(group: Optional[Dict[str, Any]]) -> List[str]:
+def device_flags_for(group: dict[str, Any] | None) -> list[str]:
 	"""Distinct non-empty device flags among a day's check-ins, worst first."""
 	if not group:
 		return []
@@ -573,13 +574,13 @@ def device_flags_for(group: Optional[Dict[str, Any]]) -> List[str]:
 	return ordered + sorted(found - set(FLAG_ORDER))
 
 
-def device_detail_for(group: Optional[Dict[str, Any]]) -> Optional[str]:
+def device_detail_for(group: dict[str, Any] | None) -> str | None:
 	"""The flagged check-ins' explanations joined into one line, or ``None``."""
 	details = list(dict.fromkeys((group or {}).get("device_details") or []))
 	return " | ".join(details) if details else None
 
 
-def late_minutes_for(group: Optional[Dict[str, Any]]) -> Optional[int]:
+def late_minutes_for(group: dict[str, Any] | None) -> int | None:
 	"""Signed minutes between the arrival and the scheduled start.
 
 	Negative means early, which is information a manager wants and which the
@@ -592,7 +593,7 @@ def late_minutes_for(group: Optional[Dict[str, Any]]) -> Optional[int]:
 	return int(round(delta.total_seconds() / 60.0))
 
 
-def worked_hours_for(group: Optional[Dict[str, Any]]) -> Optional[float]:
+def worked_hours_for(group: dict[str, Any] | None) -> float | None:
 	"""Last punch minus first, in hours. ``None`` for a lone check-in.
 
 	A single punch is an arrival with no departure. Reporting 0.0 would read as
@@ -613,12 +614,12 @@ def worked_hours_for(group: Optional[Dict[str, Any]]) -> Optional[float]:
 
 def derive_status(
 	*,
-	group: Optional[Dict[str, Any]],
+	group: dict[str, Any] | None,
 	rostered: bool,
 	day_off: bool,
 	is_holiday: bool,
 	exempt: bool,
-	late_minutes: Optional[int],
+	late_minutes: int | None,
 	grace: int,
 	is_past: bool,
 ) -> str:
@@ -656,19 +657,19 @@ def derive_status(
 def build_cell(
 	*,
 	date_str: str,
-	shift_type: Optional[str],
-	shift_location: Optional[str],
-	scheduled_start: Optional[str],
-	scheduled_end: Optional[str],
-	group: Optional[Dict[str, Any]],
-	day_off_row: Optional[Dict[str, Any]],
+	shift_type: str | None,
+	shift_location: str | None,
+	scheduled_start: str | None,
+	scheduled_end: str | None,
+	group: dict[str, Any] | None,
+	day_off_row: dict[str, Any] | None,
 	is_holiday: bool,
 	is_cover: bool,
 	exempt: bool,
 	grace: int,
 	today: date_cls,
-	location_row: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
+	location_row: dict[str, Any] | None = None,
+) -> dict[str, Any]:
 	"""One calendar cell, in the exact shape the contract fixes."""
 	late = late_minutes_for(group)
 	status = derive_status(
@@ -718,7 +719,7 @@ def build_cell(
 # ---------------------------------------------------------------------------
 
 
-def totals_for(cells: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
+def totals_for(cells: Iterable[dict[str, Any]]) -> dict[str, Any]:
 	"""Roll a pile of cells into the contract's totals block.
 
 	``late_minutes`` here is the sum of POSITIVE lateness only. Cell-level
@@ -785,7 +786,7 @@ def totals_for(cells: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
 	}
 
 
-def day_totals_for(cells: Iterable[Dict[str, Any]]) -> Dict[str, int]:
+def day_totals_for(cells: Iterable[dict[str, Any]]) -> dict[str, int]:
 	"""The counters the day board shows.
 
 	``rostered`` counts everybody who owed a shift today, ``pending`` included --
@@ -836,7 +837,7 @@ def _date_range(start: date_cls, end: date_cls) -> Iterable[date_cls]:
 	return roster_service._daterange(start, end)
 
 
-def _fetch_checkins(employees: List[str], start: date_cls, end: date_cls) -> List[Dict[str, Any]]:
+def _fetch_checkins(employees: list[str], start: date_cls, end: date_cls) -> list[dict[str, Any]]:
 	"""Raw check-ins covering the range, padded on both sides.
 
 	The window runs from the day BEFORE ``start`` to the day AFTER ``end``
@@ -882,10 +883,10 @@ def _fetch_checkins(employees: List[str], start: date_cls, end: date_cls) -> Lis
 
 
 def _checkin_visible(
-	row: Dict[str, Any],
-	redacted: Set[Tuple[str, str]],
-	roster_cells: Dict[str, Dict[str, Dict[str, Any]]],
-	shift_times: Dict[str, Tuple[Optional[str], Optional[str]]],
+	row: dict[str, Any],
+	redacted: set[tuple[str, str]],
+	roster_cells: dict[str, dict[str, dict[str, Any]]],
+	shift_times: dict[str, tuple[str | None, str | None]],
 	start: date_cls,
 ) -> bool:
 	"""May a branch-scoped caller see this raw punch at all?
@@ -945,10 +946,10 @@ def _checkin_visible(
 def build_grid(
 	start: date_cls,
 	end: date_cls,
-	shift_location: Optional[str] = None,
-	employee: Optional[str] = None,
-	today: Optional[date_cls] = None,
-) -> Dict[str, Any]:
+	shift_location: str | None = None,
+	employee: str | None = None,
+	today: date_cls | None = None,
+) -> dict[str, Any]:
 	"""Every employee in scope, with one cell per day of the range.
 
 	The roster half mirrors ``roster_service.get_month`` deliberately: same
@@ -962,12 +963,12 @@ def build_grid(
 	today = getdate(today) if today else getdate()
 	allowed = allowed_shift_locations()
 
-	assignment_filters: Dict[str, Any] = {
+	assignment_filters: dict[str, Any] = {
 		"docstatus": 1,
 		"status": ("in", roster_service.READABLE_ASSIGNMENT_STATUSES),
 		"start_date": ("<=", end),
 	}
-	day_off_filters: Dict[str, Any] = {"off_date": ("between", [start, end])}
+	day_off_filters: dict[str, Any] = {"off_date": ("between", [start, end])}
 	if employee:
 		assignment_filters["employee"] = employee
 		day_off_filters["employee"] = employee
@@ -997,12 +998,12 @@ def build_grid(
 	# indexed separately from the day-off itself -- otherwise the colleague who
 	# absorbed the day looks like an ordinary rostered day and the screen cannot
 	# explain why they are on a twelve-hour shift.
-	covers: Set[Tuple[str, str]] = set()
+	covers: set[tuple[str, str]] = set()
 	for row in day_offs:
 		if row.get("covered_by"):
 			covers.add((row["covered_by"], str(getdate(row["off_date"]))))
 
-	locations_by_employee: Dict[str, Set[str]] = {}
+	locations_by_employee: dict[str, set[str]] = {}
 	for row in assignments:
 		if row.get("shift_location"):
 			locations_by_employee.setdefault(row["employee"], set()).add(row["shift_location"])
@@ -1010,7 +1011,7 @@ def build_grid(
 		if row.get("shift_location"):
 			locations_by_employee.setdefault(row["employee"], set()).add(row["shift_location"])
 
-	candidates: Set[str] = {row["employee"] for row in assignments}
+	candidates: set[str] = {row["employee"] for row in assignments}
 	candidates.update(row["employee"] for row in day_offs)
 	if employee:
 		candidates.add(employee)
@@ -1039,7 +1040,7 @@ def build_grid(
 
 	names = sorted(n for n in candidates if in_scope(n))
 
-	employee_rows: Dict[str, Dict[str, Any]] = {}
+	employee_rows: dict[str, dict[str, Any]] = {}
 	if names:
 		fields = ["name", "employee_name", "designation", "department", "status"]
 		if _employee_exempt_field_exists():
@@ -1057,12 +1058,12 @@ def build_grid(
 	locations = shift_location_map()
 	holidays = _holidays(names, start, end)
 
-	roster_cells: Dict[str, Dict[str, Dict[str, Any]]] = {n: {} for n in names}
+	roster_cells: dict[str, dict[str, dict[str, Any]]] = {n: {} for n in names}
 	# Every branch an employee is rostered at on a day, not just the last row
 	# read. Two assignments can overlap (HRMS permits it from Desk and from
 	# schedule generation); keeping only one let a day be attributed to the
 	# caller's branch while its punches belonged to the other.
-	day_locations: Dict[Tuple[str, str], Set[Optional[str]]] = {}
+	day_locations: dict[tuple[str, str], set[str | None]] = {}
 	lookup = set(names)
 	for row in assignments:
 		name = row["employee"]
@@ -1074,7 +1075,7 @@ def build_grid(
 			roster_cells[name][str(day)] = row
 			day_locations.setdefault((name, str(day)), set()).add(row.get("shift_location") or None)
 
-	day_off_index: Dict[Tuple[str, str], Dict[str, Any]] = {}
+	day_off_index: dict[tuple[str, str], dict[str, Any]] = {}
 	for row in day_offs:
 		day_off_index[(row["employee"], str(getdate(row["off_date"])))] = row
 
@@ -1086,7 +1087,7 @@ def build_grid(
 	# zero or mis-set radius, that GPS is a home address. A day is redacted
 	# unless EVERY branch it is rostered at is the caller's -- a day with no
 	# branch at all included.
-	redacted: Set[Tuple[str, str]] = set()
+	redacted: set[tuple[str, str]] = set()
 	if allowed is not None:
 		for name in names:
 			for day in _date_range(start, end):
@@ -1106,8 +1107,8 @@ def build_grid(
 	groups = group_checkins(raw_checkins)
 
 	grace = grace_minutes()
-	employees_payload: List[Dict[str, Any]] = []
-	cells_by_employee: Dict[str, Dict[str, Dict[str, Any]]] = {}
+	employees_payload: list[dict[str, Any]] = []
+	cells_by_employee: dict[str, dict[str, dict[str, Any]]] = {}
 
 	for name in names:
 		row = employee_rows.get(name, {})
@@ -1115,7 +1116,7 @@ def build_grid(
 		exempt = bool(row.get(EMPLOYEE_EXEMPT_FIELD))
 		employee_holidays = holidays.get(name, set())
 
-		cells: Dict[str, Dict[str, Any]] = {}
+		cells: dict[str, dict[str, Any]] = {}
 		for day in _date_range(start, end):
 			key = str(day)
 			assignment = roster_cells.get(name, {}).get(key) or {}
@@ -1199,14 +1200,14 @@ def build_grid(
 # ---------------------------------------------------------------------------
 
 
-def month_bounds(month: Optional[str]) -> Tuple[date_cls, date_cls]:
+def month_bounds(month: str | None) -> tuple[date_cls, date_cls]:
 	return roster_service.month_bounds(month)
 
 
-def bootstrap() -> Dict[str, Any]:
+def bootstrap() -> dict[str, Any]:
 	"""Everything the screen needs before it can draw anything."""
 	allowed = allowed_shift_locations()
-	payload: Dict[str, Any] = {
+	payload: dict[str, Any] = {
 		"hrms_available": hrms_available(),
 		"shift_locations": roster_service.shift_locations() if hrms_available() else [],
 		"scope": scope_payload(allowed),
@@ -1220,7 +1221,7 @@ def bootstrap() -> Dict[str, Any]:
 	return payload
 
 
-def get_month(month: Optional[str] = None, shift_location: Optional[str] = None) -> Dict[str, Any]:
+def get_month(month: str | None = None, shift_location: str | None = None) -> dict[str, Any]:
 	"""The attendance calendar: people down, days across."""
 	start, end = month_bounds(month)
 	if not hrms_available():
@@ -1237,8 +1238,8 @@ def get_month(month: Optional[str] = None, shift_location: Optional[str] = None)
 		}
 
 	grid = build_grid(start, end, shift_location=shift_location)
-	employees: List[Dict[str, Any]] = []
-	every_cell: List[Dict[str, Any]] = []
+	employees: list[dict[str, Any]] = []
+	every_cell: list[dict[str, Any]] = []
 
 	for row in grid["employees"]:
 		cells = grid["cells"].get(row["employee"], {})
@@ -1301,14 +1302,14 @@ _DAY_ROW_KEYS = (
 )
 
 
-def _day_sort_key(row: Dict[str, Any]) -> Tuple[Any, ...]:
+def _day_sort_key(row: dict[str, Any]) -> tuple[Any, ...]:
 	"""Worst first: late (longest first), then unmatched, absent, pending, present."""
 	rank = DAY_ROW_RANK.get(row.get("status"), 99)
 	lateness = -int(row.get("late_minutes") or 0) if row.get("status") == STATUS_LATE else 0
 	return (rank, lateness, (row.get("employee_name") or "").lower())
 
 
-def _branch_sort_key(bucket: Dict[str, Any]) -> Tuple[int, str]:
+def _branch_sort_key(bucket: dict[str, Any]) -> tuple[int, str]:
 	"""Named branches alphabetically; the ``null`` bucket is ALWAYS last.
 
 	``None`` there means "no branch could be resolved", which is a data problem
@@ -1320,7 +1321,7 @@ def _branch_sort_key(bucket: Dict[str, Any]) -> Tuple[int, str]:
 	return (1, "") if location is None else (0, str(location).lower())
 
 
-def get_day(date: Optional[str] = None, shift_location: Optional[str] = None) -> Dict[str, Any]:
+def get_day(date: str | None = None, shift_location: str | None = None) -> dict[str, Any]:
 	"""One day, grouped by branch, ordered by what needs attention."""
 	day = getdate(date) if date else getdate()
 	if not hrms_available():
@@ -1335,8 +1336,8 @@ def get_day(date: Optional[str] = None, shift_location: Optional[str] = None) ->
 		}
 
 	grid = build_grid(day, day, shift_location=shift_location)
-	buckets: Dict[Optional[str], Dict[str, Any]] = {}
-	every_cell: List[Dict[str, Any]] = []
+	buckets: dict[str | None, dict[str, Any]] = {}
+	every_cell: list[dict[str, Any]] = []
 
 	redacted = grid.get("redacted") or set()
 	for employee_row in grid["employees"]:
@@ -1358,7 +1359,7 @@ def get_day(date: Optional[str] = None, shift_location: Optional[str] = None) ->
 		row.update({key: cell.get(key) for key in _DAY_ROW_KEYS})
 		bucket["rows"].append(row)
 
-	branches: List[Dict[str, Any]] = []
+	branches: list[dict[str, Any]] = []
 	for bucket in buckets.values():
 		bucket["rows"].sort(key=_day_sort_key)
 		branches.append(
@@ -1380,9 +1381,7 @@ def get_day(date: Optional[str] = None, shift_location: Optional[str] = None) ->
 	}
 
 
-def get_employee(
-	employee: str, from_date: Optional[str] = None, to_date: Optional[str] = None
-) -> Dict[str, Any]:
+def get_employee(employee: str, from_date: str | None = None, to_date: str | None = None) -> dict[str, Any]:
 	"""One person's range, day by day, with the raw check-ins behind it.
 
 	The raw rows are returned alongside the derived days because every dispute
@@ -1432,7 +1431,7 @@ def get_employee(
 	days = [cells[key] for key in sorted(cells.keys())]
 
 	redacted = grid.get("redacted") or set()
-	by_branch: Dict[Optional[str], Dict[str, Any]] = {}
+	by_branch: dict[str | None, dict[str, Any]] = {}
 	for cell in days:
 		if (employee, cell.get("date")) in redacted:
 			continue
@@ -1456,7 +1455,7 @@ def get_employee(
 	branch_rows.sort(key=_branch_sort_key)
 
 	locations = shift_location_map()
-	checkins: List[Dict[str, Any]] = []
+	checkins: list[dict[str, Any]] = []
 	for (name, day_key), group in grid["groups"].items():
 		if name != employee or day_key not in cells:
 			continue
@@ -1502,10 +1501,10 @@ def get_employee(
 
 
 def _range_bounds(
-	from_date: Optional[str],
-	to_date: Optional[str],
-	max_days: Optional[int] = None,
-) -> Tuple[date_cls, date_cls]:
+	from_date: str | None,
+	to_date: str | None,
+	max_days: int | None = None,
+) -> tuple[date_cls, date_cls]:
 	"""Default to the current month; tolerate a reversed pair by swapping it.
 
 	A reversed pair is a slip worth forgiving; an over-long one is not, because
@@ -1543,11 +1542,11 @@ GROUP_BY_CHOICES = ("branch", "employee", "day")
 
 
 def get_summary(
-	from_date: Optional[str] = None,
-	to_date: Optional[str] = None,
+	from_date: str | None = None,
+	to_date: str | None = None,
 	group_by: str = "branch",
-	shift_location: Optional[str] = None,
-) -> Dict[str, Any]:
+	shift_location: str | None = None,
+) -> dict[str, Any]:
 	"""The same cells, rolled up three different ways.
 
 	All three groupings share one pass over one grid, so a branch total, an
@@ -1592,9 +1591,9 @@ def get_summary(
 	grid = build_grid(start, end, shift_location=shift_location)
 	meta_by_employee = {row["employee"]: row for row in grid["employees"]}
 
-	buckets: Dict[Any, Dict[str, Any]] = {}
-	every_cell: List[Dict[str, Any]] = []
-	all_employees: Set[str] = set()
+	buckets: dict[Any, dict[str, Any]] = {}
+	every_cell: list[dict[str, Any]] = []
+	all_employees: set[str] = set()
 
 	redacted = grid.get("redacted") or set()
 	for name, cells in grid["cells"].items():
@@ -1642,7 +1641,7 @@ def get_summary(
 			bucket["_cells"].append(cell)
 			bucket["_employees"].add(name)
 
-	rows: List[Dict[str, Any]] = []
+	rows: list[dict[str, Any]] = []
 	for bucket in buckets.values():
 		totals = totals_for(bucket["_cells"])
 		totals["avg_late_minutes"] = (

@@ -27,7 +27,7 @@ DOCTYPE = "Delivery Failure Reason"
 #: The frozen seed set. Codes are the document names and therefore the values
 #: stored on ``Sales Invoice.custom_delivery_failure_reason`` — do not rename one
 #: without a patch that repoints the invoices.
-FAILURE_REASONS: List[Dict[str, Any]] = [
+FAILURE_REASONS: list[dict[str, Any]] = [
 	{
 		"code": "CUSTOMER_UNREACHABLE",
 		"label_en": "Customer unreachable",
@@ -71,7 +71,7 @@ def _logger():
 	return frappe.logger(LOGGER_NAME, allow_site=True)
 
 
-def _ensure_failure_reasons(log: Dict[str, List[str]]) -> None:
+def _ensure_failure_reasons(log: dict[str, list[str]]) -> None:
 	"""Insert any missing seed reason. Never touches one that already exists."""
 	if not frappe.db.exists("DocType", DOCTYPE):
 		# Migrate order put the seeder ahead of the doctype (or the app is being
@@ -102,9 +102,9 @@ def _ensure_failure_reasons(log: Dict[str, List[str]]) -> None:
 			_logger().error(f"Failed to seed {DOCTYPE} '{code}'", exc_info=True)
 
 
-def ensure_courier_setup() -> Dict[str, List[str]]:
+def ensure_courier_setup() -> dict[str, list[str]]:
 	"""Idempotently seed the courier app's master data."""
-	log: Dict[str, List[str]] = {"created": [], "existing": []}
+	log: dict[str, list[str]] = {"created": [], "existing": []}
 	logger = _logger()
 
 	try:

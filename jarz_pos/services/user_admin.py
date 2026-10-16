@@ -33,7 +33,8 @@ Rules this module enforces
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, Iterable, List, Optional
+from collections.abc import Iterable
+from typing import Any, Dict, List, Optional
 
 import frappe
 from frappe import _
@@ -74,7 +75,7 @@ def _roles(user: str) -> set:
 	return set(frappe.get_roles(user) or [])
 
 
-def has_access(user: Optional[str] = None) -> bool:
+def has_access(user: str | None = None) -> bool:
 	user = user or _session_user()
 	if user == ROLES.ADMINISTRATOR:
 		return True
@@ -89,16 +90,16 @@ def ensure_access() -> None:
 		)
 
 
-def is_privileged_caller(user: Optional[str] = None) -> bool:
+def is_privileged_caller(user: str | None = None) -> bool:
 	user = user or _session_user()
 	return user == ROLES.ADMINISTRATOR or bool(_roles(user) & PRIVILEGED_ROLES)
 
 
 def _effective_roles(
 	user: str,
-	roles: Optional[Iterable[str]] = None,
-	profiles: Optional[Iterable[str]] = None,
-	definitions: Optional[Dict[str, List[str]]] = None,
+	roles: Iterable[str] | None = None,
+	profiles: Iterable[str] | None = None,
+	definitions: dict[str, list[str]] | None = None,
 ) -> set:
 	"""What *user* holds now, plus what their Role Profiles grant now.
 
@@ -117,13 +118,13 @@ def _effective_roles(
 	return held
 
 
-def is_privileged_target(user: str, roles: Optional[Iterable[str]] = None, **kw) -> bool:
+def is_privileged_target(user: str, roles: Iterable[str] | None = None, **kw) -> bool:
 	if user in STANDARD_USERS:
 		return True
 	return bool(_effective_roles(user, roles, **kw) & PRIVILEGED_ROLES)
 
 
-def can_modify(user: str, roles: Optional[Iterable[str]] = None, **kw) -> bool:
+def can_modify(user: str, roles: Iterable[str] | None = None, **kw) -> bool:
 	"""A System Manager may change anyone but the built-in accounts. A JARZ
 	Manager may change anyone below the manager tier, plus their own name and
 	mobile -- never a System Manager and never another JARZ Manager: one stolen
@@ -142,7 +143,7 @@ def can_modify(user: str, roles: Optional[Iterable[str]] = None, **kw) -> bool:
 	return True
 
 
-def _ensure_can_modify(user: str) -> Dict[str, Any]:
+def _ensure_can_modify(user: str) -> dict[str, Any]:
 	"""Resolve *user* and assert the caller may change it."""
 	ensure_access()
 	user = cstr(user).strip()
@@ -185,21 +186,21 @@ def _ensure_not_self(user: str, action: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _profile_roles() -> Dict[str, List[str]]:
+def _profile_roles() -> dict[str, list[str]]:
 	rows = frappe.get_all(
 		"Has Role",
 		filters={"parenttype": "Role Profile"},
 		fields=["parent", "role"],
 		limit_page_length=0,
 	)
-	out: Dict[str, List[str]] = {name: [] for name in frappe.get_all("Role Profile", pluck="name")}
+	out: dict[str, list[str]] = {name: [] for name in frappe.get_all("Role Profile", pluck="name")}
 	for r in rows:
 		if r.parent in out:
 			out[r.parent].append(r.role)
 	return {name: sorted(roles) for name, roles in out.items()}
 
 
-def list_role_profiles() -> List[Dict[str, Any]]:
+def list_role_profiles() -> list[dict[str, Any]]:
 	privileged_caller = is_privileged_caller()
 	profiles = []
 	for name, roles in sorted(_profile_roles().items()):
@@ -219,7 +220,7 @@ def list_role_profiles() -> List[Dict[str, Any]]:
 	return profiles
 
 
-def _parse_profiles(value: Any) -> List[str]:
+def _parse_profiles(value: Any) -> list[str]:
 	if value is None:
 		return []
 	if isinstance(value, str):
@@ -234,7 +235,7 @@ def _parse_profiles(value: Any) -> List[str]:
 		value = [value]
 	if not isinstance(value, (list, tuple)):
 		frappe.throw(_("Role profiles must be a list of names."))
-	seen: List[str] = []
+	seen: list[str] = []
 	for item in value or []:
 		name = cstr(item.get("role_profile") if isinstance(item, dict) else item).strip()
 		if name and name not in seen:
@@ -242,12 +243,12 @@ def _parse_profiles(value: Any) -> List[str]:
 	return seen
 
 
-def _validate_profiles(names: List[str]) -> Dict[str, List[str]]:
+def _validate_profiles(names: list[str]) -> dict[str, list[str]]:
 	if not names:
 		frappe.throw(_("Choose at least one role profile."))
 	available = _profile_roles()
 	privileged_caller = is_privileged_caller()
-	chosen: Dict[str, List[str]] = {}
+	chosen: dict[str, list[str]] = {}
 	for name in names:
 		if name not in available:
 			frappe.throw(_("Role profile {0} does not exist.").format(name))
@@ -262,12 +263,12 @@ def _validate_profiles(names: List[str]) -> Dict[str, List[str]]:
 	return chosen
 
 
-def _module_profile_for(roles: Iterable[str]) -> Optional[str]:
+def _module_profile_for(roles: Iterable[str]) -> str | None:
 	target = MANAGER_MODULES if ROLES.JARZ_MANAGER in set(roles) else STAFF_MODULES
 	return target if frappe.db.exists("Module Profile", target) else None
 
 
-def _apply_profiles(doc, names: List[str]) -> None:
+def _apply_profiles(doc, names: list[str]) -> None:
 	chosen = _validate_profiles(names)
 	doc.set("role_profiles", [{"role_profile": n} for n in names])
 	# The old single-value field is folded into the table on validate; clear it
@@ -292,7 +293,7 @@ def _tier(roles: Iterable[str]) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _roles_by_user(users: List[str]) -> Dict[str, List[str]]:
+def _roles_by_user(users: list[str]) -> dict[str, list[str]]:
 	if not users:
 		return {}
 	rows = frappe.get_all(
@@ -301,13 +302,13 @@ def _roles_by_user(users: List[str]) -> Dict[str, List[str]]:
 		fields=["parent", "role"],
 		limit_page_length=0,
 	)
-	out: Dict[str, List[str]] = {u: [] for u in users}
+	out: dict[str, list[str]] = {u: [] for u in users}
 	for r in rows:
 		out.setdefault(r.parent, []).append(r.role)
 	return out
 
 
-def _profiles_by_user(users: List[str]) -> Dict[str, List[str]]:
+def _profiles_by_user(users: list[str]) -> dict[str, list[str]]:
 	if not users:
 		return {}
 	rows = frappe.get_all(
@@ -317,13 +318,13 @@ def _profiles_by_user(users: List[str]) -> Dict[str, List[str]]:
 		order_by="idx asc",
 		limit_page_length=0,
 	)
-	out: Dict[str, List[str]] = {u: [] for u in users}
+	out: dict[str, list[str]] = {u: [] for u in users}
 	for r in rows:
 		out.setdefault(r.parent, []).append(r.role_profile)
 	return out
 
 
-def _branches_by_user(users: List[str]) -> Dict[str, List[str]]:
+def _branches_by_user(users: list[str]) -> dict[str, list[str]]:
 	if not users:
 		return {}
 	rows = frappe.get_all(
@@ -332,14 +333,14 @@ def _branches_by_user(users: List[str]) -> Dict[str, List[str]]:
 		fields=["parent", "user"],
 		limit_page_length=0,
 	)
-	out: Dict[str, List[str]] = {u: [] for u in users}
+	out: dict[str, list[str]] = {u: [] for u in users}
 	for r in rows:
 		if r.parent not in out.setdefault(r.user, []):
 			out[r.user].append(r.parent)
 	return {u: sorted(b) for u, b in out.items()}
 
 
-def _employees_by_user(users: List[str]) -> Dict[str, Dict[str, Any]]:
+def _employees_by_user(users: list[str]) -> dict[str, dict[str, Any]]:
 	if not users:
 		return {}
 	rows = frappe.get_all(
@@ -351,7 +352,7 @@ def _employees_by_user(users: List[str]) -> Dict[str, Dict[str, Any]]:
 	return {r.user_id: r for r in rows}
 
 
-def _shape(row: Dict[str, Any], roles, profiles, branches, employee, definitions=None) -> Dict[str, Any]:
+def _shape(row: dict[str, Any], roles, profiles, branches, employee, definitions=None) -> dict[str, Any]:
 	caller = _session_user()
 	definitions = definitions if definitions is not None else _profile_roles()
 	privileged = is_privileged_target(row["name"], roles, profiles=profiles, definitions=definitions)
@@ -395,7 +396,7 @@ _USER_FIELDS = [
 ]
 
 
-def _user_fields() -> List[str]:
+def _user_fields() -> list[str]:
 	# The custom field ships with jarz_pos, but a list must not break on a site
 	# that has not migrated yet.
 	if frappe.get_meta("User").has_field("custom_require_pos_shift"):
@@ -403,9 +404,9 @@ def _user_fields() -> List[str]:
 	return [f for f in _USER_FIELDS if f != "custom_require_pos_shift"]
 
 
-def list_users(search: Optional[str] = None, include_disabled: Any = 1) -> List[Dict[str, Any]]:
+def list_users(search: str | None = None, include_disabled: Any = 1) -> list[dict[str, Any]]:
 	ensure_access()
-	filters: Dict[str, Any] = {"user_type": "System User", "name": ["not in", list(STANDARD_USERS)]}
+	filters: dict[str, Any] = {"user_type": "System User", "name": ["not in", list(STANDARD_USERS)]}
 	if not cint(include_disabled):
 		filters["enabled"] = 1
 	or_filters = None
@@ -440,7 +441,7 @@ def list_users(search: Optional[str] = None, include_disabled: Any = 1) -> List[
 	]
 
 
-def get_user(user: str) -> Dict[str, Any]:
+def get_user(user: str) -> dict[str, Any]:
 	ensure_access()
 	user = cstr(user).strip()
 	row = frappe.db.get_value("User", user, _user_fields(), as_dict=True) if user else None
@@ -456,7 +457,7 @@ def get_user(user: str) -> Dict[str, Any]:
 	)
 
 
-def get_context() -> Dict[str, Any]:
+def get_context() -> dict[str, Any]:
 	ensure_access()
 	return {
 		"can_manage": True,
@@ -466,7 +467,7 @@ def get_context() -> Dict[str, Any]:
 	}
 
 
-def list_employees(search: Optional[str] = None) -> List[Dict[str, Any]]:
+def list_employees(search: str | None = None) -> list[dict[str, Any]]:
 	"""Active employees for the link picker, with whoever they are linked to now."""
 	ensure_access()
 	or_filters = None
@@ -496,12 +497,12 @@ def _validate_password(password: Any) -> str:
 	return password
 
 
-def _clean_mobile(value: Any) -> Optional[str]:
+def _clean_mobile(value: Any) -> str | None:
 	text = cstr(value).strip()
 	return text or None
 
 
-def _link_employee(user: str, employee: Optional[str]) -> None:
+def _link_employee(user: str, employee: str | None) -> None:
 	"""Point *employee* at *user*, and unlink whichever employee pointed there before.
 
 	Written with ``db_set`` rather than ``Employee.save()``: saving an Employee
@@ -562,11 +563,11 @@ def create_user(
 	first_name: str,
 	password: str,
 	role_profiles: Any,
-	last_name: Optional[str] = None,
-	mobile_no: Optional[str] = None,
+	last_name: str | None = None,
+	mobile_no: str | None = None,
 	require_pos_shift: Any = 0,
-	employee: Optional[str] = None,
-) -> Dict[str, Any]:
+	employee: str | None = None,
+) -> dict[str, Any]:
 	ensure_access()
 	email = cstr(email).strip().lower()
 	first_name = cstr(first_name).strip()
@@ -601,14 +602,14 @@ def create_user(
 
 def update_user(
 	user: str,
-	first_name: Optional[str] = None,
-	last_name: Optional[str] = None,
-	mobile_no: Optional[str] = None,
+	first_name: str | None = None,
+	last_name: str | None = None,
+	mobile_no: str | None = None,
 	role_profiles: Any = None,
 	require_pos_shift: Any = None,
 	employee: Any = None,
 	clear_employee: Any = 0,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	"""Change only what was sent: ``None`` leaves a field as it is."""
 	row = _ensure_can_modify(user)
 	doc = frappe.get_doc("User", row.name)
@@ -645,7 +646,7 @@ def update_user(
 	return get_user(doc.name)
 
 
-def set_enabled(user: str, enabled: Any) -> Dict[str, Any]:
+def set_enabled(user: str, enabled: Any) -> dict[str, Any]:
 	row = _ensure_can_modify(user)
 	enabled = cint(enabled)
 	if not enabled:
@@ -660,7 +661,7 @@ def set_enabled(user: str, enabled: Any) -> Dict[str, Any]:
 	return get_user(row.name)
 
 
-def reset_password(user: str, new_password: str, sign_out: Any = 1) -> Dict[str, Any]:
+def reset_password(user: str, new_password: str, sign_out: Any = 1) -> dict[str, Any]:
 	"""Set a new password. Anyone else is ALWAYS signed out everywhere: a reset
 	usually means the old password leaked, and a live session is exactly what
 	the thief holds. ``sign_out`` is accepted for old clients and ignored."""
@@ -675,7 +676,7 @@ def reset_password(user: str, new_password: str, sign_out: Any = 1) -> Dict[str,
 	return {"ok": True, "user": row.name}
 
 
-def delete_user(user: str) -> Dict[str, Any]:
+def delete_user(user: str) -> dict[str, Any]:
 	row = _ensure_can_modify(user)
 	_ensure_not_self(row.name, _("delete"))
 	# User.on_trash deletes ToDos, shares and permissions BEFORE Frappe checks

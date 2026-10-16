@@ -25,7 +25,6 @@ from jarz_pos.services import commercial_policy as cp
 from jarz_pos.services import delivery_handling as dh
 from jarz_pos.services import invoice_creation as ic
 
-
 _SELLING_PRICE_LIST = "Standard Selling"
 
 

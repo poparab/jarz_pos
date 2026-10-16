@@ -7,16 +7,17 @@ Provides trip CRUD, bulk OFD transition, and trip listing.
 import frappe
 from frappe import _
 from frappe.utils import flt
+
 from jarz_pos.constants import WS_EVENTS
 from jarz_pos.services import ofd_pin_gate
 from jarz_pos.services.delivery_handling import (
-	mark_courier_outstanding,
-	ensure_delivery_note_for_invoice,
-	_get_delivery_expense_amount,
 	_create_shipping_expense_to_creditors_je,
+	_get_delivery_expense_amount,
 	build_ofd_shortage_field_values,
-	get_ofd_shortage_preview,
+	ensure_delivery_note_for_invoice,
 	get_creditors_account,
+	get_ofd_shortage_preview,
+	mark_courier_outstanding,
 	update_submitted_sales_invoice_fields,
 )
 from jarz_pos.utils.courier_visibility import (

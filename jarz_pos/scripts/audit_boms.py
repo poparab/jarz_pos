@@ -24,7 +24,8 @@ infer.
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from collections.abc import Sequence
+from typing import Any, Dict, List, Optional, Tuple
 
 import frappe
 from frappe.utils import flt
@@ -59,9 +60,9 @@ def _finding(
 	subject: str,
 	detail: str,
 	*,
-	bom: Optional[str] = None,
+	bom: str | None = None,
 	fixable: bool = False,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	return {
 		"severity": severity,
 		"rule": rule,
@@ -75,7 +76,7 @@ def _finding(
 # ── Rules ───────────────────────────────────────────────────────────────
 
 
-def rule_superseded_boms_still_active() -> List[Dict[str, Any]]:
+def rule_superseded_boms_still_active() -> list[dict[str, Any]]:
 	"""Submitted, non-default, still selectable.
 
 	This is the rule that gates every other fix: while a superseded BOM is
@@ -105,7 +106,7 @@ def rule_superseded_boms_still_active() -> List[Dict[str, Any]]:
 	]
 
 
-def rule_implausible_bom_quantity() -> List[Dict[str, Any]]:
+def rule_implausible_bom_quantity() -> list[dict[str, Any]]:
 	"""A BOM whose yield and material cost disagree by orders of magnitude.
 
 	Catches both the 9518-instead-of-9.518 typo and the "quantity bumped to 120
@@ -126,7 +127,7 @@ def rule_implausible_bom_quantity() -> List[Dict[str, Any]]:
 		as_dict=True,
 	)
 
-	out: List[Dict[str, Any]] = []
+	out: list[dict[str, Any]] = []
 	for row in rows:
 		peer = flt(row.get("peer_unit_cost"))
 		if peer <= 0:
@@ -154,7 +155,7 @@ def rule_implausible_bom_quantity() -> List[Dict[str, Any]]:
 	return out
 
 
-def rule_mix_double_counted(mix_item: str, mix_components: Sequence[str]) -> List[Dict[str, Any]]:
+def rule_mix_double_counted(mix_item: str, mix_components: Sequence[str]) -> list[dict[str, Any]]:
 	"""A BOM carrying the mix as a sub-assembly *and* as loose ingredients."""
 	if not mix_components:
 		return []
@@ -173,7 +174,7 @@ def rule_mix_double_counted(mix_item: str, mix_components: Sequence[str]) -> Lis
 		as_dict=True,
 	)
 
-	out: List[Dict[str, Any]] = []
+	out: list[dict[str, Any]] = []
 	for row in rows:
 		duplicated = frappe.db.sql(
 			"""
@@ -199,7 +200,7 @@ def rule_mix_double_counted(mix_item: str, mix_components: Sequence[str]) -> Lis
 	return out
 
 
-def rule_mix_not_migrated(mix_item: str, mix_components: Sequence[str]) -> List[Dict[str, Any]]:
+def rule_mix_not_migrated(mix_item: str, mix_components: Sequence[str]) -> list[dict[str, Any]]:
 	"""A jar BOM still hand-scaling the mix into loose ingredients."""
 	if not mix_components:
 		return []
@@ -234,7 +235,7 @@ def rule_mix_not_migrated(mix_item: str, mix_components: Sequence[str]) -> List[
 	]
 
 
-def rule_wrong_size_packaging() -> List[Dict[str, Any]]:
+def rule_wrong_size_packaging() -> list[dict[str, Any]]:
 	"""A Medium BOM consuming large-jar packaging.
 
 	Detected by comparing against what the other Medium BOMs use, so it does not
@@ -255,7 +256,7 @@ def rule_wrong_size_packaging() -> List[Dict[str, Any]]:
 		as_dict=True,
 	)
 
-	grouped: Dict[Tuple[str, str], List[str]] = defaultdict(list)
+	grouped: dict[tuple[str, str], list[str]] = defaultdict(list)
 	for row in rows:
 		grouped[(row["item"], row["name"])].append(row["item_code"])
 
@@ -272,7 +273,7 @@ def rule_wrong_size_packaging() -> List[Dict[str, Any]]:
 	]
 
 
-def small_packaging_problems(codes: Sequence[str]) -> Tuple[List[str], List[str]]:
+def small_packaging_problems(codes: Sequence[str]) -> tuple[list[str], list[str]]:
 	"""``(wrong, missing)`` packaging for one Small BOM's component codes.
 
 	*wrong*: a 212/330 jar or lid, or a label that does not end in ``147``.
@@ -280,7 +281,7 @@ def small_packaging_problems(codes: Sequence[str]) -> Tuple[List[str], List[str]
 	Pure, so it is testable without a site.
 	"""
 	listed = [str(code or "").strip() for code in codes or [] if str(code or "").strip()]
-	wrong: List[str] = []
+	wrong: list[str] = []
 	for code in listed:
 		if code in MEDIUM_UNSUFFIXED_PACKAGING:
 			wrong.append(code)
@@ -292,7 +293,7 @@ def small_packaging_problems(codes: Sequence[str]) -> Tuple[List[str], List[str]
 	return wrong, missing
 
 
-def rule_small_jar_packaging() -> List[Dict[str, Any]]:
+def rule_small_jar_packaging() -> list[dict[str, Any]]:
 	"""A Small BOM that is not packed in 147 ml packaging.
 
 	Must list ``Glass Jar 147`` and ``Jar Lid 147``, every label must end in
@@ -311,11 +312,11 @@ def rule_small_jar_packaging() -> List[Dict[str, Any]]:
 		as_dict=True,
 	)
 
-	grouped: Dict[Tuple[str, str], List[str]] = defaultdict(list)
+	grouped: dict[tuple[str, str], list[str]] = defaultdict(list)
 	for row in rows:
 		grouped[(row["item"], row["name"])].append(row["item_code"])
 
-	out: List[Dict[str, Any]] = []
+	out: list[dict[str, Any]] = []
 	for (item, bom), codes in sorted(grouped.items()):
 		wrong, missing = small_packaging_problems(codes)
 		if wrong:
@@ -343,7 +344,7 @@ def rule_small_jar_packaging() -> List[Dict[str, Any]]:
 	return out
 
 
-def rule_suspicious_uom() -> List[Dict[str, Any]]:
+def rule_suspicious_uom() -> list[dict[str, Any]]:
 	"""A component entered in a unit 1000x off what its siblings use.
 
 	Compares each line against the same item's usage across the other default
@@ -364,11 +365,11 @@ def rule_suspicious_uom() -> List[Dict[str, Any]]:
 		as_dict=True,
 	)
 
-	peers: Dict[Tuple[str, str], List[float]] = defaultdict(list)
+	peers: dict[tuple[str, str], list[float]] = defaultdict(list)
 	for row in rows:
 		peers[(row["item_group"], row["item_code"])].append(flt(row["stock_qty"]))
 
-	out: List[Dict[str, Any]] = []
+	out: list[dict[str, Any]] = []
 	for row in rows:
 		values = [v for v in peers[(row["item_group"], row["item_code"])] if v > 0]
 		if len(values) < 3:
@@ -396,7 +397,7 @@ def rule_suspicious_uom() -> List[Dict[str, Any]]:
 	return out
 
 
-def rule_component_qty_outlier() -> List[Dict[str, Any]]:
+def rule_component_qty_outlier() -> list[dict[str, Any]]:
 	"""A component quantity that breaks step with its siblings by a hair.
 
 	Deliberately separate from the UOM rule and set tight: this is the class of
@@ -417,16 +418,16 @@ def rule_component_qty_outlier() -> List[Dict[str, Any]]:
 		as_dict=True,
 	)
 
-	peers: Dict[Tuple[str, str], List[float]] = defaultdict(list)
+	peers: dict[tuple[str, str], list[float]] = defaultdict(list)
 	for row in rows:
 		peers[(row["item_group"], row["item_code"])].append(flt(row["stock_qty"]))
 
-	out: List[Dict[str, Any]] = []
+	out: list[dict[str, Any]] = []
 	for row in rows:
 		values = [v for v in peers[(row["item_group"], row["item_code"])] if v > 0]
 		if len(values) < 4:
 			continue
-		counts: Dict[float, int] = defaultdict(int)
+		counts: dict[float, int] = defaultdict(int)
 		for value in values:
 			counts[round(value, 9)] += 1
 		ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
@@ -461,7 +462,7 @@ def rule_component_qty_outlier() -> List[Dict[str, Any]]:
 	return out
 
 
-def rule_inconsistent_rate_basis() -> List[Dict[str, Any]]:
+def rule_inconsistent_rate_basis() -> list[dict[str, Any]]:
 	"""Default BOMs valuing the same raw material at different rates."""
 	rows = frappe.db.sql(
 		"""
@@ -473,14 +474,14 @@ def rule_inconsistent_rate_basis() -> List[Dict[str, Any]]:
 		as_dict=True,
 	)
 
-	normalised: Dict[str, List[Tuple[float, str]]] = defaultdict(list)
+	normalised: dict[str, list[tuple[float, str]]] = defaultdict(list)
 	for row in rows:
 		rate = flt(row["rate"])
 		if (row["uom"] or "").lower() in ("gram", "g"):
 			rate *= 1000.0
 		normalised[row["item_code"]].append((rate, row["bom"]))
 
-	out: List[Dict[str, Any]] = []
+	out: list[dict[str, Any]] = []
 	for item_code, entries in sorted(normalised.items()):
 		rates = [r for r, _ in entries]
 		low, high = min(rates), max(rates)
@@ -524,7 +525,7 @@ def rule_inconsistent_rate_basis() -> List[Dict[str, Any]]:
 	return out
 
 
-def rule_stocked_subassembly_explodes() -> List[Dict[str, Any]]:
+def rule_stocked_subassembly_explodes() -> list[dict[str, Any]]:
 	"""A sub-assembly held in stock that the parent BOM explodes through.
 
 	Exploding means the planner checks flour and eggs instead of the biscuit
@@ -561,7 +562,7 @@ def rule_stocked_subassembly_explodes() -> List[Dict[str, Any]]:
 	]
 
 
-def rule_orphan_subassembly_boms() -> List[Dict[str, Any]]:
+def rule_orphan_subassembly_boms() -> list[dict[str, Any]]:
 	"""A maintained sub-assembly BOM that no current recipe consumes."""
 	rows = frappe.db.sql(
 		"""
@@ -590,7 +591,7 @@ def rule_orphan_subassembly_boms() -> List[Dict[str, Any]]:
 	]
 
 
-def rule_yield_mass_balance() -> List[Dict[str, Any]]:
+def rule_yield_mass_balance() -> list[dict[str, Any]]:
 	"""Sub-assembly BOMs that disagree about whether baking loses weight.
 
 	Reports the implied loss per BOM rather than asserting a correct figure —
@@ -608,7 +609,7 @@ def rule_yield_mass_balance() -> List[Dict[str, Any]]:
 		as_dict=True,
 	)
 
-	out: List[Dict[str, Any]] = []
+	out: list[dict[str, Any]] = []
 	for bom in boms:
 		lines = frappe.db.sql(
 			"""
@@ -651,17 +652,17 @@ def rule_yield_mass_balance() -> List[Dict[str, Any]]:
 # ── Runner ──────────────────────────────────────────────────────────────
 
 
-def _resolve_mix_context() -> Tuple[str, List[str]]:
+def _resolve_mix_context() -> tuple[str, list[str]]:
 	from jarz_pos.services import daily_production_plan as planning
 
 	mix_item = planning._resolve_mix_item()
 	return mix_item, planning._resolve_flattened_mix_components(mix_item)
 
 
-def collect_findings() -> List[Dict[str, Any]]:
+def collect_findings() -> list[dict[str, Any]]:
 	mix_item, mix_components = _resolve_mix_context()
 
-	findings: List[Dict[str, Any]] = []
+	findings: list[dict[str, Any]] = []
 	findings += rule_inconsistent_rate_basis()
 	findings += rule_implausible_bom_quantity()
 	findings += rule_mix_double_counted(mix_item, mix_components)
@@ -679,7 +680,7 @@ def collect_findings() -> List[Dict[str, Any]]:
 	return findings
 
 
-def deactivate_superseded_boms(dry_run: bool = True) -> Dict[str, Any]:
+def deactivate_superseded_boms(dry_run: bool = True) -> dict[str, Any]:
 	"""Clear ``is_active`` on every submitted non-default BOM.
 
 	Reversible and non-destructive: ``is_active`` is ``allow_on_submit``, so
@@ -707,17 +708,17 @@ def deactivate_superseded_boms(dry_run: bool = True) -> Dict[str, Any]:
 	}
 
 
-def run(apply_deactivate: Any = False, verbose: Any = True) -> Dict[str, Any]:
+def run(apply_deactivate: Any = False, verbose: Any = True) -> dict[str, Any]:
 	"""Audit the BOM catalogue.  Writes nothing unless ``apply_deactivate``."""
 	findings = collect_findings()
 
-	by_severity: Dict[str, int] = defaultdict(int)
-	by_rule: Dict[str, int] = defaultdict(int)
+	by_severity: dict[str, int] = defaultdict(int)
+	by_rule: dict[str, int] = defaultdict(int)
 	for item in findings:
 		by_severity[item["severity"]] += 1
 		by_rule[item["rule"]] += 1
 
-	result: Dict[str, Any] = {
+	result: dict[str, Any] = {
 		"total": len(findings),
 		"by_severity": dict(by_severity),
 		"by_rule": dict(by_rule),
@@ -732,7 +733,7 @@ def run(apply_deactivate: Any = False, verbose: Any = True) -> Dict[str, Any]:
 	return result
 
 
-def _print_report(result: Dict[str, Any]) -> None:
+def _print_report(result: dict[str, Any]) -> None:
 	print("=" * 100)
 	print("JARZ BOM AUDIT")
 	print("=" * 100)

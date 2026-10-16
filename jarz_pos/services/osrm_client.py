@@ -27,7 +27,8 @@ the distances come back plausible-looking and wrong.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Sequence
+from collections.abc import Sequence
+from typing import Any, Dict, List, Optional
 
 import frappe
 
@@ -65,7 +66,7 @@ def _settings_value(fieldname: str, default: Any = None) -> Any:
 	return value
 
 
-def base_url() -> Optional[str]:
+def base_url() -> str | None:
 	"""The configured OSRM root, or ``None`` when the feature is unconfigured.
 
 	An unconfigured URL is the normal state on a fresh site and on any site
@@ -138,7 +139,7 @@ def _coordinate_string(points: Sequence[RoutePoint]) -> str:
 	return ";".join(f"{point.lng:.6f},{point.lat:.6f}" for point in points)
 
 
-def _get(path: str, params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def _get(path: str, params: dict[str, Any]) -> dict[str, Any] | None:
 	"""One guarded GET against the configured server."""
 	root = base_url()
 	if not root:
@@ -164,7 +165,7 @@ def _get(path: str, params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 	return payload
 
 
-def table(points: Sequence[RoutePoint]) -> Optional[CostMatrix]:
+def table(points: Sequence[RoutePoint]) -> CostMatrix | None:
 	"""Road distance/duration matrix for ``points``, or ``None``.
 
 	Returned in the same shape as :func:`route_planner.haversine_matrix` so the
@@ -215,7 +216,7 @@ def _is_full_matrix(matrix: Any, size: int) -> bool:
 	return True
 
 
-def route_geometry(points: Sequence[RoutePoint]) -> Optional[List[List[float]]]:
+def route_geometry(points: Sequence[RoutePoint]) -> list[list[float]] | None:
 	"""The drawn road path through ``points`` in order, as ``[[lat, lng], ...]``.
 
 	Purely cosmetic — the plan's totals come from :func:`table` — but a route
@@ -241,7 +242,7 @@ def route_geometry(points: Sequence[RoutePoint]) -> Optional[List[List[float]]]:
 	except (KeyError, IndexError, TypeError):
 		return None
 
-	path: List[List[float]] = []
+	path: list[list[float]] = []
 	for pair in coordinates:
 		try:
 			path.append([float(pair[1]), float(pair[0])])
@@ -250,7 +251,7 @@ def route_geometry(points: Sequence[RoutePoint]) -> Optional[List[List[float]]]:
 	return path or None
 
 
-def health() -> Dict[str, Any]:
+def health() -> dict[str, Any]:
 	"""Is the routing box reachable? Answers without tripping the breaker.
 
 	Exposed through the visits API so an operator can tell "my ETAs are

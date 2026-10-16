@@ -23,7 +23,6 @@ from unittest.mock import MagicMock, patch
 
 from jarz_pos.setup import b2b_pricing as bp
 
-
 _CATEGORY_DOCTYPE = "Jarz Price List Category Rate"
 
 

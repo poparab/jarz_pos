@@ -44,7 +44,7 @@ def _safe_log_error(title: str) -> None:
 	"""``frappe.log_error`` can itself raise (e.g. on a broken transaction)."""
 	try:
 		frappe.log_error(title=title, message=frappe.get_traceback())
-	except Exception:  # noqa: BLE001 - logging about logging must not raise
+	except Exception:
 		pass
 
 
@@ -88,7 +88,7 @@ def record_state_change(
 		return row.name
 	except _TRANSACTION_LOST:
 		raise
-	except Exception:  # noqa: BLE001 - see module docstring
+	except Exception:
 		_safe_log_error("Invoice State Log write failed")
 		return None
 
@@ -106,7 +106,7 @@ def _is_credit_note(doc) -> bool:
 	"""Credit notes carry a board state but are not orders on the board."""
 	try:
 		return bool(int(doc.get("is_return") or 0))
-	except Exception:  # noqa: BLE001
+	except Exception:
 		return False
 
 
@@ -125,7 +125,7 @@ def log_state_on_submit(doc, method=None):
 		)
 	except _TRANSACTION_LOST:
 		raise
-	except Exception:  # noqa: BLE001 - never block a submit
+	except Exception:
 		_safe_log_error("Invoice State Log on_submit failed")
 
 
@@ -149,5 +149,5 @@ def log_state_on_update_after_submit(doc, method=None):
 		)
 	except _TRANSACTION_LOST:
 		raise
-	except Exception:  # noqa: BLE001 - never block a save
+	except Exception:
 		_safe_log_error("Invoice State Log on_update_after_submit failed")

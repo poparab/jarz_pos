@@ -33,7 +33,6 @@ from jarz_pos.services import employee_customers as svc
 from jarz_pos.services import territory_exceptions as te
 from jarz_pos.utils import employee_link as el
 
-
 EMP = "HR-EMP-00001"
 OTHER_EMP = "HR-EMP-00002"
 

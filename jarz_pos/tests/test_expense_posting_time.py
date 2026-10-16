@@ -31,13 +31,13 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import jarz_pos
-from jarz_pos.utils import cleanup
 
 # Imported at module scope on purpose: if this import breaks, the whole module
 # errors out loudly instead of silently contributing zero assertions.
 from jarz_pos.doctype.jarz_expense_request.jarz_expense_request import (
 	JarzExpenseRequest,
 )
+from jarz_pos.utils import cleanup
 
 DOCTYPE_JSON = os.path.join(
 	os.path.dirname(os.path.abspath(jarz_pos.__file__)),
@@ -50,7 +50,7 @@ POSTING_TIME_FIELD = "custom_jarz_posting_time"
 
 
 def _load_doctype():
-	with open(DOCTYPE_JSON, "r", encoding="utf-8") as handle:
+	with open(DOCTYPE_JSON, encoding="utf-8") as handle:
 		return json.load(handle)
 
 

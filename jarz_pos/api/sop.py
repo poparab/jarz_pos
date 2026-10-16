@@ -24,7 +24,8 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from collections.abc import Mapping
+from typing import Any, Dict, List, Optional, Tuple
 
 import frappe
 from frappe import _
@@ -78,7 +79,7 @@ def _field(row: Any, name: str, default: Any = None) -> Any:
 # ── frappe / ERPNext resolvers ──────────────────────────────────────────
 
 
-def _resolve_active_sop(item_code: str) -> Optional[str]:
+def _resolve_active_sop(item_code: str) -> str | None:
 	"""Name of the live SOP for an item, or ``None``.
 
 	Highest ``version`` wins; ``modified`` breaks a tie.  ``on_update`` on the
@@ -107,7 +108,7 @@ def _resolve_required_material_rows():
 	return _get_required_material_rows
 
 
-def _resolve_direct_bom_lines(bom: str) -> List[Dict[str, Any]]:
+def _resolve_direct_bom_lines(bom: str) -> list[dict[str, Any]]:
 	"""The BOM's own one-level ``BOM Item`` rows, phantom sub-assemblies intact.
 
 	Raises on a database failure; ``_build_component_maps`` owns the fallback so
@@ -131,14 +132,14 @@ def _resolve_now_datetime():
 	return frappe.utils.now_datetime()
 
 
-def _resolve_session_user() -> Optional[str]:
+def _resolve_session_user() -> str | None:
 	try:
 		return frappe.session.user
 	except Exception:
 		return None
 
 
-def _resolve_work_order_row(work_order: str) -> Optional[Dict[str, Any]]:
+def _resolve_work_order_row(work_order: str) -> dict[str, Any] | None:
 	"""Read the Work Order, tolerating a site without the stamp field yet."""
 	try:
 		return frappe.db.get_value("Work Order", work_order, _WORK_ORDER_FIELDS, as_dict=True)
@@ -150,7 +151,7 @@ def _resolve_work_order_row(work_order: str) -> Optional[Dict[str, Any]]:
 		return frappe.db.get_value("Work Order", work_order, _WORK_ORDER_FIELDS[:-1], as_dict=True)
 
 
-def _resolve_bom_row(bom: str) -> Optional[Dict[str, Any]]:
+def _resolve_bom_row(bom: str) -> dict[str, Any] | None:
 	if not bom:
 		return None
 	try:
@@ -160,7 +161,7 @@ def _resolve_bom_row(bom: str) -> Optional[Dict[str, Any]]:
 		return None
 
 
-def _resolve_default_bom(item_code: str) -> Optional[str]:
+def _resolve_default_bom(item_code: str) -> str | None:
 	try:
 		return frappe.db.get_value("BOM", {"item": item_code, "is_default": 1, "docstatus": 1}, "name")
 	except Exception:
@@ -202,13 +203,13 @@ def _make_plain_text_fn():
 	return to_text
 
 
-def _step_rows(doc: Any) -> List[Dict[str, Any]]:
+def _step_rows(doc: Any) -> list[dict[str, Any]]:
 	"""Flatten the ``steps`` child table into plain dicts.
 
 	Uses ``getattr`` rather than ``as_dict()`` so the same code path works for
 	a real ``Document`` and for a lightweight stub in a unit test.
 	"""
-	rows: List[Dict[str, Any]] = []
+	rows: list[dict[str, Any]] = []
 	for row in _field(doc, "steps") or []:
 		rows.append(
 			{
@@ -229,7 +230,7 @@ def _step_rows(doc: Any) -> List[Dict[str, Any]]:
 	return rows
 
 
-def _sop_to_dict(doc: Any) -> Dict[str, Any]:
+def _sop_to_dict(doc: Any) -> dict[str, Any]:
 	return {
 		"name": _field(doc, "name"),
 		"item_code": _field(doc, "item_code"),
@@ -244,8 +245,8 @@ def _sop_to_dict(doc: Any) -> Dict[str, Any]:
 
 
 def _build_component_maps(
-	bom: Optional[str], company: Optional[str], bom_qty: float
-) -> Tuple[Dict[str, float], Dict[str, str], Dict[str, str]]:
+	bom: str | None, company: str | None, bom_qty: float
+) -> tuple[dict[str, float], dict[str, str], dict[str, str]]:
 	"""Per-**batch** component quantities, keyed by item code.
 
 	``render_instruction`` multiplies by the batch count, so these rows are
@@ -280,17 +281,17 @@ def _build_component_maps(
 
 
 def _build_component_maps_with_direct(
-	bom: Optional[str], company: Optional[str], bom_qty: float
-) -> Tuple[Dict[str, float], Dict[str, str], Dict[str, str], List[str]]:
+	bom: str | None, company: str | None, bom_qty: float
+) -> tuple[dict[str, float], dict[str, str], dict[str, str], list[str]]:
 	"""``_build_component_maps`` plus the BOM's direct-line codes, in BOM order.
 
 	The recipe sheet lists what the bench takes out of the store - the direct
 	lines - and must not also list the raw ingredients *inside* the phantom
 	Cheesecake Mix, which layer 2 adds only so tokens can name them.
 	"""
-	qty_map: Dict[str, float] = {}
-	uom_map: Dict[str, str] = {}
-	name_map: Dict[str, str] = {}
+	qty_map: dict[str, float] = {}
+	uom_map: dict[str, str] = {}
+	name_map: dict[str, str] = {}
 
 	if not bom:
 		return qty_map, uom_map, name_map, []
@@ -346,13 +347,13 @@ def _build_payload(
 	doc: Any,
 	*,
 	item_code: str,
-	bom: Optional[str] = None,
+	bom: str | None = None,
 	batches: Any = 1,
 	units: Any = None,
-	work_order: Optional[str] = None,
-	stamp: Optional[str] = None,
+	work_order: str | None = None,
+	stamp: str | None = None,
 	is_stamped: bool = False,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	sop = _sop_to_dict(doc)
 
 	# BOM precedence: an explicit ``bom`` (the Work Order path passes the WO's
@@ -412,7 +413,7 @@ def _build_payload(
 	return payload
 
 
-def _resolve_sop_for_work_order(wo: Mapping[str, Any]) -> Tuple[Any, Optional[str], bool]:
+def _resolve_sop_for_work_order(wo: Mapping[str, Any]) -> tuple[Any, str | None, bool]:
 	"""``(doc, stamp, is_stamped)`` for a Work Order.
 
 	The stamped version wins over the active one.  This is the whole point of
@@ -453,7 +454,7 @@ def _resolve_sop_for_work_order(wo: Mapping[str, Any]) -> Tuple[Any, Optional[st
 _MAX_SHEET_LINES = 100
 
 
-def _parse_sheet_lines(lines: Any) -> Dict[str, float]:
+def _parse_sheet_lines(lines: Any) -> dict[str, float]:
 	"""``[{"item_code", "qty"}]`` (a list, its JSON, or ``{code: qty}``).
 
 	Returns ``{code: qty}`` in first-seen order, positive quantities only, a
@@ -479,7 +480,7 @@ def _parse_sheet_lines(lines: Any) -> Dict[str, float]:
 	if len(data) > _MAX_SHEET_LINES:
 		frappe.throw(_("Too many lines: at most {0}").format(_MAX_SHEET_LINES))
 
-	wanted: Dict[str, float] = {}
+	wanted: dict[str, float] = {}
 	for row in data:
 		if not isinstance(row, dict):
 			continue
@@ -495,7 +496,7 @@ def _clean_number(value: float) -> Any:
 	return int(value) if float(value).is_integer() else round(value, 6)
 
 
-def _sheet_entry(item_code: str, qty: float) -> Optional[Dict[str, Any]]:
+def _sheet_entry(item_code: str, qty: float) -> dict[str, Any] | None:
 	"""One item's SOP and per-batch component maps, or ``None`` with no SOP."""
 	sop_name = _resolve_active_sop(item_code)
 	if not sop_name:
@@ -526,7 +527,7 @@ def _sheet_entry(item_code: str, qty: float) -> Optional[Dict[str, Any]]:
 	}
 
 
-def _steps_signature(steps: List[Mapping[str, Any]]) -> Tuple[Tuple[str, str], ...]:
+def _steps_signature(steps: list[Mapping[str, Any]]) -> tuple[tuple[str, str], ...]:
 	return tuple(
 		(
 			rendering.normalise_markup(step.get("title")).strip(),
@@ -548,11 +549,11 @@ def _unit_mass(entry: Mapping[str, Any]) -> float:
 	return total
 
 
-def _common_title(names: List[str]) -> str:
+def _common_title(names: list[str]) -> str:
 	"""Shared leading words: "Tiramisu Large" + "Tiramisu Small" -> "Tiramisu"."""
 	split = [str(name).split() for name in names]
-	prefix: List[str] = []
-	for words in zip(*split):
+	prefix: list[str] = []
+	for words in zip(*split, strict=False):
 		if all(word == words[0] for word in words):
 			prefix.append(words[0])
 		else:
@@ -560,14 +561,14 @@ def _common_title(names: List[str]) -> str:
 	return " ".join(prefix) or str(names[0])
 
 
-def _render_sheet(entries: List[Dict[str, Any]], to_text) -> Dict[str, Any]:
+def _render_sheet(entries: list[dict[str, Any]], to_text) -> dict[str, Any]:
 	entries = sorted(entries, key=lambda e: (-_unit_mass(e), e["item_code"]))
 
 	# Whole-run maps.  ``batches=1`` against these renders the run total.
-	run_qty: Dict[str, float] = {}
-	run_uom: Dict[str, str] = {}
-	run_name: Dict[str, str] = {}
-	listed: List[str] = []
+	run_qty: dict[str, float] = {}
+	run_uom: dict[str, str] = {}
+	run_name: dict[str, str] = {}
+	listed: list[str] = []
 	for entry in entries:
 		for code, per_batch in entry["qty_map"].items():
 			run_qty[code] = run_qty.get(code, 0.0) + per_batch * entry["batches"]
@@ -578,21 +579,21 @@ def _render_sheet(entries: List[Dict[str, Any]], to_text) -> Dict[str, Any]:
 				listed.append(code)
 
 	run_kwargs = {"component_qty_map": run_qty, "uom_map": run_uom, "name_map": run_name, "batches": 1}
-	unresolved: List[str] = []
+	unresolved: list[str] = []
 
-	def keep(tokens: List[str]) -> None:
+	def keep(tokens: list[str]) -> None:
 		for token in tokens:
 			if token not in unresolved:
 				unresolved.append(token)
 
-	steps: List[Dict[str, Any]] = []
+	steps: list[dict[str, Any]] = []
 	for position, raw in enumerate(entries[0]["steps"], start=1):
 		title_html, tokens = rendering.render_instruction(raw.get("title") or "", **run_kwargs)
 		keep(tokens)
 		instruction = raw.get("instruction") or ""
 
-		text: Optional[str] = None
-		per_item: Optional[List[Dict[str, Any]]] = None
+		text: str | None = None
+		per_item: list[dict[str, Any]] | None = None
 		if rendering.uses_each(instruction):
 			per_item = []
 			for entry in entries:
@@ -657,10 +658,10 @@ def _render_sheet(entries: List[Dict[str, Any]], to_text) -> Dict[str, Any]:
 @frappe.whitelist()
 def get_sop_for_item(
 	item_code: str,
-	bom: Optional[str] = None,
+	bom: str | None = None,
 	batches: Any = 1,
 	units: Any = None,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	"""The active SOP for an item, scaled to ``batches``.
 
 	**Never raises for a missing or unrenderable SOP.**  The board calls this
@@ -700,7 +701,7 @@ def get_sop_for_item(
 
 
 @frappe.whitelist()
-def get_sop_for_work_order(work_order: str) -> Dict[str, Any]:
+def get_sop_for_work_order(work_order: str) -> dict[str, Any]:
 	"""The SOP as stamped on a Work Order, scaled to that order's quantity.
 
 	``batches`` is ``WO.qty / BOM.quantity`` and ``units`` is ``WO.qty``, so a
@@ -744,8 +745,8 @@ def record_sop_step_capture(
 	work_order: str,
 	step_no: Any,
 	value: Any = None,
-	file_url: Optional[str] = None,
-) -> Dict[str, Any]:
+	file_url: str | None = None,
+) -> dict[str, Any]:
 	"""Log an operator's reading, photo, or confirmation for one step.
 
 	Writes a ``Jarz SOP Execution Log`` row.  Without the log, capture points
@@ -775,9 +776,9 @@ def record_sop_step_capture(
 		frappe.throw(_("Step {0} does not exist on this SOP").format(step_number))
 
 	capture_type = str(step.get("capture_type") or rendering.CAPTURE_NONE).strip() or rendering.CAPTURE_NONE
-	value_float: Optional[float] = None
-	value_text: Optional[str] = None
-	attachment: Optional[str] = (file_url or "").strip() or None
+	value_float: float | None = None
+	value_text: str | None = None
+	attachment: str | None = (file_url or "").strip() or None
 
 	if capture_type in rendering.NUMERIC_CAPTURE_TYPES:
 		if value is None or str(value).strip() == "":
@@ -840,7 +841,7 @@ def record_sop_step_capture(
 
 
 @frappe.whitelist()
-def get_recipe_sheet(lines: Any = None) -> Dict[str, Any]:
+def get_recipe_sheet(lines: Any = None) -> dict[str, Any]:
 	"""One combined work sheet for everything being made, per recipe family.
 
 	``lines`` is ``[{"item_code": ..., "qty": jars}]`` (or its JSON).  Items
@@ -859,7 +860,7 @@ def get_recipe_sheet(lines: Any = None) -> Dict[str, Any]:
 	"""
 	_ensure_production_view_access()
 
-	entries: List[Dict[str, Any]] = []
+	entries: list[dict[str, Any]] = []
 	for item_code, qty in _parse_sheet_lines(lines).items():
 		try:
 			entry = _sheet_entry(item_code, qty)
@@ -872,12 +873,12 @@ def get_recipe_sheet(lines: Any = None) -> Dict[str, Any]:
 		if entry:
 			entries.append(entry)
 
-	families: Dict[Tuple[Tuple[str, str], ...], List[Dict[str, Any]]] = {}
+	families: dict[tuple[tuple[str, str], ...], list[dict[str, Any]]] = {}
 	for entry in entries:
 		families.setdefault(_steps_signature(entry["steps"]), []).append(entry)
 
 	to_text = _make_plain_text_fn()
-	sheets: List[Dict[str, Any]] = []
+	sheets: list[dict[str, Any]] = []
 	for group in families.values():
 		try:
 			sheets.append(_render_sheet(group, to_text))
@@ -891,7 +892,7 @@ def get_recipe_sheet(lines: Any = None) -> Dict[str, Any]:
 
 
 @frappe.whitelist()
-def list_items_with_sop() -> Dict[str, Any]:
+def list_items_with_sop() -> dict[str, Any]:
 	"""Item codes that currently have an active SOP.
 
 	One cheap call lets the app decide which product rows get a "Recipe" button
@@ -910,11 +911,11 @@ def list_items_with_sop() -> Dict[str, Any]:
 
 
 @frappe.whitelist()
-def list_sops(item_code: Optional[str] = None, active_only: Any = 1) -> Dict[str, Any]:
+def list_sops(item_code: str | None = None, active_only: Any = 1) -> dict[str, Any]:
 	"""Catalogue of SOPs, newest version first, for a picker or an admin list."""
 	_ensure_production_view_access()
 
-	filters: Dict[str, Any] = {}
+	filters: dict[str, Any] = {}
 	item_code = (item_code or "").strip()
 	if item_code:
 		filters["item_code"] = item_code

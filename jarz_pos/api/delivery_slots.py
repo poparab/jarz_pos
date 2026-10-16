@@ -4,13 +4,15 @@ Provides delivery time slot management based on POS Profile Timetable configurat
 """
 
 from __future__ import annotations
-import frappe
+
 import json
 import logging
-from datetime import datetime, timedelta, time
-from typing import List, Dict, Any, Union
-from jarz_pos.constants import TIMING_MODES
+from datetime import datetime, time, timedelta
+from typing import Any, Dict, List, Union
 
+import frappe
+
+from jarz_pos.constants import TIMING_MODES
 
 # ──────────────────────────────────────────────────────────────────────────
 # Logging
@@ -75,7 +77,7 @@ def _get_logger() -> logging.Logger:
 
 
 @frappe.whitelist()
-def get_available_delivery_slots(pos_profile_name: str) -> List[Dict[str, Any]]:
+def get_available_delivery_slots(pos_profile_name: str) -> list[dict[str, Any]]:
 	"""
 	Get available delivery time slots for the next 5 days based on POS Profile Timetable
 
@@ -326,21 +328,21 @@ def get_available_delivery_slots(pos_profile_name: str) -> List[Dict[str, Any]]:
 		return slots
 
 	except Exception as e:
-		error_msg = f"Error generating delivery slots: {str(e)}"
+		error_msg = f"Error generating delivery slots: {e!s}"
 		logger.error("%s\n%s", error_msg, frappe.get_traceback())
-		frappe.throw(f"Error loading delivery slots: {str(e)}")
+		frappe.throw(f"Error loading delivery slots: {e!s}")
 
 
 def _generate_day_slots(
 	target_date: datetime.date,
-	opening_time: Union[time, timedelta],
-	closing_time: Union[time, timedelta],
+	opening_time: time | timedelta,
+	closing_time: time | timedelta,
 	same_day: str,
 	slot_duration_minutes: int,
 	current_datetime: datetime = None,
 	last_slot_duration_minutes: int = None,
 	anchor_last_slot_to_closing: bool = False,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
 	"""
 	Generate time slots for a specific day.
 
@@ -367,7 +369,7 @@ def _generate_day_slots(
 	    List of time slots for the day
 	"""
 	slots = []
-	windows: List[tuple[datetime, datetime]] = []
+	windows: list[tuple[datetime, datetime]] = []
 	logger = _get_logger()
 
 	# Convert timedelta to time if needed (Frappe Time fields return timedelta)
@@ -513,7 +515,7 @@ def _build_slot(
 	end: datetime,
 	is_current: bool = False,
 	today: datetime.date | None = None,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	"""Shape one slot the way the POS and the preview both expect.
 
 	``date``/``time`` describe the real start instant, NOT the business day the
@@ -660,7 +662,7 @@ def normalize_delivery_window(
 		)
 		return start, end, "unresolved"
 
-	parsed: List[tuple[datetime, datetime | None, bool]] = []
+	parsed: list[tuple[datetime, datetime | None, bool]] = []
 	for slot in slots:
 		slot_start = _parse_slot_datetime(slot.get("datetime"))
 		if slot_start is None:
@@ -732,7 +734,7 @@ def normalize_delivery_window(
 
 
 @frappe.whitelist()
-def get_next_available_slot(pos_profile_name: str) -> Dict[str, Any] | None:
+def get_next_available_slot(pos_profile_name: str) -> dict[str, Any] | None:
 	"""
 	Get the next available delivery slot for a POS profile
 
@@ -767,7 +769,7 @@ WEEKDAYS = [
 _PREVIEW_WEEK_START = datetime(2024, 1, 1).date()  # a Monday
 
 
-def _coerce_time(value: Union[str, time, timedelta, None]) -> time | None:
+def _coerce_time(value: str | time | timedelta | None) -> time | None:
 	"""Accept whatever a Time field hands us and return a ``datetime.time``.
 
 	Frappe Time fields come back as ``timedelta`` from the DB, but the Desk
@@ -789,7 +791,7 @@ def _coerce_time(value: Union[str, time, timedelta, None]) -> time | None:
 
 
 @frappe.whitelist()
-def preview_timetable_slots(config: Union[str, Dict[str, Any]]) -> Dict[str, Any]:
+def preview_timetable_slots(config: str | dict[str, Any]) -> dict[str, Any]:
 	"""Render the weekly slot plan for an (possibly unsaved) timetable config.
 
 	Drives the live preview on the POS Profile Timetable form so the operator
@@ -826,7 +828,7 @@ def preview_timetable_slots(config: Union[str, Dict[str, Any]]) -> Dict[str, Any
 
 	anchor_last_slot_to_closing = bool(int(config.get("anchor_last_slot_to_closing") or 0))
 
-	rows_by_day: Dict[str, Dict[str, Any]] = {}
+	rows_by_day: dict[str, dict[str, Any]] = {}
 	for row in config.get("timetable") or []:
 		day = (row or {}).get("day")
 		if day in WEEKDAYS:
@@ -837,7 +839,7 @@ def preview_timetable_slots(config: Union[str, Dict[str, Any]]) -> Dict[str, Any
 
 	for offset, day in enumerate(WEEKDAYS):
 		row = rows_by_day.get(day)
-		entry: Dict[str, Any] = {
+		entry: dict[str, Any] = {
 			"day": day,
 			"configured": bool(row),
 			"opening_time": None,

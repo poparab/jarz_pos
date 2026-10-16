@@ -19,8 +19,8 @@ from jarz_pos.services.checkin_device import (
 from jarz_pos.setup.roster_setup import _ensure_fields
 
 
-def ensure_checkin_device_fields() -> Dict[str, List[str]]:
-	log: Dict[str, List[str]] = {"created": [], "existing": []}
+def ensure_checkin_device_fields() -> dict[str, list[str]]:
+	log: dict[str, list[str]] = {"created": [], "existing": []}
 
 	_ensure_fields(
 		"Employee Checkin",

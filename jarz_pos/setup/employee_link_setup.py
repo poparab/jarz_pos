@@ -86,7 +86,7 @@ ADVANCE_ACCOUNT_TYPE = "Receivable"
 #: The explicit Employee <-> Customer join that ``utils/employee_link.py``
 #: prefers over name matching. Only created when HRMS is present: a Link field
 #: whose ``options`` name a DocType that does not exist is an invalid field.
-CUSTOMER_FIELDS: List[Dict[str, Any]] = [
+CUSTOMER_FIELDS: list[dict[str, Any]] = [
 	{
 		"fieldname": CUSTOMER_EMPLOYEE_FIELD,
 		"label": "Employee",
@@ -133,7 +133,7 @@ CUSTOMER_FIELDS: List[Dict[str, Any]] = [
 #: ``more_info_section`` is a collapsible section on the standard form, so these
 #: land together and out of the way instead of interleaving with the accounting
 #: fields.
-ADVANCE_FIELDS: List[Dict[str, Any]] = [
+ADVANCE_FIELDS: list[dict[str, Any]] = [
 	{
 		"fieldname": F_SALARY_MONTH,
 		"label": "Salary Month (Jarz)",
@@ -307,7 +307,7 @@ def _custom_field_exists(doctype: str, fieldname: str) -> bool:
 		return False
 
 
-def _ensure_fields(doctype: str, specs: List[Dict[str, Any]], log: Dict[str, List[str]]) -> None:
+def _ensure_fields(doctype: str, specs: list[dict[str, Any]], log: dict[str, list[str]]) -> None:
 	"""Create (or bring in line) the given Custom Fields on ``doctype``.
 
 	Uses ``frappe.custom.doctype.custom_field.custom_field.create_custom_fields``
@@ -344,7 +344,7 @@ def _ensure_fields(doctype: str, specs: List[Dict[str, Any]], log: Dict[str, Lis
 			_logger().error(f"Failed to ensure Custom Field {doctype}.{fieldname}", exc_info=True)
 
 
-def _ensure_customer_employee_field(log: Dict[str, List[str]]) -> None:
+def _ensure_customer_employee_field(log: dict[str, list[str]]) -> None:
 	"""Seed ``Customer.custom_employee`` — but only where ``Employee`` exists.
 
 	Guarded on HRMS as a whole rather than on the ``Employee`` DocType alone so
@@ -357,7 +357,7 @@ def _ensure_customer_employee_field(log: Dict[str, List[str]]) -> None:
 	_ensure_fields("Customer", CUSTOMER_FIELDS, log)
 
 
-def _ensure_advance_jarz_fields(log: Dict[str, List[str]]) -> None:
+def _ensure_advance_jarz_fields(log: dict[str, list[str]]) -> None:
 	"""Seed every ``custom_jarz_*`` field on ``Employee Advance``.
 
 	The list has grown past the original six: the payout columns the approve
@@ -419,7 +419,7 @@ def _find_advance_account(company: str) -> str:
 	return ""
 
 
-def _type_unused_advance_account(company: str, log: Dict[str, List[str]]) -> None:
+def _type_unused_advance_account(company: str, log: dict[str, list[str]]) -> None:
 	"""Set ``account_type = Receivable`` on an advance account that has none.
 
 	ERPNext creates "Employee Advances" under Loans and Advances with NO
@@ -499,7 +499,7 @@ def _type_unused_advance_account(company: str, log: Dict[str, List[str]]) -> Non
 			_logger().error(f"Failed typing {account} as {ADVANCE_ACCOUNT_TYPE}", exc_info=True)
 
 
-def _warn_employee_advance_overrides(company: str, log: Dict[str, List[str]]) -> None:
+def _warn_employee_advance_overrides(company: str, log: dict[str, list[str]]) -> None:
 	"""Name the Employee records whose advance ledger is CUSTOMER receivable.
 
 	``Employee Advance.advance_account`` is declared
@@ -555,7 +555,7 @@ def _warn_employee_advance_overrides(company: str, log: Dict[str, List[str]]) ->
 		_logger().error(f"Failed to check employee advance-account overrides for {company}", exc_info=True)
 
 
-def _verify_advance_accounts(log: Dict[str, List[str]]) -> None:
+def _verify_advance_accounts(log: dict[str, list[str]]) -> None:
 	"""Report — and only where it is unambiguous, repair — the advance account.
 
 	``EmployeeAdvance.before_submit`` falls back to
@@ -641,14 +641,14 @@ def _verify_advance_accounts(log: Dict[str, List[str]]) -> None:
 			_logger().error(f"Failed to verify the employee advance account for {company}", exc_info=True)
 
 
-def ensure_employee_link_fields() -> Dict[str, List[str]]:
+def ensure_employee_link_fields() -> dict[str, list[str]]:
 	"""Idempotently seed the employee-advance schema. Safe on every migrate.
 
 	Never raises. This runs inside the shared ``bench migrate`` that the whole
 	bench depends on; a raising seeder does not fail its own feature, it aborts
 	the migrate for every app on the site.
 	"""
-	log: Dict[str, List[str]] = {
+	log: dict[str, list[str]] = {
 		"created": [],
 		"existing": [],
 		"skipped": [],
@@ -684,7 +684,7 @@ def ensure_employee_link_fields() -> Dict[str, List[str]]:
 	return log
 
 
-def ensure_employee_customers() -> Dict[str, Any]:
+def ensure_employee_customers() -> dict[str, Any]:
 	"""Give every Active employee its one staff Customer. Safe on every migrate.
 
 	Runs right after :func:`ensure_employee_link_fields`, which creates (and
@@ -698,7 +698,7 @@ def ensure_employee_customers() -> Dict[str, Any]:
 	Never raises: a raising seeder aborts the shared migrate for every app.
 	"""
 	logger = _logger()
-	summary: Dict[str, Any] = {}
+	summary: dict[str, Any] = {}
 	try:
 		if not hrms_available():
 			logger.error("employee_customers: skipped, HRMS not installed")
@@ -709,7 +709,7 @@ def ensure_employee_customers() -> Dict[str, Any]:
 
 		summary = ensure_customers_for_all_employees() or {}
 
-		def _names(key: str) -> List[str]:
+		def _names(key: str) -> list[str]:
 			return [
 				str(item.get("customer") or item.get("employee") or "") for item in (summary.get(key) or [])
 			]

@@ -41,7 +41,6 @@ from urllib.parse import urlencode, urlparse
 
 import frappe
 
-
 #: Nominatim's public endpoint. Fixed host, HTTPS, no redirects followed.
 NOMINATIM_HOST = "nominatim.openstreetmap.org"
 NOMINATIM_URL = "https://" + NOMINATIM_HOST + "/reverse"

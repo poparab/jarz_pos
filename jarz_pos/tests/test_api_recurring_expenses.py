@@ -4,9 +4,9 @@ These cover the pure decision functions — month resolution, cadence matching
 and GL reconciliation classification — so they run without a site or database.
 """
 
-from datetime import date
 import io
 import unittest
+from datetime import date
 from unittest.mock import MagicMock, patch
 
 
@@ -206,7 +206,7 @@ class TestNamingSeriesFallback(unittest.TestCase):
 		from jarz_pos.doctype.jarz_recurring_expense import jarz_recurring_expense as mod
 
 		path = os.path.join(os.path.dirname(mod.__file__), "jarz_recurring_expense.json")
-		with io.open(path, encoding="utf-8") as handle:
+		with open(path, encoding="utf-8") as handle:
 			schema = json.load(handle)
 
 		field = next(f for f in schema["fields"] if f["fieldname"] == "naming_series")

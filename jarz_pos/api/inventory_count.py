@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import frappe
 from frappe import _
 from frappe.utils import cint, getdate, strip_html
+
 from jarz_pos.constants import DEFAULT_UOM, QUERY_LIMITS, ROLES
 from jarz_pos.utils.posting_datetime import apply_stock_posting_datetime
 
@@ -17,10 +18,10 @@ def _ensure_manager_access() -> None:
 		frappe.throw(_("Not permitted: Managers only"), frappe.PermissionError)
 
 
-def _get_uom_conversions(item_code: str) -> List[Dict[str, Any]]:
+def _get_uom_conversions(item_code: str) -> list[dict[str, Any]]:
 	"""Return available UOM conversions for an item, including stock_uom with factor 1."""
 	stock_uom = frappe.db.get_value("Item", item_code, "stock_uom") or DEFAULT_UOM
-	convs: List[Dict[str, Any]] = [{"uom": stock_uom, "conversion_factor": 1.0}]
+	convs: list[dict[str, Any]] = [{"uom": stock_uom, "conversion_factor": 1.0}]
 	rows = frappe.get_all(
 		"UOM Conversion Detail",
 		filters={"parenttype": "Item", "parentfield": "uoms", "parent": item_code},
@@ -38,7 +39,7 @@ def _get_uom_conversions(item_code: str) -> List[Dict[str, Any]]:
 	return convs
 
 
-def _attach_alternative_count_groups(rows: List[Dict[str, Any]]) -> None:
+def _attach_alternative_count_groups(rows: list[dict[str, Any]]) -> None:
 	"""Annotate explicit two-way Item Alternative networks without merging stock."""
 	by_code = {str(row.get("item_code") or ""): row for row in rows if row.get("item_code")}
 	codes = sorted(by_code)
@@ -55,8 +56,8 @@ def _attach_alternative_count_groups(rows: List[Dict[str, Any]]) -> None:
 		filters={"two_way": 1, "alternative_item_code": ["in", codes]},
 		fields=["item_code", "alternative_item_code"],
 	)
-	graph: Dict[str, Set[str]] = {code: set() for code in codes}
-	seen_edges: Set[Tuple[str, str]] = set()
+	graph: dict[str, set[str]] = {code: set() for code in codes}
+	seen_edges: set[tuple[str, str]] = set()
 	for link in [*(forward or []), *(reverse or [])]:
 		left = str(link.get("item_code") or "")
 		right = str(link.get("alternative_item_code") or "")
@@ -71,12 +72,12 @@ def _attach_alternative_count_groups(rows: List[Dict[str, Any]]) -> None:
 		graph[left].add(right)
 		graph[right].add(left)
 
-	visited: Set[str] = set()
+	visited: set[str] = set()
 	for code in codes:
 		if code in visited or not graph[code]:
 			continue
 		pending = [code]
-		component: Set[str] = set()
+		component: set[str] = set()
 		while pending:
 			member = pending.pop()
 			if member in component:
@@ -108,20 +109,20 @@ def _attach_alternative_count_groups(rows: List[Dict[str, Any]]) -> None:
 
 
 @frappe.whitelist()
-def list_warehouses(company: Optional[str] = None) -> List[Dict[str, Any]]:
+def list_warehouses(company: str | None = None) -> list[dict[str, Any]]:
 	_ensure_manager_access()
 	if not company:
 		company = frappe.defaults.get_user_default("Company") or frappe.db.get_single_value(
 			"Global Defaults", "default_company"
 		)
-	filters: Dict[str, Any] = {"is_group": 0}
+	filters: dict[str, Any] = {"is_group": 0}
 	if company:
 		filters["company"] = company
 	return frappe.get_all("Warehouse", filters=filters, fields=["name", "company"], order_by="name asc")
 
 
 @frappe.whitelist()
-def list_item_groups(search: Optional[str] = None, warehouse: Optional[str] = None) -> List[Dict[str, Any]]:
+def list_item_groups(search: str | None = None, warehouse: str | None = None) -> list[dict[str, Any]]:
 	"""Item groups worth offering as a count category.
 
 	Two things this deliberately does that the old leaf-only listing did not:
@@ -141,7 +142,7 @@ def list_item_groups(search: Optional[str] = None, warehouse: Optional[str] = No
 	"""
 	_ensure_manager_access()
 
-	item_filters: Dict[str, Any] = {"disabled": 0, "has_variants": 0, "is_stock_item": 1}
+	item_filters: dict[str, Any] = {"disabled": 0, "has_variants": 0, "is_stock_item": 1}
 	if warehouse:
 		allowed_codes = _resolve_count_item_codes(warehouse)
 		if allowed_codes is not None:
@@ -162,7 +163,7 @@ def list_item_groups(search: Optional[str] = None, warehouse: Optional[str] = No
 	bounds = {g["name"]: (g["lft"], g["rgt"]) for g in groups}
 
 	like = f"%{search}%".lower() if search else None
-	out: List[Dict[str, Any]] = []
+	out: list[dict[str, Any]] = []
 	for g in groups:
 		# Keep a group when any populated group sits inside its span -- that is
 		# true for the populated leaf itself and for every ancestor above it.
@@ -193,7 +194,7 @@ def _warehouse_count_profile_is_available() -> bool:
 		return False
 
 
-def _get_active_warehouse_count_profile_name(warehouse: str) -> Optional[str]:
+def _get_active_warehouse_count_profile_name(warehouse: str) -> str | None:
 	if not warehouse or not _warehouse_count_profile_is_available():
 		return None
 	names = frappe.get_all(
@@ -205,12 +206,12 @@ def _get_active_warehouse_count_profile_name(warehouse: str) -> Optional[str]:
 	return names[0] if names else None
 
 
-def _expand_item_groups(item_groups: List[str], include_child_groups: bool) -> List[str]:
+def _expand_item_groups(item_groups: list[str], include_child_groups: bool) -> list[str]:
 	normalized = [group.strip() for group in item_groups if group and group.strip()]
 	if not include_child_groups or not normalized:
 		return list(dict.fromkeys(normalized))
 
-	expanded: List[str] = []
+	expanded: list[str] = []
 	for group in normalized:
 		bounds = frappe.db.get_value("Item Group", group, ["lft", "rgt"], as_dict=True)
 		if not bounds:
@@ -227,7 +228,7 @@ def _expand_item_groups(item_groups: List[str], include_child_groups: bool) -> L
 	return list(dict.fromkeys(expanded))
 
 
-def _get_enabled_profile_item_groups(profile_doc: Any) -> List[str]:
+def _get_enabled_profile_item_groups(profile_doc: Any) -> list[str]:
 	rows = getattr(profile_doc, "item_groups", []) or []
 	return [
 		str(row.item_group).strip()
@@ -236,9 +237,9 @@ def _get_enabled_profile_item_groups(profile_doc: Any) -> List[str]:
 	]
 
 
-def _get_enabled_profile_item_exceptions(profile_doc: Any) -> Tuple[Set[str], Set[str]]:
-	includes: Set[str] = set()
-	excludes: Set[str] = set()
+def _get_enabled_profile_item_exceptions(profile_doc: Any) -> tuple[set[str], set[str]]:
+	includes: set[str] = set()
+	excludes: set[str] = set()
 	rows = getattr(profile_doc, "item_exceptions", []) or []
 	for row in rows:
 		if not int(getattr(row, "enabled", 1) or 0):
@@ -254,7 +255,7 @@ def _get_enabled_profile_item_exceptions(profile_doc: Any) -> Tuple[Set[str], Se
 	return includes, excludes
 
 
-def _resolve_count_item_codes(warehouse: str) -> Optional[List[str]]:
+def _resolve_count_item_codes(warehouse: str) -> list[str] | None:
 	profile_name = _get_active_warehouse_count_profile_name(warehouse)
 	if not profile_name:
 		return None
@@ -266,7 +267,7 @@ def _resolve_count_item_codes(warehouse: str) -> Optional[List[str]]:
 	)
 	included_items, excluded_items = _get_enabled_profile_item_exceptions(profile_doc)
 
-	allowed_codes: Set[str] = set()
+	allowed_codes: set[str] = set()
 	if allowed_groups:
 		allowed_codes.update(
 			frappe.get_all(
@@ -298,7 +299,7 @@ def _resolve_count_item_codes(warehouse: str) -> Optional[List[str]]:
 	return sorted(allowed_codes)
 
 
-def _get_bin_qty_map(warehouse: str, item_codes: List[str]) -> Dict[str, float]:
+def _get_bin_qty_map(warehouse: str, item_codes: list[str]) -> dict[str, float]:
 	if not item_codes:
 		return {}
 	ph = ",".join(["%s"] * len(item_codes))
@@ -309,13 +310,13 @@ def _get_bin_qty_map(warehouse: str, item_codes: List[str]) -> Dict[str, float]:
         GROUP BY b.item_code
     """
 	rows = frappe.db.sql(sql, [warehouse] + item_codes, as_dict=True)  # type: ignore
-	out: Dict[str, float] = {}
+	out: dict[str, float] = {}
 	for r in rows:
 		out[str(r.get("item_code"))] = float(r.get("qty") or 0)
 	return out
 
 
-def _first_positive(value: Any) -> Optional[float]:
+def _first_positive(value: Any) -> float | None:
 	"""A usable rate, or None. Zero, negative and NaN are not usable rates."""
 	if value is None:
 		return None
@@ -351,8 +352,8 @@ def _log_valuation_source_failure(item_code: str, label: str) -> None:
 	_safe_log(f"jarz_pos valuation source failed: {label} for {item_code}")
 
 
-def _sle_valuation(item_code: str, warehouse: Optional[str]) -> Optional[float]:
-	filters: Dict[str, Any] = {"item_code": item_code, "is_cancelled": 0}
+def _sle_valuation(item_code: str, warehouse: str | None) -> float | None:
+	filters: dict[str, Any] = {"item_code": item_code, "is_cancelled": 0}
 	if warehouse:
 		filters["warehouse"] = warehouse
 	rows = frappe.get_all(
@@ -365,11 +366,11 @@ def _sle_valuation(item_code: str, warehouse: Optional[str]) -> Optional[float]:
 	return _first_positive(rows[0].get("valuation_rate") if rows else None)
 
 
-def _item_field_valuation(item_code: str, fieldname: str) -> Optional[float]:
+def _item_field_valuation(item_code: str, fieldname: str) -> float | None:
 	return _first_positive(frappe.db.get_value("Item", item_code, fieldname))
 
 
-def _item_price_valuation(item_code: str, buying: bool) -> Optional[float]:
+def _item_price_valuation(item_code: str, buying: bool) -> float | None:
 	rows = frappe.get_all(
 		"Item Price",
 		filters={"item_code": item_code, "buying" if buying else "selling": 1},
@@ -380,7 +381,7 @@ def _item_price_valuation(item_code: str, buying: bool) -> Optional[float]:
 	return _first_positive(rows[0].get("price_list_rate") if rows else None)
 
 
-def _bom_unit_cost(item_code: str) -> Optional[float]:
+def _bom_unit_cost(item_code: str) -> float | None:
 	"""Unit cost of the item's own recipe, the way ERPNext computes it.
 
 	`base_total_cost`, not `total_cost`: the former is in company currency,
@@ -417,8 +418,8 @@ def _bom_unit_cost(item_code: str) -> Optional[float]:
 # retail price restates the entire balance at margin and books the difference
 # to stock adjustment. Selling price stays last, purely so a count is never
 # refused outright when nothing else exists.
-def _resolve_item_valuation(item_code: str, warehouse: str) -> Optional[float]:
-	sources: Tuple[Tuple[str, Any], ...] = (
+def _resolve_item_valuation(item_code: str, warehouse: str) -> float | None:
+	sources: tuple[tuple[str, Any], ...] = (
 		("stock ledger, this warehouse", lambda: _sle_valuation(item_code, warehouse)),
 		("stock ledger, any warehouse", lambda: _sle_valuation(item_code, None)),
 		("item valuation rate", lambda: _item_field_valuation(item_code, "valuation_rate")),
@@ -444,10 +445,10 @@ def _resolve_item_valuation(item_code: str, warehouse: str) -> Optional[float]:
 @frappe.whitelist()
 def list_items_for_count(
 	warehouse: str,
-	search: Optional[str] = None,
-	item_group: Optional[str] = None,
+	search: str | None = None,
+	item_group: str | None = None,
 	limit: int = 500,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
 	"""List items to count in a warehouse with current qty and UOM conversions.
 
 	We include non-variant, enabled items, optionally filtered by group/search.
@@ -461,7 +462,7 @@ def list_items_for_count(
 	# which 83 were non-stock (Bundles, Assets, Services, Label Printing). Those
 	# can never hold stock and a Stock Reconciliation rejects them outright, so
 	# they were pure noise on every sheet.
-	filters: Dict[str, Any] = {"disabled": 0, "has_variants": 0, "is_stock_item": 1}
+	filters: dict[str, Any] = {"disabled": 0, "has_variants": 0, "is_stock_item": 1}
 	allowed_codes = _resolve_count_item_codes(warehouse)
 	if allowed_codes is not None:
 		if not allowed_codes:
@@ -475,7 +476,7 @@ def list_items_for_count(
 		if not expanded:
 			return []
 		filters["item_group"] = ["in", expanded]
-	or_filters: List[Any] = []
+	or_filters: list[Any] = []
 	if search:
 		like = f"%{search}%"
 		or_filters = [["Item", "name", "like", like], ["Item", "item_name", "like", like]]
@@ -497,7 +498,7 @@ def list_items_for_count(
 	codes = [it["item_code"] for it in items]
 	qty_map = _get_bin_qty_map(warehouse, codes)
 
-	out: List[Dict[str, Any]] = []
+	out: list[dict[str, Any]] = []
 	for it in items:
 		code = it["item_code"]
 		stock_uom = it.get("stock_uom") or DEFAULT_UOM
@@ -521,7 +522,7 @@ def list_items_for_count(
 	return out
 
 
-def _to_stock_qty(item_code: str, qty: Any, uom: Optional[str]) -> float:
+def _to_stock_qty(item_code: str, qty: Any, uom: str | None) -> float:
 	try:
 		value = float(0 if qty is None or qty == "" else qty)
 	except (TypeError, ValueError):
@@ -565,12 +566,12 @@ def _to_stock_qty(item_code: str, qty: Any, uom: Optional[str]) -> float:
 
 
 def _normalize_count_lines(
-	lines: List[Dict[str, Any]],
-) -> Tuple[
-	Dict[str, float],
-	Dict[str, Optional[float]],
-	Dict[str, Optional[str]],
-	Dict[str, Optional[str]],
+	lines: list[dict[str, Any]],
+) -> tuple[
+	dict[str, float],
+	dict[str, float | None],
+	dict[str, str | None],
+	dict[str, str | None],
 ]:
 	"""Convert count components to one stock-UOM total per item.
 
@@ -579,10 +580,10 @@ def _normalize_count_lines(
 	per item, so every component is converted and summed before the document is
 	built.  Legacy callers that send one row per item keep the same behavior.
 	"""
-	counted: Dict[str, float] = {}
-	provided_vr: Dict[str, Optional[float]] = {}
-	provided_batch: Dict[str, Optional[str]] = {}
-	provided_serials: Dict[str, Optional[str]] = {}
+	counted: dict[str, float] = {}
+	provided_vr: dict[str, float | None] = {}
+	provided_batch: dict[str, str | None] = {}
+	provided_serials: dict[str, str | None] = {}
 
 	for line in lines:
 		if not isinstance(line, dict):
@@ -640,7 +641,7 @@ def _normalize_count_lines(
 
 def _current_valuation_rate(
 	item_code: str, warehouse: str, posting_date: Any, posting_time: Any
-) -> Optional[float]:
+) -> float | None:
 	"""The rate ERPNext will copy onto a row that does not state one.
 
 	A FIFO consumption can leave a remainder valued below zero (production
@@ -699,11 +700,11 @@ def _build_negative_stock_submission_message(error: Exception) -> str:
 @frappe.whitelist()
 def submit_reconciliation(
 	warehouse: str,
-	posting_date: Optional[str],
+	posting_date: str | None,
 	lines: Any,
 	enforce_all: int = 1,
 	debug: int = 0,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	"""Create a Stock Reconciliation for counted items.
 
 	lines: list[{item_code, counted_qty, uom?}]
@@ -802,7 +803,7 @@ def submit_reconciliation(
 			if abs(counted_stock_qty - current) < 1e-9:
 				continue
 			# If we're increasing stock and ERPNext may require valuation_rate, attempt to provide it
-			row: Dict[str, Any] = {
+			row: dict[str, Any] = {
 				"item_code": code,
 				"warehouse": warehouse,
 				"qty": counted_stock_qty,
@@ -916,11 +917,11 @@ def submit_reconciliation(
 def list_reconciliations(
 	limit: Any = 30,
 	page: Any = 0,
-	warehouse: Optional[str] = None,
-	from_date: Optional[str] = None,
-	to_date: Optional[str] = None,
-	search: Optional[str] = None,
-) -> Dict[str, Any]:
+	warehouse: str | None = None,
+	from_date: str | None = None,
+	to_date: str | None = None,
+	search: str | None = None,
+) -> dict[str, Any]:
 	"""Return submitted Stock Reconciliations — the count history.
 
 	:func:`submit_reconciliation` posts only the *differences*, so the
@@ -936,7 +937,7 @@ def list_reconciliations(
 	limit = max(1, min(cint(limit) or 30, 200))
 	start = max(0, cint(page)) * limit
 
-	filters: Dict[str, Any] = {"docstatus": 1, "purpose": "Stock Reconciliation"}
+	filters: dict[str, Any] = {"docstatus": 1, "purpose": "Stock Reconciliation"}
 	if from_date and to_date:
 		filters["posting_date"] = ["between", [getdate(from_date), getdate(to_date)]]
 	elif from_date:
@@ -944,9 +945,9 @@ def list_reconciliations(
 	elif to_date:
 		filters["posting_date"] = ["<=", getdate(to_date)]
 
-	allowed_parents: Optional[Set[str]] = None
+	allowed_parents: set[str] | None = None
 
-	def _restrict(names: Set[str]) -> None:
+	def _restrict(names: set[str]) -> None:
 		nonlocal allowed_parents
 		allowed_parents = names if allowed_parents is None else (allowed_parents & names)
 
@@ -1022,7 +1023,7 @@ def list_reconciliations(
 	)
 
 	names = [e["name"] for e in entries]
-	lines_by_parent: Dict[str, List[Dict[str, Any]]] = {name: [] for name in names}
+	lines_by_parent: dict[str, list[dict[str, Any]]] = {name: [] for name in names}
 	if names:
 		for row in frappe.get_all(
 			"Stock Reconciliation Item",
@@ -1061,7 +1062,7 @@ def list_reconciliations(
 		else {}
 	)
 
-	out: List[Dict[str, Any]] = []
+	out: list[dict[str, Any]] = []
 	for entry in entries:
 		lines = lines_by_parent.get(entry["name"], [])
 		warehouses = sorted({(ln.get("warehouse") or "") for ln in lines} - {""})

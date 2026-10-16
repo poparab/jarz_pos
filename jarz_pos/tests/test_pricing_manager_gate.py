@@ -35,7 +35,6 @@ import frappe
 
 from jarz_pos.services import invoice_creation as ic
 
-
 _DEFAULT_PL = "Standard Selling"  # the POS Profile's selling_price_list
 _TIER_PL = "B2B Selling"  # the customer's own tier list (server-derivable)
 _PARTNER_PL = "Partner Selling"  # a sales partner's list (server-derivable)

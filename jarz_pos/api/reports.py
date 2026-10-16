@@ -42,7 +42,7 @@ _SUB_ASSEMBLY_ROOTS = ("Sub Assemblies",)
 _CONSUMABLE_ROOTS = ("Consumable",)
 
 
-def _finished_goods_warehouses() -> List[str]:
+def _finished_goods_warehouses() -> list[str]:
 	"""The finished-goods store, so the Final Products tables always show it.
 
 	The column set used to be "whatever warehouses happen to hold one of these
@@ -66,7 +66,7 @@ def _finished_goods_warehouses() -> List[str]:
 	except Exception:
 		return []
 
-	names: List[str] = []
+	names: list[str] = []
 	for row in rows:
 		warehouse = row.get("default_fg_warehouse")
 		if not warehouse or warehouse in names:
@@ -80,9 +80,9 @@ def _finished_goods_warehouses() -> List[str]:
 	return names
 
 
-def _expand_item_groups(roots: tuple) -> List[str]:
+def _expand_item_groups(roots: tuple) -> list[str]:
 	"""Each named group plus every group beneath it in the Item Group tree."""
-	names: List[str] = []
+	names: list[str] = []
 	for root in roots:
 		bounds = frappe.db.get_value("Item Group", root, ["lft", "rgt"], as_dict=True)
 		if not bounds:
@@ -98,7 +98,7 @@ def _expand_item_groups(roots: tuple) -> List[str]:
 	return names
 
 
-def branch_warehouse(branch: Optional[str]) -> Optional[str]:
+def branch_warehouse(branch: str | None) -> str | None:
 	"""The stock warehouse of a branch (POS Profile), or None when no branch.
 
 	Raises a clear ValidationError when the branch has no warehouse, rather than
@@ -116,9 +116,9 @@ def branch_warehouse(branch: Optional[str]) -> Optional[str]:
 	return warehouse
 
 
-def _bin_maps(item_codes: List[str], warehouse: Optional[str]):
+def _bin_maps(item_codes: list[str], warehouse: str | None):
 	"""``(qty_map, value_map)``: item → {warehouse: qty} and item → {warehouse: value}."""
-	filters: Dict[str, Any] = {"item_code": ["in", item_codes], "actual_qty": ["!=", 0]}
+	filters: dict[str, Any] = {"item_code": ["in", item_codes], "actual_qty": ["!=", 0]}
 	if warehouse:
 		filters["warehouse"] = warehouse
 	bins = frappe.get_all(
@@ -126,15 +126,15 @@ def _bin_maps(item_codes: List[str], warehouse: Optional[str]):
 		filters=filters,
 		fields=["item_code", "warehouse", "actual_qty", "stock_value"],
 	)
-	qty_map: Dict[str, Dict[str, float]] = {}
-	value_map: Dict[str, Dict[str, float]] = {}
+	qty_map: dict[str, dict[str, float]] = {}
+	value_map: dict[str, dict[str, float]] = {}
 	for b in bins:
 		qty_map.setdefault(b["item_code"], {})[b["warehouse"]] = float(b["actual_qty"])
 		value_map.setdefault(b["item_code"], {})[b["warehouse"]] = float(b.get("stock_value") or 0)
 	return qty_map, value_map
 
 
-def _totals(rows: List[Dict[str, Any]]) -> Dict[str, float]:
+def _totals(rows: list[dict[str, Any]]) -> dict[str, float]:
 	return {
 		"qty": round(sum(float(r.get("total_qty") or 0) for r in rows), 3),
 		"stock_value": round(sum(float(r.get("stock_value") or 0) for r in rows), 2),
@@ -142,7 +142,7 @@ def _totals(rows: List[Dict[str, Any]]) -> Dict[str, float]:
 
 
 @frappe.whitelist()
-def get_final_products_report(branch: Optional[str] = None) -> Dict[str, Any]:
+def get_final_products_report(branch: str | None = None) -> dict[str, Any]:
 	"""
 	Return stock balances for items in the "Small", "Medium" and "Large" item
 	groups, pivoted by warehouse.
@@ -263,7 +263,7 @@ def get_final_products_report(branch: Optional[str] = None) -> Dict[str, Any]:
 	return {"groups": result_groups, "totals": _totals(all_rows), "filters": filters_echo}
 
 
-def _materials_payload(raw_materials, sub_assemblies, consumables, filters_echo) -> Dict[str, Any]:
+def _materials_payload(raw_materials, sub_assemblies, consumables, filters_echo) -> dict[str, Any]:
 	bucket_totals = {
 		"raw_materials": _totals(raw_materials),
 		"sub_assemblies": _totals(sub_assemblies),
@@ -280,7 +280,7 @@ def _materials_payload(raw_materials, sub_assemblies, consumables, filters_echo)
 
 
 @frappe.whitelist()
-def get_materials_report(branch: Optional[str] = None) -> Dict[str, Any]:
+def get_materials_report(branch: str | None = None) -> dict[str, Any]:
 	"""
 	Return stock balances for the material, sub-assembly and consumable item
 	groups — each expanded to its descendants, so the report follows the Item

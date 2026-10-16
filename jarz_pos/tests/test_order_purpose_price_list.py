@@ -36,7 +36,6 @@ from jarz_pos.api import pos
 from jarz_pos.services import commercial_policy as cp
 from jarz_pos.services import invoice_creation as ic
 
-
 _PROFILE = "Dokki"
 _DEFAULT = "Standard Selling"
 _BUNDLE3 = "Selling Bundle of 3"

@@ -19,8 +19,9 @@ the maths tests need no patching at all.
 from __future__ import annotations
 
 import math
+from collections.abc import Iterable, Sequence
 from itertools import combinations_with_replacement
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import frappe
 
@@ -48,13 +49,13 @@ QUALITY_PENALTY = {
 	QUALITY_POOR: 3.0,
 }
 
-DEFAULT_RUN_QUALITY: Dict[float, str] = {
+DEFAULT_RUN_QUALITY: dict[float, str] = {
 	1.0: QUALITY_POOR,
 	1.5: QUALITY_PREFERRED,
 	2.0: QUALITY_ACCEPTABLE,
 }
 
-DEFAULT_RUN_SIZES: Tuple[float, ...] = tuple(sorted(DEFAULT_RUN_QUALITY))
+DEFAULT_RUN_SIZES: tuple[float, ...] = tuple(sorted(DEFAULT_RUN_QUALITY))
 
 # What one wasted batch of mix costs, in the same units as the quality
 # penalties.  The mix is never stored, so spare mix is either thrown away or
@@ -86,9 +87,9 @@ def batches_needed(*, total_mix_qty: float, batch_qty: float) -> float:
 def plan_mixer_runs(
 	batches: float,
 	*,
-	run_quality: Optional[Dict[float, str]] = None,
+	run_quality: dict[float, str] | None = None,
 	waste_weight: float = DEFAULT_WASTE_WEIGHT,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	"""Split a fractional batch requirement into concrete mixer runs.
 
 	Not every run size mixes equally well, so this is a quality decision before
@@ -133,7 +134,7 @@ def plan_mixer_runs(
 	# third run nobody needs.
 	min_runs = max(1, math.ceil((batches / largest) - QTY_EPSILON))
 
-	best: Optional[Tuple[float, ...]] = None
+	best: tuple[float, ...] | None = None
 	best_score = float("inf")
 
 	# Searching a few run counts past the minimum is what lets the optimiser
@@ -158,7 +159,7 @@ def plan_mixer_runs(
 	return {**_plan_payload(best, batches, quality), "capped": False}
 
 
-def _empty_plan(required: float, *, capped: bool) -> Dict[str, Any]:
+def _empty_plan(required: float, *, capped: bool) -> dict[str, Any]:
 	return {
 		"runs": [],
 		"run_detail": [],
@@ -174,8 +175,8 @@ def _empty_plan(required: float, *, capped: bool) -> Dict[str, Any]:
 def _plan_payload(
 	combo: Sequence[float],
 	batches: float,
-	quality: Dict[float, str],
-) -> Dict[str, Any]:
+	quality: dict[float, str],
+) -> dict[str, Any]:
 	# Biggest runs first: the mixer gets filled while the team is fresh, and a
 	# short final run is the one easiest to drop if the day changes.
 	runs = sorted(combo, reverse=True)
@@ -197,9 +198,9 @@ def _best_combination(
 	n: int,
 	batches: float,
 	sizes: Sequence[float],
-	quality: Dict[float, str],
+	quality: dict[float, str],
 	waste_weight: float,
-) -> Tuple[Optional[Tuple[float, ...]], float]:
+) -> tuple[tuple[float, ...] | None, float]:
 	"""Best-scoring combination of exactly ``n`` runs covering ``batches``.
 
 	Enumerated rather than solved: with three run sizes the candidate count is
@@ -207,7 +208,7 @@ def _best_combination(
 	obviously correct, which no greedy fill would be once run quality and waste
 	are traded against each other.
 	"""
-	best: Optional[Tuple[float, ...]] = None
+	best: tuple[float, ...] | None = None
 	best_score = float("inf")
 
 	for combo in combinations_with_replacement(sizes, n):
@@ -222,14 +223,14 @@ def _best_combination(
 	return best, best_score
 
 
-def aggregate_mix_demand(lines: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
+def aggregate_mix_demand(lines: Iterable[dict[str, Any]]) -> dict[str, Any]:
 	"""Total mix quantity a set of planned jar quantities implies.
 
 	Each line is ``{"item_code", "planned_qty", "mix_qty_per_unit"}``.  Lines
 	with no mix content (Molten) contribute zero and are kept in the breakdown
 	anyway, because "why is Molten not listed" is a question somebody will ask.
 	"""
-	breakdown: List[Dict[str, Any]] = []
+	breakdown: list[dict[str, Any]] = []
 	total = 0.0
 
 	for line in lines or []:
@@ -250,7 +251,7 @@ def aggregate_mix_demand(lines: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
 	return {"total_mix_qty": total, "breakdown": breakdown}
 
 
-def jars_per_batch(*, batch_qty: float, mix_qty_per_unit: float) -> Optional[float]:
+def jars_per_batch(*, batch_qty: float, mix_qty_per_unit: float) -> float | None:
 	"""How many of one jar a single batch yields.  ``None`` when it uses no mix.
 
 	This is the number the floor already knows by heart (120 medium, 77 large);
@@ -263,7 +264,7 @@ def jars_per_batch(*, batch_qty: float, mix_qty_per_unit: float) -> Optional[flo
 	return float(batch_qty or 0) / per_unit
 
 
-def summarise_actuals(lines: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
+def summarise_actuals(lines: Iterable[dict[str, Any]]) -> dict[str, Any]:
 	"""Planned-vs-actual roll-up for the end-of-day close.
 
 	``actual_qty`` of ``None`` means "not counted yet" and is excluded from the
@@ -274,7 +275,7 @@ def summarise_actuals(lines: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
 	actual_total = 0.0
 	counted = 0
 	uncounted = 0
-	rows: List[Dict[str, Any]] = []
+	rows: list[dict[str, Any]] = []
 
 	for line in lines or []:
 		planned = max(0.0, float(line.get("planned_qty") or 0))
@@ -324,7 +325,7 @@ def realised_yield(
 	*,
 	actual_mix_batches: float,
 	actual_units: float,
-) -> Optional[float]:
+) -> float | None:
 	"""Units actually obtained per batch of mix.
 
 	The whole point of the evening count: the BOM claims 120 medium per batch,
@@ -357,7 +358,7 @@ def _resolve_mix_item() -> str:
 	return (configured or DEFAULT_MIX_ITEM).strip() or DEFAULT_MIX_ITEM
 
 
-def _resolve_run_quality() -> Dict[float, str]:
+def _resolve_run_quality() -> dict[float, str]:
 	"""Mixer run sizes and how well each mixes, from Settings.
 
 	Accepts ``1:poor, 1.5:preferred, 2:acceptable``.  A bare number is treated
@@ -373,7 +374,7 @@ def _resolve_run_quality() -> Dict[float, str]:
 	if not raw:
 		return dict(DEFAULT_RUN_QUALITY)
 
-	parsed: Dict[float, str] = {}
+	parsed: dict[float, str] = {}
 	for part in str(raw).split(","):
 		part = part.strip()
 		if not part:
@@ -427,7 +428,7 @@ def _resolve_waste_weight() -> float:
 	return weight if weight >= 0 else DEFAULT_WASTE_WEIGHT
 
 
-def _resolve_mix_batch_qty(mix_item: str) -> Tuple[float, str, Optional[str]]:
+def _resolve_mix_batch_qty(mix_item: str) -> tuple[float, str, str | None]:
 	"""Yield of one run of the mix BOM, its UOM, and the BOM name.
 
 	Returns ``(0, uom, None)`` when the mix item has no submitted default BOM —
@@ -445,7 +446,7 @@ def _resolve_mix_batch_qty(mix_item: str) -> Tuple[float, str, Optional[str]]:
 	return float(bom.get("quantity") or 0), bom.get("uom") or "Kg", bom.get("name")
 
 
-def _resolve_planable_rows(company: str, mix_item: str) -> List[Dict[str, Any]]:
+def _resolve_planable_rows(company: str, mix_item: str) -> list[dict[str, Any]]:
 	"""Every finished good with a default BOM, plus how much mix that BOM uses.
 
 	The mix quantity comes from the BOM Item row, i.e. the **one-level** BOM,
@@ -458,7 +459,7 @@ def _resolve_planable_rows(company: str, mix_item: str) -> List[Dict[str, Any]]:
 	the mix item's stock UOM.
 	"""
 	conditions = ["b.is_default = 1", "b.docstatus = 1", "i.disabled = 0"]
-	values: Dict[str, Any] = {"mix_item": mix_item}
+	values: dict[str, Any] = {"mix_item": mix_item}
 
 	if company:
 		conditions.append("b.company = %(company)s")
@@ -490,7 +491,7 @@ def _resolve_planable_rows(company: str, mix_item: str) -> List[Dict[str, Any]]:
 		as_dict=True,
 	)
 
-	out: List[Dict[str, Any]] = []
+	out: list[dict[str, Any]] = []
 	for row in rows:
 		bom_qty = float(row.get("bom_qty") or 1) or 1.0
 		# Per finished unit, not per BOM run — the jar BOMs are all quantity 1
@@ -501,7 +502,7 @@ def _resolve_planable_rows(company: str, mix_item: str) -> List[Dict[str, Any]]:
 	return out
 
 
-def _resolve_flattened_mix_components(mix_item: str) -> List[str]:
+def _resolve_flattened_mix_components(mix_item: str) -> list[str]:
 	"""Raw materials that the mix BOM consumes.
 
 	Used only to spot jar BOMs that still carry those raw materials directly —

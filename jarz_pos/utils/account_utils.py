@@ -6,6 +6,7 @@ including account lookup, payment processing, and cash handling.
 """
 
 import frappe
+
 from jarz_pos.constants import ACCOUNTS
 
 

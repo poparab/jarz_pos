@@ -147,7 +147,7 @@ def _is_b2b_rep() -> bool:
 	return B2B_SALES_REP_ROLE in _session_roles()
 
 
-def _is_company_customer(customer: Optional[str]) -> bool:
+def _is_company_customer(customer: str | None) -> bool:
 	if not customer:
 		return False
 	try:
@@ -180,7 +180,7 @@ def _admit(write: bool) -> bool:
 	return False
 
 
-def _check_rep_party(rep_only: bool, customer: Optional[str] = None) -> None:
+def _check_rep_party(rep_only: bool, customer: str | None = None) -> None:
 	"""A rep-only caller may act on Leads and on Company customers, nothing else."""
 	if rep_only and customer and not _is_company_customer(customer):
 		frappe.throw(
@@ -189,7 +189,7 @@ def _check_rep_party(rep_only: bool, customer: Optional[str] = None) -> None:
 		)
 
 
-def _can_manage_terms(customer: Optional[str] = None, lead: Optional[str] = None) -> bool:
+def _can_manage_terms(customer: str | None = None, lead: str | None = None) -> bool:
 	"""May the caller SAVE terms for this party? (``can_edit`` on the wire.)
 
 	Managers: any Customer. Reps: Company customers only. A Lead party
@@ -207,12 +207,12 @@ def _can_manage_terms(customer: Optional[str] = None, lead: Optional[str] = None
 	return _is_company_customer(customer)
 
 
-def _can_edit(customer: Optional[str] = None, lead: Optional[str] = None) -> bool:
+def _can_edit(customer: str | None = None, lead: str | None = None) -> bool:
 	"""``can_edit`` on the wire. Kept by name (tests and callers patch it)."""
 	return _can_manage_terms(customer=customer, lead=lead)
 
 
-def _load_terms_row(customer: str) -> Optional[Dict[str, Any]]:
+def _load_terms_row(customer: str) -> dict[str, Any] | None:
 	if not doctype_ready():
 		return None
 	rows = frappe.get_all(
@@ -224,7 +224,7 @@ def _load_terms_row(customer: str) -> Optional[Dict[str, Any]]:
 	return rows[0] if rows else None
 
 
-def _load_terms_rows(customers: List[str]) -> Dict[str, Dict[str, Any]]:
+def _load_terms_rows(customers: list[str]) -> dict[str, dict[str, Any]]:
 	if not customers or not doctype_ready():
 		return {}
 	try:
@@ -240,7 +240,7 @@ def _load_terms_rows(customers: List[str]) -> Dict[str, Dict[str, Any]]:
 	return {str(r.get("customer")): r for r in rows or [] if r.get("customer")}
 
 
-def _invoice_inputs(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _invoice_inputs(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 	return [
 		{
 			"name": r.get("name"),
@@ -254,8 +254,8 @@ def _invoice_inputs(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def _tag_branches(
-	customer: str, terms: Optional[Dict[str, Any]], inputs: List[Dict[str, Any]]
-) -> List[Dict[str, Any]]:
+	customer: str, terms: dict[str, Any] | None, inputs: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
 	"""Tag *inputs* with the shop's branch when the schedule settles per branch."""
 	if inputs and ss.splits_by_branch(terms):
 		from jarz_pos.services.b2b_branches import tag_invoice_branches
@@ -264,7 +264,7 @@ def _tag_branches(
 	return inputs
 
 
-def _user_full_name(user: Optional[str]) -> Optional[str]:
+def _user_full_name(user: str | None) -> str | None:
 	if not user:
 		return None
 	try:
@@ -273,7 +273,7 @@ def _user_full_name(user: Optional[str]) -> Optional[str]:
 		return user
 
 
-def _serialize_terms(row: Dict[str, Any], parsed: Dict[str, Any]) -> Dict[str, Any]:
+def _serialize_terms(row: dict[str, Any], parsed: dict[str, Any]) -> dict[str, Any]:
 	month_days = [str(d) for d in parsed.get("month_days") or []]
 	if parsed.get("month_last"):
 		month_days.append(ss.MONTH_LAST)
@@ -301,7 +301,7 @@ def _serialize_terms(row: Dict[str, Any], parsed: Dict[str, Any]) -> Dict[str, A
 	}
 
 
-def _terms_payload(customer: str) -> Dict[str, Any]:
+def _terms_payload(customer: str) -> dict[str, Any]:
 	row = _load_terms_row(customer)
 	parsed = ss.parse_terms(row) if row else None
 	# All branches, deliberately -- the same scope get_customer_credit_profile
@@ -365,7 +365,7 @@ def _require_lead(lead: Any, ptype: str = "read") -> str:
 	return name
 
 
-def _resolve_lead_customer_locked(lead: str) -> Optional[str]:
+def _resolve_lead_customer_locked(lead: str) -> str | None:
 	"""``crm._resolve_lead_customer(strict=True)`` with LOCKING reads.
 
 	Call after ``_lock_relationship_row("Lead", lead)``. Under REPEATABLE READ
@@ -402,9 +402,7 @@ def _resolve_lead_customer_locked(lead: str) -> Optional[str]:
 	return direct or converted
 
 
-def _carry_lead_terms_to(
-	customer: str, get_request: bool, prefer_lead: Optional[str] = None
-) -> Optional[str]:
+def _carry_lead_terms_to(customer: str, get_request: bool, prefer_lead: str | None = None) -> str | None:
 	"""Lazy carry-over: when *customer* has NO terms record, copy the terms still
 	stored on its Lead(s). Returns the outcome that wrote, else ``None``.
 
@@ -445,12 +443,12 @@ def _lead_title(lead: str) -> str:
 	return str(row.get("company_name") or row.get("lead_name") or lead)
 
 
-def _lead_payload(lead: str) -> Dict[str, Any]:
+def _lead_payload(lead: str) -> dict[str, Any]:
 	"""The getter's shape for an UNCONVERTED Lead (terms stored as JSON)."""
 	title = _lead_title(lead)
 	stored = slt.read_lead_terms(lead)
-	row: Optional[Dict[str, Any]] = None
-	parsed: Optional[Dict[str, Any]] = None
+	row: dict[str, Any] | None = None
+	parsed: dict[str, Any] | None = None
 	if stored:
 		row = dict(stored)
 		row["name"] = lead
@@ -482,7 +480,7 @@ def _lead_payload(lead: str) -> Dict[str, Any]:
 	}
 
 
-def _check_responsible_user(user: Optional[str]) -> None:
+def _check_responsible_user(user: str | None) -> None:
 	"""The DocType controller's user check, for terms stored on a Lead."""
 	if not user:
 		return
@@ -493,7 +491,7 @@ def _check_responsible_user(user: Optional[str]) -> None:
 		frappe.throw(_("User {0} is disabled; choose someone who can receive reminders.").format(user))
 
 
-def _via_lead(payload: Dict[str, Any], lead: str) -> Dict[str, Any]:
+def _via_lead(payload: dict[str, Any], lead: str) -> dict[str, Any]:
 	payload["lead"] = lead
 	return payload
 
@@ -512,7 +510,7 @@ def invalidate_collections_count_cache() -> None:
 
 
 @frappe.whitelist(allow_guest=False)
-def get_settlement_terms(customer: Optional[str] = None, lead: Optional[str] = None) -> Dict[str, Any]:
+def get_settlement_terms(customer: str | None = None, lead: str | None = None) -> dict[str, Any]:
 	"""One party's settlement terms and where they stand today.
 
 	Exactly one of ``customer`` / ``lead``. Returns ``{success, party_type,
@@ -546,20 +544,20 @@ def get_settlement_terms(customer: Optional[str] = None, lead: Optional[str] = N
 
 @frappe.whitelist(allow_guest=False)
 def save_settlement_terms(
-	customer: Optional[str] = None,
-	cycle: Optional[str] = None,
-	weekdays: Union[str, List[str], None] = None,
-	week_interval: Union[int, str, None] = 1,
-	month_days: Union[str, List[Any], None] = None,
-	interval_days: Union[int, str, None] = None,
-	anchor_date: Optional[str] = None,
-	remind_days_before: Union[int, str, None] = 1,
-	overdue_repeat_days: Union[int, str, None] = 2,
-	responsible_user: Optional[str] = None,
-	notes: Optional[str] = None,
-	enabled: Union[int, str, bool, None] = 1,
-	lead: Optional[str] = None,
-) -> Dict[str, Any]:
+	customer: str | None = None,
+	cycle: str | None = None,
+	weekdays: str | list[str] | None = None,
+	week_interval: int | str | None = 1,
+	month_days: str | list[Any] | None = None,
+	interval_days: int | str | None = None,
+	anchor_date: str | None = None,
+	remind_days_before: int | str | None = 1,
+	overdue_repeat_days: int | str | None = 2,
+	responsible_user: str | None = None,
+	notes: str | None = None,
+	enabled: int | str | bool | None = 1,
+	lead: str | None = None,
+) -> dict[str, Any]:
 	"""Create or replace a party's settlement terms. Same shape as the getter.
 
 	Exactly one of ``customer`` / ``lead`` (``lead`` is last so positional
@@ -616,7 +614,7 @@ def save_settlement_terms(
 	return _save_customer_terms(name, values)
 
 
-def _save_lead_terms(lead: str, values: Dict[str, Any]) -> Dict[str, Any]:
+def _save_lead_terms(lead: str, values: dict[str, Any]) -> dict[str, Any]:
 	"""Store validated *values* as JSON on an unconverted Lead."""
 	if not slt.lead_field_ready():
 		frappe.throw(
@@ -641,7 +639,7 @@ def _save_lead_terms(lead: str, values: Dict[str, Any]) -> Dict[str, Any]:
 	return _lead_payload(lead)
 
 
-def _save_customer_terms(name: str, values: Dict[str, Any]) -> Dict[str, Any]:
+def _save_customer_terms(name: str, values: dict[str, Any]) -> dict[str, Any]:
 	"""Upsert the ``Jarz Settlement Terms`` record of Customer *name* (original path)."""
 	if not doctype_ready():
 		frappe.throw(
@@ -678,7 +676,7 @@ def _save_customer_terms(name: str, values: Dict[str, Any]) -> Dict[str, Any]:
 
 
 @frappe.whitelist(allow_guest=False)
-def delete_settlement_terms(customer: Optional[str] = None, lead: Optional[str] = None) -> Dict[str, Any]:
+def delete_settlement_terms(customer: str | None = None, lead: str | None = None) -> dict[str, Any]:
 	"""Remove a party's terms. Returns the getter's shape (``terms: null``).
 
 	Exactly one of ``customer`` / ``lead``. A converted lead deletes its
@@ -703,7 +701,7 @@ def delete_settlement_terms(customer: Optional[str] = None, lead: Optional[str] 
 	return _delete_customer_terms(_require_customer(customer_name))
 
 
-def _delete_customer_terms(name: str) -> Dict[str, Any]:
+def _delete_customer_terms(name: str) -> dict[str, Any]:
 	"""Drop Customer *name*'s ``Jarz Settlement Terms`` record (original path)."""
 	if doctype_ready():
 		existing = frappe.db.get_value(TERMS_DOCTYPE, {"customer": name}, "name")
@@ -724,7 +722,7 @@ def _delete_customer_terms(name: str) -> Dict[str, Any]:
 	return _terms_payload(name)
 
 
-def _collection_entries(profiles: List[str]) -> List[Dict[str, Any]]:
+def _collection_entries(profiles: list[str]) -> list[dict[str, Any]]:
 	"""Per-customer inputs for ``ss.build_collection_rows``, within *profiles*.
 
 	Driven by what is OWED: a customer with terms and nothing open is in state
@@ -732,7 +730,7 @@ def _collection_entries(profiles: List[str]) -> List[Dict[str, Any]]:
 	invoice in scope are loaded.
 	"""
 	open_rows = _open_credit_invoices(profiles=profiles)
-	by_customer: Dict[str, Dict[str, Any]] = {}
+	by_customer: dict[str, dict[str, Any]] = {}
 	for row in open_rows or []:
 		customer = str(row.get("customer") or "")
 		if not customer:
@@ -766,7 +764,7 @@ def _collection_entries(profiles: List[str]) -> List[Dict[str, Any]]:
 			entry = _invoice_inputs([row])[0]
 			entry["in_scope"] = row.get("name") in in_scope
 			bucket["invoices"].append(entry)
-	entries: List[Dict[str, Any]] = []
+	entries: list[dict[str, Any]] = []
 	for customer, bucket in by_customer.items():
 		bucket["terms"] = terms_parsed[customer]
 		_tag_branches(customer, bucket["terms"], bucket["invoices"])
@@ -784,9 +782,9 @@ def _days_ahead(value: Any) -> int:
 
 @frappe.whitelist(allow_guest=False)
 def get_collections_due(
-	days_ahead: Union[int, str, None] = _DAYS_AHEAD_DEFAULT,
-	branch: Optional[str] = None,
-) -> Dict[str, Any]:
+	days_ahead: int | str | None = _DAYS_AHEAD_DEFAULT,
+	branch: str | None = None,
+) -> dict[str, Any]:
 	"""Every customer with an open credit balance, by urgency.
 
 	Sorted overdue -> due_today -> due_soon -> unscheduled -> ok; customers with
@@ -806,7 +804,7 @@ def get_collections_due(
 	currency = _credit_currency()
 	filters_echo = {"branch": selected or None, "days_ahead": days}
 
-	def _empty(code: str, notice: str) -> Dict[str, Any]:
+	def _empty(code: str, notice: str) -> dict[str, Any]:
 		return {
 			"success": True,
 			"currency": currency,

@@ -11,7 +11,6 @@ from unittest.mock import patch
 
 from jarz_pos.services import lead_area
 
-
 #: Roughly Zamalek. Offsets below are in degrees; 0.001 is about 100m.
 ZAMALEK = (30.0600, 31.2200)
 MAADI = (29.9600, 31.2600)

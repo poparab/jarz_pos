@@ -55,8 +55,9 @@ import json
 import re
 import time
 import traceback
+from collections.abc import Callable
 from datetime import datetime, timedelta
-from typing import Any, Callable
+from typing import Any
 
 import frappe
 from frappe.utils import now_datetime
@@ -67,7 +68,6 @@ from jarz_pos.scripts.woo_staging_full_cycle import (
 	_json_safe,
 	_next_delivery_slot,
 )
-
 
 MARKER_START = "WOO_PARITY_JSON_START"
 MARKER_END = "WOO_PARITY_JSON_END"
@@ -189,7 +189,7 @@ class ParityRunner(FullCycleRunner):
 
 		try:
 			host_name = self._host_name().lower()
-		except Exception as exc:  # noqa: BLE001
+		except Exception as exc:
 			raise RuntimeError(
 				f"REFUSED: site host_name could not be read ({exc}), so this run cannot "
 				"prove it is on staging."
@@ -223,7 +223,7 @@ class ParityRunner(FullCycleRunner):
 		try:
 			value = frappe.db.get_single_value("WooCommerce Settings", "base_url")
 			return str(value or "").strip().rstrip("/")
-		except Exception:  # noqa: BLE001
+		except Exception:
 			return ""
 
 	# ------------------------------------------------------------------
@@ -268,7 +268,7 @@ class ParityRunner(FullCycleRunner):
 				# W9 runs LAST: it needs a Sales Invoice this run created to push, and
 				# pushing anything else would mutate a record cloned from production.
 				self._case("W9", "Outbound kill-switch visibility", self._w9_kill_switch_visibility)
-		except Exception as exc:  # noqa: BLE001
+		except Exception as exc:
 			self.report["errors"].append(
 				{
 					"error": str(exc),
@@ -483,7 +483,7 @@ class ParityRunner(FullCycleRunner):
 		"""
 		try:
 			frappe.db.set_value("WooCommerce Settings", "WooCommerce Settings", fieldname, value)
-		except Exception:  # noqa: BLE001
+		except Exception:
 			frappe.db.set_single_value("WooCommerce Settings", fieldname, value)
 		frappe.clear_document_cache("WooCommerce Settings", "WooCommerce Settings")
 		frappe.db.commit()
@@ -509,7 +509,7 @@ class ParityRunner(FullCycleRunner):
 				}
 				if not ok:
 					restore["verified"] = False
-			except Exception as exc:  # noqa: BLE001
+			except Exception as exc:
 				restore["verified"] = False
 				restore["flags"][field] = {"expected": desired, "error": str(exc)}
 
@@ -594,7 +594,7 @@ class ParityRunner(FullCycleRunner):
 					}
 				)
 				return result
-		except Exception as exc:  # noqa: BLE001
+		except Exception as exc:
 			result["detail"] = f"system_status unavailable: {exc}"
 
 		try:
@@ -619,7 +619,7 @@ class ParityRunner(FullCycleRunner):
 				)
 			else:
 				result["detail"] = f"{result['detail']} | no recent orders carried meta_data"
-		except Exception as exc:  # noqa: BLE001
+		except Exception as exc:
 			result["detail"] = f"{result['detail']} | order scan failed: {exc}"
 		return result
 
@@ -631,7 +631,7 @@ class ParityRunner(FullCycleRunner):
 		for resource in ("orders/statuses", "reports/orders/totals"):
 			try:
 				body = self._woo_client().get(resource)
-			except Exception as exc:  # noqa: BLE001
+			except Exception as exc:
 				detail = f"{resource}: {exc}"
 				continue
 			if isinstance(body, dict):
@@ -656,7 +656,7 @@ class ParityRunner(FullCycleRunner):
 				fields=["name", "woo_bundle_id", "free_shipping"],
 				limit_page_length=200,
 			)
-		except Exception as exc:  # noqa: BLE001
+		except Exception as exc:
 			return {"available": False, "detail": str(exc)}
 		mapped = [row for row in rows if str(row.get("woo_bundle_id") or "").strip()]
 		return {
@@ -670,7 +670,7 @@ class ParityRunner(FullCycleRunner):
 		try:
 			body = self._woo_client().get("coupons", params={"per_page": 1})
 			return {"available": isinstance(body, (list, dict)), "detail": None}
-		except Exception as exc:  # noqa: BLE001
+		except Exception as exc:
 			return {"available": False, "detail": str(exc)}
 
 	def _probe_delivery_territory(self) -> dict[str, Any]:
@@ -694,7 +694,7 @@ class ParityRunner(FullCycleRunner):
                 """,
 				as_dict=True,
 			)
-		except Exception as exc:  # noqa: BLE001
+		except Exception as exc:
 			return {"available": False, "candidates": [], "detail": str(exc)}
 		return {"available": bool(rows), "candidates": [dict(row) for row in rows]}
 
@@ -702,7 +702,7 @@ class ParityRunner(FullCycleRunner):
 		"""An enabled jarz_pos promo code, needed to give W8 a header discount."""
 		try:
 			columns = set(frappe.db.get_table_columns("Jarz Promo Code") or [])
-		except Exception as exc:  # noqa: BLE001
+		except Exception as exc:
 			return {"available": False, "detail": f"Jarz Promo Code unavailable: {exc}"}
 		if not columns:
 			return {"available": False, "detail": "Jarz Promo Code has no table on this site"}
@@ -714,21 +714,21 @@ class ParityRunner(FullCycleRunner):
 			filters["enabled"] = 1
 		try:
 			rows = frappe.get_all("Jarz Promo Code", filters=filters, fields=["name"], limit_page_length=5)
-		except Exception as exc:  # noqa: BLE001
+		except Exception as exc:
 			return {"available": False, "detail": str(exc)}
 		return {"available": bool(rows), "codes": [str(row.get("name")) for row in rows]}
 
 	def _probe_stocked_items(self) -> dict[str, Any]:
 		try:
 			fixture = self._primary_territory_fixture()
-		except Exception as exc:  # noqa: BLE001
+		except Exception as exc:
 			return {"available": False, "detail": str(exc)}
 		try:
 			rows = self._stocked_order_fixture_items(
 				price_list=str(fixture.get("price_list") or ""),
 				warehouse=str(fixture.get("warehouse") or ""),
 			)
-		except Exception as exc:  # noqa: BLE001
+		except Exception as exc:
 			return {"available": False, "detail": str(exc)}
 		return {"available": len(rows) >= 1, "count": len(rows)}
 
@@ -839,7 +839,7 @@ class ParityRunner(FullCycleRunner):
 				as_dict=True,
 			)
 			ceiling = max(ceiling, int((rows[0].get("max_id") if rows else 0) or 0))
-		except Exception:  # noqa: BLE001
+		except Exception:
 			pass
 		return ceiling
 
@@ -873,7 +873,7 @@ class ParityRunner(FullCycleRunner):
 			collision = self._preexisting_inbound_order_artifacts(candidate_id)
 			try:
 				candidate_id_int = int(candidate_id)
-			except Exception:  # noqa: BLE001
+			except Exception:
 				candidate_id_int = 0
 
 			if collision.get("invoice_rows"):
@@ -1435,7 +1435,7 @@ class ParityRunner(FullCycleRunner):
 					"api_refund": False,
 				},
 			)
-		except Exception as exc:  # noqa: BLE001
+		except Exception as exc:
 			self._skip(
 				case,
 				"W2.02",
@@ -1588,7 +1588,7 @@ class ParityRunner(FullCycleRunner):
 					"description": f"{self.run_id} parity coupon",
 				},
 			)
-		except Exception as exc:  # noqa: BLE001
+		except Exception as exc:
 			self._skip(
 				case,
 				"W3.00",
@@ -1648,7 +1648,7 @@ class ParityRunner(FullCycleRunner):
 		raw_codes = getattr(invoice, "custom_promo_codes", None)
 		try:
 			parsed_codes = json.loads(raw_codes) if raw_codes else []
-		except Exception:  # noqa: BLE001
+		except Exception:
 			parsed_codes = [str(raw_codes)]
 		if not isinstance(parsed_codes, list):
 			parsed_codes = [parsed_codes]
@@ -2599,7 +2599,7 @@ class ParityRunner(FullCycleRunner):
 		if hasattr(outbound_sync, "_build_order_payload"):
 			try:
 				payload = outbound_sync._build_order_payload(invoice)
-			except Exception as exc:  # noqa: BLE001
+			except Exception as exc:
 				payload = None
 				self.report["concerns"].append(
 					{
@@ -2863,7 +2863,7 @@ class ParityRunner(FullCycleRunner):
 				channel="parity-harness",
 			)
 			frappe.db.commit()
-		except Exception as exc:  # noqa: BLE001
+		except Exception as exc:
 			self.report["concerns"].append(
 				{
 					"case_id": "W8",
@@ -2929,7 +2929,7 @@ class ParityRunner(FullCycleRunner):
 	def _woo_order_notes(self, woo_order_id: str) -> list[dict[str, Any]]:
 		try:
 			body = self._woo_client().get(f"orders/{woo_order_id}/notes", params={"per_page": 50})
-		except Exception:  # noqa: BLE001
+		except Exception:
 			return []
 		return [dict(row) for row in body] if isinstance(body, list) else []
 
@@ -3172,7 +3172,7 @@ class ParityRunner(FullCycleRunner):
 					float(frappe.db.get_value("Territory", customer_territory, "delivery_income") or 0),
 					2,
 				)
-			except Exception:  # noqa: BLE001
+			except Exception:
 				fallback_income = 0.0
 
 		if customer_territory and fallback_income > 0:
@@ -3254,7 +3254,7 @@ class ParityRunner(FullCycleRunner):
 				doc.cancel()
 				frappe.db.commit()
 				actions.append({"action": "cancel_invoice", "name": record_name, "ok": True})
-			except Exception as exc:  # noqa: BLE001
+			except Exception as exc:
 				frappe.db.rollback()
 				actions.append(
 					{
@@ -3277,7 +3277,7 @@ class ParityRunner(FullCycleRunner):
 						"ok": True,
 					}
 				)
-			except Exception as exc:  # noqa: BLE001
+			except Exception as exc:
 				actions.append(
 					{
 						"action": "cancel_woo_order",
@@ -3299,7 +3299,7 @@ class ParityRunner(FullCycleRunner):
 						"ok": True,
 					}
 				)
-			except Exception as exc:  # noqa: BLE001
+			except Exception as exc:
 				actions.append(
 					{
 						"action": "delete_woo_coupon",

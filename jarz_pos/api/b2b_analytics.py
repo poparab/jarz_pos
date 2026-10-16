@@ -94,9 +94,9 @@ def _safe(label: str, fn, default):
 
 @frappe.whitelist()
 def get_b2b_analytics(
-	date_from: Optional[str] = None,
-	date_to: Optional[str] = None,
-) -> Dict[str, Any]:
+	date_from: str | None = None,
+	date_to: str | None = None,
+) -> dict[str, Any]:
 	"""Composed B2B sales + clients + pipeline analytics for the date range.
 
 	See the shared analytics contract ("B2B Sales & Clients") for the exact
@@ -196,7 +196,7 @@ def get_b2b_analytics(
 # ---------------------------------------------------------------------------
 # Sales
 # ---------------------------------------------------------------------------
-def _sales_totals(params: Dict[str, str]) -> Dict[str, Any]:
+def _sales_totals(params: dict[str, str]) -> dict[str, Any]:
 	"""Headline B2B revenue / order count / distinct clients + BOM cost."""
 	row = frappe.db.sql(
 		"""
@@ -248,7 +248,7 @@ def _sales_totals(params: Dict[str, str]) -> Dict[str, Any]:
 	}
 
 
-def _revenue_trend(params: Dict[str, str]) -> List[Dict[str, Any]]:
+def _revenue_trend(params: dict[str, str]) -> list[dict[str, Any]]:
 	rows = frappe.db.sql(
 		"""
         SELECT
@@ -276,7 +276,7 @@ def _revenue_trend(params: Dict[str, str]) -> List[Dict[str, Any]]:
 	]
 
 
-def _top_clients(params: Dict[str, str]) -> List[Dict[str, Any]]:
+def _top_clients(params: dict[str, str]) -> list[dict[str, Any]]:
 	rows = frappe.db.sql(
 		"""
         SELECT
@@ -312,7 +312,7 @@ def _top_clients(params: Dict[str, str]) -> List[Dict[str, Any]]:
 	]
 
 
-def _revenue_by_policy(params: Dict[str, str]) -> List[Dict[str, Any]]:
+def _revenue_by_policy(params: dict[str, str]) -> list[dict[str, Any]]:
 	"""Revenue grouped by the commercial policy applied to each B2B invoice."""
 	rows = frappe.db.sql(
 		"""
@@ -341,7 +341,7 @@ def _revenue_by_policy(params: Dict[str, str]) -> List[Dict[str, Any]]:
 	]
 
 
-def _revenue_by_territory(params: Dict[str, str]) -> List[Dict[str, Any]]:
+def _revenue_by_territory(params: dict[str, str]) -> list[dict[str, Any]]:
 	rows = frappe.db.sql(
 		"""
         SELECT
@@ -375,7 +375,7 @@ def _revenue_by_territory(params: Dict[str, str]) -> List[Dict[str, Any]]:
 # ---------------------------------------------------------------------------
 # Clients
 # ---------------------------------------------------------------------------
-def _clients(params: Dict[str, str]) -> Dict[str, Any]:
+def _clients(params: dict[str, str]) -> dict[str, Any]:
 	"""Client counts + per-group revenue over every B2B client (see
 	``_B2B_CLIENT_COND``), so the per-group revenue adds up to B2B revenue."""
 	binds = {**params, "purpose": _B2B_PURPOSE, "groups": _B2B_GROUPS}
@@ -461,7 +461,7 @@ def _clients(params: Dict[str, str]) -> Dict[str, Any]:
 	}
 
 
-def _at_risk_clients(params: Dict[str, str]) -> Dict[str, Any]:
+def _at_risk_clients(params: dict[str, str]) -> dict[str, Any]:
 	"""B2B/Distributor customers currently flagged At Risk / Can't Lose Them,
 	with their in-range revenue."""
 	rows = frappe.db.sql(
@@ -507,14 +507,14 @@ def _at_risk_clients(params: Dict[str, str]) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Pipeline (Lead + Opportunity)
 # ---------------------------------------------------------------------------
-def _pipeline() -> Dict[str, Any]:
+def _pipeline() -> dict[str, Any]:
 	"""Aggregate Lead + Opportunity records by custom_b2b_stage.
 
 	Leads contribute count only (no monetary value); Opportunities contribute
 	both count and summed ``opportunity_amount``. pipeline_open_value is the sum
 	of opportunity value for stages that are neither Active nor Lost/On-hold.
 	"""
-	agg: Dict[str, Dict[str, float]] = {s: {"count": 0, "value": 0.0} for s in _STAGE_ORDER}
+	agg: dict[str, dict[str, float]] = {s: {"count": 0, "value": 0.0} for s in _STAGE_ORDER}
 
 	# Leads (count only).
 	try:
@@ -580,9 +580,10 @@ def _pipeline() -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Reorder-due (mirrors crm.get_reorder_due, remapped to contract keys)
 # ---------------------------------------------------------------------------
-def _reorder_due() -> Dict[str, Any]:
+def _reorder_due() -> dict[str, Any]:
 	"""Customers whose predicted next order date is due (<= today)."""
-	from frappe.utils import today as _today, getdate, date_diff
+	from frappe.utils import date_diff, getdate
+	from frappe.utils import today as _today
 
 	if not frappe.get_meta("Customer").get_field("custom_predicted_next_order"):
 		return {"reorder_due": [], "reorder_due_count": 0}
@@ -630,7 +631,7 @@ def _reorder_due() -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Conversion (opportunities -> customers)
 # ---------------------------------------------------------------------------
-def _conversion(params: Dict[str, str]) -> Dict[str, Any]:
+def _conversion(params: dict[str, str]) -> dict[str, Any]:
 	"""Opportunities created in range vs. those converted to a Customer.
 
 	``won`` counts range opportunities that a Customer points at via
@@ -703,11 +704,11 @@ def _conversion(params: Dict[str, str]) -> Dict[str, Any]:
 # Alerts feed
 # ---------------------------------------------------------------------------
 def _build_alerts(
-	summary: Dict[str, Any],
-	pipeline: Dict[str, Any],
-	conversion: Dict[str, Any],
-) -> List[Dict[str, str]]:
-	alerts: List[Dict[str, str]] = []
+	summary: dict[str, Any],
+	pipeline: dict[str, Any],
+	conversion: dict[str, Any],
+) -> list[dict[str, str]]:
+	alerts: list[dict[str, str]] = []
 
 	reorder_due = int(summary.get("reorder_due_count") or 0)
 	if reorder_due:

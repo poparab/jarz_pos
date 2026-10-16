@@ -134,7 +134,7 @@ def _logger():
 	return logger
 
 
-def _log_failure(title: str, message: Optional[str] = None) -> None:
+def _log_failure(title: str, message: str | None = None) -> None:
 	try:
 		frappe.log_error(message or frappe.get_traceback(), f"woo_backlog_watch: {title}"[:140])
 	except Exception:
@@ -179,7 +179,7 @@ def is_terminal_state(value: Any) -> bool:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _combine_date_time(date_val: Any, time_val: Any) -> Optional[datetime.datetime]:
+def _combine_date_time(date_val: Any, time_val: Any) -> datetime.datetime | None:
 	"""Best-effort ``posting_date``/``posting_time`` -> ``datetime``.
 
 	Handles every shape these two can actually arrive in: ``posting_date`` as a
@@ -227,7 +227,7 @@ def expected_finish_by(
 	posting_time: Any,
 	*,
 	stuck_after_hours: int = DEFAULT_STUCK_AFTER_HOURS,
-) -> Optional[datetime.datetime]:
+) -> datetime.datetime | None:
 	"""The timestamp past which an order that has not finished counts as stuck."""
 	posting_dt = _combine_date_time(posting_date, posting_time)
 	if posting_dt is None:
@@ -258,7 +258,7 @@ def is_stuck(
 	return now > finish_by
 
 
-def build_snapshot(row: Dict[str, Any], *, now: Optional[datetime.datetime] = None) -> Dict[str, Any]:
+def build_snapshot(row: dict[str, Any], *, now: datetime.datetime | None = None) -> dict[str, Any]:
 	"""Turn one raw candidate row into the payload the exception row stores.
 
 	Pure -- no DB access, no frappe calls. ``row`` is a dict carrying the
@@ -269,7 +269,7 @@ def build_snapshot(row: Dict[str, Any], *, now: Optional[datetime.datetime] = No
 	branch = _clean(row.get("pos_profile")) or _clean(row.get("custom_kanban_profile")) or None
 	finish_by = expected_finish_by(row.get("posting_date"), row.get("posting_time"))
 
-	age_hours: Optional[float] = None
+	age_hours: float | None = None
 	if finish_by is not None:
 		age_hours = round((now - finish_by).total_seconds() / 3600.0, 1)
 
@@ -288,7 +288,7 @@ def build_snapshot(row: Dict[str, Any], *, now: Optional[datetime.datetime] = No
 	}
 
 
-def build_detail(snapshot: Dict[str, Any]) -> str:
+def build_detail(snapshot: dict[str, Any]) -> str:
 	"""Everything a reviewer needs to triage without opening the invoice."""
 	invoice = snapshot.get("sales_invoice") or "?"
 	woo_order_id = snapshot.get("woo_order_id") or "?"
@@ -359,7 +359,7 @@ def _state_expr() -> str:
 	return "COALESCE(custom_sales_invoice_state, '')"
 
 
-def _fetch_candidate_rows(cutoff: Any, limit: int) -> List[Dict[str, Any]]:
+def _fetch_candidate_rows(cutoff: Any, limit: int) -> list[dict[str, Any]]:
 	"""Woo-linked, submitted, non-terminal invoices posted before *cutoff*.
 
 	Raw SQL, mirroring the precedent already set by
@@ -396,7 +396,7 @@ def _fetch_candidate_rows(cutoff: Any, limit: int) -> List[Dict[str, Any]]:
 		return []
 
 
-def _existing_exception(invoice_name: str) -> Optional[str]:
+def _existing_exception(invoice_name: str) -> str | None:
 	try:
 		found = frappe.db.exists(EXCEPTION_DOCTYPE, {"sales_invoice": invoice_name})
 	except Exception:
@@ -404,7 +404,7 @@ def _existing_exception(invoice_name: str) -> Optional[str]:
 	return found or None
 
 
-def _insert_exception(snapshot: Dict[str, Any]) -> Tuple[Optional[str], bool]:
+def _insert_exception(snapshot: dict[str, Any]) -> tuple[str | None, bool]:
 	"""Create the row, or return the one that is already there.
 
 	Returns ``(name, created)``. Fenced behind a savepoint the same way
@@ -470,7 +470,7 @@ def _insert_exception(snapshot: Dict[str, Any]) -> Tuple[Optional[str], bool]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def close_resolved_backlog_exceptions(limit: int = DEFAULT_CLOSE_LIMIT) -> Dict[str, Any]:
+def close_resolved_backlog_exceptions(limit: int = DEFAULT_CLOSE_LIMIT) -> dict[str, Any]:
 	"""Auto-close Open rows whose invoice has since left its non-terminal state.
 
 	Unlike ``territory_exceptions`` (where the invoice's own territory/branch
@@ -482,7 +482,7 @@ def close_resolved_backlog_exceptions(limit: int = DEFAULT_CLOSE_LIMIT) -> Dict[
 	live without a second write path. Bounded by ``limit`` so a large open
 	queue cannot make one sweep run indefinitely.
 	"""
-	summary: Dict[str, Any] = {"checked": 0, "closed": 0, "failed": 0}
+	summary: dict[str, Any] = {"checked": 0, "closed": 0, "failed": 0}
 	if not _exception_doctype_ready():
 		return summary
 
@@ -579,7 +579,7 @@ def close_resolved_backlog_exceptions(limit: int = DEFAULT_CLOSE_LIMIT) -> Dict[
 def run_woo_backlog_sweep(
 	limit: int = DEFAULT_SWEEP_LIMIT,
 	stuck_after_hours: int = DEFAULT_STUCK_AFTER_HOURS,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	"""Daily scheduler entry. Never raises -- a scheduler job that throws takes
 	the rest of the daily slot with it, the same discipline every sibling job
 	in ``hooks.py`` follows.
@@ -590,7 +590,7 @@ def run_woo_backlog_sweep(
 	Detection-only: reads Sales Invoice, writes ONLY to
 	``Jarz Woo Backlog Exception``.
 	"""
-	summary: Dict[str, Any] = {
+	summary: dict[str, Any] = {
 		"scanned": 0,
 		"created": 0,
 		"already_open": 0,

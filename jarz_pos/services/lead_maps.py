@@ -18,7 +18,6 @@ import frappe
 
 from jarz_pos.utils import geo
 
-
 MAX_URL_LENGTH = 4096
 MAX_RESPONSE_BYTES = 256 * 1024
 TICKET_TTL_SEC = 5 * 60
@@ -551,7 +550,7 @@ def _ticket_key(request_id: str) -> str:
 
 
 def _dedupe_key(user: str, link: str) -> str:
-	digest = hashlib.sha256(f"{user}\0{link}".encode("utf-8")).hexdigest()
+	digest = hashlib.sha256(f"{user}\0{link}".encode()).hexdigest()
 	return f"jarz_pos:lead_maps:dedupe:{digest}"
 
 

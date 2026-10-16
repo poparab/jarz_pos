@@ -20,9 +20,6 @@ def execute():
 			pass
 
 
-import frappe
-
-
 def execute():
 	# Remove any existing Territory custom fields that will be recreated by fixtures
 	fields = frappe.get_all(

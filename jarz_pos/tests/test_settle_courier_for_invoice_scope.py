@@ -11,7 +11,7 @@ settle_courier — the two party-wide sweeps — are never reached. The routing 
 """
 
 import unittest
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import frappe
 

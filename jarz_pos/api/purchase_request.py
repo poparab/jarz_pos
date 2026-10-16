@@ -32,11 +32,12 @@ get stuck.
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
+from typing import Any, Dict, List, Optional
 
 import frappe
 from frappe import _
 from frappe.utils import add_days, flt, getdate, now_datetime, nowdate
-from typing import Any, Dict, List, Optional, Sequence
 
 from jarz_pos.constants import ROLES
 from jarz_pos.utils.access_control import (
@@ -44,8 +45,8 @@ from jarz_pos.utils.access_control import (
 	get_user_pos_profiles,
 	is_unrestricted_user,
 )
-from jarz_pos.utils.warehouse_utils import resolve_request_warehouse
 from jarz_pos.utils.settings_utils import single_int
+from jarz_pos.utils.warehouse_utils import resolve_request_warehouse
 
 #: Request statuses that still want stock. Anything else is done or abandoned.
 OPEN_STATUSES = ("Pending", "Partially Received", "Ordered", "Partially Ordered")
@@ -71,7 +72,7 @@ def _can_review() -> bool:
 	return is_unrestricted_user() or bool(set(frappe.get_roles()).intersection(ROLES.PURCHASE_REQUEST_REVIEW))
 
 
-def _visible_profiles() -> Optional[List[str]]:
+def _visible_profiles() -> list[str] | None:
 	"""Branches whose requests the caller may see.
 
 	``None`` means "no branch filter" — reviewers and Administrator see the whole
@@ -82,7 +83,7 @@ def _visible_profiles() -> Optional[List[str]]:
 	return get_user_pos_profiles()
 
 
-def _coerce_rows(value: Any) -> List[Dict[str, Any]]:
+def _coerce_rows(value: Any) -> list[dict[str, Any]]:
 	if value is None:
 		return []
 	if isinstance(value, str):
@@ -110,7 +111,7 @@ def _settings_int(fieldname: str, default: int) -> int:
 	return single_int("Jarz POS Settings", fieldname, default)
 
 
-def _resolve_company(company: Optional[str] = None) -> str:
+def _resolve_company(company: str | None = None) -> str:
 	resolved = (
 		company
 		or frappe.defaults.get_user_default("company")
@@ -125,7 +126,7 @@ def _resolve_company(company: Optional[str] = None) -> str:
 	return resolved
 
 
-def _resolve_requester_profile(pos_profile: Optional[str] = None) -> Optional[str]:
+def _resolve_requester_profile(pos_profile: str | None = None) -> str | None:
 	"""Branch the request is filed against.
 
 	An explicit profile must be one the caller belongs to; otherwise their first
@@ -151,12 +152,12 @@ def _resolve_requester_profile(pos_profile: Optional[str] = None) -> Optional[st
 
 @frappe.whitelist()
 def create_request(
-	items: Optional[List[Dict[str, Any]]] = None,
-	schedule_date: Optional[str] = None,
-	note: Optional[str] = None,
-	pos_profile: Optional[str] = None,
-	company: Optional[str] = None,
-) -> Dict[str, Any]:
+	items: list[dict[str, Any]] | None = None,
+	schedule_date: str | None = None,
+	note: str | None = None,
+	pos_profile: str | None = None,
+	company: str | None = None,
+) -> dict[str, Any]:
 	"""Raise an item request.
 
 	``items``: ``[{item_code, qty, uom?, warehouse?}]``. The request is submitted
@@ -202,17 +203,17 @@ def create_request(
 
 
 def _build_request_lines(
-	rows: List[Dict[str, Any]],
+	rows: list[dict[str, Any]],
 	company: str,
 	needed_by: Any,
-	warehouses: Optional[Dict[str, str]] = None,
-) -> List[Dict[str, Any]]:
+	warehouses: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
 	"""Validated Material Request Item rows from the app's ``[{item_code, qty, uom?}]``.
 
 	``warehouses`` keeps an edited line where it already was, so editing a
 	quantity does not quietly move the request to a different store.
 	"""
-	lines: List[Dict[str, Any]] = []
+	lines: list[dict[str, Any]] = []
 	for row in rows:
 		item_code = str(row.get("item_code") or "").strip()
 		if not item_code:
@@ -253,7 +254,7 @@ def _build_request_lines(
 	return lines
 
 
-def _edit_block_reason(doc: Any) -> Optional[str]:
+def _edit_block_reason(doc: Any) -> str | None:
 	"""Why ``doc`` can no longer be edited, or ``None`` when it still can.
 
 	Editing is cancel-and-amend, so it is only safe before anything downstream
@@ -288,13 +289,13 @@ def _edit_block_reason(doc: Any) -> Optional[str]:
 	return None
 
 
-def _may_edit(owner: Optional[str]) -> bool:
+def _may_edit(owner: str | None) -> bool:
 	"""The person who raised a request may edit it, and so may any buyer."""
 	return owner == frappe.session.user or _can_review()
 
 
 @frappe.whitelist()
-def get_request_for_edit(name: str) -> Dict[str, Any]:
+def get_request_for_edit(name: str) -> dict[str, Any]:
 	"""A request plus every line's selectable UOMs, for the edit sheet."""
 	_ensure_request_access()
 	if not name:
@@ -319,10 +320,10 @@ def get_request_for_edit(name: str) -> Dict[str, Any]:
 @frappe.whitelist()
 def update_request(
 	name: str,
-	items: Optional[List[Dict[str, Any]]] = None,
-	schedule_date: Optional[str] = None,
-	note: Optional[str] = None,
-) -> Dict[str, Any]:
+	items: list[dict[str, Any]] | None = None,
+	schedule_date: str | None = None,
+	note: str | None = None,
+) -> dict[str, Any]:
 	"""Edit a request that nobody has acted on yet.
 
 	A submitted Material Request cannot change its lines in place, and the
@@ -397,7 +398,7 @@ def update_request(
 
 
 @frappe.whitelist()
-def stop_request(name: str, reason: Optional[str] = None) -> Dict[str, Any]:
+def stop_request(name: str, reason: str | None = None) -> dict[str, Any]:
 	"""Reject / close a request that will not be bought.
 
 	Uses ERPNext's own ``Stopped`` status rather than cancelling, so the request
@@ -421,7 +422,7 @@ def stop_request(name: str, reason: Optional[str] = None) -> Dict[str, Any]:
 
 
 @frappe.whitelist()
-def reopen_request(name: str) -> Dict[str, Any]:
+def reopen_request(name: str) -> dict[str, Any]:
 	"""Undo a stop — ERPNext calls this transition ``Submitted``."""
 	_ensure_review_access()
 	if not name:
@@ -436,7 +437,7 @@ def reopen_request(name: str) -> Dict[str, Any]:
 
 
 @frappe.whitelist()
-def acknowledge_request(name: str) -> Dict[str, Any]:
+def acknowledge_request(name: str) -> dict[str, Any]:
 	"""Accept a request: tell the requester a buyer has seen it and is on it.
 
 	Without this a request sat at ``Pending`` from the moment it was raised
@@ -482,19 +483,19 @@ def acknowledge_request(name: str) -> Dict[str, Any]:
 
 @frappe.whitelist()
 def list_requests(
-	status: Optional[str] = None,
-	pos_profile: Optional[str] = None,
+	status: str | None = None,
+	pos_profile: str | None = None,
 	mine_only: int = 0,
 	limit: int = 50,
 	page: int = 0,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	"""Paginated request list, scoped to the branches the caller may see."""
 	_ensure_request_access()
 
 	limit = max(1, min(int(limit or 50), 200))
 	start = max(0, int(page or 0)) * limit
 
-	filters: Dict[str, Any] = {"material_request_type": "Purchase", "docstatus": 1}
+	filters: dict[str, Any] = {"material_request_type": "Purchase", "docstatus": 1}
 	if status == "open":
 		filters["status"] = ["in", list(OPEN_STATUSES)]
 	elif status:
@@ -526,7 +527,7 @@ def list_requests(
 	total = frappe.db.count("Material Request", filters=filters)
 
 	names = [r["name"] for r in rows]
-	lines_by_parent: Dict[str, List[Dict[str, Any]]] = {name: [] for name in names}
+	lines_by_parent: dict[str, list[dict[str, Any]]] = {name: [] for name in names}
 	if names:
 		for line in frappe.get_all(
 			"Material Request Item",
@@ -547,7 +548,7 @@ def list_requests(
 
 
 @frappe.whitelist()
-def get_request_counts() -> Dict[str, Any]:
+def get_request_counts() -> dict[str, Any]:
 	"""Open requests the caller can see, for the side-menu indicator.
 
 	Two counts only, no rows: the drawer asks every time it opens, so this must
@@ -557,7 +558,7 @@ def get_request_counts() -> Dict[str, Any]:
 	"""
 	_ensure_request_access()
 
-	filters: Dict[str, Any] = {
+	filters: dict[str, Any] = {
 		"material_request_type": "Purchase",
 		"docstatus": 1,
 		"status": ["in", list(OPEN_STATUSES)],
@@ -580,7 +581,7 @@ def get_request_counts() -> Dict[str, Any]:
 
 
 @frappe.whitelist()
-def get_open_request_lines(company: Optional[str] = None) -> Dict[str, Any]:
+def get_open_request_lines(company: str | None = None) -> dict[str, Any]:
 	"""The buying list: every outstanding request line, rolled up per item.
 
 	This is the shape real purchasing software buys from — one row per item with
@@ -594,7 +595,7 @@ def get_open_request_lines(company: Optional[str] = None) -> Dict[str, Any]:
 	_ensure_request_access()
 	resolved_company = _resolve_company(company)
 
-	filters: Dict[str, Any] = {
+	filters: dict[str, Any] = {
 		"material_request_type": "Purchase",
 		"docstatus": 1,
 		"status": ["in", list(OPEN_STATUSES)],
@@ -632,7 +633,7 @@ def get_open_request_lines(company: Optional[str] = None) -> Dict[str, Any]:
 		limit_page_length=0,
 	)
 
-	grouped: Dict[str, Dict[str, Any]] = {}
+	grouped: dict[str, dict[str, Any]] = {}
 	for row in rows:
 		outstanding = flt(row.get("stock_qty") or 0) - flt(row.get("received_qty") or 0)
 		if outstanding <= 0:
@@ -753,7 +754,7 @@ def _has_ack_fields() -> bool:
 		return False
 
 
-def _request_fields() -> List[str]:
+def _request_fields() -> list[str]:
 	return _REQUEST_FIELDS + _ACK_FIELDS if _has_ack_fields() else list(_REQUEST_FIELDS)
 
 
@@ -775,7 +776,7 @@ _REQUEST_ITEM_FIELDS = [
 ]
 
 
-def _serialize_request(doc: Dict[str, Any]) -> Dict[str, Any]:
+def _serialize_request(doc: dict[str, Any]) -> dict[str, Any]:
 	return {
 		"name": doc.get("name"),
 		"transaction_date": doc.get("transaction_date"),
@@ -801,7 +802,7 @@ def _serialize_request(doc: Dict[str, Any]) -> Dict[str, Any]:
 	}
 
 
-def _serialize_request_with_lines(doc: Any) -> Dict[str, Any]:
+def _serialize_request_with_lines(doc: Any) -> dict[str, Any]:
 	"""A single request as the list returns it, lines included.
 
 	The write endpoints used to return the header alone. The app swaps the
@@ -813,7 +814,7 @@ def _serialize_request_with_lines(doc: Any) -> Dict[str, Any]:
 	return payload
 
 
-def _serialize_line(row: Dict[str, Any]) -> Dict[str, Any]:
+def _serialize_line(row: dict[str, Any]) -> dict[str, Any]:
 	stock_qty = flt(row.get("stock_qty") or 0)
 	received = flt(row.get("received_qty") or 0)
 	return {
@@ -846,10 +847,10 @@ def _conversion_factor(item_code: str, uom: str, stock_uom: str) -> float:
 	return flt(factor)
 
 
-def _on_hand_by_item(item_codes: Sequence[str]) -> Dict[str, float]:
+def _on_hand_by_item(item_codes: Sequence[str]) -> dict[str, float]:
 	if not item_codes:
 		return {}
-	totals: Dict[str, float] = {}
+	totals: dict[str, float] = {}
 	for row in frappe.get_all(
 		"Bin",
 		filters={"item_code": ["in", list(item_codes)]},
@@ -860,7 +861,7 @@ def _on_hand_by_item(item_codes: Sequence[str]) -> Dict[str, float]:
 	return totals
 
 
-def _last_purchase_rate_by_item(item_codes: Sequence[str]) -> Dict[str, float]:
+def _last_purchase_rate_by_item(item_codes: Sequence[str]) -> dict[str, float]:
 	"""Most recent rate actually paid, per item.
 
 	Read from submitted Purchase Invoice lines rather than
@@ -876,7 +877,7 @@ def _last_purchase_rate_by_item(item_codes: Sequence[str]) -> Dict[str, float]:
 		order_by="creation desc",
 		limit_page_length=0,
 	)
-	latest: Dict[str, float] = {}
+	latest: dict[str, float] = {}
 	for row in rows:
 		latest.setdefault(row["item_code"], flt(row.get("rate") or 0))
 	return latest
@@ -920,7 +921,7 @@ def notify_fulfilment(purchase_invoice: str, request_item_names: Sequence[str]) 
 		)
 		parent_map = {p["name"]: p for p in parent_rows}
 
-		by_parent: Dict[str, List[Dict[str, Any]]] = {}
+		by_parent: dict[str, list[dict[str, Any]]] = {}
 		for row in rows:
 			by_parent.setdefault(row["parent"], []).append(row)
 

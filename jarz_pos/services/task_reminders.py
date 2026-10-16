@@ -33,7 +33,7 @@ from frappe.utils import add_days, getdate, nowdate
 from jarz_pos.services import task_board as tb
 
 
-def _queue(task_name: str, event: str, recipients, extra: Dict[str, Any]) -> bool:
+def _queue(task_name: str, event: str, recipients, extra: dict[str, Any]) -> bool:
 	from jarz_pos.api.notifications import enqueue_task_notification
 
 	return enqueue_task_notification(task_name, event, recipients, actor=None, extra=extra)
@@ -56,7 +56,7 @@ def _safe_log(title: str) -> None:
 		pass
 
 
-def _card_pass(today, tomorrow, summary: Dict[str, int], bucket: str) -> None:
+def _card_pass(today, tomorrow, summary: dict[str, int], bucket: str) -> None:
 	rows = frappe.db.sql(
 		f"""
         SELECT name, title, status, archived, assigned_to, created_by, due_date,
@@ -89,7 +89,7 @@ def _card_pass(today, tomorrow, summary: Dict[str, int], bucket: str) -> None:
 			_safe_log(f"task_reminders: card {row.get('name')} failed")
 
 
-def _subtask_pass(today, tomorrow, summary: Dict[str, int], bucket: str) -> None:
+def _subtask_pass(today, tomorrow, summary: dict[str, int], bucket: str) -> None:
 	rows = frappe.db.sql(
 		f"""
         SELECT s.name, s.parent, s.title AS subtask_title, s.assigned_to, s.due_date,
@@ -130,7 +130,7 @@ def _subtask_pass(today, tomorrow, summary: Dict[str, int], bucket: str) -> None
 			_safe_log(f"task_reminders: subtask {row.get('name')} failed")
 
 
-def run_task_reminders() -> Dict[str, int]:
+def run_task_reminders() -> dict[str, int]:
 	"""Scheduler entry point. Returns ``{cards, subtasks, errors}``. Never raises."""
 	summary = {"cards": 0, "subtasks": 0, "errors": 0}
 	try:

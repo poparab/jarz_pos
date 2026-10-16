@@ -29,7 +29,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-import frappe  # noqa: F401  (real frappe: this module runs under bench)
+import frappe
 
 from jarz_pos.api import settlement_terms as st
 from jarz_pos.services import settlement_reminders as sr

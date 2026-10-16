@@ -129,7 +129,7 @@ class TestRegistration(unittest.TestCase):
 		import jarz_pos
 
 		path = os.path.join(os.path.dirname(os.path.abspath(jarz_pos.__file__)), "patches.txt")
-		with open(path, "r", encoding="utf-8") as handle:
+		with open(path, encoding="utf-8") as handle:
 			text = handle.read()
 		post = text.split("[post_model_sync]", 1)[1]
 		self.assertIn("jarz_pos.Patches.v1_9.kanban_drop_ready_state", post)

@@ -66,7 +66,7 @@ COST_BASIS = "Valuation Rate"
 
 # Every jar uses fruit and jelly 1:1, the same ratio the mix recipe declares, so
 # a jar's mix content is just the sum of the two lines it replaces.
-JAR_MIX_QTY: Dict[str, float] = {
+JAR_MIX_QTY: dict[str, float] = {
 	"Blueberry Medium": 0.030,
 	"Blueberry Large": 0.040,
 	"Strawberry Medium": 0.030,
@@ -80,7 +80,7 @@ JAR_MIX_QTY: Dict[str, float] = {
 # this by 5000x the tolerance and a typo cannot hide inside it.
 MIX_DERIVATION_TOLERANCE = 0.0002
 
-MIXES: Dict[str, Dict[str, Any]] = {
+MIXES: dict[str, dict[str, Any]] = {
 	"Blueberry mix": {
 		# Either tin may appear on a jar BOM; both are the same product.
 		"jar_fruits": ("aldia blueberry", "Puratos Blueberry KG"),
@@ -104,14 +104,14 @@ def _company() -> str:
 	return frappe.db.get_single_value("Global Defaults", "default_company")
 
 
-def _default_bom(item_code: str) -> Optional[str]:
+def _default_bom(item_code: str) -> str | None:
 	return frappe.db.get_value("BOM", {"item": item_code, "is_default": 1, "docstatus": 1}, "name")
 
 
 # -- Step 1: the raspberry mix item and its BOM --------------------------
 
 
-def ensure_mix_item(mix: str, apply: bool) -> Dict[str, Any]:
+def ensure_mix_item(mix: str, apply: bool) -> dict[str, Any]:
 	if frappe.db.exists("Item", mix):
 		return {"created": False, "item": mix}
 	if not apply:
@@ -133,7 +133,7 @@ def ensure_mix_item(mix: str, apply: bool) -> Dict[str, Any]:
 	return {"created": True, "item": mix}
 
 
-def ensure_mix_valuation(mix: str, bom_name: Optional[str], apply: bool) -> Dict[str, Any]:
+def ensure_mix_valuation(mix: str, bom_name: str | None, apply: bool) -> dict[str, Any]:
 	"""Seed ``Item.valuation_rate`` for a mix that has never held stock.
 
 	A ``do_not_explode`` line is priced from the sub-assembly's own stock value,
@@ -173,7 +173,7 @@ def ensure_mix_valuation(mix: str, bom_name: Optional[str], apply: bool) -> Dict
 	return {"seeded": True, "rate": round(unit, 4)}
 
 
-def ensure_mix_bom(mix: str, apply: bool) -> Dict[str, Any]:
+def ensure_mix_bom(mix: str, apply: bool) -> dict[str, Any]:
 	"""Create the mix BOM, or restate an existing one on the shared cost basis."""
 	spec = MIXES[mix]
 	fruit = spec["recipe_fruit"]
@@ -238,7 +238,7 @@ def _mix_jelly_row(doc, fruit_qty: float):
 	return rows[0] if len(rows) == 1 else None
 
 
-def plan_jar(jar: str, mix: str) -> Dict[str, Any]:
+def plan_jar(jar: str, mix: str) -> dict[str, Any]:
 	bom = _default_bom(jar)
 	if not bom:
 		return {"jar": jar, "ok": False, "reason": "no submitted default BOM"}
@@ -250,7 +250,7 @@ def plan_jar(jar: str, mix: str) -> Dict[str, Any]:
 
 	fruit = _fruit_row(doc, mix)
 	mix_rows = [r for r in doc.items if r.item_code == mix]
-	drops: List[str] = []
+	drops: list[str] = []
 
 	if fruit is not None:
 		jelly = _mix_jelly_row(doc, flt(fruit.stock_qty))
@@ -287,7 +287,7 @@ def plan_jar(jar: str, mix: str) -> Dict[str, Any]:
 	# (the sub-assembly had no valuation when the line was written) or when it
 	# would explode back to fruit instead of netting against the leftover.
 	row = mix_rows[0] if len(mix_rows) == 1 else None
-	repairs: List[str] = []
+	repairs: list[str] = []
 	if fruit is None and row is not None:
 		if flt(row.rate) <= 0:
 			repairs.append("mix line priced at zero")
@@ -309,7 +309,7 @@ def plan_jar(jar: str, mix: str) -> Dict[str, Any]:
 	}
 
 
-def rebuild_jar(plan: Dict[str, Any]) -> Dict[str, Any]:
+def rebuild_jar(plan: dict[str, Any]) -> dict[str, Any]:
 	mix = plan["mix"]
 	doc = frappe.get_doc("BOM", plan["from_bom"])
 	new = frappe.copy_doc(doc)
@@ -377,7 +377,7 @@ def rebuild_jar(plan: Dict[str, Any]) -> Dict[str, Any]:
 # -- Step 3: retire what the new defaults displaced -----------------------
 
 
-def deactivate_superseded(apply: bool) -> Dict[str, Any]:
+def deactivate_superseded(apply: bool) -> dict[str, Any]:
 	rows = frappe.db.sql(
 		"""
         SELECT name, item FROM `tabBOM`
@@ -396,12 +396,12 @@ def deactivate_superseded(apply: bool) -> Dict[str, Any]:
 # -- Runner ---------------------------------------------------------------
 
 
-def run(apply: Any = False) -> Dict[str, Any]:
+def run(apply: Any = False) -> dict[str, Any]:
 	apply = bool(apply)
 	mode = "APPLY" if apply else "PLAN"
 	print(f"MARK mode {mode}")
 
-	mixes: Dict[str, Any] = {}
+	mixes: dict[str, Any] = {}
 	for mix in MIXES:
 		item = ensure_mix_item(mix, apply)
 		bom = ensure_mix_bom(mix, apply)
@@ -409,7 +409,7 @@ def run(apply: Any = False) -> Dict[str, Any]:
 		mixes[mix] = {"item": item, "bom": bom, "valuation": seeded}
 		print(f"MARK mix {mix:<16} item={item} bom={bom} valuation={seeded}")
 
-	jars: List[Dict[str, Any]] = []
+	jars: list[dict[str, Any]] = []
 	for mix, spec in MIXES.items():
 		for jar in spec["jars"]:
 			plan = plan_jar(jar, mix)

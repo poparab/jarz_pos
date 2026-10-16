@@ -23,7 +23,7 @@ def calculate_bundle_discounts(child_items_data, bundle_qty, bundle_price):
 	total_child_value = sum(item["regular_total"] for item in child_items_data)
 	target_total_all_children = bundle_price * bundle_qty
 
-	print(f"         - Child items processing:")
+	print("         - Child items processing:")
 	print(f"           Original total value: ${total_child_value}")
 	print(f"           Target total value: ${target_total_all_children}")
 	print(f"           Required discount: ${total_child_value - target_total_all_children}")
@@ -86,7 +86,7 @@ def calculate_item_rates_with_discount(original_rate, discount_amount, qty):
 		# Determine discount type
 		if discount_per_unit >= original_rate:
 			discount_type = "100%"
-			print(f"      🎯 100% Bundle discount detected (Main Bundle Item):")
+			print("      🎯 100% Bundle discount detected (Main Bundle Item):")
 			print(f"         Original rate: ${original_rate}")
 			print(f"         Discount amount: ${discount_amount}")
 			print(f"         Qty: {qty}")
@@ -95,7 +95,7 @@ def calculate_item_rates_with_discount(original_rate, discount_amount, qty):
 			print(f"         Price list rate: ${price_list_rate}")
 		else:
 			discount_type = "partial"
-			print(f"      🎯 Partial Bundle discount calculation:")
+			print("      🎯 Partial Bundle discount calculation:")
 			print(f"         Original rate: ${original_rate}")
 			print(f"         Discount amount: ${discount_amount}")
 			print(f"         Qty: {qty}")
@@ -146,7 +146,7 @@ def apply_main_bundle_discount(item_row, discount_amount, original_rate, qty):
 
 	if discount_percentage >= 99.9:  # Essentially 100%
 		item_row["discount_percentage"] = 100
-		print(f"      🎯 Setting discount_percentage = 100% for main bundle item")
+		print("      🎯 Setting discount_percentage = 100% for main bundle item")
 
 	return item_row
 
@@ -181,7 +181,7 @@ def create_main_bundle_item_with_discount(bundle_doc, bundle_qty, bundle_price):
 	print(f"         - Main item added: {bundle_doc.erpnext_item} (from Bundle ID: {bundle_doc.name})")
 	print(f"           Original Rate: ${main_item_rate}, Qty: {main_item_qty}, Total: ${main_item_total}")
 	print(f"           Discount Amount: ${main_item_discount} (100% - makes item FREE)")
-	print(f"           Final Rate: $0.00 (100% discount applied)")
+	print("           Final Rate: $0.00 (100% discount applied)")
 	print(f"           Final Amount: ${main_item_total - main_item_discount} (should be $0.00)")
 
 	return main_item
@@ -243,7 +243,7 @@ def create_child_bundle_items_with_discounts(child_items_data, bundle_qty, bundl
 
 def _create_fallback_child_item(bundle_qty, bundle_price):
 	"""Create fallback child item when no child items are configured."""
-	print(f"         - No child items found in bundle configuration")
+	print("         - No child items found in bundle configuration")
 
 	# This ensures the invoice always shows something beyond just the main item
 	fallback_child_rate = bundle_price  # Use full bundle price for fallback
@@ -265,7 +265,7 @@ def _create_fallback_child_item(bundle_qty, bundle_price):
 	print(
 		f"           Rate: ${fallback_child_rate}, Qty: {fallback_child_qty}, Total: ${fallback_child_total}"
 	)
-	print(f"           No discount applied to fallback item")
+	print("           No discount applied to fallback item")
 
 	return [fallback_item]
 
@@ -311,7 +311,7 @@ def verify_bundle_discount_totals(processed_items, bundle_qty, bundle_price):
 	expected_total = bundle_price * bundle_qty
 	actual_total = main_item_total_final + child_item_total_final
 
-	print(f"         ✅ Bundle processing complete:")
+	print("         ✅ Bundle processing complete:")
 	print(f"            - Total processed items: {len(processed_items)}")
 	print(f"            - Main items: {main_items_count}")
 	print(f"            - Child items: {child_items_count}")
@@ -328,7 +328,7 @@ def verify_bundle_discount_totals(processed_items, bundle_qty, bundle_price):
 	)
 
 	# Debug: Print all processed items with detailed discount info
-	print(f"         📋 All processed items with discount details:")
+	print("         📋 All processed items with discount details:")
 	for i, item in enumerate(processed_items, 1):
 		item_type = item.get("bundle_type", "unknown")
 		rate = item["rate"]

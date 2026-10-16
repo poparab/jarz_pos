@@ -13,11 +13,10 @@ The two hard parts are covered deliberately:
   in August and must NOT make September look paid.
 """
 
-from datetime import date
 import unittest
+from datetime import date
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
-
 
 MONTH_START = date(2026, 8, 1)
 MONTH_END = date(2026, 8, 31)
@@ -3055,7 +3054,7 @@ class TestSettlementReadBack(unittest.TestCase):
 
 		mock_frappe = MagicMock()
 		mock_frappe.get_all.return_value = [
-			{"name": "ACC-JV-{0}".format(i), "user_remark": remark, "total_debit": total}
+			{"name": f"ACC-JV-{i}", "user_remark": remark, "total_debit": total}
 			for i, (remark, total) in enumerate(remarks_and_totals)
 		]
 		with patch.object(monthly_expenses, "frappe", mock_frappe):
@@ -3191,7 +3190,7 @@ class TestAccessGateIsShared(unittest.TestCase):
 			self.assertEqual(
 				_call_name(statements[0]),
 				"_ensure_manager",
-				"{0} must call _ensure_manager() as its first statement".format(name),
+				f"{name} must call _ensure_manager() as its first statement",
 			)
 
 	def test_every_endpoint_that_reads_the_period_columns_checks_the_schema(self):
@@ -3206,8 +3205,7 @@ class TestAccessGateIsShared(unittest.TestCase):
 			self.assertIn(
 				"_require_period_fields",
 				calls,
-				"{0} reaches _compute_month and must call _require_period_fields() "
-				"next to the gate".format(name),
+				f"{name} reaches _compute_month and must call _require_period_fields() " "next to the gate",
 			)
 
 

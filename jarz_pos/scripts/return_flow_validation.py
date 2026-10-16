@@ -38,11 +38,9 @@ from typing import Any, Dict, List, Optional
 import frappe
 from frappe.utils import flt
 
-from jarz_pos.scripts.b2b_accounting_validation import (  # noqa: F401 - reused wholesale
+from jarz_pos.scripts.b2b_accounting_validation import (
 	CheckResult,
 	RunContext,
-	assert_gl_balanced,
-	capture_invoice_accounting,
 	_cleanup,
 	_create_invoice,
 	_emit_report,
@@ -55,6 +53,8 @@ from jarz_pos.scripts.b2b_accounting_validation import (  # noqa: F401 - reused 
 	_pick_courier_party,
 	_pick_pos_profile,
 	_pick_sellable_items,
+	assert_gl_balanced,
+	capture_invoice_accounting,
 )
 from jarz_pos.services import invoice_return as ir
 
@@ -111,7 +111,7 @@ def _restore_returns(previous: bool) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _normalize_courier(picked: Any) -> Optional[Dict[str, Any]]:
+def _normalize_courier(picked: Any) -> dict[str, Any] | None:
 	"""`_pick_courier_party` yields a ``(party_type, party)`` tuple, or
 	``(None, None)`` when the site has no courier bound to this branch.
 
@@ -155,7 +155,7 @@ def _courier_outstanding_total(invoice_name: str) -> float:
 
 
 def _assert_return_invariants(
-	ctx: RunContext, case: str, *, source_invoice: str, result: Dict[str, Any]
+	ctx: RunContext, case: str, *, source_invoice: str, result: dict[str, Any]
 ) -> None:
 	"""The checks every successful return must satisfy, whatever its money state."""
 	# 1. THE guarantee: the source invoice is never voided.
@@ -245,7 +245,7 @@ def _assert_return_invariants(
 		)
 
 
-def _absorb_return_artifacts(ctx: RunContext, result: Dict[str, Any]) -> None:
+def _absorb_return_artifacts(ctx: RunContext, result: dict[str, Any]) -> None:
 	"""Register everything a return created so cleanup can unwind it."""
 	if result.get("credit_note"):
 		ctx.invoices.append(result["credit_note"])
@@ -315,7 +315,7 @@ def _teardown_dispatched_fixtures(ctx: RunContext) -> None:
 	frappe.db.commit()
 
 
-def _full_lines(invoice_name: str) -> List[Dict[str, Any]]:
+def _full_lines(invoice_name: str) -> list[dict[str, Any]]:
 	rows = (
 		frappe.get_all(
 			"Sales Invoice Item",
@@ -333,7 +333,7 @@ def _full_lines(invoice_name: str) -> List[Dict[str, Any]]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _dispatch_invoice(invoice_name: str, pos_profile: str, courier: Optional[Dict[str, Any]]) -> None:
+def _dispatch_invoice(invoice_name: str, pos_profile: str, courier: dict[str, Any] | None) -> None:
 	"""Drive an invoice to Out for Delivery through the real service entry point."""
 	from jarz_pos.services.delivery_handling import handle_out_for_delivery_transition
 
@@ -349,11 +349,11 @@ def _dispatch_invoice(invoice_name: str, pos_profile: str, courier: Optional[Dic
 
 def _case_full_return(
 	ctx: RunContext,
-	env: Dict[str, Any],
+	env: dict[str, Any],
 	*,
 	case: str,
 	prepay: bool,
-	courier: Optional[Dict[str, Any]],
+	courier: dict[str, Any] | None,
 	pay_courier: bool,
 	refund_mode: str,
 ) -> None:
@@ -431,7 +431,7 @@ def _case_full_return(
 		)
 
 
-def _case_partial_then_complete(ctx: RunContext, env: Dict[str, Any]) -> None:
+def _case_partial_then_complete(ctx: RunContext, env: dict[str, Any]) -> None:
 	"""Return one unit, then the rest — the B2B partial path and its idempotency."""
 	case = "RET-PARTIAL"
 	customer = _ensure_customer(ctx, case, env["territory"], env["customer_group"])
@@ -565,7 +565,7 @@ def _case_partial_then_complete(ctx: RunContext, env: Dict[str, Any]) -> None:
 	_assert_return_invariants(ctx, case, source_invoice=invoice, result=result_b)
 
 
-def _case_guards(ctx: RunContext, env: Dict[str, Any]) -> None:
+def _case_guards(ctx: RunContext, env: dict[str, Any]) -> None:
 	"""Undispatched orders must be refused and pointed at cancellation."""
 	case = "RET-GUARD"
 	customer = _ensure_customer(ctx, case, env["territory"], env["customer_group"])
@@ -606,7 +606,7 @@ def _case_guards(ctx: RunContext, env: Dict[str, Any]) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def run_readonly_survey(sample: int = 200) -> Dict[str, Any]:
+def run_readonly_survey(sample: int = 200) -> dict[str, Any]:
 	"""Dry-run the return postings across real dispatched orders. Writes nothing.
 
 	Proves account resolution and JE balancing hold for every real
@@ -676,7 +676,7 @@ def run_readonly_survey(sample: int = 200) -> Dict[str, Any]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def run(cleanup: bool = True, report_path: Optional[str] = None) -> Dict[str, Any]:
+def run(cleanup: bool = True, report_path: str | None = None) -> dict[str, Any]:
 	"""Run the full return-flow matrix on staging."""
 	if isinstance(cleanup, str):
 		cleanup = cleanup.strip().lower() not in {"", "0", "false", "no"}
@@ -691,7 +691,7 @@ def run(cleanup: bool = True, report_path: Optional[str] = None) -> Dict[str, An
 	previous_switch = _enable_returns()
 	ctx = RunContext()
 	report_path = report_path or "sites/return_flow_validation_report.md"
-	result: Dict[str, Any] = {}
+	result: dict[str, Any] = {}
 
 	try:
 		pos_profile = _pick_pos_profile()
@@ -795,7 +795,7 @@ def run(cleanup: bool = True, report_path: Optional[str] = None) -> Dict[str, An
 		_restore_returns(previous_switch)
 
 
-def run_json(cleanup: bool = True, report_path: Optional[str] = None) -> Dict[str, Any]:
+def run_json(cleanup: bool = True, report_path: str | None = None) -> dict[str, Any]:
 	"""`run` with marker-wrapped JSON so an SSH driver can slice out the report."""
 	report = run(cleanup=cleanup, report_path=report_path)
 	print(REPORT_MARKER_START)

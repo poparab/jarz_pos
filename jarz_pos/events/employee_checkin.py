@@ -58,7 +58,7 @@ class RosterCheckinBlocked(frappe.ValidationError):
 	"""Raised when the roster says this person is not working right now."""
 
 
-def enforce_roster_on_checkin(doc, method: Optional[str] = None) -> None:
+def enforce_roster_on_checkin(doc, method: str | None = None) -> None:
 	"""``Employee Checkin.validate`` hook.
 
 	Runs *after* HRMS's own ``validate`` -- Frappe composes app hooks to run
@@ -267,7 +267,7 @@ def _is_roster_managed(employee: str) -> bool:
 		return False
 
 
-def _assignment_on(employee: str, day: Any) -> Optional[dict]:
+def _assignment_on(employee: str, day: Any) -> dict | None:
 	try:
 		rows = frappe.get_all(
 			"Shift Assignment",
@@ -317,7 +317,7 @@ def _explanation(employee: str, day: Any) -> str:
 	)
 
 
-def _enforce_location(doc, shift_location: Optional[str]) -> None:
+def _enforce_location(doc, shift_location: str | None) -> None:
 	"""Apply the branch radius that HRMS skipped for an off-window check-in.
 
 	Mirrors ``EmployeeCheckin.validate_distance_from_shift_location`` including

@@ -29,7 +29,8 @@ import binascii
 import json
 import mimetypes
 import os
-from typing import Any, Dict, Iterable, List, Optional
+from collections.abc import Iterable
+from typing import Any, Dict, List, Optional
 
 import frappe
 from frappe import _
@@ -40,7 +41,7 @@ from jarz_pos.services import task_board as tb
 # ── Small helpers ────────────────────────────────────────────────────────────
 
 
-def _s(value: Any) -> Optional[str]:
+def _s(value: Any) -> str | None:
 	"""JSON-friendly scalar: None stays None, everything else becomes a string."""
 	if value in (None, ""):
 		return None
@@ -78,7 +79,7 @@ def _throw_denied(message: str) -> None:
 	frappe.throw(message, frappe.PermissionError)
 
 
-def _parse_list(value: Any, label: str) -> List[Any]:
+def _parse_list(value: Any, label: str) -> list[Any]:
 	if value in (None, "", []):
 		return []
 	parsed = value
@@ -108,7 +109,7 @@ def _parse_priority(value: Any) -> str:
 	return text
 
 
-def _parse_branch(value: Any) -> Optional[str]:
+def _parse_branch(value: Any) -> str | None:
 	text = str(value or "").strip()
 	if not text:
 		return None
@@ -173,7 +174,7 @@ def _find_subtask(doc: Any, subtask_id: Any):
 	frappe.throw(_("Subtask not found"), frappe.DoesNotExistError)
 
 
-def _names(users: Iterable[Any]) -> Dict[str, str]:
+def _names(users: Iterable[Any]) -> dict[str, str]:
 	wanted = sorted({str(u) for u in users if u})
 	if not wanted:
 		return {}
@@ -189,7 +190,7 @@ def _names(users: Iterable[Any]) -> Dict[str, str]:
 	return names
 
 
-def _user_ref(user: str, names: Dict[str, str], managers: Iterable[str]) -> Dict[str, Any]:
+def _user_ref(user: str, names: dict[str, str], managers: Iterable[str]) -> dict[str, Any]:
 	return {
 		"user": user,
 		"full_name": names.get(user) or user,
@@ -210,7 +211,7 @@ def _history(task_name: str, event: str, content: str, actor: str) -> None:
 	).insert(ignore_permissions=True)
 
 
-def _notify(doc: Any, event: str, actor: str, extra: Optional[Dict[str, Any]] = None) -> None:
+def _notify(doc: Any, event: str, actor: str, extra: dict[str, Any] | None = None) -> None:
 	"""Queue *event* for its recipients (never the actor). Never raises."""
 	try:
 		from jarz_pos.api.notifications import enqueue_task_notification
@@ -229,7 +230,7 @@ def _notify(doc: Any, event: str, actor: str, extra: Optional[Dict[str, Any]] = 
 # ── Shapes ───────────────────────────────────────────────────────────────────
 
 
-def _aggregates(task_names: List[str]) -> Dict[str, Dict[str, int]]:
+def _aggregates(task_names: list[str]) -> dict[str, dict[str, int]]:
 	out = {
 		n: {"subtasks_total": 0, "subtasks_done": 0, "attachments_count": 0, "entries_count": 0}
 		for n in task_names
@@ -272,7 +273,7 @@ def _aggregates(task_names: List[str]) -> Dict[str, Dict[str, int]]:
 	return out
 
 
-def _card(row: Any, agg: Dict[str, int], names: Dict[str, str], today_date) -> Dict[str, Any]:
+def _card(row: Any, agg: dict[str, int], names: dict[str, str], today_date) -> dict[str, Any]:
 	"""The contract's ``CardSummary``."""
 	assigned_to = row.get("assigned_to")
 	created_by = row.get("created_by")
@@ -299,7 +300,7 @@ def _card(row: Any, agg: Dict[str, int], names: Dict[str, str], today_date) -> D
 	}
 
 
-def _files_for(task_name: str, entry_names: List[str]) -> List[Dict[str, Any]]:
+def _files_for(task_name: str, entry_names: list[str]) -> list[dict[str, Any]]:
 	return frappe.db.sql(
 		"""
         SELECT name, file_name, file_size, owner, creation,
@@ -317,7 +318,7 @@ def _files_for(task_name: str, entry_names: List[str]) -> List[Dict[str, Any]]:
 	)
 
 
-def _attachment(f: Any, doc: Any, viewer: tb.Viewer, names: Dict[str, str]) -> Dict[str, Any]:
+def _attachment(f: Any, doc: Any, viewer: tb.Viewer, names: dict[str, str]) -> dict[str, Any]:
 	content_type = mimetypes.guess_type(f.get("file_name") or "")[0] or "application/octet-stream"
 	entry = f.get("attached_to_name") if f.get("attached_to_doctype") == tb.ENTRY_DOCTYPE else None
 	owner = f.get("owner")
@@ -336,7 +337,7 @@ def _attachment(f: Any, doc: Any, viewer: tb.Viewer, names: Dict[str, str]) -> D
 	}
 
 
-def _mentionable_users(doc: Any, viewer: tb.Viewer) -> List[str]:
+def _mentionable_users(doc: Any, viewer: tb.Viewer) -> list[str]:
 	"""Every enabled user who can see *doc*, minus the caller."""
 	candidates = set(tb.get_full_access_users()) | tb.participants(doc)
 	assignee = doc.get("assigned_to")
@@ -356,7 +357,7 @@ def _mentionable_users(doc: Any, viewer: tb.Viewer) -> List[str]:
 	)
 
 
-def _task_payload(doc: Any, viewer: tb.Viewer) -> Dict[str, Any]:
+def _task_payload(doc: Any, viewer: tb.Viewer) -> dict[str, Any]:
 	"""The contract's ``get_task`` shape."""
 	today_date = getdate(nowdate())
 	name = doc.name
@@ -371,7 +372,7 @@ def _task_payload(doc: Any, viewer: tb.Viewer) -> Dict[str, Any]:
 	files = _files_for(name, [e.name for e in entries])
 	mentionable = _mentionable_users(doc, viewer)
 
-	parsed_mentions: Dict[str, List[str]] = {}
+	parsed_mentions: dict[str, list[str]] = {}
 	for e in entries:
 		try:
 			value = json.loads(e.mentions) if e.mentions else []
@@ -392,8 +393,8 @@ def _task_payload(doc: Any, viewer: tb.Viewer) -> Dict[str, Any]:
 	people.update(mentionable)
 	names = _names(people)
 
-	attachments_by_entry: Dict[str, List[Dict[str, Any]]] = {}
-	card_attachments: List[Dict[str, Any]] = []
+	attachments_by_entry: dict[str, list[dict[str, Any]]] = {}
+	card_attachments: list[dict[str, Any]] = []
 	for f in files:
 		item = _attachment(f, doc, viewer, names)
 		if item["entry"]:
@@ -474,14 +475,14 @@ def _task_payload(doc: Any, viewer: tb.Viewer) -> Dict[str, Any]:
 
 
 @frappe.whitelist()
-def get_board_context() -> Dict[str, Any]:
+def get_board_context() -> dict[str, Any]:
 	"""Who am I on the board, and what does the board offer. Never throws for a non-board user."""
 	user = frappe.session.user
 	try:
 		viewer = _viewer()
 	except Exception:
 		viewer = tb.Viewer(user=user)
-	base: Dict[str, Any] = {
+	base: dict[str, Any] = {
 		"can_access": False,
 		"is_manager": False,
 		"can_create": False,
@@ -532,16 +533,16 @@ _BOARD_VIEWS = ("all", "mine", "created", "review")
 
 @frappe.whitelist()
 def get_board(
-	view: Optional[str] = "all",
-	assigned_to: Optional[str] = None,
-	created_by: Optional[str] = None,
-	branch: Optional[str] = None,
-	priority: Optional[str] = None,
+	view: str | None = "all",
+	assigned_to: str | None = None,
+	created_by: str | None = None,
+	branch: str | None = None,
+	priority: str | None = None,
 	overdue_only: Any = 0,
 	include_archived: Any = 0,
-	search: Optional[str] = None,
+	search: str | None = None,
 	done_days: Any = 30,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	"""The board: every visible card, grouped by status column."""
 	viewer = _viewer()
 	_require_board(viewer)
@@ -550,8 +551,8 @@ def get_board(
 		_throw_invalid(_("Unknown view: {0}").format(view))
 
 	today_str = nowdate()
-	where: List[str] = []
-	params: Dict[str, Any] = {
+	where: list[str] = []
+	params: dict[str, Any] = {
 		"me": viewer.user,
 		"done": tb.STATUS_DONE,
 		"in_review": tb.STATUS_IN_REVIEW,
@@ -618,7 +619,7 @@ def get_board(
 	task_names = [r.name for r in rows]
 	aggregates = _aggregates(task_names)
 	names = _names([r.assigned_to for r in rows] + [r.created_by for r in rows])
-	columns: Dict[str, List[Dict[str, Any]]] = {status: [] for status in tb.STATUSES}
+	columns: dict[str, list[dict[str, Any]]] = {status: [] for status in tb.STATUSES}
 	for row in rows:
 		status = row.status if row.status in columns else tb.STATUS_TODO
 		columns[status].append(_card(row, aggregates.get(row.name, {}), names, today_date))
@@ -631,7 +632,7 @@ def get_board(
 
 
 @frappe.whitelist()
-def get_task(name: str) -> Dict[str, Any]:
+def get_task(name: str) -> dict[str, Any]:
 	viewer = _viewer()
 	_require_board(viewer)
 	doc = _load_task(name, viewer)
@@ -639,7 +640,7 @@ def get_task(name: str) -> Dict[str, Any]:
 
 
 @frappe.whitelist()
-def get_overview(days: Any = 30) -> Dict[str, Any]:
+def get_overview(days: Any = 30) -> dict[str, Any]:
 	"""Per-person workload and on-time rate over the visible, non-archived tasks."""
 	viewer = _viewer()
 	_require_board(viewer)
@@ -670,7 +671,7 @@ def get_overview(days: Any = 30) -> Dict[str, Any]:
 		as_dict=True,
 	)
 
-	def _blank() -> Dict[str, int]:
+	def _blank() -> dict[str, int]:
 		return {
 			"open": 0,
 			"in_progress": 0,
@@ -680,7 +681,7 @@ def get_overview(days: Any = 30) -> Dict[str, Any]:
 			"done_on_time_in_period": 0,
 		}
 
-	per_person: Dict[str, Dict[str, int]] = {}
+	per_person: dict[str, dict[str, int]] = {}
 	for row in rows:
 		person = row.assigned_to
 		if not person:
@@ -723,7 +724,7 @@ def get_overview(days: Any = 30) -> Dict[str, Any]:
 
 
 @frappe.whitelist()
-def get_task_counts() -> Dict[str, int]:
+def get_task_counts() -> dict[str, int]:
 	"""``{assigned_open, review_waiting, overdue}`` for the caller (zeros off the board)."""
 	viewer = _viewer()
 	if not viewer.is_board_user:
@@ -790,12 +791,12 @@ def download_attachment(file: str) -> None:
 def create_task(
 	title: str,
 	assigned_to: str,
-	description: Optional[str] = None,
-	priority: Optional[str] = tb.PRIORITY_NORMAL,
-	due_date: Optional[str] = None,
-	branch: Optional[str] = None,
+	description: str | None = None,
+	priority: str | None = tb.PRIORITY_NORMAL,
+	due_date: str | None = None,
+	branch: str | None = None,
 	subtasks: Any = None,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	viewer = _viewer()
 	_require_board(viewer)
 	if not viewer.can_create:
@@ -871,22 +872,22 @@ def create_task(
 @frappe.whitelist(methods=["POST"])
 def update_task(
 	name: str,
-	title: Optional[str] = None,
-	description: Optional[str] = None,
-	priority: Optional[str] = None,
-	due_date: Optional[str] = None,
-	branch: Optional[str] = None,
-	assigned_to: Optional[str] = None,
+	title: str | None = None,
+	description: str | None = None,
+	priority: str | None = None,
+	due_date: str | None = None,
+	branch: str | None = None,
+	assigned_to: str | None = None,
 	clear_due_date: Any = 0,
 	clear_branch: Any = 0,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	viewer = _viewer()
 	_require_board(viewer)
 	doc = _load_task(name, viewer, lock=True)
 	if not tb.can_edit_task(doc, viewer):
 		_refuse(doc, _("Only the task creator can edit this task."))
 	actor = viewer.user
-	history: List[tuple] = []
+	history: list[tuple] = []
 
 	if title is not None:
 		new_title = _clean_title(title)
@@ -963,7 +964,7 @@ def update_task(
 
 
 @frappe.whitelist(methods=["POST"])
-def set_status(name: str, status: str, reason: Optional[str] = None) -> Dict[str, Any]:
+def set_status(name: str, status: str, reason: str | None = None) -> dict[str, Any]:
 	viewer = _viewer()
 	_require_board(viewer)
 	doc = _load_task(name, viewer, lock=True)
@@ -992,7 +993,7 @@ def set_status(name: str, status: str, reason: Optional[str] = None) -> Dict[str
 
 
 @frappe.whitelist(methods=["POST"])
-def archive_task(name: str, archived: Any = 1) -> Dict[str, Any]:
+def archive_task(name: str, archived: Any = 1) -> dict[str, Any]:
 	viewer = _viewer()
 	_require_board(viewer)
 	doc = _load_task(name, viewer, lock=True)
@@ -1019,8 +1020,8 @@ def archive_task(name: str, archived: Any = 1) -> Dict[str, Any]:
 
 @frappe.whitelist(methods=["POST"])
 def add_subtask(
-	name: str, title: str, assigned_to: Optional[str] = None, due_date: Optional[str] = None
-) -> Dict[str, Any]:
+	name: str, title: str, assigned_to: str | None = None, due_date: str | None = None
+) -> dict[str, Any]:
 	viewer = _viewer()
 	_require_board(viewer)
 	doc = _load_task(name, viewer, lock=True)
@@ -1068,12 +1069,12 @@ def add_subtask(
 def update_subtask(
 	name: str,
 	subtask_id: str,
-	title: Optional[str] = None,
-	assigned_to: Optional[str] = None,
-	due_date: Optional[str] = None,
+	title: str | None = None,
+	assigned_to: str | None = None,
+	due_date: str | None = None,
 	clear_assignee: Any = 0,
 	clear_due_date: Any = 0,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	viewer = _viewer()
 	_require_board(viewer)
 	doc = _load_task(name, viewer, lock=True)
@@ -1124,7 +1125,7 @@ def update_subtask(
 
 
 @frappe.whitelist(methods=["POST"])
-def delete_subtask(name: str, subtask_id: str) -> Dict[str, Any]:
+def delete_subtask(name: str, subtask_id: str) -> dict[str, Any]:
 	viewer = _viewer()
 	_require_board(viewer)
 	doc = _load_task(name, viewer, lock=True)
@@ -1139,7 +1140,7 @@ def delete_subtask(name: str, subtask_id: str) -> Dict[str, Any]:
 
 
 @frappe.whitelist(methods=["POST"])
-def set_subtask_done(name: str, subtask_id: str, done: Any) -> Dict[str, Any]:
+def set_subtask_done(name: str, subtask_id: str, done: Any) -> dict[str, Any]:
 	viewer = _viewer()
 	_require_board(viewer)
 	doc = _load_task(name, viewer, lock=True)
@@ -1174,7 +1175,7 @@ def set_subtask_done(name: str, subtask_id: str, done: Any) -> Dict[str, Any]:
 # ── Entries ──────────────────────────────────────────────────────────────────
 
 
-def _viewer_for_mention(user: str) -> Optional[tb.Viewer]:
+def _viewer_for_mention(user: str) -> tb.Viewer | None:
 	try:
 		if not frappe.db.get_value("User", user, "enabled"):
 			return None
@@ -1184,7 +1185,7 @@ def _viewer_for_mention(user: str) -> Optional[tb.Viewer]:
 
 
 @frappe.whitelist(methods=["POST"])
-def add_entry(name: str, kind: str, content: str, mentions: Any = None) -> Dict[str, Any]:
+def add_entry(name: str, kind: str, content: str, mentions: Any = None) -> dict[str, Any]:
 	"""Add a Log or a Comment. Returns the get_task shape plus ``entry`` (the new entry's name)."""
 	viewer = _viewer()
 	_require_board(viewer)
@@ -1201,7 +1202,7 @@ def add_entry(name: str, kind: str, content: str, mentions: Any = None) -> Dict[
 	if not text:
 		_throw_invalid(_("Write something first"))
 
-	mention_list: List[str] = []
+	mention_list: list[str] = []
 	for value in _parse_list(mentions, _("Mentions")):
 		user = str(value or "").strip()
 		if user and user != viewer.user and user not in mention_list:
@@ -1256,9 +1257,7 @@ def _decode_file(file_data: Any) -> bytes:
 
 
 @frappe.whitelist(methods=["POST"])
-def upload_attachment(
-	name: str, filename: str, file_data: str, entry: Optional[str] = None
-) -> Dict[str, Any]:
+def upload_attachment(name: str, filename: str, file_data: str, entry: str | None = None) -> dict[str, Any]:
 	viewer = _viewer()
 	_require_board(viewer)
 	doc = _load_task(name, viewer, lock=True)
@@ -1313,7 +1312,7 @@ def upload_attachment(
 
 
 @frappe.whitelist(methods=["POST"])
-def remove_attachment(name: str, file: str) -> Dict[str, Any]:
+def remove_attachment(name: str, file: str) -> dict[str, Any]:
 	viewer = _viewer()
 	_require_board(viewer)
 	doc = _load_task(name, viewer, lock=True)

@@ -63,7 +63,8 @@ No top-level frappe calls -- the module imports cleanly at boot.
 
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List, Optional
+from collections.abc import Iterable
+from typing import Any, Dict, List, Optional
 
 import frappe
 
@@ -121,7 +122,7 @@ def _exception_message(exc: BaseException) -> str:
 	return text or type(exc).__name__
 
 
-def message_log_length() -> Optional[int]:
+def message_log_length() -> int | None:
 	"""How many browser messages are queued right now (``None`` if unknown).
 
 	``frappe.throw`` queues its text in ``frappe.local.message_log`` before it
@@ -136,7 +137,7 @@ def message_log_length() -> Optional[int]:
 		return None
 
 
-def withdraw_messages_since(count: Optional[int]) -> None:
+def withdraw_messages_since(count: int | None) -> None:
 	"""Drop browser messages queued after :func:`message_log_length` returned ``count``."""
 	if count is None:
 		return
@@ -158,7 +159,7 @@ def _employee_has_column(fieldname: str) -> bool:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _lock_employee(employee: str) -> Optional[Dict[str, Any]]:
+def _lock_employee(employee: str) -> dict[str, Any] | None:
 	"""Row-lock the Employee and return its current committed values."""
 	columns = ["name", "employee_name", "status"]
 	if _employee_has_column("cell_number"):
@@ -175,7 +176,7 @@ def _lock_employee(employee: str) -> Optional[Dict[str, Any]]:
 	return dict(rows[0]) if rows else None
 
 
-def _linked_customers_locked(employee: str) -> List[Dict[str, Any]]:
+def _linked_customers_locked(employee: str) -> list[dict[str, Any]]:
 	"""Every Customer pointing at ``employee``, oldest first, via a LOCKING read.
 
 	The locking read is what defeats the REPEATABLE READ snapshot: it returns
@@ -193,7 +194,7 @@ def _linked_customers_locked(employee: str) -> List[Dict[str, Any]]:
 	return [dict(r) for r in rows]
 
 
-def _name_match_candidates(employee_name: str) -> List[str]:
+def _name_match_candidates(employee_name: str) -> list[str]:
 	"""Unlinked Employee-group customers named like the employee (max 2 -- enough
 	to tell "exactly one" from "ambiguous")."""
 	key = _clean(employee_name).lower()
@@ -286,7 +287,7 @@ def _record_adoption(customer: str, employee: str, employee_name: str) -> None:
 		pass
 
 
-def _mobile_for_new_customer(cell_number: Any) -> Optional[str]:
+def _mobile_for_new_customer(cell_number: Any) -> str | None:
 	"""The employee's number in canonical form -- only if nobody else holds it.
 
 	Mirrors the duplicate-mobile guard in ``api/customer.create_customer``
@@ -329,8 +330,8 @@ def _ensure_employee_group() -> None:
 	doc.insert(ignore_permissions=True)
 
 
-def _insert_customer_doc(employee: str, employee_name: str, mobile: Optional[str]) -> str:
-	payload: Dict[str, Any] = {
+def _insert_customer_doc(employee: str, employee_name: str, mobile: str | None) -> str:
+	payload: dict[str, Any] = {
 		"doctype": "Customer",
 		"customer_name": employee_name,
 		"customer_type": "Individual",
@@ -361,7 +362,7 @@ def _create_customer(employee: str, employee_name: str, cell_number: Any) -> str
 	staff member from being able to buy."""
 	_ensure_employee_group()
 	mobile = _mobile_for_new_customer(cell_number)
-	attempts: List[Optional[str]] = [mobile, None] if mobile else [None]
+	attempts: list[str | None] = [mobile, None] if mobile else [None]
 
 	for index, candidate in enumerate(attempts):
 		savepoint = _INSERT_SAVEPOINT
@@ -382,7 +383,7 @@ def _create_customer(employee: str, employee_name: str, cell_number: Any) -> str
 	raise RuntimeError("unreachable")  # pragma: no cover
 
 
-def _result(customer: str, action: str, conflicts: List[str]) -> Dict[str, Any]:
+def _result(customer: str, action: str, conflicts: list[str]) -> dict[str, Any]:
 	return {"customer": customer, "action": action, "conflicts": list(conflicts)}
 
 
@@ -391,7 +392,7 @@ def _result(customer: str, action: str, conflicts: List[str]) -> Dict[str, Any]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def ensure_customer_for_employee(employee: str) -> Dict[str, Any]:
+def ensure_customer_for_employee(employee: str) -> dict[str, Any]:
 	"""Return (and if needed adopt or create) the staff customer of ``employee``.
 
 	Returns ``{"customer": name, "action": "existing"|"adopted"|"created",
@@ -444,7 +445,7 @@ def ensure_customer_for_employee(employee: str) -> Dict[str, Any]:
 	return _result(customer, ACTION_CREATED, conflicts)
 
 
-def canonical_customers_for_employees(employees: Iterable[str]) -> Dict[str, Dict[str, str]]:
+def canonical_customers_for_employees(employees: Iterable[str]) -> dict[str, dict[str, str]]:
 	"""``employee -> {"customer", "customer_name"}`` for rule (a) only.
 
 	A plain (non-locking) read for listing screens. Employees with no
@@ -468,7 +469,7 @@ def canonical_customers_for_employees(employees: Iterable[str]) -> Dict[str, Dic
 		_safe_log_error(_traceback(), "employee_customers: canonical customer read failed")
 		return {}
 
-	mapping: Dict[str, Dict[str, str]] = {}
+	mapping: dict[str, dict[str, str]] = {}
 	for r in rows:
 		emp = _clean(r.get(_F))
 		if emp and emp not in mapping:
@@ -479,7 +480,7 @@ def canonical_customers_for_employees(employees: Iterable[str]) -> Dict[str, Dic
 	return mapping
 
 
-def ensure_customers_for_all_employees() -> Dict[str, Any]:
+def ensure_customers_for_all_employees() -> dict[str, Any]:
 	"""Run :func:`ensure_customer_for_employee` over every Active employee.
 
 	Returns ``{"created", "adopted", "existing"}`` as lists of
@@ -491,7 +492,7 @@ def ensure_customers_for_all_employees() -> Dict[str, Any]:
 	and committed on success, which also keeps the Customer row locks short.
 	Never raises.
 	"""
-	summary: Dict[str, Any] = {
+	summary: dict[str, Any] = {
 		ACTION_CREATED: [],
 		ACTION_ADOPTED: [],
 		ACTION_EXISTING: [],
@@ -565,7 +566,7 @@ def ensure_customers_for_all_employees() -> Dict[str, Any]:
 	return summary
 
 
-def ensure_customer_on_employee_save(doc, method: Optional[str] = None) -> None:
+def ensure_customer_on_employee_save(doc, method: str | None = None) -> None:
 	"""``Employee`` ``after_insert`` / ``on_update`` hook. NEVER raises.
 
 	Saving an Employee must never fail because of a customer side effect. The

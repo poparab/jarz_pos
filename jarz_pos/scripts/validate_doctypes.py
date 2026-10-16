@@ -23,7 +23,7 @@ def run():  # pragma: no cover - helper script
 		try:
 			meta = frappe.get_meta(name)
 			assert meta.name == name
-		except Exception as exc:  # noqa: BLE001
+		except Exception as exc:
 			failures.append((name, str(exc)))
 
 	if failures:

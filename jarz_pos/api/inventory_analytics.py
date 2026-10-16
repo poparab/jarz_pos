@@ -60,7 +60,7 @@ def _trend_sort_key(trend: str) -> int:
 		return len(TREND_ORDER)
 
 
-def _thresholds() -> Dict[str, Any]:
+def _thresholds() -> dict[str, Any]:
 	"""Alert thresholds from Jarz Forecast Settings, plus the active seasonal multiplier."""
 	try:
 		from jarz_pos.services.demand_forecasting import (
@@ -82,7 +82,7 @@ def _thresholds() -> Dict[str, Any]:
 		return dict(_DEFAULT_THRESHOLDS)
 
 
-def _velocity_rows(warehouse: Optional[str], branch: Optional[str], window_days: int) -> List[Dict[str, Any]]:
+def _velocity_rows(warehouse: str | None, branch: str | None, window_days: int) -> list[dict[str, Any]]:
 	"""Per-item stock (Bin, optionally one warehouse) and live sales velocity.
 
 	One set-based query. Sales are counted in stock units (``stock_qty``) from
@@ -163,7 +163,7 @@ def _live_trend(v30: float, v60: float) -> str:
 	return "Stable"
 
 
-def build_restock(rows: List[Dict[str, Any]], th: Dict[str, Any]) -> List[Dict[str, Any]]:
+def build_restock(rows: list[dict[str, Any]], th: dict[str, Any]) -> list[dict[str, Any]]:
 	"""Classify velocity rows into the actionable restock list.
 
 	- ``critical`` / ``watch``: selling, and cover (stock / (velocity_30d x
@@ -180,7 +180,7 @@ def build_restock(rows: List[Dict[str, Any]], th: Dict[str, Any]) -> List[Dict[s
 	slow_cutoff = getdate(add_days(getdate(today()), -int(th["slow"])))
 	target_days = int(th["watch"]) * _TARGET_COVER_FACTOR
 
-	out: List[Dict[str, Any]] = []
+	out: list[dict[str, Any]] = []
 	for r in rows:
 		stock = float(r.get("stock") or 0)
 		stock_value = float(r.get("stock_value") or 0)
@@ -240,7 +240,7 @@ def build_restock(rows: List[Dict[str, Any]], th: Dict[str, Any]) -> List[Dict[s
 	return out
 
 
-def get_restock(branch: Optional[str] = None) -> Dict[str, Any]:
+def get_restock(branch: str | None = None) -> dict[str, Any]:
 	"""Restock list for one branch (its POS Profile warehouse + its own sales) or all.
 
 	Returns ``{"restock": [...], "rows": [...], "thresholds": {...}, "warehouse": str|None}``.
@@ -261,16 +261,16 @@ def get_restock(branch: Optional[str] = None) -> Dict[str, Any]:
 	}
 
 
-def _alerts_from_restock(restock: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+def _alerts_from_restock(restock: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
 	"""The four legacy alert lists, rebuilt from a branch's restock rows.
 
 	Same row keys as ``demand_forecasting.build_alert_data`` so existing
 	clients keep rendering them; velocity and cover are the branch's own.
 	"""
-	critical: List[Dict[str, Any]] = []
-	watch: List[Dict[str, Any]] = []
-	slow: List[Dict[str, Any]] = []
-	over: List[Dict[str, Any]] = []
+	critical: list[dict[str, Any]] = []
+	watch: list[dict[str, Any]] = []
+	slow: list[dict[str, Any]] = []
+	over: list[dict[str, Any]] = []
 	for r in restock:
 		base = {
 			"item_code": r["item_code"],
@@ -299,7 +299,7 @@ def _alerts_from_restock(restock: List[Dict[str, Any]]) -> Dict[str, List[Dict[s
 	return {"critical": critical, "watch_list": watch, "slow_movers": slow, "overstocked": over[:20]}
 
 
-def _branch_top_movers(rows: List[Dict[str, Any]], multiplier: float) -> List[Dict[str, Any]]:
+def _branch_top_movers(rows: list[dict[str, Any]], multiplier: float) -> list[dict[str, Any]]:
 	"""Top 15 by the branch's own 60-day velocity, in the ``top_movers`` shape."""
 	movers = []
 	for r in rows:
@@ -327,10 +327,10 @@ def _branch_top_movers(rows: List[Dict[str, Any]], multiplier: float) -> List[Di
 
 @frappe.whitelist()
 def get_inventory_analytics(
-	date_from: Optional[str] = None,
-	date_to: Optional[str] = None,
-	branch: Optional[str] = None,
-) -> Dict[str, Any]:
+	date_from: str | None = None,
+	date_to: str | None = None,
+	branch: str | None = None,
+) -> dict[str, Any]:
 	"""Aggregated inventory / velocity analytics.
 
 	``branch`` (optional POS Profile name): stock is that branch's warehouse
@@ -509,7 +509,7 @@ def get_inventory_analytics(
 	}
 
 
-def _company_top_movers() -> List[Dict[str, Any]]:
+def _company_top_movers() -> list[dict[str, Any]]:
 	"""Top 15 by the stored company-wide 60-day velocity (unchanged query)."""
 	top_movers = frappe.db.sql(
 		"""

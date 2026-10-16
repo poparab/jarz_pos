@@ -23,7 +23,6 @@ from jarz_pos.scripts.woo_staging_full_cycle import (
 	_next_delivery_slot,
 )
 
-
 REPORT_MARKER_START = "WOO_ORDER_UPDATE_MATRIX_JSON_START"
 REPORT_MARKER_END = "WOO_ORDER_UPDATE_MATRIX_JSON_END"
 
@@ -177,7 +176,7 @@ class OrderUpdateMatrixRunner(FullCycleRunner):
 					self._erp_item_price_outbound_matrix,
 				)
 				self._case("MX-AUDIT-01", "Run-scoped accounting and sync audit", self._run_scoped_audit)
-		except Exception as exc:  # noqa: BLE001
+		except Exception as exc:
 			self.report["errors"].append(
 				{
 					"error": str(exc),
@@ -195,7 +194,7 @@ class OrderUpdateMatrixRunner(FullCycleRunner):
 		try:
 			api_payload = self._woo_client().get("orders/statuses")
 			api_statuses = self._extract_status_slugs(api_payload)
-		except Exception as exc:  # noqa: BLE001
+		except Exception as exc:
 			api_error = str(exc)
 
 		recent_statuses: list[str] = []
@@ -207,7 +206,7 @@ class OrderUpdateMatrixRunner(FullCycleRunner):
 			recent_statuses = sorted(
 				{str(row.get("status") or "").strip().lower() for row in recent_orders if row.get("status")}
 			)
-		except Exception as exc:  # noqa: BLE001
+		except Exception as exc:
 			recent_error = str(exc)
 
 		statuses = self._matrix_statuses(api_statuses, recent_statuses)
@@ -409,7 +408,7 @@ class OrderUpdateMatrixRunner(FullCycleRunner):
 						self._record_created(
 							"Delivery Note", delivery_note, note=f"MX-ERP-STATUS-01 {target_state}"
 						)
-			except Exception as exc:  # noqa: BLE001
+			except Exception as exc:
 				row.update(
 					{"severity": "fail", "error": str(exc), "traceback": traceback.format_exc(limit=8)}
 				)
@@ -463,7 +462,7 @@ class OrderUpdateMatrixRunner(FullCycleRunner):
 				expected="cancelled",
 				actual=cancel_row,
 			)
-		except Exception as exc:  # noqa: BLE001
+		except Exception as exc:
 			cancel_row.update(
 				{"severity": "fail", "error": str(exc), "traceback": traceback.format_exc(limit=8)}
 			)
@@ -580,7 +579,7 @@ class OrderUpdateMatrixRunner(FullCycleRunner):
 				self._record_created(
 					"Sales Invoice", replacement_invoice_name, note="MX-ERP-ITEM-01 replacement invoice"
 				)
-		except Exception as exc:  # noqa: BLE001
+		except Exception as exc:
 			row.update({"severity": "fail", "error": str(exc), "traceback": traceback.format_exc(limit=8)})
 			self._assert(
 				case,
@@ -861,7 +860,7 @@ class OrderUpdateMatrixRunner(FullCycleRunner):
 				actual=row,
 				concern=severity == "concern",
 			)
-		except Exception as exc:  # noqa: BLE001
+		except Exception as exc:
 			row.update({"severity": "fail", "error": str(exc), "traceback": traceback.format_exc(limit=8)})
 			self._assert(
 				case,
@@ -926,7 +925,7 @@ class OrderUpdateMatrixRunner(FullCycleRunner):
 				actual=row,
 				concern=severity == "concern",
 			)
-		except Exception as exc:  # noqa: BLE001
+		except Exception as exc:
 			row.update({"severity": "fail", "error": str(exc), "traceback": traceback.format_exc(limit=8)})
 			self._assert(
 				case,
@@ -1076,7 +1075,7 @@ class OrderUpdateMatrixRunner(FullCycleRunner):
 				actual=row,
 				concern=severity == "concern",
 			)
-		except Exception as exc:  # noqa: BLE001
+		except Exception as exc:
 			row.update({"severity": "fail", "error": str(exc), "traceback": traceback.format_exc(limit=8)})
 			self._assert(
 				case,

@@ -80,7 +80,7 @@ def _fit_website(value):
 
 def run(json_path):
 	"""Entry point. Read the catalog JSON and upsert every lead."""
-	with open(json_path, "r", encoding="utf-8") as fh:
+	with open(json_path, encoding="utf-8") as fh:
 		data = json.load(fh)
 
 	leads = data.get("leads") or []

@@ -30,7 +30,7 @@ top-level frappe calls.
 """
 
 import frappe
-from frappe.utils import add_days, nowdate, getdate
+from frappe.utils import add_days, getdate, nowdate
 
 from jarz_pos.setup.b2b_master_data import ensure_b2b_master_data
 

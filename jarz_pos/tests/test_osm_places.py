@@ -13,7 +13,6 @@ from unittest.mock import patch
 
 from jarz_pos.services import osm_places
 
-
 CAIRO = (30.0444, 31.2357)
 
 #: Shaped like a real jsonv2 reverse for a mapped cafe.

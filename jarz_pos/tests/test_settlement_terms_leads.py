@@ -33,11 +33,10 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
-import frappe  # noqa: F401  (real frappe: this module runs under bench)
+import frappe
 from frappe.exceptions import QueryDeadlockError, QueryTimeoutError
 
-from jarz_pos.api import credit
-from jarz_pos.api import manager
+from jarz_pos.api import credit, manager
 from jarz_pos.api import settlement_terms as st
 from jarz_pos.services import settlement_lead_terms as slt
 from jarz_pos.services import settlement_schedule as ss

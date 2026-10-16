@@ -14,7 +14,6 @@ import frappe
 
 from jarz_pos.constants import ROLES
 
-
 B2B_ROLE = "B2B Sales Rep"
 READ_TYPES = {"read", "select"}
 

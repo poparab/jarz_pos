@@ -139,9 +139,9 @@ def open_legs_for_courier(
 	party_type: str,
 	party: str,
 	*,
-	exclude_invoice: Optional[str] = None,
+	exclude_invoice: str | None = None,
 	limit: int = 20,
-) -> List[str]:
+) -> list[str]:
 	"""Submitted invoices with an open leg for this courier.
 
 	Used to enforce one open leg per courier at the moment a new one starts.
@@ -178,12 +178,12 @@ def open_legs_for_courier(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def start_updates(at: Any = None) -> Dict[str, Any]:
+def start_updates(at: Any = None) -> dict[str, Any]:
 	"""Field updates that open a leg. Clearing the end is half the operation."""
 	return {LEG_STARTED_FIELD: at or now_datetime(), LEG_ENDED_FIELD: None}
 
 
-def end_updates(at: Any = None) -> Dict[str, Any]:
+def end_updates(at: Any = None) -> dict[str, Any]:
 	"""Field updates that close a leg.
 
 	Returned as a dict rather than written here so the close rides along in the

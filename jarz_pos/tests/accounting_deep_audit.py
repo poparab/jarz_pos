@@ -56,7 +56,7 @@ class DeepAuditError(Exception):
 
 
 class _Result:
-	__slots__ = ("name", "status", "message", "rows")
+	__slots__ = ("message", "name", "rows", "status")
 
 	def __init__(self, name: str, status: str, message: str = "", rows=None):
 		self.name = name

@@ -87,11 +87,11 @@ def period_month_for_date(value: Any) -> str:
 
 
 def convert_penalty(
-	unit: Optional[str],
+	unit: str | None,
 	quantity: Any,
 	amount: Any,
 	day_rate: Any,
-) -> Tuple[float, float]:
+) -> tuple[float, float]:
 	"""``(amount, equivalent_days)`` for one penalty — the single definition.
 
 	Deliberately pure arithmetic: it never throws and never reads the database,

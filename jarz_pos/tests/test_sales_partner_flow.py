@@ -9,8 +9,9 @@ This module tests the sales partner-specific invoice handling:
 """
 
 import unittest
+from unittest.mock import MagicMock, call, patch
+
 import frappe
-from unittest.mock import patch, MagicMock, call
 
 
 class TestSalesPartnerInvoiceFlow(unittest.TestCase):

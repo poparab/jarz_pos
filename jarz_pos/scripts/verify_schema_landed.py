@@ -110,15 +110,15 @@ def _app_path() -> str:
 	return frappe.get_app_path(APP_NAME)
 
 
-def _load_json(path: str) -> Optional[Any]:
+def _load_json(path: str) -> Any | None:
 	try:
-		with open(path, "r", encoding="utf-8") as handle:
+		with open(path, encoding="utf-8") as handle:
 			return json.load(handle)
 	except Exception:
 		return None
 
 
-def _app_custom_field_dts(app_name: str) -> Optional[set]:
+def _app_custom_field_dts(app_name: str) -> set | None:
 	"""The ``dt`` values whose Custom Fields ``app_name``'s fixtures hook imports.
 
 	Returns ``None`` when the hook does not use the ``[["dt", "in", [...]]]``
@@ -145,7 +145,7 @@ def _app_custom_field_dts(app_name: str) -> Optional[set]:
 	return None
 
 
-def _fixtured_custom_field_dts() -> Optional[set]:
+def _fixtured_custom_field_dts() -> set | None:
 	"""Every ``dt`` that *any installed app* imports Custom Fields for.
 
 	Deliberately not just this app's hook. ``jarz_woocommerce_integration``
@@ -201,7 +201,7 @@ def _is_single(doctype: str) -> bool:
 		return False
 
 
-def _has_column(doctype: str, fieldname: str) -> Optional[bool]:
+def _has_column(doctype: str, fieldname: str) -> bool | None:
 	"""``None`` when the answer cannot be established, so it is never asserted."""
 	try:
 		return bool(frappe.db.has_column(doctype, fieldname))
@@ -209,14 +209,14 @@ def _has_column(doctype: str, fieldname: str) -> Optional[bool]:
 		return None
 
 
-def _is_virtual(field: Dict[str, Any]) -> bool:
+def _is_virtual(field: dict[str, Any]) -> bool:
 	try:
 		return bool(frappe.utils.cint(field.get("is_virtual")))
 	except Exception:
 		return False
 
 
-def _check_custom_fields(findings: Dict[str, List[Dict[str, str]]]) -> int:
+def _check_custom_fields(findings: dict[str, list[dict[str, str]]]) -> int:
 	path = os.path.join(_app_path(), "fixtures", "custom_field.json")
 	rows = _load_json(path)
 	if not isinstance(rows, list):
@@ -295,7 +295,7 @@ def _check_custom_fields(findings: Dict[str, List[Dict[str, str]]]) -> int:
 	return checked
 
 
-def _check_app_doctypes(findings: Dict[str, List[Dict[str, str]]]) -> int:
+def _check_app_doctypes(findings: dict[str, list[dict[str, str]]]) -> int:
 	root = os.path.join(_app_path(), "doctype")
 	if not os.path.isdir(root):
 		return 0
@@ -362,9 +362,9 @@ def _check_app_doctypes(findings: Dict[str, List[Dict[str, str]]]) -> int:
 	return checked
 
 
-def run() -> Dict[str, Any]:
+def run() -> dict[str, Any]:
 	"""Assert the declared schema is live. Raises when it is not."""
-	findings: Dict[str, List[Dict[str, str]]] = {
+	findings: dict[str, list[dict[str, str]]] = {
 		"missing": [],
 		"missing_column": [],
 		"unfixtured": [],
@@ -383,7 +383,7 @@ def run() -> Dict[str, Any]:
 	failure_buckets = ("missing", "missing_column", "errors")
 	failures = [item for bucket in failure_buckets for item in findings[bucket]]
 
-	summary: Dict[str, Any] = {
+	summary: dict[str, Any] = {
 		"app": APP_NAME,
 		"site": frappe.local.site,
 		"custom_fields_checked": custom_fields_checked,

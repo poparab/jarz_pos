@@ -23,7 +23,8 @@ without HRMS still migrates and still serves the POS.
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, Iterable, List, Optional
+from collections.abc import Iterable
+from typing import Any, Dict, List, Optional
 
 import frappe
 from frappe.utils import getdate
@@ -89,7 +90,7 @@ def suggested_salary_month(on: Any = None) -> str:
 	return month_key_shift(current, -1) if day.day <= SALARY_PAY_DAY else current
 
 
-def salary_month_options(on: Any = None, lookback: int = 3) -> List[str]:
+def salary_month_options(on: Any = None, lookback: int = 3) -> list[str]:
 	"""Salary months a new advance may be drawn against, newest first: the
 	current month and the ``lookback`` before it. No future month — an advance
 	against a salary that has not started accruing is a loan, not an advance."""
@@ -97,7 +98,7 @@ def salary_month_options(on: Any = None, lookback: int = 3) -> List[str]:
 	return [month_key_shift(current, -i) for i in range(int(lookback) + 1)]
 
 
-def normalize_salary_month(value: Any) -> Optional[str]:
+def normalize_salary_month(value: Any) -> str | None:
 	"""``YYYY-MM`` for a well-formed month key (a full date is cut to its month),
 	or ``None``. Never raises."""
 	raw = str(value or "").strip()[:7]
@@ -107,7 +108,7 @@ def normalize_salary_month(value: Any) -> Optional[str]:
 	return raw
 
 
-def advance_salary_month(row: Dict[str, Any]) -> str:
+def advance_salary_month(row: dict[str, Any]) -> str:
 	"""The salary month an advance row counts against.
 
 	Advances filed before the field existed carry nothing. They fall back to the
@@ -162,7 +163,7 @@ def customer_has_employee_field() -> bool:
 		return False
 
 
-def resolve_employee_for_user(user: Optional[str] = None) -> Optional[Dict[str, Any]]:
+def resolve_employee_for_user(user: str | None = None) -> dict[str, Any] | None:
 	"""The active ``Employee`` behind a login, or ``None``.
 
 	``None`` is a normal answer -- plenty of logins have no Employee record.
@@ -201,11 +202,11 @@ def resolve_employee_for_user(user: Optional[str] = None) -> Optional[Dict[str, 
 
 
 def list_active_employees(
-	branch: Optional[str] = None,
-	search: Optional[str] = None,
-	company: Optional[str] = None,
+	branch: str | None = None,
+	search: str | None = None,
+	company: str | None = None,
 	limit: int = 500,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
 	"""Active employees, for the advance-request employee picker.
 
 	``branch`` filters on ``Employee.branch`` only when the caller asks for it.
@@ -213,7 +214,7 @@ def list_active_employees(
 	on it then returns nothing and reads as "no employees exist" -- so callers
 	should pass it only when they know it is populated.
 	"""
-	filters: Dict[str, Any] = {"status": "Active"}
+	filters: dict[str, Any] = {"status": "Active"}
 	if company:
 		filters["company"] = company
 	if branch:
@@ -264,7 +265,7 @@ def list_active_employees(
 	]
 
 
-def customers_for_employees(employees: Iterable[str]) -> Dict[str, str]:
+def customers_for_employees(employees: Iterable[str]) -> dict[str, str]:
 	"""Map ``employee -> customer`` for the given employees.
 
 	Explicit ``Customer.custom_employee`` links win. Anything still unmatched
@@ -282,7 +283,7 @@ def customers_for_employees(employees: Iterable[str]) -> Dict[str, str]:
 	if not wanted:
 		return {}
 
-	mapping: Dict[str, str] = {}
+	mapping: dict[str, str] = {}
 
 	if customer_has_employee_field():
 		try:
@@ -349,7 +350,7 @@ def customers_for_employees(employees: Iterable[str]) -> Dict[str, str]:
 	return mapping
 
 
-def employees_for_customers(customers: Iterable[str]) -> Dict[str, str]:
+def employees_for_customers(customers: Iterable[str]) -> dict[str, str]:
 	"""Map ``customer -> employee``; the inverse of :func:`customers_for_employees`.
 
 	Used when walking employee-purpose invoices, where the invoice knows the
@@ -359,7 +360,7 @@ def employees_for_customers(customers: Iterable[str]) -> Dict[str, str]:
 	if not wanted:
 		return {}
 
-	mapping: Dict[str, str] = {}
+	mapping: dict[str, str] = {}
 
 	if customer_has_employee_field():
 		try:
@@ -429,7 +430,7 @@ def advance_has_field(fieldname: str) -> bool:
 		return False
 
 
-def advance_balance_fields() -> List[str]:
+def advance_balance_fields() -> list[str]:
 	"""The fields to select so :func:`open_advance_balance` can be computed.
 
 	``F_SETTLED_AMOUNT`` is included only when the column exists, which is what
@@ -443,7 +444,7 @@ def advance_balance_fields() -> List[str]:
 	return fields
 
 
-def open_advance_balance(row: Dict[str, Any]) -> float:
+def open_advance_balance(row: dict[str, Any]) -> float:
 	"""What is still owed back on one submitted advance, floored at 0.
 
 	``paid - claimed - returned``. ``custom_jarz_settled_amount`` is NOT
@@ -493,7 +494,7 @@ def open_advance_balance_expr(alias: str = "") -> str:
 	return "GREATEST(" + " - ".join(terms) + ", 0)"
 
 
-def employee_display_names(employees: Iterable[str]) -> Dict[str, str]:
+def employee_display_names(employees: Iterable[str]) -> dict[str, str]:
 	"""``employee -> employee_name``, for labelling rows the caller already has."""
 	wanted = [str(e).strip() for e in (employees or []) if str(e or "").strip()]
 	if not wanted:

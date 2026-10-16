@@ -24,9 +24,10 @@ every group nested under it and a route on a child group overrides its parent.
 
 from __future__ import annotations
 
+from typing import Any, Dict, List, Optional
+
 import frappe
 from frappe import _
-from typing import Any, Dict, List, Optional
 
 
 def _settings():
@@ -64,7 +65,7 @@ def _is_usable(warehouse: str, company: str) -> bool:
 	return not int(row.get("is_group") or 0) and not int(row.get("disabled") or 0)
 
 
-def _item_default_warehouse(item_code: str, company: str) -> Optional[str]:
+def _item_default_warehouse(item_code: str, company: str) -> str | None:
 	warehouse = _coerce(
 		frappe.db.get_value(
 			"Item Default",
@@ -75,7 +76,7 @@ def _item_default_warehouse(item_code: str, company: str) -> Optional[str]:
 	return warehouse if _is_usable(warehouse, company) else None
 
 
-def _item_group_ancestry(item_group: str) -> List[str]:
+def _item_group_ancestry(item_group: str) -> list[str]:
 	"""Return *item_group* then each ancestor, nearest first.
 
 	Uses the nested-set columns so one query covers the whole chain; falls back
@@ -98,7 +99,7 @@ def _item_group_ancestry(item_group: str) -> List[str]:
 		)
 		return [r["name"] for r in rows]
 
-	chain: List[str] = []
+	chain: list[str] = []
 	current = item_group
 	seen = set()
 	while current and current not in seen:
@@ -108,7 +109,7 @@ def _item_group_ancestry(item_group: str) -> List[str]:
 	return chain
 
 
-def _routed_warehouse(item_code: str, company: str) -> Optional[str]:
+def _routed_warehouse(item_code: str, company: str) -> str | None:
 	settings = _settings()
 	routes = list(getattr(settings, "purchase_warehouse_routes", None) or []) if settings else []
 	if not routes:
@@ -118,7 +119,7 @@ def _routed_warehouse(item_code: str, company: str) -> Optional[str]:
 	if not item_group:
 		return None
 
-	route_map: Dict[str, str] = {}
+	route_map: dict[str, str] = {}
 	for row in routes:
 		group = _coerce(getattr(row, "item_group", None))
 		warehouse = _coerce(getattr(row, "warehouse", None))
@@ -132,7 +133,7 @@ def _routed_warehouse(item_code: str, company: str) -> Optional[str]:
 	return None
 
 
-def _company_fallback_warehouse(company: str) -> Optional[str]:
+def _company_fallback_warehouse(company: str) -> str | None:
 	"""Last resort: ERPNext's own global stock default, then any leaf warehouse.
 
 	Deliberately *not* ``Company.default_in_transit_warehouse`` or
@@ -157,7 +158,7 @@ def _company_fallback_warehouse(company: str) -> Optional[str]:
 def resolve_purchase_warehouse(
 	item_code: str,
 	company: str,
-	explicit: Optional[str] = None,
+	explicit: str | None = None,
 ) -> str:
 	"""Resolve the receiving warehouse for one purchased line.
 
@@ -211,7 +212,7 @@ def resolve_purchase_warehouse(
 def resolve_request_warehouse(
 	item_code: str,
 	company: str,
-	explicit: Optional[str] = None,
+	explicit: str | None = None,
 ) -> str:
 	"""Warehouse a team request targets.
 

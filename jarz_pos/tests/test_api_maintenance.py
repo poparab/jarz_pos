@@ -4,6 +4,7 @@ This module tests system maintenance endpoints.
 """
 
 import unittest
+
 import frappe
 
 

@@ -51,7 +51,7 @@ def _logger():
 	return frappe.logger(LOGGER_NAME, allow_site=True)
 
 
-def _resolve_company() -> Optional[str]:
+def _resolve_company() -> str | None:
 	"""Global default company, else the only company. None when ambiguous."""
 	try:
 		company = frappe.db.get_single_value("Global Defaults", "default_company")
@@ -65,7 +65,7 @@ def _resolve_company() -> Optional[str]:
 	return None
 
 
-def resolve_label_account_names(company: Optional[str] = None) -> dict:
+def resolve_label_account_names(company: str | None = None) -> dict:
 	"""The fully-qualified account names for *company* (existence not implied)."""
 	company = company or _resolve_company()
 	if not company:
@@ -80,7 +80,7 @@ def resolve_label_account_names(company: Optional[str] = None) -> dict:
 	}
 
 
-def _find_parent(company: str, candidates) -> Optional[str]:
+def _find_parent(company: str, candidates) -> str | None:
 	for name in candidates:
 		parent = frappe.db.get_value(
 			"Account", {"account_name": name, "company": company, "is_group": 1}, "name"
@@ -99,7 +99,7 @@ def _ensure_account(
 	report_type: str,
 	account_type: str,
 	log: dict,
-) -> Optional[str]:
+) -> str | None:
 	abbr = frappe.db.get_value("Company", company, "abbr") or ""
 	full_name = f"{account_name} - {abbr}"
 	if frappe.db.exists("Account", full_name):
@@ -125,7 +125,7 @@ def _ensure_account(
 	return full_name
 
 
-def _ensure_item_group(log: dict) -> Optional[str]:
+def _ensure_item_group(log: dict) -> str | None:
 	if frappe.db.exists("Item Group", PRINTING_ITEM_GROUP):
 		log["existing"].append(f"item group {PRINTING_ITEM_GROUP}")
 		return PRINTING_ITEM_GROUP
@@ -145,7 +145,7 @@ def _ensure_item_group(log: dict) -> Optional[str]:
 	return PRINTING_ITEM_GROUP
 
 
-def _ensure_printing_item(company: str, inventory_account: Optional[str], log: dict) -> None:
+def _ensure_printing_item(company: str, inventory_account: str | None, log: dict) -> None:
 	"""The single non-stock Item label Purchase Invoices bill against.
 
 	``is_stock_item = 0`` is the whole trick: a PI line for a non-stock item
@@ -182,7 +182,7 @@ def _ensure_printing_item(company: str, inventory_account: Optional[str], log: d
 	log["created"].append(f"item {PRINTING_ITEM_CODE}")
 
 
-def _ensure_item_expense_default(company: str, inventory_account: Optional[str], log: dict) -> None:
+def _ensure_item_expense_default(company: str, inventory_account: str | None, log: dict) -> None:
 	"""Point an already-existing printing item's expense default at the inventory account.
 
 	Fill-only: a row that already names an expense account is someone's choice.

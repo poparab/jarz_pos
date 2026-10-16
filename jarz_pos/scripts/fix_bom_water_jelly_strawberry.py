@@ -70,7 +70,7 @@ STRAWBERRY_MIX_YIELD = 2.0
 DERIVED_ROW_FIELDS = ("item_name", "description", "rate", "base_rate", "amount", "base_amount")
 
 
-def _default_bom(item_code: str) -> Optional[str]:
+def _default_bom(item_code: str) -> str | None:
 	return frappe.db.get_value(
 		"BOM", {"item": item_code, "is_default": 1, "is_active": 1, "docstatus": 1}, "name"
 	)
@@ -86,7 +86,7 @@ def _row(doc, item_code: str):
 # ── Step 1: the non-stock twin ──────────────────────────────────────────
 
 
-def ensure_tap_water_item(apply: bool) -> Dict[str, Any]:
+def ensure_tap_water_item(apply: bool) -> dict[str, Any]:
 	if frappe.db.exists("Item", TAP_WATER):
 		is_stock = frappe.db.get_value("Item", TAP_WATER, "is_stock_item")
 		if is_stock:
@@ -122,7 +122,7 @@ def ensure_tap_water_item(apply: bool) -> Dict[str, Any]:
 	return plan
 
 
-def swap_water_in_base(item_code: str, apply: bool) -> Dict[str, Any]:
+def swap_water_in_base(item_code: str, apply: bool) -> dict[str, Any]:
 	bom = _default_bom(item_code)
 	if not bom:
 		return {"item": item_code, "status": "no active default BOM"}
@@ -166,7 +166,7 @@ def swap_water_in_base(item_code: str, apply: bool) -> Dict[str, Any]:
 # ── Step 2: the jelly conversion factor ─────────────────────────────────
 
 
-def fix_jelly_conversion(apply: bool) -> Dict[str, Any]:
+def fix_jelly_conversion(apply: bool) -> dict[str, Any]:
 	bom = _default_bom(JELLY_BOM_ITEM)
 	if not bom:
 		return {"item": JELLY_BOM_ITEM, "status": "no active default BOM"}
@@ -214,7 +214,7 @@ def fix_jelly_conversion(apply: bool) -> Dict[str, Any]:
 # ── Step 3: the strawberry mix yield ────────────────────────────────────
 
 
-def fix_strawberry_mix_yield(apply: bool) -> Dict[str, Any]:
+def fix_strawberry_mix_yield(apply: bool) -> dict[str, Any]:
 	bom = _default_bom(STRAWBERRY_MIX_ITEM)
 	if not bom:
 		return {"item": STRAWBERRY_MIX_ITEM, "status": "no active default BOM"}
@@ -249,7 +249,7 @@ def fix_strawberry_mix_yield(apply: bool) -> Dict[str, Any]:
 # ── Step 4: retire what the new defaults displaced ──────────────────────
 
 
-def deactivate_superseded(apply: bool) -> Dict[str, Any]:
+def deactivate_superseded(apply: bool) -> dict[str, Any]:
 	rows = frappe.db.sql(
 		"""
         SELECT name, item FROM `tabBOM`
@@ -267,9 +267,9 @@ def deactivate_superseded(apply: bool) -> Dict[str, Any]:
 # ── Verification ────────────────────────────────────────────────────────
 
 
-def verify() -> Dict[str, Any]:
+def verify() -> dict[str, Any]:
 	"""Re-read the end state from the database. Never trusts the plan dicts."""
-	out: Dict[str, Any] = {"ok": True, "failures": []}
+	out: dict[str, Any] = {"ok": True, "failures": []}
 
 	def check(label: str, got: Any, want: Any) -> None:
 		if got != want:
@@ -319,7 +319,7 @@ def verify() -> Dict[str, Any]:
 	# The whole point of step 1: the bases must no longer be blocked on water.
 	from jarz_pos.api import manufacturing as mfg
 
-	blocked: List[str] = []
+	blocked: list[str] = []
 	for item in WATER_BASES:
 		for r in mfg._get_required_material_rows(_default_bom(item), "JARZ", 1.0, fetch_exploded=0):
 			if r["item_code"] in (STOCK_WATER, TAP_WATER):
@@ -333,9 +333,9 @@ def verify() -> Dict[str, Any]:
 # ── Runner ──────────────────────────────────────────────────────────────
 
 
-def run(apply: Any = False) -> Dict[str, Any]:
+def run(apply: Any = False) -> dict[str, Any]:
 	apply = str(apply).lower() in ("1", "true", "yes", "apply")
-	result: Dict[str, Any] = {"apply": apply, "steps": {}}
+	result: dict[str, Any] = {"apply": apply, "steps": {}}
 
 	phases = [
 		("tap_water_item", lambda: ensure_tap_water_item(apply)),

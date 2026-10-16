@@ -22,9 +22,11 @@ further: not just "is this your branch?" but "is your branch open right now?".
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from typing import Any, Dict, List, Optional
+
 import frappe
 from frappe import _
-from typing import Any, Dict, List, Optional, Sequence
 
 #: Users that bypass branch scoping entirely.
 UNRESTRICTED_USERS = {"Administrator"}
@@ -70,13 +72,13 @@ def _is_system_context() -> bool:
 	return any(bool(getattr(flags, flag, False)) for flag in _SYSTEM_CONTEXT_FLAGS)
 
 
-def is_unrestricted_user(user: Optional[str] = None) -> bool:
+def is_unrestricted_user(user: str | None = None) -> bool:
 	"""True when *user* bypasses branch scoping (Administrator or system context)."""
 	resolved = user or frappe.session.user
 	return resolved in UNRESTRICTED_USERS or _is_system_context()
 
 
-def _request_cache() -> Optional[Dict[str, Any]]:
+def _request_cache() -> dict[str, Any] | None:
 	"""Per-request cache dict.
 
 	Deliberately ``frappe.local`` rather than a module-level dict: a module-level
@@ -98,7 +100,7 @@ def _request_cache() -> Optional[Dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
-def get_user_pos_profiles(user: Optional[str] = None) -> List[str]:
+def get_user_pos_profiles(user: str | None = None) -> list[str]:
 	"""Return the enabled POS Profiles *user* is assigned to.
 
 	Assignment is the POS Profile User child table for everyone, managers
@@ -116,7 +118,7 @@ def get_user_pos_profiles(user: Optional[str] = None) -> List[str]:
 	if cache is not None and cache_key in cache:
 		return list(cache[cache_key])
 
-	profiles: List[str] = []
+	profiles: list[str] = []
 	try:
 		if is_unrestricted_user(resolved):
 			profiles = frappe.get_all("POS Profile", filters={"disabled": 0}, pluck="name") or []
@@ -155,10 +157,10 @@ def get_user_pos_profiles(user: Optional[str] = None) -> List[str]:
 
 
 def ensure_user_pos_profiles(
-	user: Optional[str] = None,
+	user: str | None = None,
 	*,
 	action_label: str = "this action",
-) -> List[str]:
+) -> list[str]:
 	"""Like :func:`get_user_pos_profiles` but throws when the user has no branch.
 
 	Used by write paths.  Read paths generally prefer the soft variant so the
@@ -195,7 +197,7 @@ def ensure_profile_scoped_invoice_access(
 	inv: Any,
 	*,
 	action_label: str,
-	extra_profiles: Optional[Sequence[str]] = None,
+	extra_profiles: Sequence[str] | None = None,
 ) -> None:
 	"""Assert the current user may act on *inv*'s branch.
 
@@ -207,7 +209,7 @@ def ensure_profile_scoped_invoice_access(
 
 	allowed = set(ensure_user_pos_profiles(action_label=action_label))
 
-	required: List[str] = []
+	required: list[str] = []
 	branch = get_invoice_branch(inv)
 	if branch:
 		required.append(branch)
@@ -228,7 +230,7 @@ def ensure_profile_scoped_invoice_access(
 		)
 
 
-def get_users_for_pos_profiles(profiles: Sequence[str]) -> List[str]:
+def get_users_for_pos_profiles(profiles: Sequence[str]) -> list[str]:
 	"""Return the users assigned to any of *profiles*.
 
 	Used to address realtime events at the branch that owns an order instead of
@@ -266,7 +268,7 @@ def get_users_for_pos_profiles(profiles: Sequence[str]) -> List[str]:
 		frappe.log_error(frappe.get_traceback(), "Failed to load POS Profile users")
 		return []
 
-	users: List[str] = []
+	users: list[str] = []
 	seen: set[str] = set()
 	for row in rows:
 		user = row.get("user")
@@ -281,7 +283,7 @@ def get_users_for_pos_profiles(profiles: Sequence[str]) -> List[str]:
 # ---------------------------------------------------------------------------
 
 
-def user_requires_pos_shift(user: Optional[str] = None) -> bool:
+def user_requires_pos_shift(user: str | None = None) -> bool:
 	"""True when *user* must have an open shift to move cash or stock.
 
 	Driven by ``User.custom_require_pos_shift`` — the same flag the Flutter
@@ -311,7 +313,7 @@ def user_requires_pos_shift(user: Optional[str] = None) -> bool:
 	return required
 
 
-def get_open_shift_for_profile(pos_profile: str) -> Optional[Dict[str, Any]]:
+def get_open_shift_for_profile(pos_profile: str) -> dict[str, Any] | None:
 	"""Return the open POS Opening Entry on *pos_profile*, or None.
 
 	Queried directly rather than through ``jarz_pos.api.shift`` to keep that
@@ -384,7 +386,7 @@ class ClosedShiftError(frappe.ValidationError):
 	"""
 
 
-def find_closed_shift_covering(voucher_creation: Any) -> Optional[Dict[str, Any]]:
+def find_closed_shift_covering(voucher_creation: Any) -> dict[str, Any] | None:
 	"""Return the submitted POS Closing Entry whose window contains *voucher_creation*.
 
 	``jarz_pos.api.shift._get_shift_account_movements`` buckets a shift's cash

@@ -31,8 +31,9 @@ from __future__ import annotations
 import calendar
 import json
 import re
+from collections.abc import Iterable, Sequence
 from datetime import date
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import frappe
 from frappe import _
@@ -60,17 +61,10 @@ from jarz_pos.api.recurring_expenses import (
 	_month_bounds,
 	_payroll_expense_accounts,
 )
-from jarz_pos.utils.employee_link import (
-	ADVANCE_DOCTYPE,
-	EMPLOYEE_ORDER_PURPOSE,
-	customers_for_employees,
-	employee_display_names,
-	hrms_available,
-)
-from jarz_pos.utils.posting_datetime import (
-	apply_ledger_posting_datetime,
-	join_posting_datetime,
-	split_posting_datetime,
+from jarz_pos.doctype.jarz_employee_penalty.jarz_employee_penalty import (
+	DAYS_PER_MONTH,
+	PENALTY_UNITS,
+	convert_penalty,
 )
 
 # The two jarz-owned settlement columns on ``Employee Advance``, seeded by
@@ -83,15 +77,20 @@ from jarz_pos.utils.posting_datetime import (
 # controller cannot exist — and a fallback that restates the fieldnames or the
 # conversion here is a SECOND definition waiting to drift from the first.
 from jarz_pos.utils.employee_link import (
+	ADVANCE_DOCTYPE,
+	EMPLOYEE_ORDER_PURPOSE,
 	F_SALARY_MONTH,
 	F_SETTLED_AMOUNT,
 	F_SETTLED_VIA,
 	advance_salary_month,
+	customers_for_employees,
+	employee_display_names,
+	hrms_available,
 )
-from jarz_pos.doctype.jarz_employee_penalty.jarz_employee_penalty import (
-	DAYS_PER_MONTH,
-	PENALTY_UNITS,
-	convert_penalty,
+from jarz_pos.utils.posting_datetime import (
+	apply_ledger_posting_datetime,
+	join_posting_datetime,
+	split_posting_datetime,
 )
 
 # ── constants ─────────────────────────────────────────────────────────────
@@ -305,19 +304,19 @@ def _as_bool(value: Any) -> bool:
 	return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
-def _available_months(anchor_key: str, back: int = AVAILABLE_MONTHS_BACK) -> List[str]:
+def _available_months(anchor_key: str, back: int = AVAILABLE_MONTHS_BACK) -> list[str]:
 	"""``back`` months before ``anchor_key`` plus ``anchor_key``, newest last."""
 	year = int(str(anchor_key)[0:4])
 	month = int(str(anchor_key)[5:7])
 	base = year * 12 + (month - 1)
-	keys: List[str] = []
+	keys: list[str] = []
 	for offset in range(back, -1, -1):
 		total = base - offset
-		keys.append("{0:04d}-{1:02d}".format(total // 12, (total % 12) + 1))
+		keys.append(f"{total // 12:04d}-{(total % 12) + 1:02d}")
 	return keys
 
 
-def _due_date_for_month(day_of_month: Any, anchor: date) -> Optional[str]:
+def _due_date_for_month(day_of_month: Any, anchor: date) -> str | None:
 	"""The item's due date inside ``anchor``'s month, or ``None``.
 
 	Clamped to the last day of the month for DISPLAY only: rows created before
@@ -336,7 +335,7 @@ def _due_date_for_month(day_of_month: Any, anchor: date) -> Optional[str]:
 	return date(anchor.year, anchor.month, min(day, last)).isoformat()
 
 
-def _normalized_day_of_month(value: Any) -> Optional[int]:
+def _normalized_day_of_month(value: Any) -> int | None:
 	"""Validate a caller-supplied due day, or raise ``ValueError``.
 
 	**Rejects** 29–31 rather than clamping them. Clamping would store a day the
@@ -350,19 +349,17 @@ def _normalized_day_of_month(value: Any) -> Optional[int]:
 	try:
 		day = int(value)
 	except (TypeError, ValueError):
-		raise ValueError(
-			"Due day of month must be a whole number between 1 and {0}.".format(MAX_DAY_OF_MONTH)
-		)
+		raise ValueError(f"Due day of month must be a whole number between 1 and {MAX_DAY_OF_MONTH}.")
 	if day < 1 or day > MAX_DAY_OF_MONTH:
 		raise ValueError(
-			"Due day of month must be between 1 and {0}. "
+			f"Due day of month must be between 1 and {MAX_DAY_OF_MONTH}. "
 			"Days 29-31 do not exist in every month, so the due date they imply "
-			"would move on its own in February.".format(MAX_DAY_OF_MONTH)
+			"would move on its own in February."
 		)
 	return day
 
 
-def _monthly_equivalent(amount: Any, frequency: Optional[str]) -> float:
+def _monthly_equivalent(amount: Any, frequency: str | None) -> float:
 	"""Normalise an occurrence amount to a monthly run-rate.
 
 	Deliberately identical to ``JarzRecurringExpense._compute_monthly_equivalent``
@@ -462,7 +459,7 @@ def _day_rate(gross_due: Any, days_per_month: int = DAYS_PER_MONTH) -> float:
 	return flt(gross) / float(days_per_month or DAYS_PER_MONTH)
 
 
-def _penalty_amounts(unit: Optional[str], quantity: Any, amount: Any, day_rate: Any) -> Tuple[float, float]:
+def _penalty_amounts(unit: str | None, quantity: Any, amount: Any, day_rate: Any) -> tuple[float, float]:
 	"""``(amount, equivalent_days)`` for one penalty. Pure.
 
 	Delegates to the DocType controller's ``convert_penalty`` rather than
@@ -478,7 +475,7 @@ def _penalty_amounts(unit: Optional[str], quantity: Any, amount: Any, day_rate: 
 	return convert_penalty(unit, quantity, amount, day_rate)
 
 
-def _serialize_penalty(row: Dict[str, Any]) -> Dict[str, Any]:
+def _serialize_penalty(row: dict[str, Any]) -> dict[str, Any]:
 	return {
 		"name": row.get("name"),
 		"penalty_date": row.get("penalty_date"),
@@ -494,7 +491,7 @@ def _serialize_penalty(row: Dict[str, Any]) -> Dict[str, Any]:
 	}
 
 
-def _advance_open_amount(row: Dict[str, Any]) -> float:
+def _advance_open_amount(row: dict[str, Any]) -> float:
 	"""What is still owed on one Employee Advance, floored at zero.
 
 	``paid_amount - claimed_amount - return_amount``.
@@ -526,7 +523,7 @@ def _advance_open_amount(row: Dict[str, Any]) -> float:
 	return open_amount if open_amount > 0 else 0.0
 
 
-def _serialize_advance(row: Dict[str, Any]) -> Dict[str, Any]:
+def _serialize_advance(row: dict[str, Any]) -> dict[str, Any]:
 	return {
 		"name": row.get("name"),
 		"posting_date": row.get("posting_date"),
@@ -544,7 +541,7 @@ def _serialize_advance(row: Dict[str, Any]) -> Dict[str, Any]:
 	}
 
 
-def _serialize_order(row: Dict[str, Any]) -> Dict[str, Any]:
+def _serialize_order(row: dict[str, Any]) -> dict[str, Any]:
 	return {
 		"invoice": row.get("name"),
 		"posting_date": row.get("posting_date"),
@@ -556,7 +553,7 @@ def _serialize_order(row: Dict[str, Any]) -> Dict[str, Any]:
 	}
 
 
-def _is_advance_ledger(account_name: Optional[str]) -> bool:
+def _is_advance_ledger(account_name: str | None) -> bool:
 	"""Does this account's name read as an employee-advance ledger?
 
 	Name-based on purpose: ``root_type`` cannot tell the two apart (both are
@@ -574,9 +571,9 @@ def _is_advance_ledger(account_name: Optional[str]) -> bool:
 
 
 def _unlinked_by_account(
-	gl_by_account: Dict[str, Any],
-	linked_posted_by_account: Optional[Dict[str, Any]] = None,
-) -> Dict[str, float]:
+	gl_by_account: dict[str, Any],
+	linked_posted_by_account: dict[str, Any] | None = None,
+) -> dict[str, float]:
 	"""Money on each account this month that no app payment explains.
 
 	── Both sides of this subtraction must be in the SAME scope ──────────────
@@ -608,7 +605,7 @@ def _unlinked_by_account(
 	"""
 	linked_posted_by_account = linked_posted_by_account or {}
 	accounts = set(gl_by_account) | set(linked_posted_by_account)
-	unlinked: Dict[str, float] = {}
+	unlinked: dict[str, float] = {}
 	for account in accounts:
 		residual = flt(gl_by_account.get(account)) - flt(linked_posted_by_account.get(account))
 		unlinked[account] = residual if residual > 0 else 0.0
@@ -616,10 +613,10 @@ def _unlinked_by_account(
 
 
 def _attribute_unlinked(
-	rows: Sequence[Dict[str, Any]],
-	unlinked_by_account: Dict[str, Any],
+	rows: Sequence[dict[str, Any]],
+	unlinked_by_account: dict[str, Any],
 	tolerance: float = MONEY_TOLERANCE,
-) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, float]]:
+) -> tuple[dict[str, dict[str, Any]], dict[str, float]]:
 	"""Attach unexplained account money to an item only when it can only be that item.
 
 	``rows`` need ``name``, ``expense_account`` and ``due_this_month``.
@@ -632,8 +629,8 @@ def _attribute_unlinked(
 	  that number pays the wrong landlord.
 	* No item due → leftover as well.
 	"""
-	due_by_account: Dict[str, List[str]] = {}
-	attribution: Dict[str, Dict[str, Any]] = {}
+	due_by_account: dict[str, list[str]] = {}
+	attribution: dict[str, dict[str, Any]] = {}
 	for row in rows:
 		name = row.get("name")
 		attribution[name] = {
@@ -645,7 +642,7 @@ def _attribute_unlinked(
 		if account and row.get("due_this_month"):
 			due_by_account.setdefault(account, []).append(name)
 
-	leftovers: Dict[str, float] = {}
+	leftovers: dict[str, float] = {}
 	accounts = set(unlinked_by_account) | set(due_by_account)
 	for account in accounts:
 		unlinked = flt(unlinked_by_account.get(account))
@@ -662,7 +659,7 @@ def _attribute_unlinked(
 	return attribution, leftovers
 
 
-def _payment_row(request: Dict[str, Any]) -> Dict[str, Any]:
+def _payment_row(request: dict[str, Any]) -> dict[str, Any]:
 	return {
 		"name": request.get("name"),
 		"amount": _money(request.get("amount")),
@@ -677,7 +674,7 @@ def _payment_row(request: Dict[str, Any]) -> Dict[str, Any]:
 	}
 
 
-def _split_period_requests(requests: Sequence[Dict[str, Any]], month_key: str) -> Dict[str, Any]:
+def _split_period_requests(requests: Sequence[dict[str, Any]], month_key: str) -> dict[str, Any]:
 	"""Index submitted expense requests for one month.
 
 	Two INDEPENDENT scopes come out of this, and keeping them independent is the
@@ -704,7 +701,7 @@ def _split_period_requests(requests: Sequence[Dict[str, Any]], month_key: str) -
 	straight to a rent account is intentionally left in the unexplained pot, so
 	the single due item on that account still picks it up by inference.
 	"""
-	index: Dict[str, Any] = {
+	index: dict[str, Any] = {
 		"paid_linked_by_item": {},
 		"payments_by_item": {},
 		"paid_linked_by_employee": {},
@@ -713,7 +710,7 @@ def _split_period_requests(requests: Sequence[Dict[str, Any]], month_key: str) -
 		"salary_linked_by_account": {},
 	}
 
-	def _add(bucket: Dict[str, float], key: Optional[str], amount: float) -> None:
+	def _add(bucket: dict[str, float], key: str | None, amount: float) -> None:
 		if key:
 			bucket[key] = flt(bucket.get(key)) + amount
 
@@ -750,17 +747,17 @@ def _split_period_requests(requests: Sequence[Dict[str, Any]], month_key: str) -
 
 
 def _build_registry_rows(
-	registry_rows: Sequence[Dict[str, Any]],
+	registry_rows: Sequence[dict[str, Any]],
 	month_start: date,
 	month_end: date,
-	paid_linked_by_item: Optional[Dict[str, Any]] = None,
-	payments_by_item: Optional[Dict[str, Any]] = None,
-	gl_by_account: Optional[Dict[str, Any]] = None,
-	linked_posted_by_account: Optional[Dict[str, Any]] = None,
-	payable_accounts: Optional[Iterable[str]] = None,
-	account_labels: Optional[Dict[str, Dict[str, str]]] = None,
+	paid_linked_by_item: dict[str, Any] | None = None,
+	payments_by_item: dict[str, Any] | None = None,
+	gl_by_account: dict[str, Any] | None = None,
+	linked_posted_by_account: dict[str, Any] | None = None,
+	payable_accounts: Iterable[str] | None = None,
+	account_labels: dict[str, dict[str, str]] | None = None,
 	tolerance: float = MONEY_TOLERANCE,
-) -> Tuple[List[Dict[str, Any]], Dict[str, float]]:
+) -> tuple[list[dict[str, Any]], dict[str, float]]:
 	"""Compute the per-item money picture for one month. Pure — no DB access.
 
 	``paid_linked_by_item`` is PERIOD-scoped (what this period has been paid);
@@ -787,7 +784,7 @@ def _build_registry_rows(
 	unlinked = _unlinked_by_account(gl_by_account, linked_posted_by_account)
 	attribution, leftovers = _attribute_unlinked(prepared, unlinked, tolerance=tolerance)
 
-	rows: List[Dict[str, Any]] = []
+	rows: list[dict[str, Any]] = []
 	for entry in prepared:
 		raw = entry["raw"]
 		name = entry["name"]
@@ -849,19 +846,19 @@ def _build_registry_rows(
 
 
 def _build_payroll_rows(
-	payroll_rows: Sequence[Dict[str, Any]],
-	paid_linked_by_employee: Optional[Dict[str, Any]] = None,
-	payments_by_employee: Optional[Dict[str, Any]] = None,
-	slips_by_employee: Optional[Dict[str, Any]] = None,
-	salary_account: Optional[str] = None,
-	penalties_by_employee: Optional[Dict[str, Any]] = None,
-	advances_by_employee: Optional[Dict[str, Any]] = None,
-	orders_by_employee: Optional[Dict[str, Any]] = None,
-	settled_by_employee: Optional[Dict[str, Any]] = None,
-	off_payroll_rows: Optional[Sequence[Dict[str, Any]]] = None,
+	payroll_rows: Sequence[dict[str, Any]],
+	paid_linked_by_employee: dict[str, Any] | None = None,
+	payments_by_employee: dict[str, Any] | None = None,
+	slips_by_employee: dict[str, Any] | None = None,
+	salary_account: str | None = None,
+	penalties_by_employee: dict[str, Any] | None = None,
+	advances_by_employee: dict[str, Any] | None = None,
+	orders_by_employee: dict[str, Any] | None = None,
+	settled_by_employee: dict[str, Any] | None = None,
+	off_payroll_rows: Sequence[dict[str, Any]] | None = None,
 	days_per_month: int = DAYS_PER_MONTH,
 	tolerance: float = MONEY_TOLERANCE,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
 	"""Per-employee salary money for one month. Pure — no DB access.
 
 	Salary GL is a single account for the whole company, so it can never be split
@@ -902,7 +899,7 @@ def _build_payroll_rows(
 	prepared = [(raw, False) for raw in payroll_rows]
 	prepared += [(raw, True) for raw in (off_payroll_rows or [])]
 
-	rows: List[Dict[str, Any]] = []
+	rows: list[dict[str, Any]] = []
 	for raw, off_payroll in prepared:
 		employee = raw.get("employee")
 
@@ -997,13 +994,13 @@ def _build_payroll_rows(
 
 
 def _build_deductions(
-	payroll_rows: Sequence[Dict[str, Any]],
+	payroll_rows: Sequence[dict[str, Any]],
 	advances_readable: bool = True,
 	employee_orders_present: bool = False,
-	advances_by_employee: Optional[Dict[str, Any]] = None,
-	unattributed_orders: Optional[Sequence[Dict[str, Any]]] = None,
+	advances_by_employee: dict[str, Any] | None = None,
+	unattributed_orders: Sequence[dict[str, Any]] | None = None,
 	tolerance: float = MONEY_TOLERANCE,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	"""The month's deduction totals, rolled up from the rows. Pure.
 
 	Summed from the SAME row fields the screen renders, never recomputed from
@@ -1022,7 +1019,7 @@ def _build_deductions(
 	# Reported, never repointed: `advance_account` is on a SUBMITTED document
 	# and is the account the original payout credited, so changing it here would
 	# leave the posted GL and the document disagreeing.
-	suspect: Dict[str, Dict[str, Any]] = {}
+	suspect: dict[str, dict[str, Any]] = {}
 	for rows in advances_by_employee.values():
 		for row in rows or []:
 			account = row.get("advance_account")
@@ -1065,12 +1062,12 @@ def _build_deductions(
 
 
 def _summarize(
-	registry_rows: Sequence[Dict[str, Any]],
-	payroll_rows: Sequence[Dict[str, Any]],
+	registry_rows: Sequence[dict[str, Any]],
+	payroll_rows: Sequence[dict[str, Any]],
 	registry_run_rate: float,
 	payroll_run_rate: float,
 	tolerance: float = MONEY_TOLERANCE,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	"""Roll the rows up.
 
 	``remaining`` is the SUM of per-row remainders, never ``due - paid``:
@@ -1118,11 +1115,11 @@ def _summarize(
 
 
 def _build_categories(
-	registry_rows: Sequence[Dict[str, Any]],
-	payroll: Dict[str, Any],
+	registry_rows: Sequence[dict[str, Any]],
+	payroll: dict[str, Any],
 	tolerance: float = MONEY_TOLERANCE,
-) -> List[Dict[str, Any]]:
-	buckets: Dict[str, Dict[str, Any]] = {}
+) -> list[dict[str, Any]]:
+	buckets: dict[str, dict[str, Any]] = {}
 	for row in registry_rows:
 		due = flt(row.get("due_amount"))
 		paid = flt(row.get("paid_amount"))
@@ -1167,17 +1164,17 @@ def _build_categories(
 
 
 def _build_gaps(
-	registry_rows: Sequence[Dict[str, Any]],
+	registry_rows: Sequence[dict[str, Any]],
 	registry_present: bool,
-	leftovers: Dict[str, float],
-	payroll: Dict[str, Any],
-	deductions: Optional[Dict[str, Any]] = None,
+	leftovers: dict[str, float],
+	payroll: dict[str, Any],
+	deductions: dict[str, Any] | None = None,
 	tolerance: float = MONEY_TOLERANCE,
-) -> List[Dict[str, str]]:
+) -> list[dict[str, str]]:
 	# `deductions` is optional and trailing so the four-argument call every
 	# existing caller (and test) makes keeps working unchanged.
 	deductions = deductions or {}
-	gaps: List[Dict[str, str]] = []
+	gaps: list[dict[str, str]] = []
 
 	if not registry_present:
 		gaps.append(
@@ -1335,8 +1332,8 @@ def _build_gaps(
 # ── data loading ──────────────────────────────────────────────────────────
 
 
-def _load_registry(company: Optional[str]) -> List[Dict[str, Any]]:
-	filters: Dict[str, Any] = {}
+def _load_registry(company: str | None) -> list[dict[str, Any]]:
+	filters: dict[str, Any] = {}
 	if company:
 		filters["company"] = company
 	return frappe.get_all(
@@ -1348,9 +1345,9 @@ def _load_registry(company: Optional[str]) -> List[Dict[str, Any]]:
 	)
 
 
-def _load_period_requests(month_key: str, company: Optional[str]) -> List[Dict[str, Any]]:
+def _load_period_requests(month_key: str, company: str | None) -> list[dict[str, Any]]:
 	"""Submitted requests that either pay this period or posted in this month."""
-	filters: Dict[str, Any] = {"docstatus": 1}
+	filters: dict[str, Any] = {"docstatus": 1}
 	if company:
 		filters["company"] = company
 	return frappe.get_all(
@@ -1381,7 +1378,7 @@ def _penalty_doctype_ready() -> bool:
 		return False
 
 
-def _load_penalties(month_key: str, company: Optional[str]) -> Dict[str, List[Dict[str, Any]]]:
+def _load_penalties(month_key: str, company: str | None) -> dict[str, list[dict[str, Any]]]:
 	"""ACTIVE penalties for one salary month, keyed by employee.
 
 	MONTH-scoped, unlike advances and orders: ``period_month`` says which
@@ -1393,10 +1390,10 @@ def _load_penalties(month_key: str, company: Optional[str]) -> Dict[str, List[Di
 	"""
 	if not _penalty_doctype_ready():
 		return {}
-	filters: Dict[str, Any] = {"docstatus": 1, "period_month": month_key}
+	filters: dict[str, Any] = {"docstatus": 1, "period_month": month_key}
 	if company:
 		filters["company"] = company
-	grouped: Dict[str, List[Dict[str, Any]]] = {}
+	grouped: dict[str, list[dict[str, Any]]] = {}
 	try:
 		rows = (
 			frappe.get_all(
@@ -1420,8 +1417,8 @@ def _load_penalties(month_key: str, company: Optional[str]) -> Dict[str, List[Di
 
 
 def _load_advances(
-	company: Optional[str],
-) -> Tuple[Dict[str, List[Dict[str, Any]]], bool]:
+	company: str | None,
+) -> tuple[dict[str, list[dict[str, Any]]], bool]:
 	"""Open Employee Advance balances, ALL-TIME, keyed by employee.
 
 	Returns ``(grouped, readable)``. ``readable`` is False when HRMS is absent
@@ -1446,10 +1443,10 @@ def _load_advances(
 	if _advance_has_field(F_SALARY_MONTH):
 		fields.append(F_SALARY_MONTH)
 
-	filters: Dict[str, Any] = {"docstatus": 1}
+	filters: dict[str, Any] = {"docstatus": 1}
 	if company:
 		filters["company"] = company
-	grouped: Dict[str, List[Dict[str, Any]]] = {}
+	grouped: dict[str, list[dict[str, Any]]] = {}
 	try:
 		rows = (
 			frappe.get_all(
@@ -1472,8 +1469,8 @@ def _load_advances(
 
 
 def _advances_due_by_month(
-	advances_by_employee: Dict[str, List[Dict[str, Any]]], month_key: str
-) -> Dict[str, List[Dict[str, Any]]]:
+	advances_by_employee: dict[str, list[dict[str, Any]]], month_key: str
+) -> dict[str, list[dict[str, Any]]]:
 	"""Drop advances drawn against a salary month LATER than ``month_key``. Pure.
 
 	An advance carries the salary month it comes off (``custom_jarz_salary_month``),
@@ -1490,7 +1487,7 @@ def _advances_due_by_month(
 	month_key = str(month_key or "")[:7]
 	if not month_key:
 		return advances_by_employee
-	due: Dict[str, List[Dict[str, Any]]] = {}
+	due: dict[str, list[dict[str, Any]]] = {}
 	for employee, rows in (advances_by_employee or {}).items():
 		kept = [r for r in rows or [] if (advance_salary_month(r) or month_key) <= month_key]
 		if kept:
@@ -1511,7 +1508,7 @@ def _employee_order_field_ready() -> bool:
 		return False
 
 
-def _employee_orders_exist(company: Optional[str]) -> bool:
+def _employee_orders_exist(company: str | None) -> bool:
 	"""Has ANY order ever been rung up with the Employee purpose?
 
 	Separate from the balance query and deliberately unfiltered by outstanding:
@@ -1521,7 +1518,7 @@ def _employee_orders_exist(company: Optional[str]) -> bool:
 	"""
 	if not _employee_order_field_ready():
 		return False
-	filters: Dict[str, Any] = {
+	filters: dict[str, Any] = {
 		"docstatus": 1,
 		"custom_order_purpose": EMPLOYEE_ORDER_PURPOSE,
 	}
@@ -1535,8 +1532,8 @@ def _employee_orders_exist(company: Optional[str]) -> bool:
 
 
 def _load_employee_orders(
-	employees: Sequence[str], company: Optional[str]
-) -> Tuple[Dict[str, List[Dict[str, Any]]], List[Dict[str, Any]]]:
+	employees: Sequence[str], company: str | None
+) -> tuple[dict[str, list[dict[str, Any]]], list[dict[str, Any]]]:
 	"""Unpaid Employee-purpose invoices, ALL-TIME, keyed by employee.
 
 	The join is ``employee_link.customers_for_employees`` and the filter is
@@ -1568,15 +1565,15 @@ def _load_employee_orders(
 
 	# Unfiltered by customer on purpose: the attribution happens below, so an
 	# order for an unlinked customer is still SEEN.
-	filters: Dict[str, Any] = {
+	filters: dict[str, Any] = {
 		"docstatus": 1,
 		"custom_order_purpose": EMPLOYEE_ORDER_PURPOSE,
 		"outstanding_amount": [">", 0],
 	}
 	if company:
 		filters["company"] = company
-	grouped: Dict[str, List[Dict[str, Any]]] = {}
-	unattributed: List[Dict[str, Any]] = []
+	grouped: dict[str, list[dict[str, Any]]] = {}
+	unattributed: list[dict[str, Any]] = []
 	try:
 		rows = (
 			frappe.get_all(
@@ -1600,7 +1597,7 @@ def _load_employee_orders(
 	return grouped, unattributed
 
 
-def _load_settlements(month_key: str, company: Optional[str]) -> Dict[str, float]:
+def _load_settlements(month_key: str, company: str | None) -> dict[str, float]:
 	"""What each employee's salary month was discharged IN KIND, by employee.
 
 	A settlement is a Journal Entry, not a ``Jarz Expense Request``, so
@@ -1612,11 +1609,11 @@ def _load_settlements(month_key: str, company: Optional[str]) -> Dict[str, float
 	settlement Journal Entry in Desk immediately puts the salary back to unpaid,
 	with no second document to remember to undo.
 	"""
-	like = "%[JARZ-JE:{0}:%:{1}]%".format(SETTLEMENT_JE_TAG, month_key)
-	filters: Dict[str, Any] = {"docstatus": 1, "user_remark": ["like", like]}
+	like = f"%[JARZ-JE:{SETTLEMENT_JE_TAG}:%:{month_key}]%"
+	filters: dict[str, Any] = {"docstatus": 1, "user_remark": ["like", like]}
 	if company:
 		filters["company"] = company
-	settled: Dict[str, float] = {}
+	settled: dict[str, float] = {}
 	try:
 		rows = (
 			frappe.get_all(
@@ -1645,9 +1642,9 @@ def _load_settlements(month_key: str, company: Optional[str]) -> Dict[str, float
 
 def _off_payroll_stubs(
 	employees: Sequence[str],
-	penalties_by_employee: Optional[Dict[str, Any]] = None,
-	advances_by_employee: Optional[Dict[str, Any]] = None,
-) -> List[Dict[str, Any]]:
+	penalties_by_employee: dict[str, Any] | None = None,
+	advances_by_employee: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
 	"""Minimal payroll-row seeds for people with debt but no salary structure.
 
 	The display name is taken from a document that already names them —
@@ -1662,7 +1659,7 @@ def _off_payroll_stubs(
 	if not employees:
 		return []
 
-	names: Dict[str, str] = {}
+	names: dict[str, str] = {}
 	for source in (advances_by_employee, penalties_by_employee):
 		for employee, rows in source.items():
 			for row in rows or []:
@@ -1692,7 +1689,7 @@ def _off_payroll_stubs(
 	]
 
 
-def _empty_payroll() -> Dict[str, Any]:
+def _empty_payroll() -> dict[str, Any]:
 	"""The payroll block a site without readable HRMS gets."""
 	return {
 		"configured": False,
@@ -1705,7 +1702,7 @@ def _empty_payroll() -> Dict[str, Any]:
 	}
 
 
-def _safe_load_payroll(company: Optional[str], month_end: date) -> Tuple[Dict[str, Any], bool]:
+def _safe_load_payroll(company: str | None, month_end: date) -> tuple[dict[str, Any], bool]:
 	"""``recurring_expenses._load_payroll``, but never fatal to the screen.
 
 	``Employee`` and ``Salary Structure Assignment`` are HRMS doctypes. On a site
@@ -1741,7 +1738,7 @@ def _salary_slip_doctype_exists() -> bool:
 
 def _submitted_salary_slips(
 	employees: Sequence[str], month_start: date, month_end: date, strict: bool = False
-) -> Dict[str, Dict[str, Any]]:
+) -> dict[str, dict[str, Any]]:
 	"""Submitted Salary Slips overlapping the month, keyed by employee.
 
 	``strict=True`` (the payment path) lets a query failure propagate: if HRMS is
@@ -1769,15 +1766,13 @@ def _submitted_salary_slips(
 		if strict:
 			raise
 		return {}
-	slips: Dict[str, Dict[str, Any]] = {}
+	slips: dict[str, dict[str, Any]] = {}
 	for row in rows:
 		slips.setdefault(row["employee"], row)
 	return slips
 
 
-def _resolve_salary_account(
-	payroll_accounts: Sequence[str], payable_accounts: Iterable[str]
-) -> Optional[str]:
+def _resolve_salary_account(payroll_accounts: Sequence[str], payable_accounts: Iterable[str]) -> str | None:
 	"""Pick the ONE account a salary payment should debit.
 
 	``_payroll_expense_accounts`` can return several (one per Salary Component).
@@ -1799,7 +1794,7 @@ def _resolve_salary_account(
 	return sorted(candidates)[0]
 
 
-def _registry_categories() -> List[str]:
+def _registry_categories() -> list[str]:
 	try:
 		field = frappe.get_meta("Jarz Recurring Expense").get_field("category")
 		options = [o.strip() for o in str(getattr(field, "options", "") or "").split("\n")]
@@ -1811,8 +1806,8 @@ def _registry_categories() -> List[str]:
 	return list(DEFAULT_CATEGORIES)
 
 
-def _cost_centers(company: Optional[str]) -> List[Dict[str, Any]]:
-	filters: Dict[str, Any] = {"is_group": 0}
+def _cost_centers(company: str | None) -> list[dict[str, Any]]:
+	filters: dict[str, Any] = {"is_group": 0}
 	if company:
 		filters["company"] = company
 	try:
@@ -1829,7 +1824,7 @@ def _cost_centers(company: Optional[str]) -> List[Dict[str, Any]]:
 	return [{"name": r["name"], "label": r.get("cost_center_name") or r["name"]} for r in rows]
 
 
-def _month_context(month: Optional[str], company: Optional[str]) -> Tuple[date, date, str, str, str]:
+def _month_context(month: str | None, company: str | None) -> tuple[date, date, str, str, str]:
 	month_start, month_end, month_key = _month_bounds(month)
 	company = company or _default_company()
 	currency = (
@@ -1838,7 +1833,7 @@ def _month_context(month: Optional[str], company: Optional[str]) -> Tuple[date, 
 	return month_start, month_end, month_key, company, currency
 
 
-def _compute_month(month: Optional[str], company: Optional[str]) -> Dict[str, Any]:
+def _compute_month(month: str | None, company: str | None) -> dict[str, Any]:
 	"""Everything the screen needs for one month. Used by the read AND pay paths.
 
 	The pay endpoints recompute through here rather than re-deriving "already
@@ -2006,7 +2001,7 @@ def _compute_month(month: Optional[str], company: Optional[str]) -> Dict[str, An
 
 
 @frappe.whitelist()
-def get_monthly_expenses(month: Optional[str] = None, company: Optional[str] = None) -> Dict[str, Any]:
+def get_monthly_expenses(month: str | None = None, company: str | None = None) -> dict[str, Any]:
 	"""Everything the Monthly Expenses screen shows for one month."""
 	_ensure_manager()
 	_require_period_fields()
@@ -2078,7 +2073,7 @@ def get_monthly_expenses(month: Optional[str] = None, company: Optional[str] = N
 	}
 
 
-def _resolve_paying_account(paying_account: Optional[str], company: str) -> str:
+def _resolve_paying_account(paying_account: str | None, company: str) -> str:
 	"""The account the money leaves. Must be one the picker actually offers.
 
 	The read path builds ``payment_sources`` from ``_cashlike_accounts``; the
@@ -2125,7 +2120,7 @@ def _resolve_paying_account(paying_account: Optional[str], company: str) -> str:
 	return row["name"]
 
 
-def _lock_row(doctype: str, name: Optional[str]) -> None:
+def _lock_row(doctype: str, name: str | None) -> None:
 	"""Serialize the read → guard → write window for one payable row.
 
 	``pay_recurring_expense`` and ``pay_salary`` read the month's state, decide
@@ -2159,12 +2154,12 @@ def _create_payment(
 	amount: float,
 	reason_account: str,
 	paying_account: str,
-	payment_date: Optional[str],
-	remarks: Optional[str],
+	payment_date: str | None,
+	remarks: str | None,
 	expense_kind: str,
 	period_month: str,
-	recurring_expense: Optional[str] = None,
-	employee: Optional[str] = None,
+	recurring_expense: str | None = None,
+	employee: str | None = None,
 ):
 	"""Insert and submit the Jarz Expense Request that posts the Journal Entry.
 
@@ -2212,13 +2207,13 @@ def _create_payment(
 @frappe.whitelist()
 def pay_recurring_expense(
 	recurring_expense: str,
-	month: Optional[str] = None,
-	amount: Optional[float] = None,
-	paying_account: Optional[str] = None,
-	payment_date: Optional[str] = None,
-	remarks: Optional[str] = None,
+	month: str | None = None,
+	amount: float | None = None,
+	paying_account: str | None = None,
+	payment_date: str | None = None,
+	remarks: str | None = None,
 	allow_overpay: Any = 0,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	"""Pay a registry item for a billing period."""
 	_ensure_manager()
 	_require_period_fields()
@@ -2295,7 +2290,7 @@ def pay_recurring_expense(
 		reason_account=row["expense_account"],
 		paying_account=account,
 		payment_date=payment_date,
-		remarks=remarks or "{0} — {1}".format(label, month_key),
+		remarks=remarks or f"{label} — {month_key}",
 		expense_kind="Recurring",
 		period_month=month_key,
 		recurring_expense=name,
@@ -2311,7 +2306,7 @@ def pay_recurring_expense(
 	}
 
 
-def _parse_settlement_list(value: Any, key: str) -> List[Dict[str, Any]]:
+def _parse_settlement_list(value: Any, key: str) -> list[dict[str, Any]]:
 	"""Normalise ``settle_advances`` / ``settle_orders`` to ``[{key, amount}]``.
 
 	Three wire shapes are accepted because three callers exist: a JSON string
@@ -2336,7 +2331,7 @@ def _parse_settlement_list(value: Any, key: str) -> List[Dict[str, Any]]:
 	if not isinstance(value, (list, tuple)):
 		frappe.throw(_("{0} must be a list.").format(key))
 
-	parsed: List[Dict[str, Any]] = []
+	parsed: list[dict[str, Any]] = []
 	for entry in value:
 		if isinstance(entry, str):
 			name, requested = entry.strip(), None
@@ -2359,9 +2354,9 @@ def _parse_settlement_list(value: Any, key: str) -> List[Dict[str, Any]]:
 def _plan_advance_settlements(
 	employee: str,
 	company: str,
-	requests: Sequence[Dict[str, Any]],
-	allowed_advances: Optional[Iterable[str]] = None,
-) -> List[Dict[str, Any]]:
+	requests: Sequence[dict[str, Any]],
+	allowed_advances: Iterable[str] | None = None,
+) -> list[dict[str, Any]]:
 	"""Validate each requested advance and cap it at its OPEN balance.
 
 	Every row is locked and re-read from the database rather than trusted from
@@ -2382,7 +2377,7 @@ def _plan_advance_settlements(
 		return []
 	allowed = set(allowed_advances) if allowed_advances is not None else None
 
-	plan: List[Dict[str, Any]] = []
+	plan: list[dict[str, Any]] = []
 	seen: set = set()
 	fields = [
 		"name",
@@ -2473,8 +2468,8 @@ def _plan_advance_settlements(
 
 
 def _plan_order_settlements(
-	employee: str, company: str, requests: Sequence[Dict[str, Any]], allowed_invoices: Iterable[str]
-) -> List[Dict[str, Any]]:
+	employee: str, company: str, requests: Sequence[dict[str, Any]], allowed_invoices: Iterable[str]
+) -> list[dict[str, Any]]:
 	"""Validate each requested staff invoice and cap it at its outstanding.
 
 	``allowed_invoices`` is the set the month context already attributed to this
@@ -2487,7 +2482,7 @@ def _plan_order_settlements(
 		return []
 
 	allowed = set(allowed_invoices or [])
-	plan: List[Dict[str, Any]] = []
+	plan: list[dict[str, Any]] = []
 	seen: set = set()
 
 	for request in requests:
@@ -2553,11 +2548,11 @@ def _post_settlement_journal_entry(
 	employee: str,
 	month_key: str,
 	salary_account: str,
-	advance_plan: Sequence[Dict[str, Any]],
-	order_plan: Sequence[Dict[str, Any]],
-	posting_date: Optional[str],
-	posting_time: Optional[str],
-	remarks: Optional[str],
+	advance_plan: Sequence[dict[str, Any]],
+	order_plan: Sequence[dict[str, Any]],
+	posting_date: str | None,
+	posting_time: str | None,
+	remarks: str | None,
 ) -> str:
 	"""The ONE Journal Entry that discharges a salary in kind.
 
@@ -2593,11 +2588,11 @@ def _post_settlement_journal_entry(
 	# somebody else's idempotency guard — see the long note in
 	# `JarzExpenseRequest.on_submit`. Here it would also let one employee's
 	# remark be counted as another employee's settlement by `_load_settlements`.
-	tag = "[JARZ-JE:{0}:{1}:{2}]".format(SETTLEMENT_JE_TAG, employee, month_key)
+	tag = f"[JARZ-JE:{SETTLEMENT_JE_TAG}:{employee}:{month_key}]"
 	free_text = _strip_je_tag_lookalikes(remarks) or _("Salary settlement {0} {1}").format(
 		employee, month_key
 	)
-	je.user_remark = "{0} {1}".format(tag, free_text)
+	je.user_remark = f"{tag} {free_text}"
 
 	apply_ledger_posting_datetime(je, join_posting_datetime(je.posting_date, posting_time))
 
@@ -2658,15 +2653,15 @@ def _post_settlement_journal_entry(
 @frappe.whitelist()
 def pay_salary(
 	employee: str,
-	month: Optional[str] = None,
-	amount: Optional[float] = None,
-	paying_account: Optional[str] = None,
-	payment_date: Optional[str] = None,
-	remarks: Optional[str] = None,
+	month: str | None = None,
+	amount: float | None = None,
+	paying_account: str | None = None,
+	payment_date: str | None = None,
+	remarks: str | None = None,
 	allow_overpay: Any = 0,
 	settle_advances: Any = None,
 	settle_orders: Any = None,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	"""Pay one employee's salary for a month, collapsing the two HRMS entries.
 
 	DEBIT the salary expense account / CREDIT cash-or-bank, in one Journal Entry.
@@ -2883,15 +2878,15 @@ def pay_salary(
 @frappe.whitelist()
 def add_employee_penalty(
 	employee: str,
-	month: Optional[str] = None,
+	month: str | None = None,
 	unit: str = "Days",
 	quantity: Any = None,
 	amount: Any = None,
-	reason: Optional[str] = None,
-	penalty_date: Optional[str] = None,
-	company: Optional[str] = None,
+	reason: str | None = None,
+	penalty_date: str | None = None,
+	company: str | None = None,
 	allow_overpay: Any = 0,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	"""Record a penalty against one employee's salary month.
 
 	Posts NO Journal Entry, deliberately. Salary is expensed when it is PAID
@@ -3000,7 +2995,7 @@ def add_employee_penalty(
 
 
 @frappe.whitelist()
-def cancel_employee_penalty(name: str, reason: str) -> Dict[str, Any]:
+def cancel_employee_penalty(name: str, reason: str) -> dict[str, Any]:
 	"""Undo a penalty. Cancels the document; the salary goes back up.
 
 	Refused once the penalty is ``settled``: at that point the reduced salary
@@ -3053,7 +3048,7 @@ def cancel_employee_penalty(name: str, reason: str) -> Dict[str, Any]:
 	}
 
 
-def _validate_expense_ledger(account: str, company: Optional[str]) -> str:
+def _validate_expense_ledger(account: str, company: str | None) -> str:
 	"""The registry's expense account must be a bookable Expense ledger."""
 	account = (account or "").strip()
 	if not account:
@@ -3091,7 +3086,7 @@ _EDITABLE_REGISTRY_FIELDS = (
 
 
 @frappe.whitelist()
-def save_recurring_expense(payload: Optional[str] = None, **kwargs) -> Dict[str, Any]:
+def save_recurring_expense(payload: str | None = None, **kwargs) -> dict[str, Any]:
 	"""Create a registry item when ``name`` is absent, otherwise update it."""
 	_ensure_manager()
 	# This endpoint SAVES before it recomputes, and `_compute_month` selects the
@@ -3160,7 +3155,7 @@ def save_recurring_expense(payload: Optional[str] = None, **kwargs) -> Dict[str,
 
 
 @frappe.whitelist()
-def set_recurring_expense_status(name: str, status: str) -> Dict[str, Any]:
+def set_recurring_expense_status(name: str, status: str) -> dict[str, Any]:
 	"""Flip a registry item between Active / Paused / Ended."""
 	_ensure_manager()
 	_require_period_fields()  # reaches `_compute_month`, which needs the columns
@@ -3184,7 +3179,7 @@ def set_recurring_expense_status(name: str, status: str) -> Dict[str, Any]:
 
 
 @frappe.whitelist()
-def cancel_expense_payment(name: str, reason: str) -> Dict[str, Any]:
+def cancel_expense_payment(name: str, reason: str) -> dict[str, Any]:
 	"""Reverse a payment made from this screen.
 
 	Delegates to ``expenses.cancel_expense`` — that is the only code path that

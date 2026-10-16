@@ -50,7 +50,7 @@ def _coerce_int(value: Any, default: int = 0) -> int:
 		return default
 
 
-def _coerce_lines(lines: Any) -> List[Dict[str, Any]]:
+def _coerce_lines(lines: Any) -> list[dict[str, Any]]:
 	if isinstance(lines, str):
 		try:
 			lines = json.loads(lines)
@@ -59,7 +59,7 @@ def _coerce_lines(lines: Any) -> List[Dict[str, Any]]:
 	if not isinstance(lines, list):
 		frappe.throw(_("lines must be a list"))
 
-	out: List[Dict[str, Any]] = []
+	out: list[dict[str, Any]] = []
 	for i, item in enumerate(lines):
 		if not isinstance(item, dict):
 			frappe.throw(_("lines[{0}] must be an object").format(i))
@@ -71,12 +71,12 @@ def _coerce_lines(lines: Any) -> List[Dict[str, Any]]:
 
 
 def _build_suggestion(
-	row: Dict[str, Any],
+	row: dict[str, Any],
 	*,
-	context: Dict[str, Any],
+	context: dict[str, Any],
 	on_hand: float,
-	capacity: Optional[Dict[str, Any]],
-) -> Dict[str, Any]:
+	capacity: dict[str, Any] | None,
+) -> dict[str, Any]:
 	season_multiplier = context["season"]["multiplier"]
 	thresholds = context["thresholds"]
 
@@ -135,7 +135,7 @@ def _build_suggestion(
 	}
 
 
-def _summarize(items: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _summarize(items: list[dict[str, Any]]) -> dict[str, Any]:
 	summary = {
 		planning.STATUS_CRITICAL: 0,
 		planning.STATUS_LOW: 0,
@@ -160,12 +160,12 @@ def _summarize(items: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 @frappe.whitelist()
 def get_production_suggestions(
-	company: Optional[str] = None,
-	search: Optional[str] = None,
-	status: Optional[str] = None,
+	company: str | None = None,
+	search: str | None = None,
+	status: str | None = None,
 	include_capacity: Any = 1,
 	force_refresh: Any = 0,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	"""Rank producible items by urgency and propose a batch count for each.
 
 	``include_capacity=0`` skips the BOM explosion entirely and returns
@@ -214,7 +214,7 @@ def get_production_suggestions(
 
 	# Most urgent first.  Items that never sell sort last regardless of stock —
 	# they are the one bucket nobody should be acting on.
-	def _sort_key(item: Dict[str, Any]):
+	def _sort_key(item: dict[str, Any]):
 		cover = item["days_of_cover"]
 		return (1 if cover is None else 0, cover if cover is not None else 0.0, item["item_name"])
 
@@ -241,7 +241,7 @@ def get_production_suggestions(
 	return _apply_status_filter(payload, status)
 
 
-def _apply_status_filter(payload: Dict[str, Any], status: Optional[str]) -> Dict[str, Any]:
+def _apply_status_filter(payload: dict[str, Any], status: str | None) -> dict[str, Any]:
 	"""Filter by status on the way out so the cache stays status-agnostic."""
 	status = (status or "").strip()
 	if not status or status == "all":
@@ -253,7 +253,7 @@ def _apply_status_filter(payload: Dict[str, Any], status: Optional[str]) -> Dict
 	return filtered
 
 
-def _latest_velocity_timestamp(rows: List[Dict[str, Any]]) -> Optional[str]:
+def _latest_velocity_timestamp(rows: list[dict[str, Any]]) -> str | None:
 	"""When the velocity job last touched anything on this board.
 
 	Surfaced in the header because a board full of zeroes almost always means
@@ -266,7 +266,7 @@ def _latest_velocity_timestamp(rows: List[Dict[str, Any]]) -> Optional[str]:
 
 
 @frappe.whitelist()
-def get_basket_material_rollup(lines: Any, company: Optional[str] = None) -> Dict[str, Any]:
+def get_basket_material_rollup(lines: Any, company: str | None = None) -> dict[str, Any]:
 	"""Consolidated raw-material demand for a whole basket of production lines.
 
 	Takes the same line shape as ``submit_work_orders``.  This is what the per-
@@ -286,7 +286,7 @@ def get_basket_material_rollup(lines: Any, company: Optional[str] = None) -> Dic
 
 
 @frappe.whitelist()
-def set_item_target_days(item_code: str, target_days: Any = None) -> Dict[str, Any]:
+def set_item_target_days(item_code: str, target_days: Any = None) -> dict[str, Any]:
 	"""Override the cover target for one item.  Blank or 0 restores the default."""
 	_ensure_manager_access()
 

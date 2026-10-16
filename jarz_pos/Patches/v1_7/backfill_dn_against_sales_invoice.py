@@ -39,7 +39,7 @@ _DATE_WINDOW_DAYS = 2
 _MAX_DELIVERY_NOTES = 5000
 
 
-def _item_signature(rows: List[Dict[str, Any]]) -> Counter:
+def _item_signature(rows: list[dict[str, Any]]) -> Counter:
 	"""Multiset of (item_code, rounded qty) — order-independent identity."""
 	return Counter(
 		(str(row.get("item_code") or ""), round(float(row.get("qty") or 0), 3))
@@ -48,7 +48,7 @@ def _item_signature(rows: List[Dict[str, Any]]) -> Counter:
 	)
 
 
-def _candidate_invoices(dn: Dict[str, Any]) -> List[str]:
+def _candidate_invoices(dn: dict[str, Any]) -> list[str]:
 	"""Submitted, non-return invoices for the same customer near the DN's date."""
 	return (
 		frappe.get_all(
@@ -72,13 +72,13 @@ def _candidate_invoices(dn: Dict[str, Any]) -> List[str]:
 	)
 
 
-def _resolve_source_invoice(dn: Dict[str, Any], dn_items: List[Dict[str, Any]]) -> Optional[str]:
+def _resolve_source_invoice(dn: dict[str, Any], dn_items: list[dict[str, Any]]) -> str | None:
 	"""Return the single invoice whose items match *dn* exactly, else None."""
 	signature = _item_signature(dn_items)
 	if not signature:
 		return None
 
-	matches: List[str] = []
+	matches: list[str] = []
 	for invoice_name in _candidate_invoices(dn):
 		si_items = (
 			frappe.get_all(
@@ -98,7 +98,7 @@ def _resolve_source_invoice(dn: Dict[str, Any], dn_items: List[Dict[str, Any]]) 
 	return matches[0] if len(matches) == 1 else None
 
 
-def _si_row_for_item(invoice_name: str, item_code: str, used: set) -> Optional[str]:
+def _si_row_for_item(invoice_name: str, item_code: str, used: set) -> str | None:
 	"""Pick an unused Sales Invoice Item row name for *item_code*.
 
 	v16 rejects a Delivery Note Item that sets ``against_sales_invoice`` without
@@ -120,7 +120,7 @@ def _si_row_for_item(invoice_name: str, item_code: str, used: set) -> Optional[s
 	return None
 
 
-def execute(dry_run: bool = False) -> Dict[str, Any]:
+def execute(dry_run: bool = False) -> dict[str, Any]:
 	"""Link legacy Delivery Notes back to their source Sales Invoice."""
 	if isinstance(dry_run, str):
 		dry_run = dry_run.strip().lower() not in {"", "0", "false", "no"}
@@ -181,7 +181,7 @@ def execute(dry_run: bool = False) -> Dict[str, Any]:
 			continue
 
 		used_rows: set = set()
-		pending: List[tuple] = []
+		pending: list[tuple] = []
 		complete = True
 		for row in dn_items:
 			si_row = _si_row_for_item(invoice_name, row.get("item_code"), used_rows)

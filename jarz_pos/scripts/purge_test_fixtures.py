@@ -62,7 +62,7 @@ def _guard_environment() -> None:
 		raise RuntimeError(f"purge_test_fixtures refuses to run against production ({base_url!r}).")
 
 
-def _fixture_customers() -> List[str]:
+def _fixture_customers() -> list[str]:
 	"""Fixture customer names, from the Customer table *and* from documents.
 
 	Deliberately not just the Customer table. A run that deletes the Customer
@@ -72,7 +72,7 @@ def _fixture_customers() -> List[str]:
 	name off the documents as well makes the purge idempotent and lets it finish a
 	job it started.
 	"""
-	names: List[str] = []
+	names: list[str] = []
 	for prefix in FIXTURE_PREFIXES:
 		names += (
 			frappe.get_all(
@@ -96,7 +96,7 @@ def _fixture_customers() -> List[str]:
 	return sorted(set(names))
 
 
-def _fixture_taxonomy() -> Dict[str, List[str]]:
+def _fixture_taxonomy() -> dict[str, list[str]]:
 	"""Fixture Territory and Customer Group records, matched by name prefix.
 
 	Unlike every other candidate here these cannot be resolved from a document.
@@ -104,9 +104,9 @@ def _fixture_taxonomy() -> Dict[str, List[str]]:
 	a document-driven sweep finds nothing and reports a clean site while the rows
 	are still there. Matching the prefix directly is the only way to see them.
 	"""
-	found: Dict[str, List[str]] = {"Territory": [], "Customer Group": []}
+	found: dict[str, list[str]] = {"Territory": [], "Customer Group": []}
 	for doctype in found:
-		names: List[str] = []
+		names: list[str] = []
 		for prefix in FIXTURE_PREFIXES:
 			names += (
 				frappe.get_all(
@@ -121,7 +121,7 @@ def _fixture_taxonomy() -> Dict[str, List[str]]:
 	return found
 
 
-def _fixture_invoices(customers: List[str]) -> List[Dict[str, Any]]:
+def _fixture_invoices(customers: list[str]) -> list[dict[str, Any]]:
 	if not customers:
 		return []
 	return (
@@ -135,7 +135,7 @@ def _fixture_invoices(customers: List[str]) -> List[Dict[str, Any]]:
 	)
 
 
-def _restore_missing_customers(customers: List[str], report: Dict[str, Any]) -> None:
+def _restore_missing_customers(customers: list[str], report: dict[str, Any]) -> None:
 	"""Recreate fixture Customer rows that documents still point at.
 
 	Cancelling a submitted Sales Invoice revalidates its party, so an invoice
@@ -174,7 +174,7 @@ def _restore_missing_customers(customers: List[str], report: Dict[str, Any]) -> 
 			)
 
 
-def _cancel_and_delete(doctype: str, name: str, report: Dict[str, Any]) -> None:
+def _cancel_and_delete(doctype: str, name: str, report: dict[str, Any]) -> None:
 	"""Cancel if submitted, then delete. Failures are recorded, never raised."""
 	try:
 		if not frappe.db.exists(doctype, name):
@@ -200,7 +200,7 @@ def _cancel_and_delete(doctype: str, name: str, report: Dict[str, Any]) -> None:
 		report["failed"].append({"doctype": doctype, "name": name, "error": str(exc)[:300]})
 
 
-def _delete_if_unreferenced(doctype: str, name: str, report: Dict[str, Any]) -> None:
+def _delete_if_unreferenced(doctype: str, name: str, report: dict[str, Any]) -> None:
 	"""Delete a shared lookup record, with Frappe's link check left enabled.
 
 	Deliberately not ``force=True``. The invoices and customers above are known
@@ -232,14 +232,14 @@ def _delete_if_unreferenced(doctype: str, name: str, report: Dict[str, Any]) -> 
 		)
 
 
-def run(dry_run: bool = True) -> Dict[str, Any]:
+def run(dry_run: bool = True) -> dict[str, Any]:
 	_guard_environment()
 
 	customers = _fixture_customers()
 	invoices = _fixture_invoices(customers)
 	invoice_names = [row["name"] for row in invoices]
 
-	report: Dict[str, Any] = {
+	report: dict[str, Any] = {
 		"site": frappe.local.site,
 		"dry_run": bool(dry_run),
 		"customers": customers,
@@ -366,7 +366,7 @@ def run(dry_run: bool = True) -> Dict[str, Any]:
 	]
 	for name in plan["source_invoices"]:
 		try:
-			updates: Dict[str, Any] = {
+			updates: dict[str, Any] = {
 				"custom_was_out_for_delivery": 0,
 				"custom_return_status": None,
 			}

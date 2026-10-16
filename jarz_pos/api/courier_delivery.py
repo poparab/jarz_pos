@@ -49,7 +49,7 @@ def _ensure_courier_read_permission() -> None:
 	frappe.has_permission("Sales Invoice", ptype="read", throw=True)
 
 
-def _coerce_float(value: Any) -> Optional[float]:
+def _coerce_float(value: Any) -> float | None:
 	if value in (None, ""):
 		return None
 	try:
@@ -72,7 +72,7 @@ def _derive_request_id(action: str, invoice_id: str, *parts: Any) -> str:
 
 
 @frappe.whitelist(allow_guest=False)
-def get_delivery_failure_reasons() -> Dict[str, Any]:
+def get_delivery_failure_reasons() -> dict[str, Any]:
 	"""Active failure reasons for the courier's picker. Read-only."""
 	_ensure_courier_read_permission()
 	try:
@@ -85,7 +85,7 @@ def get_delivery_failure_reasons() -> Dict[str, Any]:
 
 
 @frappe.whitelist(allow_guest=False)
-def get_stop_outcome(invoice_id: str) -> Dict[str, Any]:
+def get_stop_outcome(invoice_id: str) -> dict[str, Any]:
 	"""Preview: the delivery outcome already recorded on one invoice.
 
 	Read-only, and deliberately cheap — the courier app polls it to reconcile an
@@ -134,7 +134,7 @@ def get_stop_outcome(invoice_id: str) -> Dict[str, Any]:
 
 
 @frappe.whitelist(allow_guest=False)
-def get_my_courier_identity() -> Dict[str, Any]:
+def get_my_courier_identity() -> dict[str, Any]:
 	"""Which courier party the caller resolves to, if any. Read-only.
 
 	``is_courier`` means "is in the delivery Employee Group", not "has an
@@ -161,11 +161,11 @@ def get_my_courier_identity() -> Dict[str, Any]:
 @frappe.whitelist(allow_guest=False)
 def mark_arrived(
 	invoice_id: str,
-	latitude: Optional[Any] = None,
-	longitude: Optional[Any] = None,
-	accuracy_m: Optional[Any] = None,
-	request_id: Optional[str] = None,
-) -> Dict[str, Any]:
+	latitude: Any | None = None,
+	longitude: Any | None = None,
+	accuracy_m: Any | None = None,
+	request_id: str | None = None,
+) -> dict[str, Any]:
 	"""Execute: stamp arrival at the customer's door."""
 	_ensure_courier_delivery_permission()
 	try:
@@ -192,14 +192,14 @@ def mark_arrived(
 @frappe.whitelist(allow_guest=False)
 def mark_delivered(
 	invoice_id: str,
-	latitude: Optional[Any] = None,
-	longitude: Optional[Any] = None,
-	accuracy_m: Optional[Any] = None,
-	collected_amount: Optional[Any] = None,
-	recipient_name: Optional[str] = None,
+	latitude: Any | None = None,
+	longitude: Any | None = None,
+	accuracy_m: Any | None = None,
+	collected_amount: Any | None = None,
+	recipient_name: str | None = None,
 	is_mocked: Any = False,
-	request_id: Optional[str] = None,
-) -> Dict[str, Any]:
+	request_id: str | None = None,
+) -> dict[str, Any]:
 	"""Execute: record a successful hand-over and move the card to Delivered.
 
 	Posts no accounting — the response carries ``posted_accounting: False`` to
@@ -232,12 +232,12 @@ def mark_delivered(
 def mark_failed(
 	invoice_id: str,
 	failure_reason: str,
-	latitude: Optional[Any] = None,
-	longitude: Optional[Any] = None,
-	accuracy_m: Optional[Any] = None,
-	notes: Optional[str] = None,
-	request_id: Optional[str] = None,
-) -> Dict[str, Any]:
+	latitude: Any | None = None,
+	longitude: Any | None = None,
+	accuracy_m: Any | None = None,
+	notes: str | None = None,
+	request_id: str | None = None,
+) -> dict[str, Any]:
 	"""Execute: record a failed attempt.
 
 	The board state is untouched by design — the order stays Out for Delivery

@@ -12,7 +12,6 @@ import types
 import unittest
 from unittest.mock import MagicMock, patch
 
-
 # ---------------------------------------------------------------------------
 # Minimal Frappe stub so the module can be imported outside bench
 # ---------------------------------------------------------------------------
@@ -44,10 +43,10 @@ else:
 		frappe_mod.ValidationError = Exception  # type: ignore
 
 
-import frappe  # noqa: E402  (after stub registration)
+import frappe
 
 # Re-import helpers fresh each test class (patch objects replace frappe.db / frappe.get_meta)
-from jarz_pos.utils.invoice_utils import (  # noqa: E402
+from jarz_pos.utils.invoice_utils import (
 	assert_pos_profile_matches_territory,
 	resolve_order_territory,
 	resolve_territory_name,

@@ -44,8 +44,9 @@ by :func:`_hrms_permission_bypass` with its reasoning written out in full.
 
 from __future__ import annotations
 
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
-from typing import Any, Dict, Iterator, List, Optional, Sequence
+from typing import Any, Dict, List, Optional
 
 import frappe
 from frappe import _
@@ -247,7 +248,7 @@ def _advance_has_field(fieldname: str) -> bool:
 		return False
 
 
-def _present_jarz_fields() -> List[str]:
+def _present_jarz_fields() -> list[str]:
 	return [f for f in JARZ_FIELDS if _advance_has_field(f)]
 
 
@@ -308,7 +309,7 @@ def _company_currency(company: str) -> str:
 		return ""
 
 
-def _employee_meta(employees: Sequence[str]) -> Dict[str, Dict[str, str]]:
+def _employee_meta(employees: Sequence[str]) -> dict[str, dict[str, str]]:
 	"""``employee -> {employee_name, branch, department}`` for rows we already have.
 
 	Complements ``employee_link.employee_display_names`` rather than duplicating
@@ -342,7 +343,7 @@ def _employee_meta(employees: Sequence[str]) -> Dict[str, Dict[str, str]]:
 	}
 
 
-def _user_full_names(users: Sequence[str]) -> Dict[str, str]:
+def _user_full_names(users: Sequence[str]) -> dict[str, str]:
 	wanted = sorted({str(u or "").strip() for u in users if str(u or "").strip()})
 	if not wanted:
 		return {}
@@ -361,7 +362,7 @@ def _user_full_names(users: Sequence[str]) -> Dict[str, str]:
 	return {r["name"]: str(r.get("full_name") or r["name"]) for r in rows}
 
 
-def _status_for(row: Dict[str, Any]) -> str:
+def _status_for(row: dict[str, Any]) -> str:
 	"""``status`` as HRMS derived it, with a docstatus fallback.
 
 	Never computed and never written by this app: ``status`` is read-only and
@@ -375,11 +376,11 @@ def _status_for(row: Dict[str, Any]) -> str:
 
 
 def _serialize_advance(
-	row: Dict[str, Any],
-	account_labels: Optional[Dict[str, Dict[str, str]]] = None,
-	employee_meta: Optional[Dict[str, Dict[str, str]]] = None,
-	user_names: Optional[Dict[str, str]] = None,
-) -> Dict[str, Any]:
+	row: dict[str, Any],
+	account_labels: dict[str, dict[str, str]] | None = None,
+	employee_meta: dict[str, dict[str, str]] | None = None,
+	user_names: dict[str, str] | None = None,
+) -> dict[str, Any]:
 	"""The single wire shape for an advance. Every endpoint returns exactly this.
 
 	``amount`` maps from ``advance_amount`` — the client never sees an HRMS
@@ -440,7 +441,7 @@ def _serialize_advance(
 	}
 
 
-def _serialize_advances(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _serialize_advances(rows: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
 	"""Bulk wrapper: builds the three lookup maps once, then delegates per row.
 
 	Same split as ``api/expenses.py::_serialize_expenses`` — the per-row helper
@@ -451,7 +452,7 @@ def _serialize_advances(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
 	if not rows:
 		return []
 
-	fallback_labels: Dict[str, str] = {}
+	fallback_labels: dict[str, str] = {}
 	for row in rows:
 		account = _fallback_label(row.get(F_PAYING_ACCOUNT))
 		if account and account not in fallback_labels:
@@ -474,7 +475,7 @@ def _serialize_advances(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
 	]
 
 
-def _serialize_one(row: Dict[str, Any]) -> Dict[str, Any]:
+def _serialize_one(row: dict[str, Any]) -> dict[str, Any]:
 	"""Serialise a single advance, building its (tiny) lookup maps on the fly."""
 	return _serialize_advances([row])[0]
 
@@ -482,7 +483,7 @@ def _serialize_one(row: Dict[str, Any]) -> Dict[str, Any]:
 # ── Reads ────────────────────────────────────────────────────────────────────
 
 
-def _collect_advances(filters: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _collect_advances(filters: dict[str, Any]) -> list[dict[str, Any]]:
 	fields = list(BASE_ADVANCE_FIELDS) + _present_jarz_fields()
 	try:
 		return (
@@ -500,7 +501,7 @@ def _collect_advances(filters: Dict[str, Any]) -> List[Dict[str, Any]]:
 		return []
 
 
-def _load_months() -> List[str]:
+def _load_months() -> list[str]:
 	"""Distinct ``YYYY-MM`` buckets that have at least one advance.
 
 	NOTE: no SQL function in the SELECT (no ``DATE_FORMAT``, no ``DISTINCT`` on
@@ -509,7 +510,7 @@ def _load_months() -> List[str]:
 	error. The posting_date column is pulled and bucketed in Python, exactly as
 	``api/price_lists.py::_pricing_categories`` counts in Python.
 	"""
-	months: List[str] = []
+	months: list[str] = []
 	seen = set()
 	try:
 		rows = (
@@ -540,7 +541,7 @@ def _load_months() -> List[str]:
 	return months
 
 
-def _month_bounds(month_key: str) -> Optional[tuple]:
+def _month_bounds(month_key: str) -> tuple | None:
 	"""``("YYYY-MM-01", "YYYY-MM-<last>")`` for a month key, or ``None``.
 
 	``None`` for anything unparseable so a malformed ``month`` filter widens the
@@ -556,7 +557,7 @@ def _month_bounds(month_key: str) -> Optional[tuple]:
 		return None
 
 
-def _salary_month_options() -> List[str]:
+def _salary_month_options() -> list[str]:
 	return salary_month_options(today(), SALARY_MONTH_LOOKBACK)
 
 
@@ -594,7 +595,7 @@ def _resolve_salary_month(raw: Any, posting_date: Any = None) -> str:
 	return month
 
 
-def _payment_sources(company: str, can_approve: bool) -> List[Dict[str, Any]]:
+def _payment_sources(company: str, can_approve: bool) -> list[dict[str, Any]]:
 	"""The branch/cash accounts this user may name as the source of the cash.
 
 	Mirrors ``api/expenses.py::get_expense_bootstrap``: branch (POS Profile)
@@ -609,7 +610,7 @@ def _payment_sources(company: str, can_approve: bool) -> List[Dict[str, Any]]:
 	usable; the approval step, not this picker, is where the money is actually
 	controlled.
 	"""
-	sources: List[PaymentSource] = []
+	sources: list[PaymentSource] = []
 
 	if can_approve:
 		profiles: Sequence[str] = _manager_pos_profiles(company)
@@ -627,7 +628,7 @@ def _payment_sources(company: str, can_approve: bool) -> List[Dict[str, Any]]:
 
 
 @frappe.whitelist(allow_guest=False)
-def get_employee_advance_bootstrap(filters: Optional[str] = None) -> Dict[str, Any]:
+def get_employee_advance_bootstrap(filters: str | None = None) -> dict[str, Any]:
 	"""Everything the Advances screen needs in one round trip.
 
 	``filters`` is a JSON string or a dict with optional ``month`` (``YYYY-MM``),
@@ -691,7 +692,7 @@ def get_employee_advance_bootstrap(filters: Optional[str] = None) -> Dict[str, A
 	# Cancelled advances are excluded by default, the same way the Expenses
 	# bootstrap does: a rejection deletes the draft, so a docstatus-2 row here is
 	# an unusual, after-the-fact cancellation rather than routine traffic.
-	advance_filters: Dict[str, Any] = {"docstatus": ["in", [0, 1]]}
+	advance_filters: dict[str, Any] = {"docstatus": ["in", [0, 1]]}
 	month_bounds = _month_bounds(month_to_use)
 	if month_bounds:
 		# A real date range, not a LIKE on a Date column: LIKE forces MariaDB to
@@ -726,7 +727,7 @@ def get_employee_advance_bootstrap(filters: Optional[str] = None) -> Dict[str, A
 	# about exactly this: an unset Employee.branch is common here, and filtering
 	# on it then returns nothing, which the screen renders as "no employees
 	# exist" rather than "your filter matched nothing".
-	employee_branch: Optional[str] = None
+	employee_branch: str | None = None
 	if branch_filter:
 		try:
 			if frappe.db.exists("Employee", {"branch": branch_filter, "status": "Active"}):
@@ -770,7 +771,7 @@ def get_employee_advance_bootstrap(filters: Optional[str] = None) -> Dict[str, A
 # ── Validation helpers for the write paths ───────────────────────────────────
 
 
-def _validate_employee(employee: str) -> Dict[str, Any]:
+def _validate_employee(employee: str) -> dict[str, Any]:
 	"""The employee must exist and still be Active.
 
 	Same rule as ``employee_link.resolve_employee_for_user`` and
@@ -796,7 +797,7 @@ def _validate_employee(employee: str) -> Dict[str, Any]:
 	return row
 
 
-def _validate_paying_account(company: str, account: str) -> Dict[str, Any]:
+def _validate_paying_account(company: str, account: str) -> dict[str, Any]:
 	"""The source of the cash must be a real, non-group, cash-like company ledger.
 
 	The cash-like test mirrors ``api/expenses.py::_cashlike_accounts`` — Cash and
@@ -1051,7 +1052,7 @@ def _resolve_advance_account(company: str, current: str = "", currency: str = ""
 	return account
 
 
-def _linked_payment_entries(advance_name: str) -> List[str]:
+def _linked_payment_entries(advance_name: str) -> list[str]:
 	"""Submitted Payment Entries that reference this advance.
 
 	Read off ``Payment Entry Reference`` rather than off
@@ -1108,7 +1109,7 @@ def _mode_of_payment_for_account(company: str, account: str) -> str:
 
 
 @frappe.whitelist(allow_guest=False)
-def create_employee_advance_request(payload: Optional[str] = None, **kwargs) -> Dict[str, Any]:
+def create_employee_advance_request(payload: str | None = None, **kwargs) -> dict[str, Any]:
 	"""File a cash-advance request for an employee. Creates a DRAFT; pays nothing.
 
 	Accepts either a JSON ``payload`` string or flat keyword arguments, exactly
@@ -1155,7 +1156,7 @@ def create_employee_advance_request(payload: Optional[str] = None, **kwargs) -> 
 	#   * a chain of single guards reports whichever happens to be FIRST, so a
 	#     request missing only its purpose can be answered with an error about
 	#     the amount. Each field now names itself, whatever else is also empty.
-	missing: List[str] = []
+	missing: list[str] = []
 	if not employee:
 		missing.append(_("Employee"))
 	if raw_amount is None or str(raw_amount).strip() == "":
@@ -1376,7 +1377,7 @@ def _build_and_submit_payment_entry(advance: Any, paying_account: str) -> Any:
 
 
 @frappe.whitelist(allow_guest=False)
-def approve_employee_advance(name: str) -> Dict[str, Any]:
+def approve_employee_advance(name: str) -> dict[str, Any]:
 	"""Approve a draft advance, submit it, and pay it out in the same request.
 
 	"Approved" and "paid" are one step on purpose. The manager approves with the
@@ -1460,7 +1461,7 @@ def approve_employee_advance(name: str) -> Dict[str, Any]:
 
 
 @frappe.whitelist(allow_guest=False)
-def reject_employee_advance(name: str, reason: str) -> Dict[str, Any]:
+def reject_employee_advance(name: str, reason: str) -> dict[str, Any]:
 	"""Turn down a request, recording why.
 
 	A rejected draft is deleted rather than parked in a "Rejected" state:
@@ -1493,7 +1494,7 @@ def reject_employee_advance(name: str, reason: str) -> Dict[str, Any]:
 	if docstatus == 2:
 		frappe.throw(_("Advance {0} is already cancelled.").format(name))
 
-	stamp = "[REJECTED by {0} on {1}] {2}".format(frappe.session.user, now_datetime(), reason)
+	stamp = f"[REJECTED by {frappe.session.user} on {now_datetime()}] {reason}"
 
 	if docstatus == 0:
 		try:

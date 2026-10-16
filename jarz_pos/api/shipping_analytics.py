@@ -11,11 +11,10 @@ from __future__ import annotations
 
 import frappe
 from frappe import _
-from frappe.utils import nowdate, get_first_day, get_last_day, getdate, date_diff
+from frappe.utils import date_diff, get_first_day, get_last_day, getdate, nowdate
 
 from jarz_pos.constants import ROLES
 from jarz_pos.utils.invoice_utils import get_area_label, get_woo_order_ids
-
 
 # What the customer was actually billed for delivery on invoice ``si``: its
 # ``Shipping Income (...)`` tax row. No row means the order billed nothing.

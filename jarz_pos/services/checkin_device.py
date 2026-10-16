@@ -106,7 +106,7 @@ def _safe_log(title: str) -> None:
 		pass
 
 
-def stamp_device(doc, method: Optional[str] = None) -> None:
+def stamp_device(doc, method: str | None = None) -> None:
 	"""``Employee Checkin.before_insert`` hook. Never raises."""
 	try:
 		_stamp(doc)
@@ -121,9 +121,9 @@ def _request():
 def classify(
 	*,
 	token: str,
-	registered: Optional[str],
-	others_today: List[Dict[str, Any]],
-) -> Optional[str]:
+	registered: str | None,
+	others_today: list[dict[str, Any]],
+) -> str | None:
 	"""Pure decision: which flag (if any) this check-in earns."""
 	if others_today:
 		return FLAG_SHARED
@@ -132,7 +132,7 @@ def classify(
 	return None
 
 
-def _read_or_issue_token(request) -> Optional[str]:
+def _read_or_issue_token(request) -> str | None:
 	"""The browser's token, minting (and re-setting, to slide expiry) as needed.
 
 	``None`` only when there is no way to remember a device on this request.
@@ -161,7 +161,7 @@ def _read_or_issue_token(request) -> Optional[str]:
 	return token
 
 
-def _others_same_day(employee: str, token: str, when: Any) -> List[Dict[str, Any]]:
+def _others_same_day(employee: str, token: str, when: Any) -> list[dict[str, Any]]:
 	day = getdate(when)
 	rows = frappe.get_all(
 		"Employee Checkin",
@@ -177,7 +177,7 @@ def _others_same_day(employee: str, token: str, when: Any) -> List[Dict[str, Any
 	return rows or []
 
 
-def _detail_for_shared(others: List[Dict[str, Any]]) -> str:
+def _detail_for_shared(others: list[dict[str, Any]]) -> str:
 	today = getdate()
 	parts = []
 	seen = set()

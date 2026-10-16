@@ -37,7 +37,8 @@ already shipped somewhere else:
 from __future__ import annotations
 
 import math
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
+from collections.abc import Callable, Mapping, Sequence
+from typing import Any, Dict, List, Optional, Tuple
 
 #: Below this, a quantity is float noise rather than a jar.  Same value the
 #: production planner uses so the two agree at the boundary.
@@ -138,7 +139,7 @@ def sells_per_day(*, qty_sold: Any, sales_days: Any) -> float:
 	return round(max(0.0, to_float(qty_sold, 0.0)) / days, RATE_PRECISION)
 
 
-def days_of_cover(*, on_hand: Any, rate: Any) -> Optional[float]:
+def days_of_cover(*, on_hand: Any, rate: Any) -> float | None:
 	"""Days this branch's shelf covers at its own selling rate.
 
 	``None`` — not a sentinel — when the branch never sells the item.  The
@@ -184,7 +185,7 @@ def suggested_qty(*, rate: Any, cover_days: Any, on_hand: Any) -> int:
 def allocate_proportionally(
 	demands: Mapping[str, Any],
 	available: Any,
-) -> Dict[str, int]:
+) -> dict[str, int]:
 	"""Split a short supply across branches in proportion to what each needs.
 
 	``demands`` is ``{warehouse: suggested_qty}``; the return is
@@ -207,7 +208,7 @@ def allocate_proportionally(
 	(ties broken by the bigger demand, then by warehouse name so two calls on
 	the same data agree).  No branch is ever allocated more than it asked for.
 	"""
-	wanted: Dict[str, int] = {
+	wanted: dict[str, int] = {
 		str(key): max(0, int(math.floor(to_float(value, 0.0) + QTY_EPSILON)))
 		for key, value in (demands or {}).items()
 	}
@@ -283,9 +284,9 @@ def select_selling_warehouses(
 	rows: Sequence[Mapping[str, Any]],
 	*,
 	source_warehouse: Any,
-	also_excluded: Optional[Callable[[Any, Any], bool]] = None,
-	branch_labels: Optional[Mapping[str, str]] = None,
-) -> List[Dict[str, Any]]:
+	also_excluded: Callable[[Any, Any], bool] | None = None,
+	branch_labels: Mapping[str, str] | None = None,
+) -> list[dict[str, Any]]:
 	"""Turn raw ``Warehouse`` rows into the branches this plan ships to.
 
 	``rows`` are ``{name, warehouse_type, is_group, disabled}``.  The factory
@@ -305,7 +306,7 @@ def select_selling_warehouses(
 	source = str(source_warehouse or "").strip()
 	labels = {str(k): str(v) for k, v in (branch_labels or {}).items()}
 
-	out: List[Dict[str, Any]] = []
+	out: list[dict[str, Any]] = []
 	for row in rows or []:
 		name = str(row.get("name") or row.get("warehouse") or "").strip()
 		if not name or name == source:
@@ -360,7 +361,7 @@ def build_branch_item_row(
 	qty_sold: Any,
 	sales_days: int,
 	cover_days: int,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	"""One jar, at one branch: what is there, what sells, what to send.
 
 	``send_now`` / ``short_by`` / ``available_at_source`` are filled in later by
@@ -403,7 +404,7 @@ def is_worth_showing(row: Mapping[str, Any]) -> bool:
 
 
 def apply_allocation(
-	rows_by_warehouse: Mapping[str, Mapping[str, Dict[str, Any]]],
+	rows_by_warehouse: Mapping[str, Mapping[str, dict[str, Any]]],
 	source_available: Mapping[str, Any],
 ) -> None:
 	"""Fill ``available_at_source`` / ``send_now`` / ``short_by``, in place.
@@ -433,7 +434,7 @@ def apply_allocation(
 			row["short_by"] = max(0, int(row["suggested_qty"]) - send_now)
 
 
-def summarise(rows: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+def summarise(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
 	"""The four numbers a branch card shows above its item list."""
 	return {
 		"items_below_cover": sum(1 for row in rows if int(row.get("suggested_qty") or 0) > 0),
@@ -446,17 +447,17 @@ def summarise(rows: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
 def build_plan(
 	*,
 	generated_on: str,
-	company: Optional[str],
-	source_warehouse: Optional[str],
+	company: str | None,
+	source_warehouse: str | None,
 	cover_days: int,
 	sales_days: int,
 	items: Sequence[Mapping[str, Any]],
 	branches: Sequence[Mapping[str, Any]],
 	source_available: Mapping[str, Any],
-	on_hand: Mapping[Tuple[str, str], Any],
-	sold: Mapping[Tuple[str, str], Any],
-	notice: Optional[str] = None,
-) -> Dict[str, Any]:
+	on_hand: Mapping[tuple[str, str], Any],
+	sold: Mapping[tuple[str, str], Any],
+	notice: str | None = None,
+) -> dict[str, Any]:
 	"""The whole endpoint payload, from plain data.  No database, no frappe.
 
 	``on_hand`` and ``sold`` are keyed ``(warehouse, item_code)`` — the two
@@ -469,7 +470,7 @@ def build_plan(
 	"""
 	catalogue = [item for item in (items or []) if str(item.get("item_code") or "").strip()]
 
-	rows_by_warehouse: Dict[str, Dict[str, Dict[str, Any]]] = {}
+	rows_by_warehouse: dict[str, dict[str, dict[str, Any]]] = {}
 	for branch in branches or []:
 		warehouse = str(branch.get("warehouse") or "").strip()
 		if not warehouse:
@@ -487,7 +488,7 @@ def build_plan(
 
 	apply_allocation(rows_by_warehouse, source_available or {})
 
-	branch_payloads: List[Dict[str, Any]] = []
+	branch_payloads: list[dict[str, Any]] = []
 	for branch in branches or []:
 		warehouse = str(branch.get("warehouse") or "").strip()
 		if not warehouse:

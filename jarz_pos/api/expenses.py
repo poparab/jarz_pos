@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import frappe
 from frappe import _
@@ -20,18 +21,18 @@ class PaymentSource:
 	label: str
 	category: str
 	balance: float
-	pos_profile: Optional[str] = None
-	label_en: Optional[str] = None
-	label_ar: Optional[str] = None
+	pos_profile: str | None = None
+	label_en: str | None = None
+	label_ar: str | None = None
 
 
-def _current_user_pos_profile_names() -> List[str]:
+def _current_user_pos_profile_names() -> list[str]:
 	try:
 		raw_profiles = get_pos_profiles() or []
 	except Exception:
 		return []
 
-	profiles: List[str] = []
+	profiles: list[str] = []
 	seen = set()
 	for profile in raw_profiles:
 		if isinstance(profile, dict):
@@ -64,7 +65,7 @@ def _default_company() -> str:
 	return ""
 
 
-def _resolve_named_account(company: str, label: str) -> Optional[str]:
+def _resolve_named_account(company: str, label: str) -> str | None:
 	cleaned = (label or "").strip()
 	if not cleaned:
 		return None
@@ -99,7 +100,7 @@ def _resolve_named_account(company: str, label: str) -> Optional[str]:
 	return None
 
 
-def _account_label_columns() -> Tuple[bool, bool]:
+def _account_label_columns() -> tuple[bool, bool]:
 	cached = getattr(frappe.flags, "jarz_pos_account_label_columns", None)
 	if cached is not None:
 		return cached
@@ -120,7 +121,7 @@ def _account_label_columns() -> Tuple[bool, bool]:
 	return cached
 
 
-def _account_label_fields() -> List[str]:
+def _account_label_fields() -> list[str]:
 	fields = ["name", "account_name"]
 	has_en, has_ar = _account_label_columns()
 	if has_en:
@@ -137,9 +138,9 @@ def _fallback_label(value: Any, fallback: str = "") -> str:
 
 def _account_label_map(
 	accounts: Sequence[str],
-	fallback_labels: Optional[Dict[str, str]] = None,
-) -> Dict[str, Dict[str, str]]:
-	unique_accounts: List[str] = []
+	fallback_labels: dict[str, str] | None = None,
+) -> dict[str, dict[str, str]]:
+	unique_accounts: list[str] = []
 	seen: set[str] = set()
 	for account in accounts:
 		cleaned = _fallback_label(account)
@@ -158,7 +159,7 @@ def _account_label_map(
 		limit_page_length=len(unique_accounts),
 	)
 	rows_by_name = {row["name"]: row for row in rows}
-	labels: Dict[str, Dict[str, str]] = {}
+	labels: dict[str, dict[str, str]] = {}
 	fallback_labels = fallback_labels or {}
 
 	for account in unique_accounts:
@@ -176,10 +177,10 @@ def _account_label_map(
 
 
 def _bilingual_label_from_account(
-	account: Optional[str],
-	fallback_label: Optional[str],
-	account_labels: Optional[Dict[str, Dict[str, str]]] = None,
-) -> Dict[str, str]:
+	account: str | None,
+	fallback_label: str | None,
+	account_labels: dict[str, dict[str, str]] | None = None,
+) -> dict[str, str]:
 	label = _fallback_label(fallback_label)
 	account_name = _fallback_label(account)
 	if account_labels and account_name:
@@ -192,7 +193,7 @@ def _bilingual_label_from_account(
 	return {"label_en": label, "label_ar": label}
 
 
-def _balance_on(account: str, company: Optional[str] = None) -> float:
+def _balance_on(account: str, company: str | None = None) -> float:
 	from erpnext.accounts.utils import get_balance_on
 
 	try:
@@ -201,7 +202,7 @@ def _balance_on(account: str, company: Optional[str] = None) -> float:
 		return 0.0
 
 
-def _indirect_expense_accounts(company: str) -> List[Dict[str, Any]]:
+def _indirect_expense_accounts(company: str) -> list[dict[str, Any]]:
 	parents = frappe.get_all(
 		"Account",
 		filters={"company": company, "is_group": 1},
@@ -214,10 +215,10 @@ def _indirect_expense_accounts(company: str) -> List[Dict[str, Any]]:
 	)
 	if not parents:
 		return []
-	bounds: List[Tuple[int, int]] = [(p["lft"], p["rgt"]) for p in parents if p.get("lft") and p.get("rgt")]
+	bounds: list[tuple[int, int]] = [(p["lft"], p["rgt"]) for p in parents if p.get("lft") and p.get("rgt")]
 	if not bounds:
 		return []
-	clauses = ["(lft > {0} and rgt < {1})".format(lft, rgt) for lft, rgt in bounds]
+	clauses = [f"(lft > {lft} and rgt < {rgt})" for lft, rgt in bounds]
 	condition = " or ".join(clauses)
 	from jarz_pos.utils.cleanup import ACCOUNT_REQUIRES_PERIOD_FIELD
 
@@ -248,8 +249,8 @@ def _indirect_expense_accounts(company: str) -> List[Dict[str, Any]]:
 	]
 
 
-def _manager_pos_profiles(company: str) -> List[str]:
-	filters: Dict[str, Any] = {"company": company}
+def _manager_pos_profiles(company: str) -> list[str]:
+	filters: dict[str, Any] = {"company": company}
 	try:
 		if frappe.db.has_column("POS Profile", "disabled"):
 			filters["disabled"] = 0
@@ -259,8 +260,8 @@ def _manager_pos_profiles(company: str) -> List[str]:
 	return [row["name"] for row in rows]
 
 
-def _pos_profile_accounts(company: str, profiles: Sequence[str]) -> List[PaymentSource]:
-	result: List[PaymentSource] = []
+def _pos_profile_accounts(company: str, profiles: Sequence[str]) -> list[PaymentSource]:
+	result: list[PaymentSource] = []
 	seen: set[str] = set()
 	for profile in profiles:
 		account = _resolve_named_account(company, profile)
@@ -285,7 +286,7 @@ def _pos_profile_accounts(company: str, profiles: Sequence[str]) -> List[Payment
 	return result
 
 
-def _custody_account_map(company: Optional[str] = None) -> Dict[str, str]:
+def _custody_account_map(company: str | None = None) -> dict[str, str]:
 	"""``{account: holder}`` for display tagging only — never an access decision.
 
 	Swallows failures (e.g. a site not migrated yet, or a harness without a
@@ -306,10 +307,8 @@ def _own_custody_holder():
 		return None
 
 
-def _cashlike_accounts(
-	company: str, excluded_accounts: Optional[Iterable[str]] = None
-) -> List[PaymentSource]:
-	accounts: List[PaymentSource] = []
+def _cashlike_accounts(company: str, excluded_accounts: Iterable[str] | None = None) -> list[PaymentSource]:
+	accounts: list[PaymentSource] = []
 	excluded = {str(account).strip() for account in (excluded_accounts or []) if str(account).strip()}
 	custody = _custody_account_map(company)
 	rows = frappe.get_all(
@@ -370,8 +369,8 @@ def _cashlike_accounts(
 	return accounts
 
 
-def _serialize_payment_sources(sources: Sequence[PaymentSource]) -> List[Dict[str, Any]]:
-	serialised: List[Dict[str, Any]] = []
+def _serialize_payment_sources(sources: Sequence[PaymentSource]) -> list[dict[str, Any]]:
+	serialised: list[dict[str, Any]] = []
 	for src in sources:
 		serialised.append(
 			{
@@ -397,7 +396,7 @@ def _month_label(month_key: str) -> str:
 	return formatdate(date_obj, "MMMM yyyy")
 
 
-def _load_months() -> List[str]:
+def _load_months() -> list[str]:
 	rows = frappe.db.sql(
 		"SELECT DISTINCT expense_month AS month FROM `tabJarz Expense Request` ORDER BY expense_month DESC",
 		as_dict=True,
@@ -410,9 +409,9 @@ def _load_months() -> List[str]:
 
 
 def _serialize_expense(
-	doc: Dict[str, Any],
-	account_labels: Optional[Dict[str, Dict[str, str]]] = None,
-) -> Dict[str, Any]:
+	doc: dict[str, Any],
+	account_labels: dict[str, dict[str, str]] | None = None,
+) -> dict[str, Any]:
 	is_rejected = bool(doc.get("rejection_reason") or doc.get("rejected_on"))
 	# A rejected request never leaves docstatus 0 (see the doctype controller),
 	# so the docstatus alone cannot tell "refused" from "still waiting".
@@ -430,7 +429,7 @@ def _serialize_expense(
 	payment_label = doc.get("payment_source_label") or doc.get("paying_account")
 
 	if account_labels is None:
-		fallback_labels: Dict[str, str] = {}
+		fallback_labels: dict[str, str] = {}
 		reason_account = _fallback_label(doc.get("reason_account"))
 		payment_account = _fallback_label(doc.get("paying_account"))
 		if reason_account:
@@ -442,7 +441,7 @@ def _serialize_expense(
 	reason_labels = _bilingual_label_from_account(doc.get("reason_account"), reason_label, account_labels)
 	payment_labels = _bilingual_label_from_account(doc.get("paying_account"), payment_label, account_labels)
 
-	timeline: List[Dict[str, Any]] = []
+	timeline: list[dict[str, Any]] = []
 	timeline.append(
 		{
 			"label": "Created",
@@ -518,8 +517,8 @@ def _serialize_expense(
 	return payload
 
 
-def _serialize_expenses(expenses: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
-	fallback_labels: Dict[str, str] = {}
+def _serialize_expenses(expenses: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+	fallback_labels: dict[str, str] = {}
 	for expense in expenses:
 		reason_account = _fallback_label(expense.get("reason_account"))
 		if reason_account and reason_account not in fallback_labels:
@@ -535,14 +534,14 @@ def _serialize_expenses(expenses: Sequence[Dict[str, Any]]) -> List[Dict[str, An
 	return [_serialize_expense(expense, account_labels=account_labels) for expense in expenses]
 
 
-def _period_fields() -> List[str]:
+def _period_fields() -> list[str]:
 	# Only once the DocType has synced; a site mid-migrate still lists expenses.
 	if frappe.db.has_column("Jarz Expense Request", "period_from"):
 		return ["period_from", "period_to", "period_journal_entries"]
 	return []
 
 
-def _collect_expenses(filters: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _collect_expenses(filters: dict[str, Any]) -> list[dict[str, Any]]:
 	rows = frappe.get_all(
 		"Jarz Expense Request",
 		filters=filters,
@@ -579,7 +578,7 @@ def _collect_expenses(filters: Dict[str, Any]) -> List[Dict[str, Any]]:
 	return rows
 
 
-def _parse_filters(filters: Optional[str | Dict[str, Any]]) -> Dict[str, Any]:
+def _parse_filters(filters: str | dict[str, Any] | None) -> dict[str, Any]:
 	if isinstance(filters, str):
 		try:
 			filters = json.loads(filters)
@@ -591,7 +590,7 @@ def _parse_filters(filters: Optional[str | Dict[str, Any]]) -> Dict[str, Any]:
 	return filters
 
 
-def _normalize_payment_filter(payment_ids: Optional[Iterable[str]]) -> List[str]:
+def _normalize_payment_filter(payment_ids: Iterable[str] | None) -> list[str]:
 	if not payment_ids:
 		return []
 	accounts = [pid for pid in payment_ids if pid]
@@ -599,7 +598,7 @@ def _normalize_payment_filter(payment_ids: Optional[Iterable[str]]) -> List[str]
 
 
 @frappe.whitelist(allow_guest=False)
-def get_expense_bootstrap(filters: Optional[str] = None):
+def get_expense_bootstrap(filters: str | None = None):
 	filter_payload = _parse_filters(filters)
 	requested_month = filter_payload.get("month")
 	payment_ids = filter_payload.get("payment_ids")
@@ -620,7 +619,7 @@ def get_expense_bootstrap(filters: Optional[str] = None):
 	else:
 		user_profiles = _current_user_pos_profile_names()
 
-	payment_sources: List[PaymentSource] = []
+	payment_sources: list[PaymentSource] = []
 	source_profiles: Sequence[str] = manager_profiles if is_manager and manager_profiles else user_profiles
 	if source_profiles:
 		payment_sources.extend(_pos_profile_accounts(company, source_profiles))
@@ -656,7 +655,7 @@ def get_expense_bootstrap(filters: Optional[str] = None):
 	if month_to_use not in months:
 		months.insert(0, month_to_use)
 
-	frappe_filters: Dict[str, Any] = {"docstatus": ["in", [0, 1]]}
+	frappe_filters: dict[str, Any] = {"docstatus": ["in", [0, 1]]}
 	if month_to_use:
 		frappe_filters["expense_month"] = month_to_use
 	if payment_ids:
@@ -691,7 +690,7 @@ def get_expense_bootstrap(filters: Optional[str] = None):
 
 
 @frappe.whitelist(allow_guest=False)
-def create_expense(payload: Optional[str] = None, **kwargs):
+def create_expense(payload: str | None = None, **kwargs):
 	data = _parse_filters(payload)
 	data.update(kwargs)
 
@@ -724,11 +723,11 @@ def create_expense(payload: Optional[str] = None, **kwargs):
 	payment_type = None
 	payment_label = None
 	pos_profile = None
-	paying_account: Optional[str] = None
+	paying_account: str | None = None
 
 	# The holder whose custody is being spent, if any. Resolved through the
 	# fail-CLOSED service calls, because it decides where money comes from.
-	custody_holder: Optional[str] = None
+	custody_holder: str | None = None
 
 	if is_manager:
 		paying_account = data.get("paying_account") or data.get("payment_account")

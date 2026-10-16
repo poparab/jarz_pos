@@ -82,5 +82,5 @@ def execute() -> None:
 			),
 			title="Kanban Ready state dropped",
 		)
-	except Exception:  # noqa: BLE001 - an audit note must never abort the migrate
+	except Exception:
 		pass

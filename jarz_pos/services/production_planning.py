@@ -18,7 +18,8 @@ accessor for the same reason.
 from __future__ import annotations
 
 import math
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
+from collections.abc import Iterable, Mapping, Sequence
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import frappe
 
@@ -115,8 +116,8 @@ def is_non_sellable_warehouse(warehouse: Any, warehouse_type: Any = None) -> boo
 def shape_stock_elsewhere(
 	item_codes: Sequence[str],
 	rows: Iterable[Mapping[str, Any]],
-	exclude_warehouse_by_item: Optional[Mapping[str, Any]] = None,
-) -> Dict[str, Dict[str, Any]]:
+	exclude_warehouse_by_item: Mapping[str, Any] | None = None,
+) -> dict[str, dict[str, Any]]:
 	"""Pure half of ``find_stock_elsewhere`` — every rule, no database.
 
 	``rows`` are ``{item_code, warehouse, warehouse_type, qty}`` as read by
@@ -138,7 +139,7 @@ def shape_stock_elsewhere(
 	  a missing key would read as "we did not look".
 	"""
 	codes = [str(c).strip() for c in (item_codes or []) if str(c or "").strip()]
-	result: Dict[str, Dict[str, Any]] = {
+	result: dict[str, dict[str, Any]] = {
 		code: {"available_elsewhere": 0.0, "alternatives": []} for code in codes
 	}
 	if not result:
@@ -217,7 +218,7 @@ def days_of_cover(
 	on_hand: float,
 	velocity: float,
 	season_multiplier: float,
-) -> Optional[float]:
+) -> float | None:
 	"""Days of demand the current stock covers, or ``None`` if it never sells.
 
 	``None`` rather than a sentinel: the stored ``jarz_days_of_stock`` field
@@ -241,7 +242,7 @@ def days_of_cover(
 
 
 def status_for_days_of_cover(
-	days: Optional[float],
+	days: float | None,
 	*,
 	critical_days: float,
 	watch_days: float,
@@ -259,7 +260,7 @@ def status_for_days_of_cover(
 	return STATUS_OK
 
 
-def can_make_now(components: Sequence[Dict[str, Any]]) -> Tuple[Optional[int], Optional[Dict[str, Any]]]:
+def can_make_now(components: Sequence[dict[str, Any]]) -> tuple[int | None, dict[str, Any] | None]:
 	"""Whole batches makeable from stock on hand, plus the component that caps it.
 
 	``components`` must be the required-material rows for **exactly one** BOM
@@ -268,8 +269,8 @@ def can_make_now(components: Sequence[Dict[str, Any]]) -> Tuple[Optional[int], O
 	Returns ``(None, None)`` for a BOM with no consuming components, which is
 	unbounded rather than zero.
 	"""
-	best_count: Optional[int] = None
-	best_row: Optional[Dict[str, Any]] = None
+	best_count: int | None = None
+	best_row: dict[str, Any] | None = None
 
 	for row in components or []:
 		required = float(row.get("required_qty") or 0)
@@ -293,8 +294,8 @@ def can_make_now(components: Sequence[Dict[str, Any]]) -> Tuple[Optional[int], O
 
 
 def aggregate_basket_materials(
-	line_component_sets: Iterable[Dict[str, Any]],
-) -> Dict[str, Any]:
+	line_component_sets: Iterable[dict[str, Any]],
+) -> dict[str, Any]:
 	"""Roll raw-material requirements up across every line in the basket.
 
 	This is the fix for the per-line shortage hole: two lines that both consume
@@ -309,7 +310,7 @@ def aggregate_basket_materials(
 	``{"line_index": int, "item_code": str, "components": [rows]}`` where the
 	rows are already scaled to that line's full quantity.
 	"""
-	aggregated: Dict[Tuple[str, str], Dict[str, Any]] = {}
+	aggregated: dict[tuple[str, str], dict[str, Any]] = {}
 
 	for entry in line_component_sets or []:
 		line_index = entry.get("line_index")
@@ -351,7 +352,7 @@ def aggregate_basket_materials(
 		key=lambda r: (r["item_code"], r["source_warehouse"] or ""),
 	)
 
-	shortages: List[Dict[str, Any]] = []
+	shortages: list[dict[str, Any]] = []
 	for row in components:
 		if not row["source_warehouse"]:
 			row["missing_qty"] = row["required_qty"]
@@ -375,13 +376,13 @@ def aggregate_basket_materials(
 	}
 
 
-def _max_feasible_scale(components: Sequence[Dict[str, Any]]) -> Optional[float]:
+def _max_feasible_scale(components: Sequence[dict[str, Any]]) -> float | None:
 	"""Largest uniform fraction of the basket the warehouse can actually cover.
 
 	``1.0`` means the basket fits as-is; ``0.6`` means every line would have to
 	shrink to 60% to fit.  ``None`` when nothing constrains it.
 	"""
-	scale: Optional[float] = None
+	scale: float | None = None
 	for row in components:
 		required = float(row.get("required_qty") or 0)
 		if required <= 0:
@@ -399,7 +400,7 @@ def _max_feasible_scale(components: Sequence[Dict[str, Any]]) -> Optional[float]
 def resolve_target_days(
 	item_override: Any,
 	default_target_days: Any,
-) -> Tuple[int, str]:
+) -> tuple[int, str]:
 	"""Target days of cover for one item, and where the number came from.
 
 	Precedence: the Item override, then the Jarz Forecast Settings default,
@@ -425,10 +426,10 @@ def resolve_target_days(
 
 
 def scale_components(
-	components: Sequence[Dict[str, Any]],
+	components: Sequence[dict[str, Any]],
 	*,
 	factor: float,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
 	"""Multiply per-batch requirement rows by a batch count."""
 	factor = float(factor or 0)
 	return [dict(row, required_qty=float(row.get("required_qty") or 0) * factor) for row in components or []]
@@ -472,8 +473,8 @@ def _resolve_backdated_shortage_stamper():
 
 
 def _stock_at_backdated_postings(
-	lines: Sequence[Dict[str, Any]], sets: Sequence[Dict[str, Any]]
-) -> Dict[Tuple[str, str], Tuple[float, Any]]:
+	lines: Sequence[dict[str, Any]], sets: Sequence[dict[str, Any]]
+) -> dict[tuple[str, str], tuple[float, Any]]:
 	"""``{(item, warehouse): (balance, posting moment)}`` for backdated lines.
 
 	A basket dated in the past is posted — and validated by ERPNext — against
@@ -489,10 +490,10 @@ def _stock_at_backdated_postings(
 	Pairs whose ledger could not be read keep the Bin figure too.
 	"""
 	resolve_posting, qty_at = _resolve_backdated_stock_helpers()
-	found: Dict[Tuple[str, str], Tuple[float, Any]] = {}
-	current: Set[Tuple[str, str]] = set()
+	found: dict[tuple[str, str], tuple[float, Any]] = {}
+	current: set[tuple[str, str]] = set()
 	# A jar and a lid sit on every recipe: one ledger read per pair and moment.
-	read: Dict[Tuple[str, str, Any], Optional[float]] = {}
+	read: dict[tuple[str, str, Any], float | None] = {}
 	for entry in sets:
 		index = entry.get("line_index")
 		if not isinstance(index, int) or index >= len(lines):
@@ -536,7 +537,7 @@ def _resolve_bom_company(bom_name: str) -> str:
 		return ""
 
 
-def _resolve_producible_rows(company: str, search: Optional[str] = None) -> List[Dict[str, Any]]:
+def _resolve_producible_rows(company: str, search: str | None = None) -> list[dict[str, Any]]:
 	"""Every item with a submitted default BOM, joined to its velocity fields.
 
 	Deliberately not ``list_default_bom_items``: that one orders by
@@ -544,7 +545,7 @@ def _resolve_producible_rows(company: str, search: Optional[str] = None) -> List
 	returns an arbitrary slice of the catalogue rather than the whole board.
 	"""
 	conditions = ["b.is_default = 1", "b.docstatus = 1", "i.disabled = 0"]
-	values: Dict[str, Any] = {}
+	values: dict[str, Any] = {}
 
 	if company:
 		conditions.append("b.company = %(company)s")
@@ -582,7 +583,7 @@ def _resolve_producible_rows(company: str, search: Optional[str] = None) -> List
 	return [dict(r) for r in rows]
 
 
-def resolve_phantom_boms(bom_names: Sequence[Any]) -> Set[str]:
+def resolve_phantom_boms(bom_names: Sequence[Any]) -> set[str]:
 	"""Which of these BOMs are phantom, in one query.
 
 	A read failure returns the empty set: degrading to "nothing is phantom"
@@ -612,7 +613,7 @@ def resolve_phantom_boms(bom_names: Sequence[Any]) -> Set[str]:
 	return {r["name"] for r in rows or []}
 
 
-def exclude_phantom_rows(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def exclude_phantom_rows(rows: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
 	"""Drop every producible row whose default BOM is phantom.
 
 	**A safety guard, not a tidy-up, and it belongs to every screen that offers
@@ -635,7 +636,7 @@ def exclude_phantom_rows(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]
 	return [row for row in rows if row.get("default_bom") not in phantom]
 
 
-def _resolve_on_hand_map(item_codes: Sequence[str]) -> Dict[str, float]:
+def _resolve_on_hand_map(item_codes: Sequence[str]) -> dict[str, float]:
 	"""Sellable stock per item, in one query, excluding WIP and Rejected.
 
 	``demand_forecasting.get_current_stock`` sums every warehouse and runs one
@@ -661,7 +662,7 @@ def _resolve_on_hand_map(item_codes: Sequence[str]) -> Dict[str, float]:
 	return {r["item_code"]: float(r["qty"] or 0) for r in rows}
 
 
-def _resolve_bin_stock_map(pairs: Sequence[Tuple[str, str]]) -> Dict[Tuple[str, str], float]:
+def _resolve_bin_stock_map(pairs: Sequence[tuple[str, str]]) -> dict[tuple[str, str], float]:
 	"""Stock for a batch of (item_code, warehouse) pairs in a single query.
 
 	Feeding ``can_make_now`` from this dict is what keeps the board off an N+1:
@@ -688,7 +689,7 @@ def _resolve_bin_stock_map(pairs: Sequence[Tuple[str, str]]) -> Dict[Tuple[str, 
 	return {(r["item_code"], r["warehouse"]): float(r["qty"] or 0) for r in rows}
 
 
-def _resolve_stock_elsewhere_rows(item_codes: Sequence[str], company: str) -> List[Dict[str, Any]]:
+def _resolve_stock_elsewhere_rows(item_codes: Sequence[str], company: str) -> list[dict[str, Any]]:
 	"""Every company Bin holding any of these items, in ONE query.
 
 	One query for the whole set, never one per item: the caller is a loop over
@@ -751,12 +752,12 @@ def _log_failure(title: str, message: str) -> None:
 	try:
 		frappe.log_error(title=title, message=message)
 		return
-	except Exception as logging_error:  # noqa: BLE001 — see docstring
+	except Exception as logging_error:
 		fallback = f"{title}: {message} (log_error itself failed: {logging_error})"
 
 	try:
 		frappe.logger().error(fallback)
-	except Exception:  # noqa: BLE001
+	except Exception:
 		# Nothing left to log with.  Raising here would substitute a logging
 		# error for the real one, which is the trap this helper exists to avoid.
 		return
@@ -801,8 +802,8 @@ def invalidate_suggestions_cache() -> None:
 def find_stock_elsewhere(
 	item_codes: Sequence[str],
 	company: str,
-	exclude_warehouse_by_item: Optional[Mapping[str, Any]] = None,
-) -> Dict[str, Dict[str, Any]]:
+	exclude_warehouse_by_item: Mapping[str, Any] | None = None,
+) -> dict[str, dict[str, Any]]:
 	"""Where else in the company each of these items has pickable stock.
 
 	THE single implementation of the "it's in another store" lookup, shared by
@@ -832,7 +833,7 @@ def find_stock_elsewhere(
 
 
 def attach_stock_elsewhere(
-	rows: Sequence[Dict[str, Any]],
+	rows: Sequence[dict[str, Any]],
 	company: str,
 	*,
 	item_key: str = "item_code",
@@ -872,7 +873,7 @@ def attach_stock_elsewhere(
 		row["alternatives"] = list(entry.get("alternatives") or [])
 
 
-def get_planning_context(company: str) -> Dict[str, Any]:
+def get_planning_context(company: str) -> dict[str, Any]:
 	"""Thresholds, season, and the default cover target, read once per request."""
 	settings = _resolve_get_settings()()
 	multiplier, season_name = _resolve_get_active_seasonal_multiplier()(settings)
@@ -890,7 +891,7 @@ def get_planning_context(company: str) -> Dict[str, Any]:
 	}
 
 
-def build_capacity_map(rows: Sequence[Dict[str, Any]], company: str) -> Dict[str, Dict[str, Any]]:
+def build_capacity_map(rows: Sequence[dict[str, Any]], company: str) -> dict[str, dict[str, Any]]:
 	"""Per-item ``can_make_now`` for a whole page of producible items.
 
 	One BOM read per item, then a **single** batched ``Bin`` read for every
@@ -904,7 +905,7 @@ def build_capacity_map(rows: Sequence[Dict[str, Any]], company: str) -> Dict[str
 	"""
 	# Named for what it now holds: the one-level components of each BOM, not an
 	# explosion.  The old name outlived the behaviour it described.
-	components_by_item: Dict[str, List[Dict[str, Any]]] = {}
+	components_by_item: dict[str, list[dict[str, Any]]] = {}
 	required_rows = _resolve_required_material_rows()
 
 	for row in rows:
@@ -932,7 +933,7 @@ def build_capacity_map(rows: Sequence[Dict[str, Any]], company: str) -> Dict[str
 	]
 	stock = _resolve_bin_stock_map(pairs)
 
-	capacity: Dict[str, Dict[str, Any]] = {}
+	capacity: dict[str, dict[str, Any]] = {}
 	for item_code, comps in components_by_item.items():
 		priced = [
 			dict(c, available_qty=stock.get((c["item_code"], c.get("source_warehouse")), 0.0)) for c in comps
@@ -955,7 +956,7 @@ def build_capacity_map(rows: Sequence[Dict[str, Any]], company: str) -> Dict[str
 	return capacity
 
 
-def build_basket_rollup(lines: Sequence[Dict[str, Any]], company: str) -> Dict[str, Any]:
+def build_basket_rollup(lines: Sequence[dict[str, Any]], company: str) -> dict[str, Any]:
 	"""Aggregate the material demand of a whole basket of production lines.
 
 	``fetch_exploded=0``: this is the pick list and the shortage gate for a
@@ -965,12 +966,12 @@ def build_basket_rollup(lines: Sequence[Dict[str, Any]], company: str) -> Dict[s
 	mid-submit on a sub-assembly bin that was already negative.
 	"""
 	required_rows = _resolve_required_material_rows()
-	sets: List[Dict[str, Any]] = []
+	sets: list[dict[str, Any]] = []
 
 	for index, line in enumerate(lines or []):
 		bom_name = line.get("bom_name")
 		line_company = _resolve_bom_company(bom_name) or company
-		kwargs: Dict[str, Any] = {"fetch_exploded": 0}
+		kwargs: dict[str, Any] = {"fetch_exploded": 0}
 		if line.get("material_selections"):
 			kwargs["material_selections"] = line.get("material_selections")
 		components = required_rows(

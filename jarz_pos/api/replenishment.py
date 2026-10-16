@@ -34,30 +34,31 @@ stock, item alternatives, item metadata); the maths lives in
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from collections.abc import Mapping, Sequence
+from typing import Any, Dict, List, Optional, Tuple
 
 import frappe
 from frappe.utils import add_days, getdate, now_datetime, nowdate
-
-# The gate on the transfer this plan feeds, imported rather than restated.  A
-# plan the caller may read but not act on is a screen that ends in "Not
-# permitted", and a second role set would drift from the first one silently.
-from jarz_pos.api.transfer import _ensure_transfer_access
 
 # THE definition of "which item groups are a sellable jar", shared with the
 # daily plan and the bases screen.
 from jarz_pos.api.daily_plan import FINISHED_GOODS_GROUPS
 
-# THE definition of "this warehouse's stock is not sellable" (WIP / Rejected),
-# injected into the pure selector rather than copied into it.
-from jarz_pos.services.production_planning import is_non_sellable_warehouse
-from jarz_pos.services import replenishment_planning as plan
-from jarz_pos.services import production_round_planning as round_plan
-
 # The Production Board's read gate.  ``api/production`` imports nothing from
 # this module, so a top-level import is cycle-free (``api/manufacturing`` does
 # the same).
 from jarz_pos.api.production import _ensure_production_view_access
+
+# The gate on the transfer this plan feeds, imported rather than restated.  A
+# plan the caller may read but not act on is a screen that ends in "Not
+# permitted", and a second role set would drift from the first one silently.
+from jarz_pos.api.transfer import _ensure_transfer_access
+from jarz_pos.services import production_round_planning as round_plan
+from jarz_pos.services import replenishment_planning as plan
+
+# THE definition of "this warehouse's stock is not sellable" (WIP / Rejected),
+# injected into the pure selector rather than copied into it.
+from jarz_pos.services.production_planning import is_non_sellable_warehouse
 
 #: The owner's standing answer to "how much cover should a branch hold": a
 #: 14-day delivery cycle plus a 7-day backup week — the same stock level the
@@ -87,19 +88,19 @@ def _log_failure(title: str, message: str) -> None:
 	try:
 		frappe.log_error(title=title, message=message)
 		return
-	except Exception as logging_error:  # noqa: BLE001 — see docstring
+	except Exception as logging_error:
 		fallback = f"{title}: {message} (log_error itself failed: {logging_error})"
 
 	try:
 		frappe.logger().error(fallback)
-	except Exception:  # noqa: BLE001
+	except Exception:
 		return
 
 
 def _traceback() -> str:
 	try:
 		return frappe.get_traceback()
-	except Exception:  # noqa: BLE001
+	except Exception:
 		return ""
 
 
@@ -109,7 +110,7 @@ def _traceback() -> str:
 # stated once per read rather than once per caller.
 
 
-def _resolve_company(company: Optional[str]) -> Optional[str]:
+def _resolve_company(company: str | None) -> str | None:
 	"""The company this plan belongs to, or ``None`` when it is ambiguous.
 
 	``None`` is a usable answer: it simply stops filtering warehouses by
@@ -133,7 +134,7 @@ def _resolve_company(company: Optional[str]) -> Optional[str]:
 	return None
 
 
-def _resolve_jar_items() -> List[Dict[str, Any]]:
+def _resolve_jar_items() -> list[dict[str, Any]]:
 	"""Every finished jar: the ``Small``, ``Medium`` and ``Large`` item groups.
 
 	Restricted to the jars on purpose — a replenishment plan that also offered
@@ -169,9 +170,9 @@ def _resolve_jar_items() -> List[Dict[str, Any]]:
 	]
 
 
-def _resolve_warehouse_rows(company: Optional[str]) -> List[Dict[str, Any]]:
+def _resolve_warehouse_rows(company: str | None) -> list[dict[str, Any]]:
 	"""Every leaf warehouse of the company, with the fields the selector needs."""
-	filters: Dict[str, Any] = {"is_group": 0, "disabled": 0}
+	filters: dict[str, Any] = {"is_group": 0, "disabled": 0}
 	if company:
 		filters["company"] = company
 	try:
@@ -188,7 +189,7 @@ def _resolve_warehouse_rows(company: Optional[str]) -> List[Dict[str, Any]]:
 	return [dict(row) for row in rows or []]
 
 
-def _resolve_branch_labels() -> Dict[str, str]:
+def _resolve_branch_labels() -> dict[str, str]:
 	"""``{warehouse: branch name}`` from the enabled POS Profiles.
 
 	The POS Profile is this app's operational branch — the same mapping
@@ -208,7 +209,7 @@ def _resolve_branch_labels() -> Dict[str, str]:
 		_log_failure("JARZ Replenishment - POS Profile read failed", _traceback())
 		return {}
 
-	labels: Dict[str, str] = {}
+	labels: dict[str, str] = {}
 	for row in rows or []:
 		warehouse = str(row.get("warehouse") or "").strip()
 		if warehouse and warehouse not in labels:
@@ -217,10 +218,10 @@ def _resolve_branch_labels() -> Dict[str, str]:
 
 
 def _resolve_source_warehouse(
-	source_warehouse: Optional[str],
+	source_warehouse: str | None,
 	warehouse_rows: Sequence[Mapping[str, Any]],
-	company: Optional[str] = None,
-) -> Optional[str]:
+	company: str | None = None,
+) -> str | None:
 	"""The factory store: the caller's choice, then the configured one, then a guess.
 
 	"Configured" is the **Company's** ``default_fg_warehouse``, not Manufacturing
@@ -253,7 +254,7 @@ def _resolve_source_warehouse(
 def _resolve_stock(
 	warehouses: Sequence[str],
 	item_codes: Sequence[str],
-) -> Dict[Tuple[str, str], float]:
+) -> dict[tuple[str, str], float]:
 	"""ONE query: on-hand per (warehouse, item) for every branch and the source.
 
 	Quantities come back **raw**, negatives included.  The floor belongs to the
@@ -297,7 +298,7 @@ def _resolve_sales(
 	warehouses: Sequence[str],
 	item_codes: Sequence[str],
 	sales_days: int,
-) -> Dict[Tuple[str, str], float]:
+) -> dict[tuple[str, str], float]:
 	"""ONE query: net quantity sold per (warehouse, item) over the window.
 
 	``Sales Invoice Item.warehouse`` is where a sale is recorded, and it is the
@@ -358,7 +359,7 @@ def _resolve_sales(
 def _generated_on() -> str:
 	try:
 		return str(now_datetime())
-	except Exception:  # noqa: BLE001
+	except Exception:
 		return ""
 
 
@@ -367,11 +368,11 @@ def _generated_on() -> str:
 
 @frappe.whitelist()
 def get_branch_replenishment(
-	company: Optional[str] = None,
-	source_warehouse: Optional[str] = None,
+	company: str | None = None,
+	source_warehouse: str | None = None,
 	cover_days: Any = DEFAULT_COVER_DAYS,
 	sales_days: Any = DEFAULT_SALES_DAYS,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	"""How many of each jar the factory should send to each branch today.
 
 	Read-only.  Nothing here inserts, submits or commits; the resulting lines
@@ -403,7 +404,7 @@ def get_branch_replenishment(
 	warehouse_rows = _resolve_warehouse_rows(company)
 	source = _resolve_source_warehouse(source_warehouse, warehouse_rows, company)
 
-	empty: Dict[str, Any] = {
+	empty: dict[str, Any] = {
 		"generated_on": _generated_on(),
 		"company": company,
 		"source_warehouse": source,
@@ -477,7 +478,7 @@ def get_branch_replenishment(
 MAX_BOM_LEVELS = 12
 
 
-def _unique(values: Any) -> List[str]:
+def _unique(values: Any) -> list[str]:
 	return sorted({str(v) for v in values or [] if v})
 
 
@@ -486,8 +487,8 @@ def _resolve_weekly_sales(
 	item_codes: Sequence[str],
 	from_date: Any,
 	to_date: Any,
-	notices: List[str],
-) -> Dict[Tuple[str, str], Dict[int, float]]:
+	notices: list[str],
+) -> dict[tuple[str, str], dict[int, float]]:
 	"""ONE query: net qty sold per (warehouse, item, week) over the window.
 
 	Week 0 is the 7 days ending ``to_date`` (yesterday).  Submitted invoices
@@ -526,7 +527,7 @@ def _resolve_weekly_sales(
 		notices.append("Sales history could not be read; every jar shows as not selling.")
 		return {}
 
-	out: Dict[Tuple[str, str], Dict[int, float]] = {}
+	out: dict[tuple[str, str], dict[int, float]] = {}
 	for row in rows or []:
 		try:
 			week = int(plan.to_float(row.get("week"), -1))
@@ -540,15 +541,15 @@ def _resolve_weekly_sales(
 
 def _resolve_bom_tree(
 	item_codes: Sequence[str],
-	notices: List[str],
-) -> Dict[str, Dict[str, Any]]:
+	notices: list[str],
+) -> dict[str, dict[str, Any]]:
 	"""Every item's chosen BOM, walked down level by level.
 
 	Two queries per level (headers, then lines) — never one per item.  The
 	walk stops when a level finds no new item with a BOM.  Returns
 	``{item_code: {"name", "quantity", "lines": [...]}}``.
 	"""
-	boms: Dict[str, Dict[str, Any]] = {}
+	boms: dict[str, dict[str, Any]] = {}
 	probed: set = set()
 	frontier = set(_unique(item_codes))
 
@@ -592,7 +593,7 @@ def _resolve_bom_tree(
 			notices.append("Some BOMs could not be read; materials and bases may be incomplete.")
 			break
 
-		lines_by_bom: Dict[str, List[Dict[str, Any]]] = {}
+		lines_by_bom: dict[str, list[dict[str, Any]]] = {}
 		for row in line_rows or []:
 			lines_by_bom.setdefault(str(row.get("parent")), []).append(
 				{
@@ -618,8 +619,8 @@ def _resolve_bom_tree(
 
 def _resolve_item_alternatives(
 	item_codes: Sequence[str],
-	notices: List[str],
-) -> List[Dict[str, Any]]:
+	notices: list[str],
+) -> list[dict[str, Any]]:
 	"""ONE query: ``Item Alternative`` rows touching any of these items."""
 	item_codes = _unique(item_codes)
 	if not item_codes:
@@ -647,8 +648,8 @@ def _resolve_item_alternatives(
 def _resolve_material_stock(
 	warehouses: Sequence[str],
 	item_codes: Sequence[str],
-	notices: List[str],
-) -> Dict[str, float]:
+	notices: list[str],
+) -> dict[str, float]:
 	"""ONE query: on-hand per item summed over the given (factory-side) warehouses.
 
 	Each bin is floored at zero BEFORE summing: a negative bin in one store is
@@ -680,8 +681,8 @@ def _resolve_material_stock(
 
 def _resolve_item_meta(
 	item_codes: Sequence[str],
-	notices: List[str],
-) -> Dict[str, Dict[str, Any]]:
+	notices: list[str],
+) -> dict[str, dict[str, Any]]:
 	"""Name, group and stock unit for every component, plus whether that unit
 	only comes whole (``UOM.must_be_whole_number``) — two fixed-cost reads."""
 	item_codes = _unique(item_codes)
@@ -724,7 +725,7 @@ def _resolve_item_meta(
 
 @frappe.whitelist()
 def get_production_round(
-	company: Optional[str] = None,
+	company: str | None = None,
 	cycle_days: Any = round_plan.DEFAULT_CYCLE_DAYS,
 	backup_days: Any = round_plan.DEFAULT_BACKUP_DAYS,
 	sales_weeks: Any = round_plan.DEFAULT_SALES_WEEKS,
@@ -733,7 +734,7 @@ def get_production_round(
 	# Last, not first, so a caller passing the older arguments positionally
 	# still lands them on the right parameter.
 	batch_small: Any = round_plan.DEFAULT_BATCH_SMALL,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	"""How many batches of every jar to make now, and what that needs.
 
 	Read-only.  Each branch holds ``cycle_days + backup_days`` of its own
@@ -755,7 +756,7 @@ def get_production_round(
 		batch_large=batch_large,
 		batch_small=batch_small,
 	)
-	notices: List[str] = []
+	notices: list[str] = []
 
 	company = _resolve_company(company)
 	warehouse_rows = _resolve_warehouse_rows(company)

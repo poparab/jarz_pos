@@ -27,7 +27,7 @@ def _ensure_return_permission() -> None:
 
 
 @frappe.whitelist(allow_guest=False)
-def get_return_preview(invoice_id: str) -> Dict[str, Any]:
+def get_return_preview(invoice_id: str) -> dict[str, Any]:
 	"""Everything the return dialog needs. Read-only."""
 	_ensure_return_permission()
 	try:
@@ -47,9 +47,9 @@ def submit_invoice_return(
 	return_type: str = "Customer Return",
 	refund_mode: str = _returns.REFUND_CUSTOMER_CREDIT,
 	pay_courier_for_trip: Any = True,
-	notes: Optional[str] = None,
-	request_id: Optional[str] = None,
-) -> Dict[str, Any]:
+	notes: str | None = None,
+	request_id: str | None = None,
+) -> dict[str, Any]:
 	"""Post the return document graph.
 
 	``lines`` is a JSON list of ``{"si_detail": <row name>, "qty": <positive>}``.
@@ -70,7 +70,7 @@ def submit_invoice_return(
 
 
 @frappe.whitelist(allow_guest=False)
-def dry_run_return(invoice_id: str) -> Dict[str, Any]:
+def dry_run_return(invoice_id: str) -> dict[str, Any]:
 	"""Resolve and balance every posting a return would make, writing nothing.
 
 	Exposed so the staging survey can sweep real production-cloned orders and

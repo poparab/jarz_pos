@@ -6,12 +6,14 @@ Alternative to websocket-based notifications for mobile clients
 import base64
 import json
 import os
+from collections.abc import Iterable, Sequence
 from datetime import datetime, timedelta
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import frappe
 from frappe import _
-from jarz_pos.constants import QUERY_LIMITS, STATUS, WS_EVENTS, ROLES
+
+from jarz_pos.constants import QUERY_LIMITS, ROLES, STATUS, WS_EVENTS
 from jarz_pos.utils.invoice_utils import normalize_woo_order_id
 
 # Firebase Admin SDK for modern FCM V1 API
@@ -38,7 +40,7 @@ except ImportError:
 	firebase_exceptions = None
 
 # Module-level state to throttle init-failure Error Log writes (one per process).
-_FIREBASE_INIT_STATE: Dict[str, Any] = {
+_FIREBASE_INIT_STATE: dict[str, Any] = {
 	"failed_logged": False,
 	"push_skipped_logged": False,
 	"ok": False,
@@ -57,7 +59,7 @@ _FCM_LOGGED_ERROR_TOKENS: set = set()
 #: Sales Invoice query here rather than reinvented per call site — the two
 #: polling endpoints below carried only ``docstatus`` for long enough that they
 #: reported B2B/Desk invoices and credit notes as POS activity.
-POS_ORDER_FILTERS: Dict[str, Any] = {
+POS_ORDER_FILTERS: dict[str, Any] = {
 	"docstatus": 1,
 	"is_pos": 1,
 	# Credit notes inherit is_pos and the branch fields from the invoice they
@@ -68,7 +70,7 @@ POS_ORDER_FILTERS: Dict[str, Any] = {
 
 
 @frappe.whitelist(allow_guest=False)
-def get_recent_invoices(minutes: int = 5) -> Dict[str, Any]:
+def get_recent_invoices(minutes: int = 5) -> dict[str, Any]:
 	"""
 	Get Sales Invoices created/modified in the last N minutes.
 	Mobile app can poll this endpoint instead of relying on websockets.
@@ -181,12 +183,12 @@ def get_recent_invoices(minutes: int = 5) -> Dict[str, Any]:
 		return response
 
 	except Exception as e:
-		frappe.log_error(f"Notifications API error: {str(e)}", "Notifications API")
+		frappe.log_error(f"Notifications API error: {e!s}", "Notifications API")
 		return {"success": False, "error": str(e), "timestamp": frappe.utils.now()}
 
 
 @frappe.whitelist(allow_guest=False)
-def check_for_updates(last_check: Optional[str] = None) -> Dict[str, Any]:
+def check_for_updates(last_check: str | None = None) -> dict[str, Any]:
 	"""
 	Check for any invoice updates since the last check time.
 	More efficient than get_recent_invoices for frequent polling.
@@ -236,12 +238,12 @@ def check_for_updates(last_check: Optional[str] = None) -> Dict[str, Any]:
 		}
 
 	except Exception as e:
-		frappe.log_error(f"Check updates error: {str(e)}", "Notifications API")
+		frappe.log_error(f"Check updates error: {e!s}", "Notifications API")
 		return {"success": False, "error": str(e), "timestamp": frappe.utils.now()}
 
 
 @frappe.whitelist()
-def test_websocket_emission() -> Dict[str, Any]:
+def test_websocket_emission() -> dict[str, Any]:
 	"""
 	Test endpoint to manually emit websocket events for debugging.
 	Emits both new invoice and state change events.
@@ -314,12 +316,12 @@ def test_websocket_emission() -> Dict[str, Any]:
 		}
 
 	except Exception as e:
-		frappe.log_error(f"Test websocket emission error: {str(e)}", "Notifications API")
+		frappe.log_error(f"Test websocket emission error: {e!s}", "Notifications API")
 		return {"success": False, "error": str(e), "timestamp": frappe.utils.now()}
 
 
 @frappe.whitelist(allow_guest=False)
-def get_websocket_debug_info() -> Dict[str, Any]:
+def get_websocket_debug_info() -> dict[str, Any]:
 	"""
 	Get debugging information about websocket configuration and status.
 	"""
@@ -428,7 +430,7 @@ def _get_original_pos_profile_for_doc(doc: Any) -> str:
 	return _pick_display_text(getattr(doc, "pos_profile", None))
 
 
-def _get_effective_profile_for_payload(payload: Dict[str, Any]) -> str:
+def _get_effective_profile_for_payload(payload: dict[str, Any]) -> str:
 	return _pick_display_text(
 		payload.get("effective_pos_profile"),
 		payload.get("kanban_profile"),
@@ -440,7 +442,7 @@ def _get_effective_profile_for_payload(payload: Dict[str, Any]) -> str:
 def _get_pending_alert_rows_for_profiles(
 	profiles: Sequence[str],
 	cutoff: Any,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
 	filtered_profiles = [profile for profile in profiles if profile]
 	if not filtered_profiles:
 		return []
@@ -483,7 +485,7 @@ def _get_pending_alert_rows_for_profiles(
 		limit=QUERY_LIMITS.NOTIFICATIONS,
 	)
 
-	deduped: Dict[str, Dict[str, Any]] = {}
+	deduped: dict[str, dict[str, Any]] = {}
 
 	for row in effective_rows:
 		name = _safe_str(row.get("name"))
@@ -560,7 +562,7 @@ def outbound_alerts_suppressed(context: str = "") -> bool:
 _NOTIFICATION_GAP_THROTTLE_SECONDS = 900
 
 
-def _log_notification_gap(title: str, message: str, throttle_key: Optional[str] = None) -> None:
+def _log_notification_gap(title: str, message: str, throttle_key: str | None = None) -> None:
 	"""Record a delivery gap in Error Log, throttled so volume cannot drown it.
 
 	``throttle_key`` is shared across workers through the Redis cache rather
@@ -599,7 +601,7 @@ def _log_notification_gap(title: str, message: str, throttle_key: Optional[str] 
 		pass
 
 
-def _get_bench_path() -> Optional[str]:
+def _get_bench_path() -> str | None:
 	try:
 		site_path = frappe.get_site_path()
 	except Exception:
@@ -611,7 +613,7 @@ def _get_bench_path() -> Optional[str]:
 	return os.path.abspath(os.path.join(site_path, os.pardir, os.pardir))
 
 
-def _get_site_private_files_path() -> Optional[str]:
+def _get_site_private_files_path() -> str | None:
 	try:
 		return frappe.get_site_path("private", "files")
 	except Exception:
@@ -619,18 +621,18 @@ def _get_site_private_files_path() -> Optional[str]:
 
 
 def _resolve_fcm_service_account_path(
-	raw_path: Optional[str],
-) -> Tuple[Optional[str], Optional[str], List[str]]:
+	raw_path: str | None,
+) -> tuple[str | None, str | None, list[str]]:
 	normalized = (raw_path or "").strip()
 	if not normalized:
 		return None, None, []
 
-	candidates: List[Tuple[str, str]] = []
+	candidates: list[tuple[str, str]] = []
 	bench_path = _get_bench_path()
 	private_files_path = _get_site_private_files_path()
 	basename = os.path.basename(normalized)
 
-	def add_candidate(source: str, path: Optional[str]) -> None:
+	def add_candidate(source: str, path: str | None) -> None:
 		if not path:
 			return
 		normalized_path = os.path.normpath(path)
@@ -661,7 +663,7 @@ def _resolve_fcm_service_account_path(
 	return candidates[0][1], candidates[0][0], [path for _, path in candidates]
 
 
-def _path_is_under(path: Optional[str], root: Optional[str]) -> bool:
+def _path_is_under(path: str | None, root: str | None) -> bool:
 	if not path or not root:
 		return False
 
@@ -673,7 +675,7 @@ def _path_is_under(path: Optional[str], root: Optional[str]) -> bool:
 		return False
 
 
-def _get_fcm_path_warning(resolved_path: Optional[str]) -> Optional[str]:
+def _get_fcm_path_warning(resolved_path: str | None) -> str | None:
 	private_files_path = _get_site_private_files_path()
 	if not resolved_path or not private_files_path:
 		return None
@@ -717,9 +719,9 @@ def _initialize_firebase_app() -> bool:
 	def _mark_init_state(
 		*,
 		ok: bool,
-		raw_path: Optional[str] = None,
-		resolved_path: Optional[str] = None,
-		path_source: Optional[str] = None,
+		raw_path: str | None = None,
+		resolved_path: str | None = None,
+		path_source: str | None = None,
 	) -> None:
 		_FIREBASE_INIT_STATE["ok"] = ok
 		_FIREBASE_INIT_STATE["raw_path"] = raw_path
@@ -793,7 +795,7 @@ def _initialize_firebase_app() -> bool:
 
 
 @frappe.whitelist(allow_guest=False)
-def health_check_firebase() -> Dict[str, Any]:
+def health_check_firebase() -> dict[str, Any]:
 	"""Return Firebase SDK readiness without sending any push notification.
 
 	Response fields:
@@ -817,9 +819,9 @@ def health_check_firebase() -> Dict[str, Any]:
 		}
 
 	raw_path = frappe.local.conf.get("fcm_service_account_path")
-	resolved_path: Optional[str] = None
-	path_source: Optional[str] = None
-	candidate_paths: List[str] = []
+	resolved_path: str | None = None
+	path_source: str | None = None
+	candidate_paths: list[str] = []
 
 	if raw_path:
 		resolved_path, path_source, candidate_paths = _resolve_fcm_service_account_path(raw_path)
@@ -934,7 +936,7 @@ def _disable_token(token: str) -> None:
 		)
 
 
-def _get_mobile_device_rows_by_token(token: str) -> List[Dict[str, Any]]:
+def _get_mobile_device_rows_by_token(token: str) -> list[dict[str, Any]]:
 	return frappe.get_all(
 		"Jarz Mobile Device",
 		filters={"token": token},
@@ -943,14 +945,14 @@ def _get_mobile_device_rows_by_token(token: str) -> List[Dict[str, Any]]:
 	)
 
 
-def _is_enabled_mobile_device(row: Dict[str, Any]) -> bool:
+def _is_enabled_mobile_device(row: dict[str, Any]) -> bool:
 	try:
 		return int(row.get("enabled") or 0) == 1
 	except (TypeError, ValueError):
 		return False
 
 
-def _select_mobile_device_row(rows: Sequence[Dict[str, Any]], user: str) -> Optional[Dict[str, Any]]:
+def _select_mobile_device_row(rows: Sequence[dict[str, Any]], user: str) -> dict[str, Any] | None:
 	if not rows:
 		return None
 
@@ -966,7 +968,7 @@ def _select_mobile_device_row(rows: Sequence[Dict[str, Any]], user: str) -> Opti
 	return None
 
 
-def _prune_duplicate_mobile_device_rows(rows: Sequence[Dict[str, Any]], keep_name: str) -> None:
+def _prune_duplicate_mobile_device_rows(rows: Sequence[dict[str, Any]], keep_name: str) -> None:
 	for row in rows:
 		docname = row.get("name")
 		if not docname or docname == keep_name:
@@ -986,14 +988,14 @@ def _prune_duplicate_mobile_device_rows(rows: Sequence[Dict[str, Any]], keep_nam
 			)
 
 
-def _update_mobile_device_row(docname: str, payload: Dict[str, Any]) -> Any:
+def _update_mobile_device_row(docname: str, payload: dict[str, Any]) -> Any:
 	values = dict(payload)
 	values["last_seen"] = frappe.utils.now_datetime()
 	frappe.db.set_value("Jarz Mobile Device", docname, values, update_modified=True)
 	return frappe.get_doc("Jarz Mobile Device", docname)
 
 
-def _upsert_mobile_device(payload: Dict[str, Any]) -> Any:
+def _upsert_mobile_device(payload: dict[str, Any]) -> Any:
 	token = payload["token"]
 	user = payload["user"]
 	rows = _get_mobile_device_rows_by_token(token)
@@ -1020,11 +1022,11 @@ def _upsert_mobile_device(payload: Dict[str, Any]) -> Any:
 @frappe.whitelist(allow_guest=False)
 def register_mobile_device(
 	token: str,
-	platform: Optional[str] = None,
-	device_name: Optional[str] = None,
-	app_version: Optional[str] = None,
-	pos_profiles: Optional[str] = None,
-) -> Dict[str, Any]:
+	platform: str | None = None,
+	device_name: str | None = None,
+	app_version: str | None = None,
+	pos_profiles: str | None = None,
+) -> dict[str, Any]:
 	"""Register or refresh an FCM token for the signed-in user."""
 
 	token = (token or "").strip()
@@ -1060,11 +1062,11 @@ def register_mobile_device(
 @frappe.whitelist(allow_guest=False)
 def register_device_token(
 	token: str,
-	platform: Optional[str] = None,
-	device_name: Optional[str] = None,
-	app_version: Optional[str] = None,
-	pos_profiles: Optional[str] = None,
-) -> Dict[str, Any]:
+	platform: str | None = None,
+	device_name: str | None = None,
+	app_version: str | None = None,
+	pos_profiles: str | None = None,
+) -> dict[str, Any]:
 	"""Backward-compatible alias for older mobile and startup callers."""
 
 	return register_mobile_device(
@@ -1077,14 +1079,14 @@ def register_device_token(
 
 
 @frappe.whitelist(allow_guest=False)
-def accept_invoice(invoice_name: str) -> Dict[str, Any]:
+def accept_invoice(invoice_name: str) -> dict[str, Any]:
 	"""Backward-compatible alias for older accept endpoint callers."""
 
 	return acknowledge_invoice(invoice_name)
 
 
 @frappe.whitelist(allow_guest=False)
-def acknowledge_invoice(invoice_name: str) -> Dict[str, Any]:
+def acknowledge_invoice(invoice_name: str) -> dict[str, Any]:
 	"""Mark an invoice alert as accepted by the current user."""
 
 	if not invoice_name:
@@ -1149,7 +1151,7 @@ def acknowledge_invoice(invoice_name: str) -> Dict[str, Any]:
 
 
 @frappe.whitelist(allow_guest=False)
-def get_pending_alerts() -> Dict[str, Any]:
+def get_pending_alerts() -> dict[str, Any]:
 	"""Return unaccepted invoices for the caller's authorised POS profiles."""
 
 	user = frappe.session.user
@@ -1160,7 +1162,7 @@ def get_pending_alerts() -> Dict[str, Any]:
 	cutoff = frappe.utils.add_to_date(frappe.utils.now_datetime(), hours=-12)
 	rows = _get_pending_alert_rows_for_profiles(profiles, cutoff)
 
-	alerts: List[Dict[str, Any]] = []
+	alerts: list[dict[str, Any]] = []
 	for row in rows:
 		try:
 			inv_doc = frappe.get_doc("Sales Invoice", row.name)
@@ -1238,7 +1240,7 @@ def handle_invoice_submission(doc: Any) -> None:
 		frappe.log_error(frappe.get_traceback(), "handle_invoice_submission failed")
 
 
-def notify_invoice_reassignment(invoice: Union[str, Any], new_kanban_profile: str) -> None:
+def notify_invoice_reassignment(invoice: str | Any, new_kanban_profile: str) -> None:
 	"""Re-issue invoice alerts for the new effective Kanban branch after reassignment.
 
 	Args:
@@ -1283,11 +1285,11 @@ def notify_invoice_reassignment(invoice: Union[str, Any], new_kanban_profile: st
 
 
 def notify_invoice_cancellation(
-	invoice: Union[str, Any],
+	invoice: str | Any,
 	reason: str,
 	*,
-	notes: Optional[str] = None,
-	credit_note: Optional[str] = None,
+	notes: str | None = None,
+	credit_note: str | None = None,
 ) -> None:
 	"""Notify relevant users that an invoice has been cancelled from the Kanban board."""
 
@@ -1378,8 +1380,8 @@ def _item_count_summary(item_count: Any) -> str:
 	return "No items"
 
 
-def _summarize_items(items: Sequence[Dict[str, Any]]) -> str:
-	summary_parts: List[str] = []
+def _summarize_items(items: Sequence[dict[str, Any]]) -> str:
+	summary_parts: list[str] = []
 	for item in list(items)[:5]:
 		item_label = _pick_display_text(
 			item.get("item_name"),
@@ -1393,7 +1395,7 @@ def _summarize_items(items: Sequence[Dict[str, Any]]) -> str:
 	return _item_count_summary(len(items))
 
 
-def _enrich_invoice_display_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
+def _enrich_invoice_display_fields(payload: dict[str, Any]) -> dict[str, Any]:
 	raw_items = payload.get("items")
 	items = raw_items if isinstance(raw_items, list) else []
 	item_count = len(items) if isinstance(raw_items, list) else _parse_item_count(payload.get("item_count"))
@@ -1414,7 +1416,7 @@ def _enrich_invoice_display_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
 		fallback=_format_total_display(payload.get("grand_total")),
 	)
 
-	body_parts: List[str] = []
+	body_parts: list[str] = []
 	if branch_display:
 		body_parts.append(branch_display)
 	body_parts.append(f"Total: {total_display}")
@@ -1441,7 +1443,7 @@ def _enrich_invoice_display_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
 	return payload
 
 
-def _resolve_notification_content(data_payload: Dict[str, str]) -> Tuple[str, str]:
+def _resolve_notification_content(data_payload: dict[str, str]) -> tuple[str, str]:
 	title = _pick_display_text(data_payload.get("title"))
 	body = _pick_display_text(data_payload.get("body"))
 	if title and body:
@@ -1478,7 +1480,7 @@ def _get_webpush_link() -> str:
 	return "/pos/"
 
 
-def _build_webpush_config(data_payload: Dict[str, str], title: str, body: str) -> Optional[Any]:
+def _build_webpush_config(data_payload: dict[str, str], title: str, body: str) -> Any | None:
 	webpush_config_cls = getattr(messaging, "WebpushConfig", None)
 	webpush_notification_cls = getattr(messaging, "WebpushNotification", None)
 	webpush_fcm_options_cls = getattr(messaging, "WebpushFCMOptions", None)
@@ -1508,7 +1510,7 @@ def _build_webpush_config(data_payload: Dict[str, str], title: str, body: str) -
 		require_interaction=data_payload.get("type") == "new_invoice",
 	)
 
-	webpush_kwargs: Dict[str, Any] = {
+	webpush_kwargs: dict[str, Any] = {
 		"headers": {"Urgency": "high" if data_payload.get("type") == "new_invoice" else "normal"},
 		"notification": webpush_notification,
 	}
@@ -1519,7 +1521,7 @@ def _build_webpush_config(data_payload: Dict[str, str], title: str, body: str) -
 	return webpush_config_cls(**webpush_kwargs)
 
 
-def _build_invoice_alert_payload(doc: Any) -> Dict[str, Any]:
+def _build_invoice_alert_payload(doc: Any) -> dict[str, Any]:
 	if not doc or not getattr(doc, "name", None):
 		return {}
 
@@ -1551,7 +1553,7 @@ def _build_invoice_alert_payload(doc: Any) -> Dict[str, Any]:
 		or "Received"
 	)
 
-	items: List[Dict[str, Any]] = []
+	items: list[dict[str, Any]] = []
 	try:
 		for row in getattr(doc, "items", [])[:15]:
 			item_code = _pick_display_text(getattr(row, "item_code", None))
@@ -1571,7 +1573,7 @@ def _build_invoice_alert_payload(doc: Any) -> Dict[str, Any]:
 
 	acceptance_status = getattr(doc, "custom_acceptance_status", None) or "Pending"
 
-	payload: Dict[str, Any] = {
+	payload: dict[str, Any] = {
 		"invoice_id": invoice_id,
 		"name": invoice_id,
 		"woo_order_id": normalize_woo_order_id(getattr(doc, "woo_order_id", None)),
@@ -1598,7 +1600,7 @@ def _build_invoice_alert_payload(doc: Any) -> Dict[str, Any]:
 	return _enrich_invoice_display_fields(payload)
 
 
-def _resolve_recipients_for_payload(payload: Dict[str, Any]) -> List[str]:
+def _resolve_recipients_for_payload(payload: dict[str, Any]) -> list[str]:
 	effective_profile = _get_effective_profile_for_payload(payload)
 	if not effective_profile:
 		return []
@@ -1625,9 +1627,9 @@ def _ensure_acceptance_defaults(doc: Any) -> None:
 			},
 			update_modified=False,
 		)
-		setattr(doc, "custom_acceptance_status", "Pending")
-		setattr(doc, "custom_accepted_by", None)
-		setattr(doc, "custom_accepted_on", None)
+		doc.custom_acceptance_status = "Pending"
+		doc.custom_accepted_by = None
+		doc.custom_accepted_on = None
 
 		if frappe.conf.get("developer_mode"):
 			frappe.msgprint(f"Set acceptance status to Pending for {doc.name}")
@@ -1637,7 +1639,7 @@ def _ensure_acceptance_defaults(doc: Any) -> None:
 		)
 
 
-def _publish_to_recipients(event: str, payload: Dict[str, Any], recipients: Sequence[str]) -> None:
+def _publish_to_recipients(event: str, payload: dict[str, Any], recipients: Sequence[str]) -> None:
 	"""Emit *event* to each recipient individually.
 
 	``publish_realtime(user=[...])`` builds the room ``user:['a@b.com', ...]``,
@@ -1660,7 +1662,7 @@ def _publish_to_recipients(event: str, payload: Dict[str, Any], recipients: Sequ
 			frappe.log_error(frappe.get_traceback(), f"publish_realtime {event} failed for {user}")
 
 
-def _publish_invoice_alert(payload: Dict[str, Any], recipients: Sequence[str]) -> None:
+def _publish_invoice_alert(payload: dict[str, Any], recipients: Sequence[str]) -> None:
 	try:
 		_publish_to_recipients(WS_EVENTS.NEW_INVOICE, payload, recipients)
 
@@ -1673,7 +1675,7 @@ def _publish_invoice_alert(payload: Dict[str, Any], recipients: Sequence[str]) -
 		frappe.log_error(frappe.get_traceback(), "publish_realtime jarz_pos_new_invoice failed")
 
 
-def _publish_invoice_accepted(payload: Dict[str, Any], recipients: Sequence[str]) -> None:
+def _publish_invoice_accepted(payload: dict[str, Any], recipients: Sequence[str]) -> None:
 	try:
 		_publish_to_recipients(WS_EVENTS.INVOICE_ACCEPTED, payload, recipients)
 	except Exception:
@@ -1683,15 +1685,15 @@ def _publish_invoice_accepted(payload: Dict[str, Any], recipients: Sequence[str]
 # ── VAPID web push ────────────────────────────────────────────────────────────
 
 
-def _generate_vapid_keys() -> Tuple[str, str]:
+def _generate_vapid_keys() -> tuple[str, str]:
 	"""Generate a P-256 EC key pair for VAPID.
 
 	Returns (public_key_base64url, private_key_pem).
 	The public key is the raw uncompressed EC point (65 bytes) in base64url with no padding.
 	The private key is PEM format accepted by pywebpush.
 	"""
-	from cryptography.hazmat.primitives.asymmetric import ec
 	from cryptography.hazmat.primitives import serialization
+	from cryptography.hazmat.primitives.asymmetric import ec
 
 	private_key = ec.generate_private_key(ec.SECP256R1())
 
@@ -1729,7 +1731,7 @@ def _load_vapid_from_private_key(private_key_pem: str) -> Any:
 	return Vapid02.from_string(private_key=key)
 
 
-def _get_or_create_vapid_keys() -> Tuple[str, str]:
+def _get_or_create_vapid_keys() -> tuple[str, str]:
 	"""Return existing VAPID keys from settings, generating them on first call."""
 	settings = frappe.get_doc("Jarz POS Settings", "Jarz POS Settings")
 	public_key = (settings.vapid_public_key or "").strip()
@@ -1749,14 +1751,14 @@ def _get_or_create_vapid_keys() -> Tuple[str, str]:
 
 
 @frappe.whitelist(allow_guest=False)
-def get_vapid_public_key() -> Dict[str, str]:
+def get_vapid_public_key() -> dict[str, str]:
 	"""Return the VAPID application server public key, generating it on first call."""
 	public_key, _ = _get_or_create_vapid_keys()
 	return {"public_key": public_key}
 
 
 @frappe.whitelist(allow_guest=False)
-def register_vapid_subscription(subscription_json: str, browser: Optional[str] = None) -> Dict[str, Any]:
+def register_vapid_subscription(subscription_json: str, browser: str | None = None) -> dict[str, Any]:
 	"""Register or refresh a VAPID web push subscription for the signed-in user."""
 	sub_json = (subscription_json or "").strip()
 	if not sub_json:
@@ -1819,7 +1821,7 @@ def register_vapid_subscription(subscription_json: str, browser: Optional[str] =
 		frappe.throw(f"Unable to register web push subscription: {exc}")
 
 
-def _get_vapid_subscriptions_for_users(users: Sequence[str]) -> List[str]:
+def _get_vapid_subscriptions_for_users(users: Sequence[str]) -> list[str]:
 	if not users:
 		return []
 
@@ -1829,7 +1831,7 @@ def _get_vapid_subscriptions_for_users(users: Sequence[str]) -> List[str]:
 		fields=["subscription_json", "endpoint"],
 	)
 	seen_endpoints: set = set()
-	result: List[str] = []
+	result: list[str] = []
 	for row in rows:
 		endpoint = row.get("endpoint") or ""
 		sub_json = row.get("subscription_json") or ""
@@ -1860,9 +1862,9 @@ def _disable_vapid_subscription(endpoint: str) -> None:
 		frappe.log_error(frappe.get_traceback(), "Failed to disable VAPID subscription")
 
 
-def _send_vapid_notifications(subscriptions: Sequence[str], data_payload: Dict[str, Any]) -> Dict[str, Any]:
+def _send_vapid_notifications(subscriptions: Sequence[str], data_payload: dict[str, Any]) -> dict[str, Any]:
 	"""Send standard VAPID web push notifications (iOS Safari PWA, Chrome, Firefox, Edge)."""
-	result: Dict[str, Any] = {
+	result: dict[str, Any] = {
 		"ok": False,
 		"status": "pending",
 		"total": len(subscriptions),
@@ -1877,7 +1879,8 @@ def _send_vapid_notifications(subscriptions: Sequence[str], data_payload: Dict[s
 		return result
 
 	try:
-		from pywebpush import webpush as vapid_webpush, WebPushException  # type: ignore[import]
+		from pywebpush import WebPushException
+		from pywebpush import webpush as vapid_webpush  # type: ignore[import]
 	except ImportError:
 		result["status"] = "skipped_pywebpush_not_installed"
 		frappe.log_error("pywebpush not installed — VAPID push skipped", "VAPID Push Warning")
@@ -1955,7 +1958,7 @@ def _send_vapid_notifications(subscriptions: Sequence[str], data_payload: Dict[s
 	return result
 
 
-def _push_new_invoice(payload: Dict[str, Any], recipients: Sequence[str]) -> Dict[str, Any]:
+def _push_new_invoice(payload: dict[str, Any], recipients: Sequence[str]) -> dict[str, Any]:
 	data = _prepare_invoice_data_payload("new_invoice", payload)
 
 	# Both channels are resolved before either is judged: a branch working
@@ -2022,7 +2025,7 @@ def _push_new_invoice(payload: Dict[str, Any], recipients: Sequence[str]) -> Dic
 	}
 
 
-def _prepare_invoice_status_data_payload(event_type: str, payload: Dict[str, Any]) -> Dict[str, str]:
+def _prepare_invoice_status_data_payload(event_type: str, payload: dict[str, Any]) -> dict[str, str]:
 	customer_name = _pick_display_text(payload.get("customer_name"), fallback=DEFAULT_WALK_IN_CUSTOMER)
 	territory = _pick_display_text(payload.get("territory"))
 	pos_profile = _pick_display_text(payload.get("pos_profile"))
@@ -2033,7 +2036,7 @@ def _prepare_invoice_status_data_payload(event_type: str, payload: Dict[str, Any
 	)
 	title = f"{title_prefix}: {customer_name}"
 
-	body_parts: List[str] = []
+	body_parts: list[str] = []
 	if territory:
 		body_parts.append(f"Territory: {territory}")
 	if effective_profile:
@@ -2050,7 +2053,7 @@ def _prepare_invoice_status_data_payload(event_type: str, payload: Dict[str, Any
 
 	body = " | ".join(body_parts)
 
-	data: Dict[str, str] = {
+	data: dict[str, str] = {
 		"type": event_type,
 		"invoice_id": _safe_str(payload.get("invoice_id")),
 		"notification_id": _safe_str(payload.get("notification_id") or payload.get("invoice_id")),
@@ -2080,7 +2083,7 @@ def _prepare_invoice_status_data_payload(event_type: str, payload: Dict[str, Any
 	return data
 
 
-def _push_invoice_accepted(payload: Dict[str, Any], recipients: Sequence[str]) -> Dict[str, Any]:
+def _push_invoice_accepted(payload: dict[str, Any], recipients: Sequence[str]) -> dict[str, Any]:
 	# Platforms are threaded through here for the same reason as the new-invoice
 	# push: this is the message that carries stopAlarm, and it only reaches the
 	# native service if it is shaped data-only for Android.
@@ -2095,10 +2098,10 @@ def _push_invoice_accepted(payload: Dict[str, Any], recipients: Sequence[str]) -
 	return _send_fcm_notifications(tokens, data, platforms=token_platforms)
 
 
-def _prepare_invoice_data_payload(event_type: str, payload: Dict[str, Any]) -> Dict[str, str]:
+def _prepare_invoice_data_payload(event_type: str, payload: dict[str, Any]) -> dict[str, str]:
 	display_payload = _enrich_invoice_display_fields(dict(payload))
 	timestamp = display_payload.get("timestamp") or frappe.utils.now_datetime().isoformat()
-	data: Dict[str, str] = {
+	data: dict[str, str] = {
 		"type": event_type,
 		"invoice_id": display_payload.get("invoice_id", ""),
 		"notification_id": display_payload.get("invoice_id", ""),
@@ -2197,7 +2200,7 @@ def _is_invalid_token_error(exc: Exception) -> bool:
 	)
 
 
-def _new_fcm_send_result(tokens: Sequence[str], status: str = "pending") -> Dict[str, Any]:
+def _new_fcm_send_result(tokens: Sequence[str], status: str = "pending") -> dict[str, Any]:
 	return {
 		"ok": False,
 		"status": status,
@@ -2218,9 +2221,9 @@ def _new_fcm_send_result(tokens: Sequence[str], status: str = "pending") -> Dict
 	}
 
 
-def _normalise_fcm_tokens(tokens: Sequence[str]) -> Tuple[List[str], int]:
+def _normalise_fcm_tokens(tokens: Sequence[str]) -> tuple[list[str], int]:
 	seen: set[str] = set()
-	normalised: List[str] = []
+	normalised: list[str] = []
 	duplicate_count = 0
 
 	for token in tokens or []:
@@ -2236,8 +2239,8 @@ def _normalise_fcm_tokens(tokens: Sequence[str]) -> Tuple[List[str], int]:
 	return normalised, duplicate_count
 
 
-def _normalise_fcm_data_payload(data_payload: Dict[str, Any]) -> Dict[str, str]:
-	data: Dict[str, str] = {}
+def _normalise_fcm_data_payload(data_payload: dict[str, Any]) -> dict[str, str]:
+	data: dict[str, str] = {}
 	for key, value in (data_payload or {}).items():
 		if value is None:
 			data[str(key)] = ""
@@ -2257,7 +2260,7 @@ def _log_fcm_push_skipped_once(message: str) -> None:
 	_FIREBASE_INIT_STATE["push_skipped_logged"] = True
 
 
-def _fcm_invalid_token_disable_cap_would_trip(result: Dict[str, Any]) -> bool:
+def _fcm_invalid_token_disable_cap_would_trip(result: dict[str, Any]) -> bool:
 	"""Would disabling ONE more token push this run over the safety cap?
 
 	Checked prospectively, before the next disable, so the run never disables
@@ -2275,7 +2278,7 @@ def _fcm_invalid_token_disable_cap_would_trip(result: Dict[str, Any]) -> bool:
 	return prospective_invalid > attempted * FCM_INVALID_TOKEN_DISABLE_CAP_RATIO
 
 
-def _log_fcm_invalid_token_disable_cap_tripped(result: Dict[str, Any]) -> None:
+def _log_fcm_invalid_token_disable_cap_tripped(result: dict[str, Any]) -> None:
 	"""One loud Error Log per run when the disable cap trips (not per token)."""
 	attempted = result.get("attempted_count", 0)
 	already_disabled = result.get("invalid_token_count", 0)
@@ -2298,7 +2301,7 @@ def _log_fcm_invalid_token_disable_cap_tripped(result: Dict[str, Any]) -> None:
 	)
 
 
-def _record_fcm_send_error(token: str, send_err: Exception, result: Dict[str, Any]) -> None:
+def _record_fcm_send_error(token: str, send_err: Exception, result: dict[str, Any]) -> None:
 	result["failure_count"] += 1
 
 	if _is_invalid_token_error(send_err):
@@ -2312,7 +2315,7 @@ def _record_fcm_send_error(token: str, send_err: Exception, result: Dict[str, An
 			return
 
 		result["invalid_token_count"] += 1
-		_log_fcm_info(f"FCM invalid token (disabling): {str(send_err)}")
+		_log_fcm_info(f"FCM invalid token (disabling): {send_err!s}")
 		try:
 			_disable_token(token)
 		except Exception:
@@ -2321,11 +2324,11 @@ def _record_fcm_send_error(token: str, send_err: Exception, result: Dict[str, An
 
 	result["unexpected_failure_count"] += 1
 	if token not in _FCM_LOGGED_ERROR_TOKENS:
-		frappe.log_error(f"Failed to send FCM to token: {str(send_err)}", "FCM Send Error")
+		frappe.log_error(f"Failed to send FCM to token: {send_err!s}", "FCM Send Error")
 		_FCM_LOGGED_ERROR_TOKENS.add(token)
 
 
-def _finalise_fcm_send_result(result: Dict[str, Any]) -> Dict[str, Any]:
+def _finalise_fcm_send_result(result: dict[str, Any]) -> dict[str, Any]:
 	if result["failure_count"] == 0:
 		result["ok"] = True
 		if result["success_count"] > 0:
@@ -2342,15 +2345,15 @@ def _finalise_fcm_send_result(result: Dict[str, Any]) -> Dict[str, Any]:
 	return result
 
 
-def _is_android_target(platform: Optional[str]) -> bool:
+def _is_android_target(platform: str | None) -> bool:
 	return (platform or "").strip().lower() == "android"
 
 
 def _send_fcm_notifications(
 	tokens: Sequence[str],
-	data_payload: Dict[str, Any],
-	platforms: Optional[Dict[str, str]] = None,
-) -> Dict[str, Any]:
+	data_payload: dict[str, Any],
+	platforms: dict[str, str] | None = None,
+) -> dict[str, Any]:
 	"""Send FCM push notifications using Firebase Admin SDK (V1 API)."""
 	result = _new_fcm_send_result(tokens)
 	normalised_tokens, duplicate_count = _normalise_fcm_tokens(tokens)
@@ -2520,7 +2523,7 @@ def _chunk(items: Sequence[str], size: int) -> Iterable[Sequence[str]]:
 
 def _get_token_targets_for_users(
 	users: Sequence[str],
-) -> Tuple[List[str], Dict[str, str]]:
+) -> tuple[list[str], dict[str, str]]:
 	"""Return the enabled tokens for *users*, and each one's platform.
 
 	Platform comes back from the SAME query as the token rather than a second
@@ -2545,8 +2548,8 @@ def _get_token_targets_for_users(
 
 	# Deduplicate while preserving order
 	seen: set[str] = set()
-	deduped: List[str] = []
-	platforms: Dict[str, str] = {}
+	deduped: list[str] = []
+	platforms: dict[str, str] = {}
 	for row in rows:
 		token = row.get("token")
 		if not token or token in seen:
@@ -2557,11 +2560,11 @@ def _get_token_targets_for_users(
 	return deduped, platforms
 
 
-def _get_tokens_for_users(users: Sequence[str]) -> List[str]:
+def _get_tokens_for_users(users: Sequence[str]) -> list[str]:
 	return _get_token_targets_for_users(users)[0]
 
 
-def _get_users_for_pos_profiles(profiles: Sequence[str]) -> List[str]:
+def _get_users_for_pos_profiles(profiles: Sequence[str]) -> list[str]:
 	filtered = [p for p in profiles if p]
 	if not filtered:
 		return []
@@ -2576,7 +2579,7 @@ def _get_users_for_pos_profiles(profiles: Sequence[str]) -> List[str]:
 		frappe.log_error(frappe.get_traceback(), "Failed to load POS Profile users")
 		return []
 
-	users: List[str] = []
+	users: list[str] = []
 	seen: set[str] = set()
 	for row in rows:
 		user = row.get("user")
@@ -2586,7 +2589,7 @@ def _get_users_for_pos_profiles(profiles: Sequence[str]) -> List[str]:
 	return users
 
 
-def _get_users_with_roles(roles: Sequence[str]) -> List[str]:
+def _get_users_with_roles(roles: Sequence[str]) -> list[str]:
 	"""Enabled users holding any of *roles*, sorted for a stable recipient list.
 
 	Administrator is deliberately NOT filtered out, matching
@@ -2608,7 +2611,7 @@ def _get_users_with_roles(roles: Sequence[str]) -> List[str]:
 		frappe.log_error(frappe.get_traceback(), "Failed to load users for roles")
 		return []
 
-	users: List[str] = []
+	users: list[str] = []
 	seen: set = set()
 	for user in rows or []:
 		if not user or user == "Guest" or user in seen:
@@ -2622,7 +2625,7 @@ def _get_users_with_roles(roles: Sequence[str]) -> List[str]:
 	return sorted(users)
 
 
-def _get_profiles_for_user(user: str) -> List[str]:
+def _get_profiles_for_user(user: str) -> list[str]:
 	if not user or user == "Guest":
 		return []
 
@@ -2632,7 +2635,7 @@ def _get_profiles_for_user(user: str) -> List[str]:
 		fields=["parent"],
 	)
 
-	profiles: List[str] = []
+	profiles: list[str] = []
 	seen: set[str] = set()
 	for row in rows:
 		parent = row.get("parent")
@@ -2652,7 +2655,7 @@ def _ensure_user_can_accept(doc: Any, user: str) -> None:
 		frappe.throw("You are not allowed to accept orders for this POS profile", frappe.PermissionError)
 
 
-def _normalise_pos_profile_payload(pos_profiles: Optional[str]) -> Optional[str]:
+def _normalise_pos_profile_payload(pos_profiles: str | None) -> str | None:
 	if not pos_profiles:
 		return None
 	try:
@@ -2689,8 +2692,8 @@ def _safe_str(value: Any) -> str:
 
 
 def _expense_approval_recipients(
-	requested_by: Optional[str] = None,
-) -> Tuple[List[str], List[str]]:
+	requested_by: str | None = None,
+) -> tuple[list[str], list[str]]:
 	"""(holders, recipients) for an expense request.
 
 	Both halves are returned because an empty recipients has two causes that
@@ -2705,7 +2708,7 @@ def _expense_approval_recipients(
 	return holders, [u for u in holders if u != requester]
 
 
-def _build_expense_approval_payload(doc: Any) -> Dict[str, Any]:
+def _build_expense_approval_payload(doc: Any) -> dict[str, Any]:
 	"""The realtime payload for a pending expense request."""
 	name = _safe_str(getattr(doc, "name", ""))
 	if not name:
@@ -2746,7 +2749,7 @@ def _build_expense_approval_payload(doc: Any) -> Dict[str, Any]:
 	}
 
 
-def _prepare_expense_approval_data_payload(payload: Dict[str, Any]) -> Dict[str, str]:
+def _prepare_expense_approval_data_payload(payload: dict[str, Any]) -> dict[str, str]:
 	"""Flatten the payload into the string-only map FCM and web push carry."""
 	amount = _format_total_display(payload.get("amount"))
 	currency = _pick_display_text(payload.get("currency"))
@@ -2761,7 +2764,7 @@ def _prepare_expense_approval_data_payload(payload: Dict[str, Any]) -> Dict[str,
 	money = f"{amount} {currency}".strip()
 	title = f"Expense approval: {money}"
 
-	body_parts: List[str] = [f"From: {requester}"]
+	body_parts: list[str] = [f"From: {requester}"]
 	if reason:
 		body_parts.append(f"For: {reason}")
 	if source:
@@ -2793,7 +2796,7 @@ def _prepare_expense_approval_data_payload(payload: Dict[str, Any]) -> Dict[str,
 	}
 
 
-def send_expense_approval_alert(expense: str) -> Dict[str, Any]:
+def send_expense_approval_alert(expense: str) -> dict[str, Any]:
 	"""Background-worker entry point for the expense approval alert.
 
 	Takes the NAME, not the document: RQ serialises its arguments, and a
@@ -2819,7 +2822,7 @@ def send_expense_approval_alert(expense: str) -> Dict[str, Any]:
 	return notify_expense_approval_required(doc)
 
 
-def notify_expense_approval_required(doc: Any) -> Dict[str, Any]:
+def notify_expense_approval_required(doc: Any) -> dict[str, Any]:
 	"""Alert every JARZ Manager that *doc* is waiting for a decision.
 
 	Never raises. Spending money is the point of the document and being told
@@ -2827,7 +2830,7 @@ def notify_expense_approval_required(doc: Any) -> Dict[str, Any]:
 	request that triggered it -- the caller in
 	``Jarz Expense Request.after_insert`` runs inside the insert's transaction.
 	"""
-	result: Dict[str, Any] = {"ok": True, "status": "skipped", "recipients": 0}
+	result: dict[str, Any] = {"ok": True, "status": "skipped", "recipients": 0}
 	try:
 		payload = _build_expense_approval_payload(doc)
 		if not payload:
@@ -2934,8 +2937,8 @@ def notify_expense_approval_required(doc: Any) -> Dict[str, Any]:
 
 
 def notify_label_stock_alert(
-	snapshots: Sequence[Dict[str, Any]], recipients: Sequence[str]
-) -> Dict[str, Any]:
+	snapshots: Sequence[dict[str, Any]], recipients: Sequence[str]
+) -> dict[str, Any]:
 	"""Push ONE daily digest of the B2B labels that need printing.
 
 	Until this existed the daily label alert wrote a Desk bell entry and a
@@ -2945,7 +2948,7 @@ def notify_label_stock_alert(
 	print order, and the per-day notification_id makes a re-run replace the
 	tray entry instead of stacking a second one. Never raises.
 	"""
-	result: Dict[str, Any] = {"ok": True, "status": "skipped", "recipients": len(recipients or [])}
+	result: dict[str, Any] = {"ok": True, "status": "skipped", "recipients": len(recipients or [])}
 	try:
 		due = [s for s in snapshots or [] if s]
 		if not due or not recipients:
@@ -3035,10 +3038,10 @@ def notify_label_stock_alert(
 # push can never hold -- or roll back -- the request that caused it.
 
 
-def _json_safe_task_extra(extra: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+def _json_safe_task_extra(extra: dict[str, Any] | None) -> dict[str, Any]:
 	"""Strings (and lists of strings) only: RQ pickles the job kwargs, and a
 	date or a Document in here is a job that dies before it starts."""
-	out: Dict[str, Any] = {}
+	out: dict[str, Any] = {}
 	for key, value in (extra or {}).items():
 		if isinstance(value, (list, tuple, set)):
 			out[str(key)] = [_safe_str(v) for v in value]
@@ -3051,8 +3054,8 @@ def enqueue_task_notification(
 	task: Any,
 	event: str,
 	recipients: Sequence[str],
-	actor: Optional[str] = None,
-	extra: Optional[Dict[str, Any]] = None,
+	actor: str | None = None,
+	extra: dict[str, Any] | None = None,
 ) -> bool:
 	"""Queue a task push for after the current transaction commits. Never raises.
 
@@ -3094,9 +3097,9 @@ def run_task_notification_job(
 	task: str,
 	task_event: str,
 	recipients: Sequence[str],
-	actor: Optional[str] = None,
-	extra: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
+	actor: str | None = None,
+	extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
 	"""Background-worker entry point (see enqueue_task_notification)."""
 	return send_task_notification(task, task_event, recipients, actor, extra)
 
@@ -3105,9 +3108,9 @@ def send_task_notification(
 	task: Any,
 	event: str,
 	recipients: Sequence[str],
-	actor: Optional[str] = None,
-	extra: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
+	actor: str | None = None,
+	extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
 	"""Deliver one Task Board event to *recipients*. Never raises.
 
 	*task* is a Jarz Task name (or anything with ``.name``). Sends the realtime
@@ -3115,7 +3118,7 @@ def send_task_notification(
 	push (FCM + web push). A recipient with no device is recorded as a
 	notification gap rather than passing silently.
 	"""
-	result: Dict[str, Any] = {"ok": True, "status": "skipped", "recipients": 0}
+	result: dict[str, Any] = {"ok": True, "status": "skipped", "recipients": 0}
 	try:
 		from jarz_pos.services.task_board import clean_recipients, notification_text
 
@@ -3219,7 +3222,7 @@ def _ensure_notification_health_access() -> None:
 
 
 @frappe.whitelist(allow_guest=False)
-def notification_health() -> Dict[str, Any]:
+def notification_health() -> dict[str, Any]:
 	"""Report, per POS profile, who can actually be reached by push.
 
 	Managers only. Every query below uses frappe.get_all, which ignores
@@ -3246,7 +3249,7 @@ def notification_health() -> Dict[str, Any]:
 		fields=["user", "platform", "last_seen"],
 		limit_page_length=0,
 	)
-	live: Dict[str, List[Dict[str, Any]]] = {}
+	live: dict[str, list[dict[str, Any]]] = {}
 	for row in devices:
 		last_seen = row.get("last_seen")
 		age_days = None
@@ -3270,11 +3273,11 @@ def notification_health() -> Dict[str, Any]:
 		fields=["parent", "user"],
 		limit_page_length=0,
 	)
-	by_profile: Dict[str, List[str]] = {}
+	by_profile: dict[str, list[str]] = {}
 	for row in memberships:
 		by_profile.setdefault(row.get("parent"), []).append(row.get("user"))
 
-	profiles_out: List[Dict[str, Any]] = []
+	profiles_out: list[dict[str, Any]] = []
 	for profile in frappe.get_all("POS Profile", fields=["name", "disabled"], limit_page_length=0):
 		users = sorted(set(by_profile.get(profile.get("name"), [])))
 		reachable, unreachable, stale_only = [], [], []

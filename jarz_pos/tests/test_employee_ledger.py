@@ -30,7 +30,6 @@ from unittest.mock import MagicMock, patch
 
 from jarz_pos.api import manager
 
-
 FROM_DATE = "2026-06-01"
 TO_DATE = "2026-06-30"
 #: What the patched ``nowdate`` reports, so the default-window case is exact.

@@ -37,12 +37,12 @@ def _ensure_access() -> None:
 	attendance_service.ensure_attendance_access()
 
 
-def _clean(value: Any) -> Optional[str]:
+def _clean(value: Any) -> str | None:
 	text = str(value or "").strip()
 	return text or None
 
 
-def _coerce_date(value: Any, label: str = "date") -> Optional[str]:
+def _coerce_date(value: Any, label: str = "date") -> str | None:
 	"""``None`` stays ``None`` (the service applies the default); junk throws."""
 	if not value:
 		return None
@@ -52,7 +52,7 @@ def _coerce_date(value: Any, label: str = "date") -> Optional[str]:
 		frappe.throw(_("{0} is not a valid date: {1}").format(label, value))
 
 
-def _coerce_month(value: Any) -> Optional[str]:
+def _coerce_month(value: Any) -> str | None:
 	"""Validate ``YYYY-MM`` here so the error names the month, not the first.
 
 	``month_bounds`` builds ``f"{month}-01"`` and lets ``getdate`` fail, which
@@ -72,7 +72,7 @@ def _coerce_month(value: Any) -> Optional[str]:
 
 
 @frappe.whitelist()
-def get_bootstrap() -> Dict[str, Any]:
+def get_bootstrap() -> dict[str, Any]:
 	"""Branches, scope, grace and the status vocabulary, in one call.
 
 	The status list is served rather than hard-coded in the client so that a
@@ -86,7 +86,7 @@ def get_bootstrap() -> Dict[str, Any]:
 
 
 @frappe.whitelist()
-def get_month(month: Optional[str] = None, shift_location: Optional[str] = None) -> Dict[str, Any]:
+def get_month(month: str | None = None, shift_location: str | None = None) -> dict[str, Any]:
 	"""The attendance calendar for a month: one row per employee."""
 	_ensure_access()
 	data = attendance_service.get_month(month=_coerce_month(month), shift_location=_clean(shift_location))
@@ -95,7 +95,7 @@ def get_month(month: Optional[str] = None, shift_location: Optional[str] = None)
 
 
 @frappe.whitelist()
-def get_day(date: Optional[str] = None, shift_location: Optional[str] = None) -> Dict[str, Any]:
+def get_day(date: str | None = None, shift_location: str | None = None) -> dict[str, Any]:
 	"""One day, grouped by branch, worst rows first."""
 	_ensure_access()
 	data = attendance_service.get_day(
@@ -108,9 +108,9 @@ def get_day(date: Optional[str] = None, shift_location: Optional[str] = None) ->
 @frappe.whitelist()
 def get_employee(
 	employee: str,
-	from_date: Optional[str] = None,
-	to_date: Optional[str] = None,
-) -> Dict[str, Any]:
+	from_date: str | None = None,
+	to_date: str | None = None,
+) -> dict[str, Any]:
 	"""One person's attendance over a range, with their raw check-ins.
 
 	The scope re-check is not redundant with the one inside the service: the
@@ -140,11 +140,11 @@ def get_employee(
 
 @frappe.whitelist()
 def get_summary(
-	from_date: Optional[str] = None,
-	to_date: Optional[str] = None,
+	from_date: str | None = None,
+	to_date: str | None = None,
 	group_by: str = "branch",
-	shift_location: Optional[str] = None,
-) -> Dict[str, Any]:
+	shift_location: str | None = None,
+) -> dict[str, Any]:
 	"""Totals rolled up by branch, by employee or by day."""
 	_ensure_access()
 	data = attendance_service.get_summary(

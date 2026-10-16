@@ -72,7 +72,7 @@ def _is_bundle_child_row(row: Any) -> bool:
 	return _flag(row, "is_bundle_child") or bool(_text(row, "parent_bundle"))
 
 
-def _bundle_exists(bundle_code: str, cache: Dict[str, bool]) -> bool:
+def _bundle_exists(bundle_code: str, cache: dict[str, bool]) -> bool:
 	"""Return whether ``bundle_code`` still names a live Jarz Bundle record."""
 	if bundle_code not in cache:
 		try:
@@ -86,8 +86,8 @@ def _bundle_exists(bundle_code: str, cache: Dict[str, bool]) -> bool:
 
 def _resolve_bundle_code(
 	row: Any,
-	bundle_code_cache: Dict[str, str],
-	bundle_exists_cache: Dict[str, bool],
+	bundle_code_cache: dict[str, str],
+	bundle_exists_cache: dict[str, bool],
 ) -> str:
 	"""Return the Jarz Bundle this parent row should be rebuilt against.
 
@@ -103,7 +103,7 @@ def _resolve_bundle_code(
 	return _derive_bundle_code_from_parent_item(row.item_code, bundle_code_cache)
 
 
-def _owning_parent_index(child_index: int, candidate_parents: List[int], child_row: Any, invoice: Any) -> int:
+def _owning_parent_index(child_index: int, candidate_parents: list[int], child_row: Any, invoice: Any) -> int:
 	"""Return the row index of the bundle parent that owns the child at ``child_index``.
 
 	``candidate_parents`` holds, in invoice order, every parent row whose resolved
@@ -137,7 +137,7 @@ def _owning_parent_index(child_index: int, candidate_parents: List[int], child_r
 	return candidate_parents[0]  # pragma: no cover - frappe.throw does not return
 
 
-def build_amendment_cart_from_invoice(invoice: Any) -> List[Dict[str, Any]]:
+def build_amendment_cart_from_invoice(invoice: Any) -> list[dict[str, Any]]:
 	"""Return the POS cart payload that reproduces ``invoice`` line-for-line.
 
 	Bundle parents become a single ``is_bundle`` cart row whose ``selected_items``
@@ -155,18 +155,18 @@ def build_amendment_cart_from_invoice(invoice: Any) -> List[Dict[str, Any]]:
 	if not rows:
 		frappe.throw(_("Invoice {0} has no items to rebuild.").format(getattr(invoice, "name", "")))
 
-	bundle_code_cache: Dict[str, str] = {}
-	bundle_exists_cache: Dict[str, bool] = {}
-	group_metadata_cache: Dict[str, Dict[str, Dict[str, str]]] = {}
+	bundle_code_cache: dict[str, str] = {}
+	bundle_exists_cache: dict[str, bool] = {}
+	group_metadata_cache: dict[str, dict[str, dict[str, str]]] = {}
 
 	# Resolve each parent row's bundle code up front so children can be attached.
-	parent_bundle_codes: Dict[int, str] = {}
+	parent_bundle_codes: dict[int, str] = {}
 	# Every parent row index per resolved code, in invoice order. More than one
 	# entry means the order holds the same bundle more than once.
-	parent_indexes_by_code: Dict[str, List[int]] = {}
+	parent_indexes_by_code: dict[str, list[int]] = {}
 	# Children point at whatever code the parent row stored. When that code is
 	# stale it is replaced above, so keep the translation to re-attach them.
-	resolved_by_stored_code: Dict[str, str] = {}
+	resolved_by_stored_code: dict[str, str] = {}
 	for index, row in enumerate(rows):
 		if _is_bundle_child_row(row) or not _is_bundle_parent_row(row):
 			continue
@@ -186,8 +186,8 @@ def build_amendment_cart_from_invoice(invoice: Any) -> List[Dict[str, Any]]:
 
 	# Keyed by the parent ROW index, not the bundle code: two instances of one
 	# bundle share a code, and keying by it handed every child to both parents.
-	children_by_parent: Dict[int, List[Any]] = {}
-	orphan_children: List[Any] = []
+	children_by_parent: dict[int, list[Any]] = {}
+	orphan_children: list[Any] = []
 	for index, row in enumerate(rows):
 		if not _is_bundle_child_row(row):
 			continue
@@ -217,7 +217,7 @@ def build_amendment_cart_from_invoice(invoice: Any) -> List[Dict[str, Any]]:
 		only_parent_index = next(iter(parent_bundle_codes))
 		children_by_parent.setdefault(only_parent_index, []).extend(orphan_children)
 
-	cart: List[Dict[str, Any]] = []
+	cart: list[dict[str, Any]] = []
 	for index, row in enumerate(rows):
 		if _is_bundle_child_row(row):
 			continue  # emitted as part of its bundle parent
@@ -238,7 +238,7 @@ def build_amendment_cart_from_invoice(invoice: Any) -> List[Dict[str, Any]]:
 		if not item_code:
 			continue
 		unit_rate = flt(row.price_list_rate) or flt(row.rate)
-		plain_row: Dict[str, Any] = {
+		plain_row: dict[str, Any] = {
 			"item_code": item_code,
 			"qty": flt(row.qty),
 			"rate": unit_rate,
@@ -262,9 +262,9 @@ def _build_bundle_cart_row(
 	invoice: Any,
 	parent_row: Any,
 	bundle_code: str,
-	children: List[Any],
-	group_metadata_cache: Dict[str, Dict[str, Dict[str, str]]],
-) -> Dict[str, Any]:
+	children: list[Any],
+	group_metadata_cache: dict[str, dict[str, dict[str, str]]],
+) -> dict[str, Any]:
 	"""Return one ``is_bundle`` cart row rebuilt from its persisted invoice rows."""
 	invoice_name = getattr(invoice, "name", "")
 	if not children:
@@ -278,7 +278,7 @@ def _build_bundle_cart_row(
 	if bundle_qty <= 0:
 		bundle_qty = 1
 
-	selected_items: Dict[str, List[Dict[str, Any]]] = {}
+	selected_items: dict[str, list[dict[str, Any]]] = {}
 	for child in children:
 		group_key = _text(child, "bundle_group_key")
 		group_name = _text(child, "bundle_group_name")

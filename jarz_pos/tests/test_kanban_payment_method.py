@@ -26,7 +26,6 @@ from unittest.mock import patch
 
 from jarz_pos.api import kanban
 
-
 COMPANY_ABBR = "J"
 
 #: ``Account`` rows the stub serves, keyed by name.

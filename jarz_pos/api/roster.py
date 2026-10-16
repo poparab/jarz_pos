@@ -42,7 +42,7 @@ def _coerce_date(value: Any, label: str = "date") -> str:
 		frappe.throw(_("{0} is not a valid date: {1}").format(label, value))
 
 
-def _clean(value: Any) -> Optional[str]:
+def _clean(value: Any) -> str | None:
 	text = str(value or "").strip()
 	return text or None
 
@@ -100,7 +100,7 @@ def _ensure_employee_active(employee: str) -> None:
 
 
 @frappe.whitelist()
-def get_bootstrap() -> Dict[str, Any]:
+def get_bootstrap() -> dict[str, Any]:
 	"""Everything the screen needs before it can draw a month.
 
 	Returned as one call so the calendar does not open on three spinners. The
@@ -125,7 +125,7 @@ def get_bootstrap() -> Dict[str, Any]:
 
 
 @frappe.whitelist()
-def get_month(month: Optional[str] = None, shift_location: Optional[str] = None) -> Dict[str, Any]:
+def get_month(month: str | None = None, shift_location: str | None = None) -> dict[str, Any]:
 	"""The calendar: one row per employee, one cell per day."""
 	_ensure_access()
 	data = roster_service.get_month(month=_clean(month), shift_location=_clean(shift_location))
@@ -134,7 +134,7 @@ def get_month(month: Optional[str] = None, shift_location: Optional[str] = None)
 
 
 @frappe.whitelist()
-def get_month_hours(month: Optional[str] = None, shift_location: Optional[str] = None) -> Dict[str, Any]:
+def get_month_hours(month: str | None = None, shift_location: str | None = None) -> dict[str, Any]:
 	"""Per-employee hours and overtime for the month, ready for payroll."""
 	_ensure_access()
 	data = roster_service.month_hours(month=_clean(month), shift_location=_clean(shift_location))
@@ -142,7 +142,7 @@ def get_month_hours(month: Optional[str] = None, shift_location: Optional[str] =
 	return data
 
 
-def _ensure_location_allowed(shift_location: Optional[str]) -> None:
+def _ensure_location_allowed(shift_location: str | None) -> None:
 	"""Refuse a branch outside the caller's scope.
 
 	The plan names its branch per person, so without this a manager could
@@ -160,7 +160,7 @@ def _ensure_location_allowed(shift_location: Optional[str]) -> None:
 
 
 @frappe.whitelist()
-def get_plan_defaults(shift_location: Optional[str] = None) -> Dict[str, Any]:
+def get_plan_defaults(shift_location: str | None = None) -> dict[str, Any]:
 	"""Pre-fill for the rota plan wizard: everybody's current week."""
 	_ensure_access()
 	shift_location = _clean(shift_location)
@@ -180,9 +180,9 @@ def assign_shift(
 	employee: str,
 	date: str,
 	shift_type: str,
-	shift_location: Optional[str] = None,
+	shift_location: str | None = None,
 	grant_pos_access: Any = 0,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	"""Put one employee on one shift for one day.
 
 	Used for both "swap Ali from Opening to Closing" and "move Ali to the other
@@ -227,11 +227,11 @@ def set_day_off(
 	employee: str,
 	date: str,
 	off_type: str = "Weekly Off",
-	covered_by: Optional[str] = None,
-	cover_shift_type: Optional[str] = None,
-	notes: Optional[str] = None,
+	covered_by: str | None = None,
+	cover_shift_type: str | None = None,
+	notes: str | None = None,
 	grant_pos_access: Any = 0,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	"""Mark somebody off and, in the same step, name who covers the day.
 
 	``grant_pos_access`` gives the COVERING colleague POS access at the branch
@@ -287,7 +287,7 @@ def set_day_off(
 
 
 @frappe.whitelist()
-def clear_day_off(employee: str, date: str) -> Dict[str, Any]:
+def clear_day_off(employee: str, date: str) -> dict[str, Any]:
 	"""Undo a day off, restoring both the person and whoever covered them."""
 	_ensure_access()
 	employee = _clean(employee)
@@ -303,7 +303,7 @@ def clear_day_off(employee: str, date: str) -> Dict[str, Any]:
 
 
 @frappe.whitelist()
-def bulk_assign(payload: Any) -> Dict[str, Any]:
+def bulk_assign(payload: Any) -> dict[str, Any]:
 	"""Apply many single-day changes in one request.
 
 	The screen edits a month at a time, and a manager filling a rota makes
@@ -322,8 +322,8 @@ def bulk_assign(payload: Any) -> Dict[str, Any]:
 	if not isinstance(rows, list):
 		frappe.throw(_("Payload must be a list of changes."))
 
-	applied: List[Dict[str, Any]] = []
-	failed: List[Dict[str, Any]] = []
+	applied: list[dict[str, Any]] = []
+	failed: list[dict[str, Any]] = []
 
 	for index, row in enumerate(rows):
 		if not isinstance(row, dict):
@@ -389,7 +389,7 @@ def bulk_assign(payload: Any) -> Dict[str, Any]:
 	}
 
 
-def _coerce_plan(payload: Any) -> Dict[str, Any]:
+def _coerce_plan(payload: Any) -> dict[str, Any]:
 	plan = payload
 	if isinstance(plan, str):
 		try:
@@ -469,7 +469,7 @@ def _ensure_plan_home_in_scope(employee: str) -> None:
 		)
 
 
-def _check_plan_scope(plan: Dict[str, Any]) -> None:
+def _check_plan_scope(plan: dict[str, Any]) -> None:
 	"""Every person, coverer and branch in the plan must be the caller's.
 
 	The service writes with ``ignore_permissions``, so this is the whole
@@ -479,7 +479,7 @@ def _check_plan_scope(plan: Dict[str, Any]) -> None:
 	"""
 	checked = set()
 
-	def check(employee: Optional[str], planned: bool = False) -> None:
+	def check(employee: str | None, planned: bool = False) -> None:
 		if not employee:
 			return
 		if employee not in checked:
@@ -515,7 +515,7 @@ def _wants_apply(dry_run: Any) -> bool:
 
 
 @frappe.whitelist()
-def apply_plan(payload: Any, dry_run: Any = 1) -> Dict[str, Any]:
+def apply_plan(payload: Any, dry_run: Any = 1) -> dict[str, Any]:
 	"""Preview (``dry_run=1``, the default) or write a rota plan.
 
 	The default is the preview so that a client which forgets the flag gets a
@@ -544,7 +544,7 @@ def apply_plan(payload: Any, dry_run: Any = 1) -> Dict[str, Any]:
 	if not branch_access_service.as_flag(plan.get("grant_pos_access")):
 		return result
 
-	names: Dict[str, str] = {}
+	names: dict[str, str] = {}
 	for cover in result.get("created_covers") or []:
 		employee = cover["employee"]
 		if employee not in names:

@@ -45,7 +45,7 @@ from jarz_pos.utils import geo
 PAGE_SIZE = 500
 
 
-def _summary() -> Dict[str, Any]:
+def _summary() -> dict[str, Any]:
 	return {
 		"scanned": 0,
 		"with_link": 0,
@@ -61,10 +61,10 @@ def _summary() -> Dict[str, Any]:
 
 def run(
 	dry_run: bool = False,
-	limit: Optional[int] = None,
+	limit: int | None = None,
 	resolve_short_links: bool = False,
 	verbose: bool = True,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	"""Copy coordinates out of ``address_line2`` into the Address geo fields.
 
 	Args:
@@ -88,7 +88,7 @@ def run(
 	stop = False
 	while not stop:
 		try:
-			rows: List[Dict[str, Any]] = (
+			rows: list[dict[str, Any]] = (
 				frappe.get_all(
 					"Address",
 					# address_line2 is SELECTed. It is never in an update.

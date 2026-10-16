@@ -138,7 +138,7 @@ def _path(filename: str) -> str:
 
 
 def _bucket_path(bucket: str) -> str:
-	return _path("bucket_{0}.csv".format(bucket))
+	return _path(f"bucket_{bucket}.csv")
 
 
 # -------------------------------------------------------------------- safety --
@@ -151,7 +151,7 @@ OUTBOUND_SWITCHES = (
 )
 
 
-def _outbound_state() -> Dict[str, Any]:
+def _outbound_state() -> dict[str, Any]:
 	return {field: frappe.db.get_single_value("WooCommerce Settings", field) for field in OUTBOUND_SWITCHES}
 
 
@@ -171,7 +171,7 @@ def _assert_safe() -> None:
 			"ABORT: WooCommerce outbound is still armed ({0}). Run "
 			"harden_outbound first -- otherwise every Payment Entry pushes a "
 			"status change to the live store and emails a real customer.".format(
-				", ".join("{0}={1}".format(k, v) for k, v in sorted(live.items()))
+				", ".join(f"{k}={v}" for k, v in sorted(live.items()))
 			)
 		)
 	# Independent of the settings, and the only guard that covers the Payment
@@ -180,7 +180,7 @@ def _assert_safe() -> None:
 	frappe.flags.ignore_woo_outbound = True
 
 
-def harden_outbound(confirm: str = "") -> Dict[str, Any]:
+def harden_outbound(confirm: str = "") -> dict[str, Any]:
 	"""Turn every outbound switch off. Disable-only, on purpose.
 
 	There is deliberately no counterpart that turns them back on. Re-enabling is
@@ -198,7 +198,7 @@ def harden_outbound(confirm: str = "") -> Dict[str, Any]:
 		frappe.db.set_single_value("WooCommerce Settings", field, 0)
 	frappe.db.commit()
 	after = _outbound_state()
-	print("outbound switches: {0} -> {1}".format(before, after))
+	print(f"outbound switches: {before} -> {after}")
 	return {"before": before, "after": after}
 
 
@@ -207,7 +207,7 @@ def _company_abbr(company: str) -> str:
 	return frappe.db.get_value("Company", company, "abbr") or ""
 
 
-def _resolve_account(company: str, woo_payment_method: str, woo_date_paid: str = "") -> Optional[str]:
+def _resolve_account(company: str, woo_payment_method: str, woo_date_paid: str = "") -> str | None:
 	"""The account that receives this payment, or None if we will not guess.
 
 	A method with no mapping returns None and the invoice goes to a human --
@@ -234,14 +234,14 @@ def _resolve_account(company: str, woo_payment_method: str, woo_date_paid: str =
 
 
 # ----------------------------------------------------------------- snapshot --
-def _load_snapshot() -> Dict[int, Dict[str, str]]:
+def _load_snapshot() -> dict[int, dict[str, str]]:
 	path = _path(SNAPSHOT_FILE)
 	if not os.path.exists(path):
 		frappe.throw(
-			"Missing Woo snapshot at {0}. Upload the woo_snapshot.csv produced by "
-			"the read-only store crawl before classifying.".format(path)
+			f"Missing Woo snapshot at {path}. Upload the woo_snapshot.csv produced by "
+			"the read-only store crawl before classifying."
 		)
-	snapshot: Dict[int, Dict[str, str]] = {}
+	snapshot: dict[int, dict[str, str]] = {}
 	with open(path, newline="", encoding="utf-8") as handle:
 		for row in csv.DictReader(handle):
 			try:
@@ -249,11 +249,11 @@ def _load_snapshot() -> Dict[int, Dict[str, str]]:
 			except (TypeError, ValueError):
 				continue
 	if not snapshot:
-		frappe.throw("Woo snapshot at {0} is empty.".format(path))
+		frappe.throw(f"Woo snapshot at {path} is empty.")
 	return snapshot
 
 
-def _clean_datetime(value: str) -> Optional[str]:
+def _clean_datetime(value: str) -> str | None:
 	value = (value or "").strip()
 	if not value:
 		return None
@@ -261,7 +261,7 @@ def _clean_datetime(value: str) -> Optional[str]:
 
 
 # ---------------------------------------------------------------- preflight --
-def preflight() -> Dict[str, Any]:
+def preflight() -> dict[str, Any]:
 	"""Read-only. Prints what the run would face; changes nothing."""
 	state = _outbound_state()
 	print("WooCommerce outbound switches:")
@@ -281,7 +281,7 @@ def preflight() -> Dict[str, Any]:
 	)
 	print("\nLive Woo-linked invoices by ops state:")
 	for row in rows:
-		print("  {0:24} {1:>6}  {2:>12,} EGP".format(row.state, row.n, row.outstanding or 0))
+		print(f"  {row.state:24} {row.n:>6}  {row.outstanding or 0:>12,} EGP")
 
 	snapshot_path = _path(SNAPSHOT_FILE)
 	print(
@@ -315,13 +315,13 @@ BUCKET_COLUMNS = [
 ]
 
 
-def classify() -> Dict[str, int]:
+def classify() -> dict[str, int]:
 	"""Sort every Woo-linked invoice into a bucket, grounded in live Woo status.
 
 	Read-only apart from the bucket CSVs it writes.
 	"""
 	snapshot = _load_snapshot()
-	print("Woo snapshot: {0} orders".format(len(snapshot)))
+	print(f"Woo snapshot: {len(snapshot)} orders")
 
 	invoices = frappe.db.sql(
 		"""
@@ -334,13 +334,13 @@ def classify() -> Dict[str, int]:
         """,
 		as_dict=True,
 	)
-	print("ERPNext Woo-linked invoices: {0}".format(len(invoices)))
+	print(f"ERPNext Woo-linked invoices: {len(invoices)}")
 
-	by_order: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+	by_order: dict[int, list[dict[str, Any]]] = defaultdict(list)
 	for invoice in invoices:
 		by_order[int(invoice.woo_order_id)].append(invoice)
 
-	buckets: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+	buckets: dict[str, list[dict[str, Any]]] = defaultdict(list)
 
 	for woo_id, rows in by_order.items():
 		woo = snapshot.get(woo_id)
@@ -421,12 +421,12 @@ def classify() -> Dict[str, int]:
 
 	print("\n{0:38} {1:>9} {2:>17}".format("bucket", "invoices", "outstanding EGP"))
 	print("-" * 68)
-	counts: Dict[str, int] = {}
+	counts: dict[str, int] = {}
 	for bucket in sorted(buckets):
 		rows = buckets[bucket]
 		counts[bucket] = len(rows)
 		total = sum(float(r.outstanding_amount or 0) for r in rows)
-		print("{0:38} {1:>9} {2:>17,.0f}".format(bucket, len(rows), total))
+		print(f"{bucket:38} {len(rows):>9} {total:>17,.0f}")
 		if bucket == "ALIGNED":
 			continue
 		with open(_bucket_path(bucket), "w", newline="", encoding="utf-8") as handle:
@@ -434,12 +434,12 @@ def classify() -> Dict[str, int]:
 			writer.writeheader()
 			writer.writerows(rows)
 	print("-" * 68)
-	print("bucket CSVs written to {0}".format(_files_dir()))
+	print(f"bucket CSVs written to {_files_dir()}")
 	return counts
 
 
 # --------------------------------------------------------------------- audit --
-def _write_audit(rows: List[Dict[str, Any]], bucket: str, dry_run: bool) -> Optional[str]:
+def _write_audit(rows: list[dict[str, Any]], bucket: str, dry_run: bool) -> str | None:
 	if not rows:
 		return None
 	stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -483,9 +483,7 @@ def _build_payment_entry(invoice: Any, account: str) -> Any:
 	payment = get_payment_entry("Sales Invoice", invoice.name, bank_account=account)
 	payment.reference_no = MARKER
 	payment.reference_date = frappe.utils.today()
-	payment.remarks = "{0} | woo_order_id={1} | invoice={2}".format(
-		MARKER, invoice.woo_order_id, invoice.name
-	)
+	payment.remarks = f"{MARKER} | woo_order_id={invoice.woo_order_id} | invoice={invoice.name}"
 	payment.flags.ignore_woo_outbound = True
 	return payment
 
@@ -497,7 +495,7 @@ def _receive_payment(invoice: Any, woo_payment_method: str, dry_run: bool, woo_d
 		return (
 			None,
 			"SKIP",
-			"no account for payment_method={0!r} (date_paid={1!r})".format(woo_payment_method, woo_date_paid),
+			f"no account for payment_method={woo_payment_method!r} (date_paid={woo_date_paid!r})",
 		)
 
 	amount = invoice.outstanding_amount
@@ -513,14 +511,14 @@ def _receive_payment(invoice: Any, woo_payment_method: str, dry_run: bool, woo_d
 		# setup_party_account_field, set_missing_values, set_missing_ref_details
 		# and the allocation checks.
 		payment.validate()
-		return None, "DRY", "WOULD receive {0:,.2f} -> {1} ({2})".format(amount, account, payment.paid_from)
+		return None, "DRY", f"WOULD receive {amount:,.2f} -> {account} ({payment.paid_from})"
 
 	payment.insert(ignore_permissions=True)
 	payment.submit()
-	return payment.name, "OK", "received {0:,.2f} -> {1}".format(amount, account)
+	return payment.name, "OK", f"received {amount:,.2f} -> {account}"
 
 
-def _set_delivered(invoice_name: str, delivered_at: Optional[str], dry_run: bool) -> str:
+def _set_delivered(invoice_name: str, delivered_at: str | None, dry_run: bool) -> str:
 	"""Advance the ops state without touching the document.
 
 	``frappe.db.set_value`` does not fire ``doc_events``, so this cannot reach
@@ -531,7 +529,7 @@ def _set_delivered(invoice_name: str, delivered_at: Optional[str], dry_run: bool
 	"""
 	if dry_run:
 		return "WOULD set Delivered"
-	payload: Dict[str, Any] = {
+	payload: dict[str, Any] = {
 		"custom_sales_invoice_state": "Delivered",
 		"sales_invoice_state": "Delivered",
 	}
@@ -545,9 +543,9 @@ def _set_delivered(invoice_name: str, delivered_at: Optional[str], dry_run: bool
 def run(
 	bucket: str = "B1_pay_and_state",
 	dry_run: bool = True,
-	limit: Optional[int] = None,
-	csv_path: Optional[str] = None,
-) -> Dict[str, Any]:
+	limit: int | None = None,
+	csv_path: str | None = None,
+) -> dict[str, Any]:
 	"""Process one bucket: book the cash, advance the state.
 
 	Idempotent -- a second run finds the payment marker and the terminal state
@@ -557,14 +555,14 @@ def run(
 
 	path = csv_path or _bucket_path(bucket)
 	if not os.path.exists(path):
-		frappe.throw("No bucket file at {0}. Run classify first.".format(path))
+		frappe.throw(f"No bucket file at {path}. Run classify first.")
 	with open(path, newline="", encoding="utf-8") as handle:
 		todo = list(csv.DictReader(handle))
 	if limit:
 		todo = todo[: int(limit)]
 
-	print("{0}: {1} invoices | dry_run={2}".format(bucket, len(todo), dry_run))
-	audit: List[Dict[str, Any]] = []
+	print(f"{bucket}: {len(todo)} invoices | dry_run={dry_run}")
+	audit: list[dict[str, Any]] = []
 	failures = 0
 
 	for index, row in enumerate(todo, 1):
@@ -594,18 +592,16 @@ def run(
 			# change wins.
 			if invoice.docstatus != 1:
 				record["outcome"] = "SKIP"
-				record["note"] = "docstatus={0}".format(invoice.docstatus)
+				record["note"] = f"docstatus={invoice.docstatus}"
 				audit.append(record)
 				continue
 			if (row["ops_state"] or "") != (invoice.custom_sales_invoice_state or ""):
 				record["outcome"] = "SKIP"
-				record["note"] = "state moved since classification: {0}".format(
-					invoice.custom_sales_invoice_state
-				)
+				record["note"] = f"state moved since classification: {invoice.custom_sales_invoice_state}"
 				audit.append(record)
 				continue
 
-			notes: List[str] = []
+			notes: list[str] = []
 			skipped = False
 
 			if float(row["outstanding_amount"] or 0) > 0 and invoice.outstanding_amount > 0:
@@ -639,39 +635,37 @@ def run(
 			if not dry_run:
 				frappe.db.commit()
 
-		except Exception as exc:  # noqa: BLE001
+		except Exception as exc:
 			failures += 1
 			record["outcome"] = "FAIL"
-			record["note"] = "{0}: {1}".format(type(exc).__name__, exc)
+			record["note"] = f"{type(exc).__name__}: {exc}"
 			if not dry_run:
 				frappe.db.rollback()
-			print("  [{0}/{1}] FAIL {2}: {3}".format(index, len(todo), name, exc))
+			print(f"  [{index}/{len(todo)}] FAIL {name}: {exc}")
 			traceback.print_exc()
 			if failures >= MAX_FAILURES:
 				audit.append(record)
-				print("HALTING: {0} failures -- investigate before continuing.".format(failures))
+				print(f"HALTING: {failures} failures -- investigate before continuing.")
 				break
 
 		audit.append(record)
 		if index % 25 == 0:
-			print("  [{0}/{1}] ...".format(index, len(todo)))
+			print(f"  [{index}/{len(todo)}] ...")
 
 	return _summarise(audit, bucket, dry_run, failures)
 
 
-def _summarise(audit: List[Dict[str, Any]], bucket: str, dry_run: bool, failures: int) -> Dict[str, Any]:
+def _summarise(audit: list[dict[str, Any]], bucket: str, dry_run: bool, failures: int) -> dict[str, Any]:
 	path = _write_audit(audit, bucket, dry_run)
 	processed = sum(1 for r in audit if r["outcome"] in ("OK", "DRY"))
 	skipped = sum(1 for r in audit if r["outcome"] == "SKIP")
-	print("\ndone: {0} processed, {1} failed, {2} skipped".format(processed, failures, skipped))
-	print("audit: {0}".format(path))
+	print(f"\ndone: {processed} processed, {failures} failed, {skipped} skipped")
+	print(f"audit: {path}")
 	return {"processed": processed, "failed": failures, "skipped": skipped, "audit": path}
 
 
 # ------------------------------------------------------------------- cancels --
-def run_cancel(
-	dry_run: bool = True, limit: Optional[int] = None, csv_path: Optional[str] = None
-) -> Dict[str, Any]:
+def run_cancel(dry_run: bool = True, limit: int | None = None, csv_path: str | None = None) -> dict[str, Any]:
 	"""B4: WooCommerce says the order is dead, ERPNext still has it live.
 
 	``before_cancel -> block_cancel_if_dispatched`` refuses a dispatched invoice.
@@ -682,14 +676,14 @@ def run_cancel(
 
 	path = csv_path or _bucket_path("B4_cancel_in_erp")
 	if not os.path.exists(path):
-		frappe.throw("No bucket file at {0}. Run classify first.".format(path))
+		frappe.throw(f"No bucket file at {path}. Run classify first.")
 	with open(path, newline="", encoding="utf-8") as handle:
 		todo = list(csv.DictReader(handle))
 	if limit:
 		todo = todo[: int(limit)]
 
-	print("B4 cancel: {0} invoices | dry_run={1}".format(len(todo), dry_run))
-	audit: List[Dict[str, Any]] = []
+	print(f"B4 cancel: {len(todo)} invoices | dry_run={dry_run}")
+	audit: list[dict[str, Any]] = []
 	failures = 0
 
 	for index, row in enumerate(todo, 1):
@@ -707,7 +701,7 @@ def run_cancel(
 			invoice = frappe.get_doc("Sales Invoice", name)
 			if invoice.docstatus != 1:
 				record["outcome"] = "SKIP"
-				record["note"] = "docstatus={0}".format(invoice.docstatus)
+				record["note"] = f"docstatus={invoice.docstatus}"
 				audit.append(record)
 				continue
 
@@ -724,7 +718,7 @@ def run_cancel(
 				record["payments_cancelled"] = ",".join(payments)
 				record["outcome"] = "DRY"
 				record["note"] = "WOULD cancel invoice" + (
-					" and {0} payment entry(s)".format(len(payments)) if payments else ""
+					f" and {len(payments)} payment entry(s)" if payments else ""
 				)
 				audit.append(record)
 				continue
@@ -766,21 +760,21 @@ def run_cancel(
 			# which silently let the Delivery Note refusal count as a hard
 			# failure and would have halted production after three of them.
 			record["outcome"] = "SKIP"
-			record["note"] = "blocked -- manual review: {0}".format(exc)
+			record["note"] = f"blocked -- manual review: {exc}"
 			frappe.db.rollback()
 			audit.append(record)
 			continue
 
-		except Exception as exc:  # noqa: BLE001
+		except Exception as exc:
 			failures += 1
 			record["outcome"] = "FAIL"
-			record["note"] = "{0}: {1}".format(type(exc).__name__, exc)
+			record["note"] = f"{type(exc).__name__}: {exc}"
 			frappe.db.rollback()
-			print("  [{0}/{1}] FAIL {2}: {3}".format(index, len(todo), name, exc))
+			print(f"  [{index}/{len(todo)}] FAIL {name}: {exc}")
 			traceback.print_exc()
 			if failures >= MAX_FAILURES:
 				audit.append(record)
-				print("HALTING: {0} failures -- investigate before continuing.".format(failures))
+				print(f"HALTING: {failures} failures -- investigate before continuing.")
 				break
 
 		audit.append(record)
@@ -789,7 +783,7 @@ def run_cancel(
 
 
 # ------------------------------------------------------------------- verify --
-def verify() -> Dict[str, Any]:
+def verify() -> dict[str, Any]:
 	"""Post-run evidence. Read-only.
 
 	The customer-safety checks matter more than the financial ones: the books
@@ -802,12 +796,12 @@ def verify() -> Dict[str, Any]:
         WHERE docstatus = 1 AND remarks LIKE %s
         GROUP BY paid_to
         """,
-		("%{0}%".format(MARKER),),
+		(f"%{MARKER}%",),
 		as_dict=True,
 	)
 	print("Migration Payment Entries:")
 	for row in payments:
-		print("  {0:28} {1:>6}  {2:>12,} EGP".format(row.account, row.n, row.total or 0))
+		print(f"  {row.account:28} {row.n:>6}  {row.total or 0:>12,} EGP")
 
 	remaining = frappe.db.sql(
 		"""
@@ -821,7 +815,7 @@ def verify() -> Dict[str, Any]:
 	)
 	print("\nLive Woo-linked invoices by ops state:")
 	for row in remaining:
-		print("  {0:24} {1:>6}  {2:>12,} EGP".format(row.state, row.n, row.outstanding or 0))
+		print(f"  {row.state:24} {row.n:>6}  {row.outstanding or 0:>12,} EGP")
 
 	# The acceptance criterion that matters most: nothing left ERPNext.
 	emails = frappe.db.count("Email Queue", {"creation": (">", frappe.utils.add_days(None, -1))})
@@ -838,13 +832,13 @@ def verify() -> Dict[str, Any]:
 		else []
 	)
 
-	print("\nEmail Queue rows in the last 24h: {0}  (expected 0)".format(emails))
+	print(f"\nEmail Queue rows in the last 24h: {emails}  (expected 0)")
 	print(
 		"Outbound sync events in the last 24h: {0}  (expected none)".format(
 			{r.status: r.n for r in pending} or "none"
 		)
 	)
-	print("Outbound switches: {0}".format(_outbound_state()))
+	print(f"Outbound switches: {_outbound_state()}")
 	return {
 		"payments": payments,
 		"states": remaining,

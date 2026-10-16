@@ -16,7 +16,6 @@ from unittest.mock import MagicMock, patch
 
 from jarz_pos.constants import ROLES
 
-
 #: Every role that must clear a line-manager gate. Both spellings of the line
 #: manager exist as real Role records on staging and production.
 TIER_MEMBERS = [

@@ -121,7 +121,7 @@ def _assert_geo_fields() -> None:
 		)
 
 
-def _assert_no_woo_trigger_fields(updates: Dict[str, Any]) -> None:
+def _assert_no_woo_trigger_fields(updates: dict[str, Any]) -> None:
 	"""Refuse any write that would reach WooCommerce.
 
 	The geo fields are safe by construction because Woo's Address outbound hooks
@@ -139,7 +139,7 @@ def _assert_no_woo_trigger_fields(updates: Dict[str, Any]) -> None:
 		)
 
 
-def get_address_geo(address_name: str) -> Dict[str, Any]:
+def get_address_geo(address_name: str) -> dict[str, Any]:
 	"""Current geo state of an Address, plus its derived rank. Read-only.
 
 	Returns ``{}`` — falsy — when the Address does not exist, so callers can
@@ -158,7 +158,7 @@ def get_address_geo(address_name: str) -> Dict[str, Any]:
 	return data
 
 
-def _can_manual_override(user: Optional[str] = None) -> bool:
+def _can_manual_override(user: str | None = None) -> bool:
 	resolved = user or frappe.session.user
 	if resolved == ROLES.ADMINISTRATOR:
 		return True
@@ -181,7 +181,7 @@ def evaluate_pin_write(
 	longitude: Any,
 	source: str,
 	accuracy_m: Any = None,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	"""Decide what a pin write *would* do. Writes nothing.
 
 	Shared by :func:`set_address_pin` and the API dry-run so the two can never
@@ -302,8 +302,8 @@ def set_address_pin(
 	longitude: Any,
 	source: str,
 	accuracy_m: Any = None,
-	note: Optional[str] = None,
-) -> Dict[str, Any]:
+	note: str | None = None,
+) -> dict[str, Any]:
 	"""Write a pin onto an Address, subject to the never-downgrade ladder.
 
 	Returns ``{"success": True, "accepted": bool, ...}``. A rejected write is a
@@ -333,7 +333,7 @@ def set_address_pin(
 			frappe.PermissionError,
 		)
 
-	updates: Dict[str, Any] = {
+	updates: dict[str, Any] = {
 		"custom_latitude": decision["latitude"],
 		"custom_longitude": decision["longitude"],
 		"custom_geo_source": resolved_source,
@@ -397,7 +397,7 @@ def resolve_address_from_link(
 	*,
 	source: str = geo.SOURCE_POS_LINK,
 	accuracy_m: Any = None,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	"""Parse a Maps link and, if it yields coordinates, pin the Address.
 
 	A short link (``maps.app.goo.gl/...``) carries no coordinates until it is
@@ -471,7 +471,7 @@ def enqueue_short_link_resolution(address_name: str, url: str, *, source: str = 
 		return False
 
 
-def resolve_short_link_job(address_name: str, url: str, source: str = geo.SOURCE_POS_LINK) -> Dict[str, Any]:
+def resolve_short_link_job(address_name: str, url: str, source: str = geo.SOURCE_POS_LINK) -> dict[str, Any]:
 	"""Background worker: expand a short link, then pin the Address.
 
 	Runs in a queue, so the HTTP round-trip is fine here. Never raises — a
@@ -548,7 +548,7 @@ def _preview_ticket_key(request_id: str) -> str:
 	return f"jarz_pos:geo_preview:ticket:{request_id}"
 
 
-def _preview_cache_set(key: str, value: Dict[str, Any]) -> bool:
+def _preview_cache_set(key: str, value: dict[str, Any]) -> bool:
 	try:
 		frappe.cache().set_value(key, json.dumps(value), expires_in_sec=PREVIEW_TICKET_TTL_SEC)
 		return True
@@ -556,7 +556,7 @@ def _preview_cache_set(key: str, value: Dict[str, Any]) -> bool:
 		return False
 
 
-def _preview_cache_get(key: str) -> Dict[str, Any]:
+def _preview_cache_get(key: str) -> dict[str, Any]:
 	try:
 		# ``use_local_cache=False`` deliberately: a poll and the worker's write
 		# can land in the same Frappe request during a harness sweep, and the
@@ -588,7 +588,7 @@ def _consume_preview_budget(user: str) -> bool:
 		return False
 
 
-def _preview_resolved(link: str, parsed: Any) -> Dict[str, Any]:
+def _preview_resolved(link: str, parsed: Any) -> dict[str, Any]:
 	latitude, longitude, precision = parsed
 	return {
 		"success": True,
@@ -603,7 +603,7 @@ def _preview_resolved(link: str, parsed: Any) -> Dict[str, Any]:
 	}
 
 
-def _preview_unresolved(link: str, reason: str, *, short_link: bool) -> Dict[str, Any]:
+def _preview_unresolved(link: str, reason: str, *, short_link: bool) -> dict[str, Any]:
 	return {
 		"success": True,
 		"resolved": False,
@@ -614,7 +614,7 @@ def _preview_unresolved(link: str, reason: str, *, short_link: bool) -> Dict[str
 	}
 
 
-def _preview_failed(reason: str) -> Dict[str, Any]:
+def _preview_failed(reason: str) -> dict[str, Any]:
 	return {
 		"success": False,
 		"resolved": False,
@@ -624,7 +624,7 @@ def _preview_failed(reason: str) -> Dict[str, Any]:
 	}
 
 
-def _preview_poll(request_id: object, user: str) -> Dict[str, Any]:
+def _preview_poll(request_id: object, user: str) -> dict[str, Any]:
 	token = str(request_id or "").strip()
 	if not _PREVIEW_REQUEST_ID_RE.fullmatch(token):
 		return _preview_failed("invalid_request_id")
@@ -648,7 +648,7 @@ def _preview_poll(request_id: object, user: str) -> Dict[str, Any]:
 	}
 
 
-def preview_link(link: object = None, *, request_id: object = None, user: str = "") -> Dict[str, Any]:
+def preview_link(link: object = None, *, request_id: object = None, user: str = "") -> dict[str, Any]:
 	"""Resolve a pasted Maps link to a point. Reads and writes no document.
 
 	Three outcomes, and a caller must handle all three:
@@ -702,7 +702,7 @@ def preview_link(link: object = None, *, request_id: object = None, user: str = 
 	}
 
 
-def preview_short_link_job(request_id: str, url: str, user: str = "") -> Dict[str, Any]:
+def preview_short_link_job(request_id: str, url: str, user: str = "") -> dict[str, Any]:
 	"""Background worker: expand one short link and park the answer on its ticket.
 
 	Never raises. A shortener being slow or down is an ordinary outcome of a

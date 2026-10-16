@@ -114,7 +114,7 @@ def _ensure_manager() -> None:
 # ── date helpers ──────────────────────────────────────────────────────────
 
 
-def _month_bounds(month: Optional[str]) -> tuple[date, date, str]:
+def _month_bounds(month: str | None) -> tuple[date, date, str]:
 	"""Resolve a ``YYYY-MM`` string (or today) to first/last day of that month."""
 	if month:
 		try:
@@ -135,7 +135,7 @@ def _months_between(start: date, end: date) -> int:
 	return (end.year - start.year) * 12 + (end.month - start.month)
 
 
-def _is_due_in_month(row: Dict[str, Any], month_start: date, month_end: date) -> bool:
+def _is_due_in_month(row: dict[str, Any], month_start: date, month_end: date) -> bool:
 	"""Does this registry item have an occurrence inside the selected month?"""
 	if (row.get("status") or "") != "Active":
 		return False
@@ -179,7 +179,7 @@ def _worked_fraction(relieving_date: Any, month_start: date, month_end: Any) -> 
 	return min(relieved.day, PAYROLL_DAYS_PER_MONTH) / float(PAYROLL_DAYS_PER_MONTH)
 
 
-def _load_payroll(company: Optional[str], month_end: date) -> Dict[str, Any]:
+def _load_payroll(company: str | None, month_end: date) -> dict[str, Any]:
 	"""Payroll for the month ending ``month_end``, straight from HRMS. Never cached into Jarz.
 
 	Who is on it is decided by the MONTH, not by today's status alone: Active
@@ -191,7 +191,7 @@ def _load_payroll(company: Optional[str], month_end: date) -> Dict[str, Any]:
 	status. A leaver with no relieving date is treated as gone, as before.
 	"""
 	month_start = getdate(month_end).replace(day=1)
-	emp_filters: Dict[str, Any] = {}
+	emp_filters: dict[str, Any] = {}
 	if company:
 		emp_filters["company"] = company
 
@@ -228,11 +228,11 @@ def _load_payroll(company: Optional[str], month_end: date) -> Dict[str, Any]:
 		order_by="employee asc, from_date desc",
 	)
 
-	latest: Dict[str, Dict[str, Any]] = {}
+	latest: dict[str, dict[str, Any]] = {}
 	for row in assignments:
 		latest.setdefault(row["employee"], row)
 
-	rows: List[Dict[str, Any]] = []
+	rows: list[dict[str, Any]] = []
 	monthly_total = 0.0
 	for emp_id, assignment in latest.items():
 		emp = emp_index.get(emp_id, {})
@@ -286,13 +286,13 @@ def _load_payroll(company: Optional[str], month_end: date) -> Dict[str, Any]:
 	}
 
 
-def _payroll_expense_accounts(company: Optional[str]) -> List[str]:
+def _payroll_expense_accounts(company: str | None) -> list[str]:
 	"""Expense accounts payroll posts to, for month-level reconciliation."""
 	accounts: set[str] = set()
 
 	# Preferred source: accounts configured on Salary Components.
 	try:
-		comp_filters: Dict[str, Any] = {}
+		comp_filters: dict[str, Any] = {}
 		if company:
 			comp_filters["company"] = company
 		for row in frappe.get_all(
@@ -310,7 +310,7 @@ def _payroll_expense_accounts(company: Optional[str]) -> List[str]:
 		return sorted(accounts)
 
 	# Fallback: expense ledgers that look like payroll accounts.
-	acc_filters: Dict[str, Any] = {"root_type": "Expense", "is_group": 0}
+	acc_filters: dict[str, Any] = {"root_type": "Expense", "is_group": 0}
 	if company:
 		acc_filters["company"] = company
 	for row in frappe.get_all("Account", filters=acc_filters, fields=["name", "account_name"]):
@@ -325,8 +325,8 @@ def _payroll_expense_accounts(company: Optional[str]) -> List[str]:
 
 
 def _gl_posted_by_account(
-	accounts: List[str], month_start: date, month_end: date, company: Optional[str]
-) -> Dict[str, Dict[str, Any]]:
+	accounts: list[str], month_start: date, month_end: date, company: str | None
+) -> dict[str, dict[str, Any]]:
 	"""Net debit posted to each account within the month."""
 	if not accounts:
 		return {}
@@ -345,7 +345,7 @@ def _gl_posted_by_account(
 		fields=["account", "debit", "credit", "voucher_type", "voucher_no"],
 	)
 
-	posted: Dict[str, Dict[str, Any]] = {}
+	posted: dict[str, dict[str, Any]] = {}
 	for entry in entries:
 		bucket = posted.setdefault(entry["account"], {"amount": 0.0, "count": 0, "vouchers": set()})
 		bucket["amount"] += flt(entry.get("debit")) - flt(entry.get("credit"))
@@ -377,8 +377,8 @@ def _reconcile_status(expected: float, actual: float) -> str:
 
 
 def _detect_unregistered(
-	company: Optional[str], month_end: date, registered_accounts: set[str]
-) -> List[Dict[str, Any]]:
+	company: str | None, month_end: date, registered_accounts: set[str]
+) -> list[dict[str, Any]]:
 	"""Expense accounts posting on a monthly cadence but absent from the registry."""
 	lookback_year = month_end.year
 	lookback_month = month_end.month - _detection_lookback_months()
@@ -387,7 +387,7 @@ def _detect_unregistered(
 		lookback_year -= 1
 	window_start = date(lookback_year, lookback_month, 1)
 
-	acc_filters: Dict[str, Any] = {"root_type": "Expense", "is_group": 0}
+	acc_filters: dict[str, Any] = {"root_type": "Expense", "is_group": 0}
 	if company:
 		acc_filters["company"] = company
 	accounts = frappe.get_all("Account", filters=acc_filters, fields=["name", "account_name", "account_type"])
@@ -400,7 +400,7 @@ def _detect_unregistered(
 	if not candidate_accounts:
 		return []
 
-	gl_filters: Dict[str, Any] = {
+	gl_filters: dict[str, Any] = {
 		"account": ["in", candidate_accounts],
 		"posting_date": ["between", [window_start, month_end]],
 		"is_cancelled": 0,
@@ -414,7 +414,7 @@ def _detect_unregistered(
 		fields=["account", "posting_date", "debit", "credit"],
 	)
 
-	by_account: Dict[str, Dict[str, Any]] = {}
+	by_account: dict[str, dict[str, Any]] = {}
 	for entry in entries:
 		bucket = by_account.setdefault(entry["account"], {"months": {}, "total": 0.0, "count": 0})
 		key = getdate(entry["posting_date"]).strftime("%Y-%m")
@@ -423,7 +423,7 @@ def _detect_unregistered(
 		bucket["total"] += net
 		bucket["count"] += 1
 
-	detected: List[Dict[str, Any]] = []
+	detected: list[dict[str, Any]] = []
 	for account, data in by_account.items():
 		active_months = [m for m, amt in data["months"].items() if abs(amt) > 0.005]
 		if len(active_months) < _detection_min_months() or data["total"] <= 0:
@@ -448,9 +448,9 @@ def _detect_unregistered(
 
 @frappe.whitelist()
 def get_recurring_expenses_overview(
-	month: Optional[str] = None,
-	company: Optional[str] = None,
-) -> Dict[str, Any]:
+	month: str | None = None,
+	company: str | None = None,
+) -> dict[str, Any]:
 	"""Monthly recurring-expense roll-up with GL reconciliation."""
 	_ensure_manager()
 
@@ -473,7 +473,7 @@ def get_recurring_expenses_overview(
 	payroll["status"] = _reconcile_status(payroll["monthly_total"], payroll_posted)
 
 	# ── registry ──────────────────────────────────────────────────────────
-	reg_filters: Dict[str, Any] = {}
+	reg_filters: dict[str, Any] = {}
 	if company:
 		reg_filters["company"] = company
 	registry_rows = frappe.get_all(
@@ -505,15 +505,15 @@ def get_recurring_expenses_overview(
 
 	# An account shared by several due items can't be attributed per item —
 	# surface that instead of implying a false per-item match.
-	due_per_account: Dict[str, int] = {}
-	expected_per_account: Dict[str, float] = {}
+	due_per_account: dict[str, int] = {}
+	expected_per_account: dict[str, float] = {}
 	for row in registry_rows:
 		if _is_due_in_month(row, month_start, month_end):
 			acc = row.get("expense_account")
 			due_per_account[acc] = due_per_account.get(acc, 0) + 1
 			expected_per_account[acc] = expected_per_account.get(acc, 0.0) + flt(row.get("amount"))
 
-	registry: List[Dict[str, Any]] = []
+	registry: list[dict[str, Any]] = []
 	registry_monthly_total = 0.0
 	expected_this_month = 0.0
 	items_missing = 0
@@ -552,7 +552,7 @@ def get_recurring_expenses_overview(
 		)
 
 	# ── category roll-up (payroll included as its own bucket) ─────────────
-	by_category: Dict[str, Dict[str, Any]] = {}
+	by_category: dict[str, dict[str, Any]] = {}
 	for row in registry:
 		if (row.get("status") or "") != "Active":
 			continue
@@ -577,7 +577,7 @@ def get_recurring_expenses_overview(
 	total_expected = expected_this_month + payroll["monthly_total"]
 
 	# ── gaps worth shouting about ─────────────────────────────────────────
-	gaps: List[Dict[str, str]] = []
+	gaps: list[dict[str, str]] = []
 	if payroll["employees_without_structure"]:
 		gaps.append(
 			{

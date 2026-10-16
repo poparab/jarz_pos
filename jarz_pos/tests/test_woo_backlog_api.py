@@ -49,7 +49,7 @@ def _make_frappe_stub():
 
 
 try:  # pragma: no cover - depends on whether the runner has a bench
-	import frappe as _real_frappe  # noqa: F401
+	import frappe as _real_frappe
 except Exception:  # pragma: no cover
 	_stub = _make_frappe_stub()
 	sys.modules["frappe"] = _stub
@@ -59,8 +59,8 @@ else:  # pragma: no cover
 		_real_frappe.whitelist = lambda *a, **k: (lambda fn: fn)  # type: ignore
 
 
-from jarz_pos.api import woo_backlog as mod  # noqa: E402
-from jarz_pos.constants import ROLES  # noqa: E402
+from jarz_pos.api import woo_backlog as mod
+from jarz_pos.constants import ROLES
 
 
 def _fake_frappe(*, roles=None, get_all=None):

@@ -12,7 +12,6 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-
 if "frappe" not in sys.modules:
 	fake_frappe = types.ModuleType("frappe")
 
@@ -49,7 +48,6 @@ if "frappe" not in sys.modules:
 	sys.modules["frappe"] = fake_frappe
 
 from jarz_pos.utils import warehouse_utils
-
 
 COMPANY = "Jarz"
 RAW_STORE = "Raw Materials - J"

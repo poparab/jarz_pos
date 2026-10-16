@@ -5,22 +5,24 @@ Only handles cart items - never treats shipping as an item.
 """
 
 from __future__ import annotations
+
 import datetime
-import frappe
 import json
 import logging
 
+import frappe
+
+from jarz_pos.constants import ACCOUNTS
+from jarz_pos.services import delivery_handling as _delivery
+
 # Import from the refactored services
 from jarz_pos.services.invoice_creation import create_pos_invoice as _create_invoice
-from jarz_pos.services import delivery_handling as _delivery
-from jarz_pos.constants import ACCOUNTS
 from jarz_pos.utils.access_control import (
 	ensure_open_shift,
 	ensure_open_shift_for_invoice,
 	ensure_profile_scoped_invoice_access,
 )
 from jarz_pos.utils.invoice_utils import normalize_woo_order_id
-
 
 # ---------------------------------------------------------------------------
 # Public, whitelisted functions
@@ -141,9 +143,9 @@ RAW PARAMETERS:
 	print(f"� User: {frappe.session.user}")
 	print(f"🌐 Site: {frappe.local.site}")
 	print(f"� Method: {getattr(frappe.local.request, 'method', 'N/A')}")
-	print(f"🔗 Endpoint: /api/method/jarz_pos.api.invoices.create_pos_invoice")
+	print("🔗 Endpoint: /api/method/jarz_pos.api.invoices.create_pos_invoice")
 
-	print(f"\n📋 INCOMING PARAMETERS:")
+	print("\n📋 INCOMING PARAMETERS:")
 	print(f"   cart_json: {cart_json} (type: {type(cart_json)})")
 	print(f"   customer_name: {customer_name} (type: {type(customer_name)})")
 	print(f"   shipping_address_name: {shipping_address_name} (type: {type(shipping_address_name)})")
@@ -180,11 +182,11 @@ RAW PARAMETERS:
 				parsed_cart = json.loads(cart_json)
 				print(f"✅ Cart JSON parsed successfully: {len(parsed_cart)} items")
 			except json.JSONDecodeError as e:
-				error_msg = f"Invalid JSON in cart_json: {str(e)}"
+				error_msg = f"Invalid JSON in cart_json: {e!s}"
 				print(f"❌ JSON PARSE ERROR: {error_msg}")
 				frappe.throw(error_msg)
 
-		print(f"\n🔄 Calling core function...")
+		print("\n🔄 Calling core function...")
 
 		# Territory → POS profile safety check (before any DB writes)
 		from jarz_pos.utils.invoice_utils import assert_pos_profile_matches_territory, resolve_order_territory
@@ -233,8 +235,8 @@ RAW PARAMETERS:
 		)
 
 		# Log successful response
-		print(f"\n✅ API CALL SUCCESSFUL!")
-		print(f"📤 RESPONSE:")
+		print("\n✅ API CALL SUCCESSFUL!")
+		print("📤 RESPONSE:")
 		print(f"   Type: {type(result)}")
 		if isinstance(result, dict):
 			for key, value in result.items():
@@ -261,7 +263,7 @@ RESPONSE: {json.dumps(result, indent=2, default=str)}
 API ENDPOINT: create_pos_invoice
 STATUS: ERROR
 ERROR TYPE: {type(e).__name__}
-ERROR MESSAGE: {str(e)}
+ERROR MESSAGE: {e!s}
 PARAMETERS:
 - cart_json: {cart_json}
 - customer_name: {customer_name}
@@ -270,14 +272,14 @@ USER: {frappe.session.user}
 SITE: {frappe.local.site}
         """.strip()
 
-		print(f"\n❌ API ERROR:")
+		print("\n❌ API ERROR:")
 		print(f"   Type: {type(e).__name__}")
-		print(f"   Message: {str(e)}")
+		print(f"   Message: {e!s}")
 
 		# Print full traceback for debugging
 		import traceback
 
-		print(f"   Traceback:")
+		print("   Traceback:")
 		traceback.print_exc()
 
 		# Frappe best practice: Log error with full context
@@ -545,7 +547,7 @@ def pay_invoice(
 			try:
 				frappe.log_error(
 					title="Pay Invoice - Existing Payment Check Error",
-					message=f"Invoice: {invoice_name}\nError: {str(e)}",
+					message=f"Invoice: {invoice_name}\nError: {e!s}",
 				)
 			except Exception:
 				pass
@@ -704,7 +706,7 @@ def pay_invoice(
 			# Handle duplicate Payment Entry name - return existing entry (idempotency)
 			frappe.log_error(
 				title="Pay Invoice - Duplicate Payment Entry",
-				message=f"Invoice: {invoice_name}\nAttempted duplicate payment entry creation\n{str(dup_err)}",
+				message=f"Invoice: {invoice_name}\nAttempted duplicate payment entry creation\n{dup_err!s}",
 			)
 			# Try to find and return the existing payment entry
 			try:
@@ -738,7 +740,7 @@ def pay_invoice(
 			except Exception:
 				pass
 			# If we can't find existing, throw clear error
-			frappe.throw(f"Payment entry creation failed due to duplicate. Please refresh and try again.")
+			frappe.throw("Payment entry creation failed due to duplicate. Please refresh and try again.")
 		except Exception as pe_err:
 			# Provide a clearer message when invoice is already settled
 			msg = str(pe_err)
@@ -793,7 +795,7 @@ def pay_invoice(
 			"reference_no": getattr(pe, "reference_no", None),
 			"reference_date": getattr(pe, "reference_date", None),
 		}
-	except Exception as e:
+	except Exception:
 		frappe.log_error(
 			title="Pay Invoice Error",
 			message=f"Invoice: {invoice_name}\nMode: {payment_mode}\nError: {frappe.get_traceback()}",
@@ -1208,5 +1210,5 @@ def update_invoice_delivery_slot(
 
 		return {"success": True, "message": "Delivery slot updated successfully"}
 	except Exception as e:
-		frappe.logger().error(f"Failed to update delivery slot for {invoice_id}: {str(e)}")
-		frappe.throw(f"Failed to update delivery slot: {str(e)}")
+		frappe.logger().error(f"Failed to update delivery slot for {invoice_id}: {e!s}")
+		frappe.throw(f"Failed to update delivery slot: {e!s}")

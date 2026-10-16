@@ -5,8 +5,9 @@ This file contains test endpoints to verify the bundle processing
 and delivery charges implementation works correctly.
 """
 
-import frappe
 import json
+
+import frappe
 
 
 @frappe.whitelist()
@@ -135,7 +136,7 @@ def test_bundle_processing():
 		return {"success": True, "bundles_tested": len(test_results), "results": test_results}
 
 	except Exception as e:
-		frappe.log_error(f"Bundle test error: {str(e)}", "Bundle Test")
+		frappe.log_error(f"Bundle test error: {e!s}", "Bundle Test")
 		return {"success": False, "error": str(e)}
 
 
@@ -195,7 +196,7 @@ def test_delivery_charges():
 		return {"success": True, "companies_tested": len(test_results), "results": test_results}
 
 	except Exception as e:
-		frappe.log_error(f"Delivery test error: {str(e)}", "Delivery Test")
+		frappe.log_error(f"Delivery test error: {e!s}", "Delivery Test")
 		return {"success": False, "error": str(e)}
 
 
@@ -294,5 +295,5 @@ def test_invoice_creation_with_bundle():
 		return result
 
 	except Exception as e:
-		frappe.log_error(f"Invoice creation test error: {str(e)}", "Invoice Test")
+		frappe.log_error(f"Invoice creation test error: {e!s}", "Invoice Test")
 		return {"success": False, "error": str(e)}

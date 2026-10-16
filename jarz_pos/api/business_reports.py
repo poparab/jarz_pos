@@ -42,8 +42,9 @@ from __future__ import annotations
 import math
 import re
 from collections import defaultdict
+from collections.abc import Iterable
 from datetime import date, datetime, timedelta
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import frappe
 from frappe import _
@@ -78,7 +79,7 @@ def _ensure_jarz_manager() -> None:
 		frappe.throw(_("Only JARZ Manager can access business reports"), frappe.PermissionError)
 
 
-def _clean_branch(branch: Any) -> Optional[str]:
+def _clean_branch(branch: Any) -> str | None:
 	"""``None``/empty = all branches; anything else must be a real POS Profile."""
 	text = str(branch or "").strip()
 	if not text:
@@ -100,14 +101,14 @@ def ensure_max_range(fd: date, td: date, max_days: int = MAX_RANGE_DAYS) -> None
 		frappe.throw(_("Choose a range of at most {0} days").format(max_days), frappe.ValidationError)
 
 
-def _parse_range(date_from: Optional[str], date_to: Optional[str]) -> Tuple[date, date]:
+def _parse_range(date_from: str | None, date_to: str | None) -> tuple[date, date]:
 	"""``fr._parse_dates`` plus the :data:`MAX_RANGE_DAYS` cap."""
 	fd, td = fr._parse_dates(date_from, date_to)
 	ensure_max_range(fd, td)
 	return fd, td
 
 
-def _finite_input(value: Any, default: float, lo: float = 0.0, hi: Optional[float] = None) -> float:
+def _finite_input(value: Any, default: float, lo: float = 0.0, hi: float | None = None) -> float:
 	"""An owner input as a finite float clamped to ``[lo, hi]``.
 
 	``flt("NaN")`` is NaN and ``flt("inf")`` is inf; NaN passes ``max``/``min``
@@ -128,11 +129,11 @@ def _r2(value: Any) -> float:
 	return round(flt(value), 2)
 
 
-def _ratio_pct(part: float, whole: float) -> Optional[float]:
+def _ratio_pct(part: float, whole: float) -> float | None:
 	return round(part / whole * 100, 1) if whole else None
 
 
-def _base_filters(fd: date, td: date, branch: Optional[str]) -> Dict[str, Any]:
+def _base_filters(fd: date, td: date, branch: str | None) -> dict[str, Any]:
 	return {"date_from": fd.isoformat(), "date_to": td.isoformat(), "branch": branch}
 
 
@@ -141,7 +142,7 @@ def _base_filters(fd: date, td: date, branch: Optional[str]) -> Dict[str, Any]:
 # ═════════════════════════════════════════════════════════════════════════
 
 
-def _profit_and_loss(fd: date, td: date, company: Optional[str]) -> Dict[str, Any]:
+def _profit_and_loss(fd: date, td: date, company: str | None) -> dict[str, Any]:
 	"""The P&L payload, assembled exactly as ``get_profit_and_loss`` does (no gate)."""
 	shipping_account, freight_account = fr._accounts(company)
 	recurring = fr._recurring_accounts(company)
@@ -159,7 +160,7 @@ def _profit_and_loss(fd: date, td: date, company: Optional[str]) -> Dict[str, An
 	)
 
 
-def _accounts_like(company: Optional[str], root_type: str, pattern: str) -> List[str]:
+def _accounts_like(company: str | None, root_type: str, pattern: str) -> list[str]:
 	cond = "AND company = %(company)s" if company else ""
 	return [
 		r[0]
@@ -175,7 +176,7 @@ def _accounts_like(company: Optional[str], root_type: str, pattern: str) -> List
 	]
 
 
-def _kashier_receipts(fd: date, td: date, company: Optional[str]) -> float:
+def _kashier_receipts(fd: date, td: date, company: str | None) -> float:
 	"""Money received into the Kashier gateway ledger in the range (GL debits).
 
 	Debits are inflows whatever the voucher (Payment Entry from the POS, or
@@ -199,7 +200,7 @@ def _kashier_receipts(fd: date, td: date, company: Optional[str]) -> float:
 	return flt(row[0][0]) if row else 0.0
 
 
-def _talabat_sales(fd: date, td: date, company: Optional[str]) -> Tuple[float, int]:
+def _talabat_sales(fd: date, td: date, company: str | None) -> tuple[float, int]:
 	"""Net sales (returns as negatives) and order count of Talabat-partner invoices."""
 	cond = "AND company = %(company)s" if company else ""
 	row = frappe.db.sql(
@@ -221,7 +222,7 @@ def _talabat_sales(fd: date, td: date, company: Optional[str]) -> Tuple[float, i
 
 def build_unit_economics(
 	*,
-	pnl: Dict[str, Any],
+	pnl: dict[str, Any],
 	kashier_receipts: float,
 	talabat_sales: float,
 	commission_accounts: Iterable[str],
@@ -230,7 +231,7 @@ def build_unit_economics(
 	kashier_pct: float,
 	talabat_pct: float,
 	extra_fixed: float,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	"""Pure: P&L payload + gateway/partner volumes + owner inputs -> unit economics.
 
 	* revenue = ledger sales income (delivery income is netted into shipping).
@@ -263,7 +264,7 @@ def build_unit_economics(
 	recurring_rows = (pnl.get("recurring") or {}).get("rows") or []
 	other_rows = (pnl.get("other_expenses") or {}).get("rows") or []
 
-	def booked(accounts: Set[str]) -> Tuple[float, float]:
+	def booked(accounts: set[str]) -> tuple[float, float]:
 		rec = sum(flt(r.get("posted")) for r in recurring_rows if r.get("account") in accounts)
 		oth = sum(flt(r.get("amount")) for r in other_rows if r.get("account") in accounts)
 		return rec, oth
@@ -292,7 +293,7 @@ def build_unit_economics(
 	def per_order(value: float) -> float:
 		return round(value / orders, 2) if orders else 0.0
 
-	notes: List[str] = []
+	notes: list[str] = []
 	if ad_spend > 0:
 		notes.append("ad_spend_is_owner_input")
 	else:
@@ -370,7 +371,7 @@ def build_unit_economics(
 	}
 
 
-def owner_inputs(ad_spend: Any, kashier_pct: Any, talabat_pct: Any, extra_fixed: Any) -> Dict[str, float]:
+def owner_inputs(ad_spend: Any, kashier_pct: Any, talabat_pct: Any, extra_fixed: Any) -> dict[str, float]:
 	"""The four owner inputs of :func:`get_unit_economics`, finite and clamped."""
 	return {
 		"ad_spend": _finite_input(ad_spend, 0.0),
@@ -382,13 +383,13 @@ def owner_inputs(ad_spend: Any, kashier_pct: Any, talabat_pct: Any, extra_fixed:
 
 @frappe.whitelist()
 def get_unit_economics(
-	date_from: Optional[str] = None,
-	date_to: Optional[str] = None,
+	date_from: str | None = None,
+	date_to: str | None = None,
 	ad_spend: Any = 0,
 	kashier_pct: Any = 3,
 	talabat_pct: Any = 30,
 	extra_fixed: Any = 0,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	"""Contribution per order, fixed costs and break-even for the range.
 
 	Ledger figures come from the P&L report; ``ad_spend`` and ``extra_fixed``
@@ -427,11 +428,11 @@ def get_unit_economics(
 
 def aggregate_promo(
 	*,
-	invoices: List[Dict[str, Any]],
-	redemptions: List[Dict[str, Any]],
+	invoices: list[dict[str, Any]],
+	redemptions: list[dict[str, Any]],
 	baseline_orders: int,
 	baseline_revenue: float,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	"""Pure: promo invoices + redemption rows + all-orders baseline -> payload.
 
 	``invoices``: one row per promo invoice {invoice, customer, revenue,
@@ -439,14 +440,14 @@ def aggregate_promo(
 	discount}. An invoice with no redemption row falls back to its own code
 	list, with the discount split evenly.
 	"""
-	by_invoice: Dict[str, List[Tuple[str, float]]] = defaultdict(list)
+	by_invoice: dict[str, list[tuple[str, float]]] = defaultdict(list)
 	for r in redemptions or []:
 		if r.get("invoice") and r.get("code"):
 			by_invoice[r["invoice"]].append((str(r["code"]), flt(r.get("discount"))))
 
-	codes: Dict[str, Dict[str, Any]] = {}
+	codes: dict[str, dict[str, Any]] = {}
 
-	def bucket(code: str) -> Dict[str, Any]:
+	def bucket(code: str) -> dict[str, Any]:
 		return codes.setdefault(
 			code,
 			{"invoices": set(), "discount": 0.0, "revenue": 0.0, "new": set(), "repeat": set()},
@@ -455,7 +456,7 @@ def aggregate_promo(
 	promo_orders = 0
 	promo_revenue = 0.0
 	discount_total = 0.0
-	new_customers: Set[str] = set()
+	new_customers: set[str] = set()
 	for inv in invoices or []:
 		name = inv.get("invoice")
 		if not name:
@@ -518,10 +519,10 @@ def aggregate_promo(
 
 @frappe.whitelist()
 def get_promo_performance(
-	date_from: Optional[str] = None,
-	date_to: Optional[str] = None,
-	branch: Optional[str] = None,
-) -> Dict[str, Any]:
+	date_from: str | None = None,
+	date_to: str | None = None,
+	branch: str | None = None,
+) -> dict[str, Any]:
 	"""Promo code cost against what the orders brought in.
 
 	Scope: submitted, non-return **consumer** orders (B2B, staff and sample
@@ -592,7 +593,7 @@ def get_promo_performance(
 		except Exception:
 			row["codes"] = []
 
-	redemptions: List[Dict[str, Any]] = []
+	redemptions: list[dict[str, Any]] = []
 	names = [r["invoice"] for r in invoice_rows]
 	if names:
 		redemptions = frappe.db.sql(
@@ -621,9 +622,9 @@ def get_promo_performance(
 # ═════════════════════════════════════════════════════════════════════════
 
 
-def _profile_warehouses() -> Dict[str, str]:
+def _profile_warehouses() -> dict[str, str]:
 	"""{warehouse: POS Profile} for enabled profiles; first by name wins."""
-	out: Dict[str, str] = {}
+	out: dict[str, str] = {}
 	for row in frappe.get_all(
 		"POS Profile",
 		filters={"disabled": 0},
@@ -636,7 +637,7 @@ def _profile_warehouses() -> Dict[str, str]:
 	return out
 
 
-def _consumable_entries(fd: date, td: date) -> List[str]:
+def _consumable_entries(fd: date, td: date) -> list[str]:
 	"""Stock Entries the consumable deduction created for invoices near the range."""
 	try:
 		return [
@@ -654,9 +655,9 @@ def _consumable_entries(fd: date, td: date) -> List[str]:
 		return []
 
 
-def _adjustment_scope(fd: date, td: date, branch: Optional[str]) -> Tuple[str, Dict[str, Any]]:
+def _adjustment_scope(fd: date, td: date, branch: str | None) -> tuple[str, dict[str, Any]]:
 	"""Shared FROM/WHERE for every stock-adjustment query."""
-	params: Dict[str, Any] = {
+	params: dict[str, Any] = {
 		"fd": fd,
 		"td": td,
 		"consumables": tuple(_consumable_entries(fd, td) or [""]),
@@ -718,10 +719,10 @@ _TYPE_EXPR = (
 
 @frappe.whitelist()
 def get_stock_adjustments(
-	date_from: Optional[str] = None,
-	date_to: Optional[str] = None,
-	branch: Optional[str] = None,
-) -> Dict[str, Any]:
+	date_from: str | None = None,
+	date_to: str | None = None,
+	branch: str | None = None,
+) -> dict[str, Any]:
 	"""Waste and count adjustments, valued at ``stock_value_difference``.
 
 	Included: Stock Reconciliations (not Opening Stock) and Material Issue
@@ -908,11 +909,11 @@ def prorated_month_cost(
 
 
 def allocation_shares(
-	hours_by_loc: Dict[Optional[str], float],
-	days_by_loc: Dict[Optional[str], int],
-	assigned_days_by_loc: Dict[Optional[str], int],
-	fallback_loc: Optional[str],
-) -> Dict[Optional[str], float]:
+	hours_by_loc: dict[str | None, float],
+	days_by_loc: dict[str | None, int],
+	assigned_days_by_loc: dict[str | None, int],
+	fallback_loc: str | None,
+) -> dict[str | None, float]:
 	"""Pure: how one person's cost splits across shift locations.
 
 	Worked hours first, then attended days, then rostered days, then the
@@ -927,11 +928,11 @@ def allocation_shares(
 
 def build_labour_report(
 	*,
-	records: List[Dict[str, Any]],
-	sales_by_branch: Dict[Optional[str], float],
-	branch: Optional[str],
+	records: list[dict[str, Any]],
+	sales_by_branch: dict[str | None, float],
+	branch: str | None,
 	cost_basis: str,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	"""Pure: per (employee, location) allocations + branch sales -> payload.
 
 	``records``: {employee, employee_name, branch, shift_location, hours, days,
@@ -940,16 +941,16 @@ def build_labour_report(
 	names its ``shift_location``.
 	"""
 
-	def key_of(b: Optional[str], loc: Optional[str]) -> str:
+	def key_of(b: str | None, loc: str | None) -> str:
 		return b if b else "~" + (loc or "")
 
 	if branch:
 		records = [r for r in records if r.get("branch") == branch]
 		sales_by_branch = {branch: flt(sales_by_branch.get(branch))}
 
-	rows: Dict[str, Dict[str, Any]] = {}
+	rows: dict[str, dict[str, Any]] = {}
 
-	def row_for(b: Optional[str], loc: Optional[str]) -> Dict[str, Any]:
+	def row_for(b: str | None, loc: str | None) -> dict[str, Any]:
 		k = key_of(b, loc)
 		if k not in rows:
 			rows[k] = {
@@ -965,8 +966,8 @@ def build_labour_report(
 	for b, amount in (sales_by_branch or {}).items():
 		row_for(b or None, None)["sales"] += flt(amount)
 
-	people: Set[str] = set()
-	per_employee: Dict[str, Dict[str, Any]] = {}
+	people: set[str] = set()
+	per_employee: dict[str, dict[str, Any]] = {}
 	for r in records:
 		row = row_for(r.get("branch"), r.get("shift_location"))
 		row["labour_cost"] += flt(r.get("cost"))
@@ -1054,7 +1055,7 @@ def build_labour_report(
 	}
 
 
-def _employee_index(company: Optional[str]) -> Dict[str, Dict[str, Any]]:
+def _employee_index(company: str | None) -> dict[str, dict[str, Any]]:
 	filters = {"company": company} if company else {}
 	return {
 		e["name"]: e
@@ -1067,7 +1068,7 @@ def _employee_index(company: Optional[str]) -> Dict[str, Dict[str, Any]]:
 	}
 
 
-def _salary_slip_costs(fd: date, td: date, company: Optional[str]) -> Dict[str, float]:
+def _salary_slip_costs(fd: date, td: date, company: str | None) -> dict[str, float]:
 	"""Gross pay of submitted Salary Slips, prorated to the range by slip days."""
 	try:
 		if not frappe.db.table_exists("Salary Slip"):
@@ -1085,7 +1086,7 @@ def _salary_slip_costs(fd: date, td: date, company: Optional[str]) -> Dict[str, 
 	except Exception:
 		frappe.log_error(frappe.get_traceback(), "business_reports: salary slips")
 		return {}
-	out: Dict[str, float] = defaultdict(float)
+	out: dict[str, float] = defaultdict(float)
 	for r in rows:
 		s, e = getdate(r["start_date"]), getdate(r["end_date"])
 		span = (e - s).days + 1
@@ -1097,11 +1098,11 @@ def _salary_slip_costs(fd: date, td: date, company: Optional[str]) -> Dict[str, 
 
 
 def _payroll_costs(
-	fd: date, td: date, company: Optional[str], employees: Dict[str, Dict[str, Any]]
-) -> Tuple[Dict[str, float], str]:
+	fd: date, td: date, company: str | None, employees: dict[str, dict[str, Any]]
+) -> tuple[dict[str, float], str]:
 	"""Per-employee labour cost for the range and the basis it came from."""
 	slips = _salary_slip_costs(fd, td, company)
-	costs: Dict[str, float] = defaultdict(float)
+	costs: dict[str, float] = defaultdict(float)
 	configured = False
 	try:
 		from jarz_pos.api.recurring_expenses import _load_payroll
@@ -1136,7 +1137,7 @@ def _payroll_costs(
 	return {}, "estimate"
 
 
-def _payroll_ledger_total(fd: date, td: date, company: Optional[str]) -> float:
+def _payroll_ledger_total(fd: date, td: date, company: str | None) -> float:
 	"""Net debits on payroll expense ledgers in the range (the estimate basis)."""
 	try:
 		from jarz_pos.api.recurring_expenses import _payroll_expense_accounts
@@ -1163,7 +1164,7 @@ def _payroll_ledger_total(fd: date, td: date, company: Optional[str]) -> float:
 		return 0.0
 
 
-def _shift_assignments(fd: date, td: date) -> List[Dict[str, Any]]:
+def _shift_assignments(fd: date, td: date) -> list[dict[str, Any]]:
 	try:
 		from jarz_pos.services import roster as roster_service
 
@@ -1186,8 +1187,8 @@ def _shift_assignments(fd: date, td: date) -> List[Dict[str, Any]]:
 		return []
 
 
-def _schedule_locations() -> Dict[str, str]:
-	out: Dict[str, str] = {}
+def _schedule_locations() -> dict[str, str]:
+	out: dict[str, str] = {}
 	try:
 		for row in frappe.get_all(
 			"Shift Schedule Assignment",
@@ -1202,7 +1203,7 @@ def _schedule_locations() -> Dict[str, str]:
 	return out
 
 
-def _worked_groups(fd: date, td: date) -> List[Dict[str, Any]]:
+def _worked_groups(fd: date, td: date) -> list[dict[str, Any]]:
 	"""Check-in day groups inside the range, dated as the attendance board dates them."""
 	try:
 		if not frappe.db.table_exists("Employee Checkin"):
@@ -1239,7 +1240,7 @@ def _worked_groups(fd: date, td: date) -> List[Dict[str, Any]]:
 		return []
 
 
-def _branch_sales(fd: date, td: date, company: Optional[str]) -> Dict[Optional[str], float]:
+def _branch_sales(fd: date, td: date, company: str | None) -> dict[str | None, float]:
 	cond = "AND company = %(company)s" if company else ""
 	return {
 		(r[0] or None): flt(r[1])
@@ -1255,7 +1256,7 @@ def _branch_sales(fd: date, td: date, company: Optional[str]) -> Dict[Optional[s
 	}
 
 
-def _labour_records(fd: date, td: date, company: Optional[str]) -> Tuple[List[Dict[str, Any]], str]:
+def _labour_records(fd: date, td: date, company: str | None) -> tuple[list[dict[str, Any]], str]:
 	"""Per (employee, shift location) hours, days and allocated cost."""
 	from jarz_pos.services import branch_access
 
@@ -1266,11 +1267,11 @@ def _labour_records(fd: date, td: date, company: Optional[str]) -> Tuple[List[Di
 	groups = _worked_groups(fd, td)
 	costs, basis = _payroll_costs(fd, td, company, employees)
 
-	by_emp_assign: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+	by_emp_assign: dict[str, list[dict[str, Any]]] = defaultdict(list)
 	for a in assignments:
 		by_emp_assign[a["employee"]].append(a)
 
-	def location_on(emp: str, day: date) -> Optional[str]:
+	def location_on(emp: str, day: date) -> str | None:
 		for a in by_emp_assign.get(emp, []):  # newest start first
 			start = getdate(a["start_date"])
 			end = getdate(a["end_date"]) if a.get("end_date") else None
@@ -1278,8 +1279,8 @@ def _labour_records(fd: date, td: date, company: Optional[str]) -> Tuple[List[Di
 				return a.get("shift_location") or None
 		return None
 
-	hours: Dict[str, Dict[Optional[str], float]] = defaultdict(lambda: defaultdict(float))
-	days: Dict[str, Dict[Optional[str], int]] = defaultdict(lambda: defaultdict(int))
+	hours: dict[str, dict[str | None, float]] = defaultdict(lambda: defaultdict(float))
+	days: dict[str, dict[str | None, int]] = defaultdict(lambda: defaultdict(int))
 	for g in groups:
 		emp = g["employee"]
 		if employees and emp not in employees:
@@ -1288,8 +1289,8 @@ def _labour_records(fd: date, td: date, company: Optional[str]) -> Tuple[List[Di
 		hours[emp][loc] += g["hours"]
 		days[emp][loc] += 1
 
-	def assigned_days(emp: str) -> Dict[Optional[str], int]:
-		out: Dict[Optional[str], int] = defaultdict(int)
+	def assigned_days(emp: str) -> dict[str | None, int]:
+		out: dict[str | None, int] = defaultdict(int)
 		for a in by_emp_assign.get(emp, []):
 			start = max(getdate(a["start_date"]), fd)
 			end = min(getdate(a["end_date"]) if a.get("end_date") else td, td)
@@ -1306,7 +1307,7 @@ def _labour_records(fd: date, td: date, company: Optional[str]) -> Tuple[List[Di
 		elif ledger:
 			costs = {"": ledger}
 
-	records: List[Dict[str, Any]] = []
+	records: list[dict[str, Any]] = []
 	for emp in set(costs) | set(hours) | set(days):
 		cost = flt(costs.get(emp))
 		if not emp:
@@ -1343,10 +1344,10 @@ def _labour_records(fd: date, td: date, company: Optional[str]) -> Tuple[List[Di
 
 @frappe.whitelist()
 def get_labour_cost(
-	date_from: Optional[str] = None,
-	date_to: Optional[str] = None,
-	branch: Optional[str] = None,
-) -> Dict[str, Any]:
+	date_from: str | None = None,
+	date_to: str | None = None,
+	branch: str | None = None,
+) -> dict[str, Any]:
 	"""Labour cost against sales and hours, per branch and per person.
 
 	Cost (``cost_basis``): submitted Salary Slips prorated by slip days if any

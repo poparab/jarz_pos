@@ -11,8 +11,7 @@ accounts, and debit/credit directions.
 """
 
 import unittest
-from unittest.mock import patch, MagicMock, call
-
+from unittest.mock import MagicMock, call, patch
 
 # ---------------------------------------------------------------------------
 # Helpers to build mock Frappe environment

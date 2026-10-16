@@ -14,7 +14,6 @@ from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-
 SCHEDULED = datetime(2026, 8, 2, 9, 30, 0)
 
 

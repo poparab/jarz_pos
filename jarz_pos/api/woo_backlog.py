@@ -50,7 +50,7 @@ def _age_hours(expected_finish_by: Any, now: Any) -> float:
 
 
 @frappe.whitelist()
-def get_woo_backlog_queue(branch: Optional[str] = None) -> Dict[str, Any]:
+def get_woo_backlog_queue(branch: str | None = None) -> dict[str, Any]:
 	"""Return the open WooCommerce backlog review queue for the mobile dashboard.
 
 	Read-only: reads ``Jarz Woo Backlog Exception`` rows only, and never
@@ -78,7 +78,7 @@ def get_woo_backlog_queue(branch: Optional[str] = None) -> Dict[str, Any]:
 	"""
 	_ensure_manager_dashboard_access()
 
-	filters: Dict[str, Any] = {"status": STATUS_OPEN}
+	filters: dict[str, Any] = {"status": STATUS_OPEN}
 	branch_name = str(branch or "").strip()
 	if branch_name:
 		filters["pos_profile"] = branch_name
@@ -109,9 +109,9 @@ def get_woo_backlog_queue(branch: Optional[str] = None) -> Dict[str, Any]:
 	)
 
 	now = now_datetime()
-	out_rows: List[Dict[str, Any]] = []
-	by_day: Dict[str, Dict[str, float]] = {}
-	by_branch: Dict[str, Dict[str, float]] = {}
+	out_rows: list[dict[str, Any]] = []
+	by_day: dict[str, dict[str, float]] = {}
+	by_branch: dict[str, dict[str, float]] = {}
 	total_count = 0
 	total_amount = 0.0
 

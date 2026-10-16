@@ -19,7 +19,6 @@ from unittest.mock import MagicMock, patch
 
 from jarz_pos.services import invoice_creation as ic
 
-
 _PL = "Companies"
 _CODE = "COFFEE-M-01"
 _CUST = "CUST-A"

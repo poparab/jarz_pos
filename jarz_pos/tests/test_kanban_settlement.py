@@ -9,8 +9,9 @@ This module tests:
 """
 
 import unittest
+from unittest.mock import MagicMock, patch
+
 import frappe
-from unittest.mock import patch, MagicMock
 
 
 class TestKanbanOperations(unittest.TestCase):
@@ -511,9 +512,10 @@ class TestKanbanOperations(unittest.TestCase):
 	@patch("jarz_pos.services.delivery_handling.frappe")
 	def test_delivery_note_allows_disabled_historical_invoice_items(self, mock_frappe):
 		"""Auto-created DNs should still work for submitted invoices whose items were later disabled."""
-		from jarz_pos.services.delivery_handling import ensure_delivery_note_for_invoice
 		import erpnext.stock.get_item_details as stock_get_item_details
 		from erpnext.stock.doctype.item import item as item_module
+
+		from jarz_pos.services.delivery_handling import ensure_delivery_note_for_invoice
 
 		mock_item = MagicMock()
 		mock_item.item_code = "ITEM-001"

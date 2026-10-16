@@ -12,44 +12,50 @@ and a dedicated placeholder to extend later without mixing logic paths.
 """
 
 from __future__ import annotations
-from typing import Optional, Dict, Any
+
+import sys
+from typing import Any, Dict, Optional
+
 import frappe
 
 from jarz_pos.services.delivery_handling import (
-	_get_delivery_expense_amount,
-	ensure_delivery_note_for_invoice,
-	_get_courier_outstanding_account,
-	_get_receivable_account,
 	_create_payment_entry,
-	update_submitted_sales_invoice_state,
+	_get_courier_outstanding_account,
+	_get_delivery_expense_amount,
+	_get_receivable_account,
 	# Delivery-partner fee accrual. One builder for both order types: the fee is
 	# the ONLY thing a partner changes, and it is always owed to the partner
 	# company, never netted against the customer's money.
 	create_partner_fee_accrual_je,
+	ensure_delivery_note_for_invoice,
+	update_submitted_sales_invoice_state,
+)
+from jarz_pos.services.delivery_handling import (
+	handle_credit_deliver_on_account as handle_credit_deliver_on_account,  # alias for tests
 )
 
 # Re-export selected delivery handlers at module level so tests can patch via
 # 'jarz_pos.services.settlement_strategies.<name>'
 from jarz_pos.services.delivery_handling import (
 	handle_out_for_delivery_paid as handle_out_for_delivery_paid,  # alias for tests
-	mark_courier_outstanding as mark_courier_outstanding,  # alias for tests
+)
+from jarz_pos.services.delivery_handling import (
 	handle_unpaid_online_deliver_unconfirmed as handle_unpaid_online_deliver_unconfirmed,  # alias for tests
-	handle_credit_deliver_on_account as handle_credit_deliver_on_account,  # alias for tests
 )
-import sys
-from jarz_pos.utils.credit_utils import CREDIT_INTENT_TOKENS, is_credit_intent_doc
+from jarz_pos.services.delivery_handling import (
+	mark_courier_outstanding as mark_courier_outstanding,  # alias for tests
+)
 from jarz_pos.utils.account_utils import (
-	get_pos_cash_account,
-	get_freight_expense_account,
 	get_creditors_account,
-	validate_account_exists,
+	get_freight_expense_account,
+	get_pos_cash_account,
 	resolve_online_partner_paid_to,
+	validate_account_exists,
 )
+from jarz_pos.utils.credit_utils import CREDIT_INTENT_TOKENS, is_credit_intent_doc
 
 
-def _route_paid_to_account(
-	company: str, payment_type: Optional[str], sales_partner: Optional[str]
-) -> Optional[str]:
+def _route_paid_to_account(company: str, payment_type: str | None, sales_partner: str | None) -> str | None:
 	"""Route paid_to account based on payment type and partner.
 	Online + Sales Partner -> partner receivable subaccount (to be implemented elsewhere).
 	Returns None to indicate caller should decide default (Cash/Bank/Courier Outstanding).
@@ -165,8 +171,8 @@ def _in_test_mode() -> bool:
 
 
 def handle_unpaid_settle_now(
-	inv, *, pos_profile: str, payment_type: Optional[str], party_type: Optional[str], party: Optional[str]
-) -> Dict[str, Any]:
+	inv, *, pos_profile: str, payment_type: str | None, party_type: str | None, party: str | None
+) -> dict[str, Any]:
 	company = inv.company
 	outstanding = float(frappe.db.get_value("Sales Invoice", inv.name, "outstanding_amount") or 0)
 	already_paid = outstanding <= 0.0001
@@ -214,7 +220,7 @@ def handle_unpaid_settle_now(
 	)
 
 	# Merge and return
-	res: Dict[str, Any] = {
+	res: dict[str, Any] = {
 		"success": True,
 		"invoice": inv.name,
 		"mode": "unpaid_settle_now",
@@ -241,8 +247,8 @@ def handle_unpaid_settle_now(
 
 
 def handle_unpaid_settle_later(
-	inv, *, pos_profile: str, payment_type: Optional[str], party_type: Optional[str], party: Optional[str]
-) -> Dict[str, Any]:
+	inv, *, pos_profile: str, payment_type: str | None, party_type: str | None, party: str | None
+) -> dict[str, Any]:
 	# mark_courier_outstanding now enforces Delivery Note creation and returns DN info
 	res = mark_courier_outstanding(inv.name, courier=None, party_type=party_type, party=party)
 	if isinstance(res, dict):
@@ -251,8 +257,8 @@ def handle_unpaid_settle_later(
 
 
 def handle_paid_settle_now(
-	inv, *, pos_profile: str, payment_type: Optional[str], party_type: Optional[str], party: Optional[str]
-) -> Dict[str, Any]:
+	inv, *, pos_profile: str, payment_type: str | None, party_type: str | None, party: str | None
+) -> dict[str, Any]:
 	# Paid already – no PE; perform Out For Delivery transition with immediate courier cash settlement
 	courier_label = "Courier"
 	ofd = handle_out_for_delivery_paid(
@@ -264,7 +270,7 @@ def handle_paid_settle_now(
 		party=party,
 	)
 	# Return OFD artifacts
-	res: Dict[str, Any] = {"success": True, "invoice": inv.name, "mode": "paid_settle_now"}
+	res: dict[str, Any] = {"success": True, "invoice": inv.name, "mode": "paid_settle_now"}
 	if isinstance(ofd, dict):
 		for k in (
 			"journal_entry",
@@ -279,8 +285,8 @@ def handle_paid_settle_now(
 
 
 def handle_paid_settle_later(
-	inv, *, pos_profile: str, payment_type: Optional[str], party_type: Optional[str], party: Optional[str]
-) -> Dict[str, Any]:
+	inv, *, pos_profile: str, payment_type: str | None, party_type: str | None, party: str | None
+) -> dict[str, Any]:
 	# No PE; accrue shipping and create Unsettled CT via existing transition path for paid invoices
 	courier_label = "Courier"
 	return handle_out_for_delivery_paid(
@@ -306,7 +312,7 @@ STRATEGY = {
 # ---------------------------------------------------------------------------
 
 
-def _resolve_delivery_partner(party_type: Optional[str], party: Optional[str]) -> Optional[str]:
+def _resolve_delivery_partner(party_type: str | None, party: str | None) -> str | None:
 	"""Return the Delivery Partner name if this courier belongs to one, else None."""
 	if not party_type or not party:
 		return None
@@ -330,16 +336,16 @@ def _stamp_partner_fields(inv_name: str, delivery_partner: str):
 def _create_partner_courier_transaction(
 	inv,
 	*,
-	party_type: Optional[str],
-	party: Optional[str],
+	party_type: str | None,
+	party: str | None,
 	delivery_partner: str,
 	order_amount: float,
 	partner_fee: float,
 	status: str = "Unsettled",
 	payment_mode: str = "Cash",
-	journal_entry: Optional[str] = None,
-	pos_profile: Optional[str] = None,
-	notes: Optional[str] = None,
+	journal_entry: str | None = None,
+	pos_profile: str | None = None,
+	notes: str | None = None,
 ) -> str:
 	"""Create a Courier Transaction for a delivery-partner order.
 
@@ -381,7 +387,7 @@ def _create_partner_courier_transaction(
 	return ct.name
 
 
-def _merge_dn_info(res: Dict[str, Any], dn_info: Any) -> None:
+def _merge_dn_info(res: dict[str, Any], dn_info: Any) -> None:
 	if isinstance(dn_info, dict):
 		for k in ("delivery_note", "delivery_note_reused"):
 			if k in dn_info:
@@ -402,9 +408,9 @@ def _require_partner_fee(inv, delivery_partner: str, partner_fee) -> float:
 	"""
 	if partner_fee is None or str(partner_fee).strip() == "":
 		frappe.throw(
-			"This courier works for delivery partner {0}. Enter the partner's "
+			f"This courier works for delivery partner {delivery_partner}. Enter the partner's "
 			"delivery cost for this order before dispatching — our own area rate "
-			"does not apply to them.".format(delivery_partner)
+			"does not apply to them."
 		)
 	try:
 		fee = round(float(partner_fee), 2)
@@ -423,12 +429,12 @@ def handle_partner_unpaid_settle_now(
 	inv,
 	*,
 	pos_profile: str,
-	payment_type: Optional[str],
-	party_type: Optional[str],
-	party: Optional[str],
+	payment_type: str | None,
+	party_type: str | None,
+	party: str | None,
 	delivery_partner: str,
 	partner_fee=None,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	"""Partner cash order, rider hands the cash over now.
 
 	He collected the customer's money and gives the branch the FULL amount — a
@@ -491,7 +497,7 @@ def handle_partner_unpaid_settle_now(
 	)
 	_stamp_partner_fields(inv.name, delivery_partner)
 
-	res: Dict[str, Any] = {
+	res: dict[str, Any] = {
 		"success": True,
 		"invoice": inv.name,
 		"mode": "partner_unpaid_settle_now",
@@ -514,12 +520,12 @@ def handle_partner_unpaid_settle_later(
 	inv,
 	*,
 	pos_profile: str,
-	payment_type: Optional[str],
-	party_type: Optional[str],
-	party: Optional[str],
+	payment_type: str | None,
+	party_type: str | None,
+	party: str | None,
 	delivery_partner: str,
 	partner_fee=None,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	"""Partner cash order, cash comes back later.
 
 	Identical to the ordinary courier settle-later path, because that is exactly
@@ -550,13 +556,13 @@ def _handle_partner_prepaid(
 	inv,
 	*,
 	pos_profile: str,
-	payment_type: Optional[str],
-	party_type: Optional[str],
-	party: Optional[str],
+	payment_type: str | None,
+	party_type: str | None,
+	party: str | None,
 	delivery_partner: str,
 	mode_label: str,
 	partner_fee=None,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	"""Partner prepaid order — the rider carries no money and is given none.
 
 	    DR Freight (fee) / CR Partner payable (fee)
@@ -591,7 +597,7 @@ def _handle_partner_prepaid(
 	)
 	_stamp_partner_fields(inv.name, delivery_partner)
 
-	res: Dict[str, Any] = {
+	res: dict[str, Any] = {
 		"success": True,
 		"invoice": inv.name,
 		"mode": mode_label,
@@ -611,12 +617,12 @@ def handle_partner_paid_settle_now(
 	inv,
 	*,
 	pos_profile: str,
-	payment_type: Optional[str],
-	party_type: Optional[str],
-	party: Optional[str],
+	payment_type: str | None,
+	party_type: str | None,
+	party: str | None,
 	delivery_partner: str,
 	partner_fee=None,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	return _handle_partner_prepaid(
 		inv,
 		pos_profile=pos_profile,
@@ -633,12 +639,12 @@ def handle_partner_paid_settle_later(
 	inv,
 	*,
 	pos_profile: str,
-	payment_type: Optional[str],
-	party_type: Optional[str],
-	party: Optional[str],
+	payment_type: str | None,
+	party_type: str | None,
+	party: str | None,
 	delivery_partner: str,
 	partner_fee=None,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	return _handle_partner_prepaid(
 		inv,
 		pos_profile=pos_profile,
@@ -663,12 +669,12 @@ def dispatch_settlement(
 	inv_name: str,
 	*,
 	mode: str,
-	pos_profile: Optional[str] = None,
-	payment_type: Optional[str] = None,
-	party_type: Optional[str] = None,
-	party: Optional[str] = None,
+	pos_profile: str | None = None,
+	payment_type: str | None = None,
+	party_type: str | None = None,
+	party: str | None = None,
 	partner_fee=None,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	"""Central dispatch that decides paid/unpaid at call time and invokes the proper handler.
 
 	mode: "now" | "later"

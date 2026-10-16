@@ -4,12 +4,21 @@ These are registered at the global scope to avoid nested module path issues.
 """
 
 import frappe
+
+from .kanban import (
+	get_invoice_details as _get_invoice_details,
+)
 from .kanban import (
 	get_kanban_columns as _get_kanban_columns,
-	get_kanban_invoices as _get_kanban_invoices,
-	update_invoice_state as _update_invoice_state,
-	get_invoice_details as _get_invoice_details,
+)
+from .kanban import (
 	get_kanban_filters as _get_kanban_filters,
+)
+from .kanban import (
+	get_kanban_invoices as _get_kanban_invoices,
+)
+from .kanban import (
+	update_invoice_state as _update_invoice_state,
 )
 
 

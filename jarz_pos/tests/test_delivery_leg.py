@@ -25,7 +25,7 @@ Pure ``unittest`` with mocks — no site, no fixtures.
 import unittest
 from unittest.mock import MagicMock, patch
 
-import frappe  # noqa: F401  (binds frappe.local / frappe._ for the imports below)
+import frappe
 
 from jarz_pos.services import delivery_leg
 

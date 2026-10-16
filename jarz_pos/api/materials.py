@@ -25,7 +25,8 @@ the two rules that matter most there:
 from __future__ import annotations
 
 import json
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import frappe
 from frappe.utils import cint, now_datetime

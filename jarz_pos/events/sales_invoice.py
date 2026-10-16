@@ -38,7 +38,7 @@ def _safe_publish(event: str, message: dict[str, Any], doc: Any = None) -> None:
 			pass
 
 
-def sync_kanban_profile(doc: Any, method: Optional[str] = None) -> None:
+def sync_kanban_profile(doc: Any, method: str | None = None) -> None:
 	"""Seed Kanban profile from POS Profile on draft invoices only.
 
 	- Draft invoices keep `custom_kanban_profile` aligned with `pos_profile`.
@@ -53,7 +53,7 @@ def sync_kanban_profile(doc: Any, method: Optional[str] = None) -> None:
 		docstatus = int(getattr(doc, "docstatus", 0) or 0)
 		if docstatus == 0 and pos_profile and hasattr(doc, "custom_kanban_profile"):
 			if getattr(doc, "custom_kanban_profile", None) != pos_profile:
-				setattr(doc, "custom_kanban_profile", pos_profile)
+				doc.custom_kanban_profile = pos_profile
 	except Exception:
 		if frappe:
 			frappe.log_error(frappe.get_traceback(), "sync_kanban_profile failed")
@@ -108,7 +108,7 @@ def _check_flag(doc: Any, fieldname: str) -> int:
 		return 1 if value else 0
 
 
-def suppress_pos_invoice_stock_update(doc: Any, method: Optional[str] = None) -> None:
+def suppress_pos_invoice_stock_update(doc: Any, method: str | None = None) -> None:
 	"""Force ``update_stock = 0`` on every POS Sales Invoice.
 
 	Stock leaves the warehouse through the Delivery Note and nothing else. The
@@ -143,7 +143,7 @@ def suppress_pos_invoice_stock_update(doc: Any, method: Optional[str] = None) ->
 			frappe.log_error(frappe.get_traceback(), "suppress_pos_invoice_stock_update failed")
 
 
-def publish_new_invoice(doc: Any, method: Optional[str] = None) -> None:
+def publish_new_invoice(doc: Any, method: str | None = None) -> None:
 	"""Notify listeners a Sales Invoice has been submitted.
 
 	This is the `on_submit` doc event, so it fires for EVERY submitted Sales
@@ -171,7 +171,7 @@ def publish_new_invoice(doc: Any, method: Optional[str] = None) -> None:
 			frappe.log_error(frappe.get_traceback(), "handle_invoice_submission failed")
 
 
-def publish_state_change_if_needed(doc: Any, method: Optional[str] = None) -> None:
+def publish_state_change_if_needed(doc: Any, method: str | None = None) -> None:
 	"""Emit a generic state-change notification for already-submitted invoices.
 
 	Intentionally lightweight. Frontend can refetch details by name.
@@ -183,7 +183,7 @@ def publish_state_change_if_needed(doc: Any, method: Optional[str] = None) -> No
 	)
 
 
-def mark_cancelled_invoice_workflow_fields(doc: Any, method: Optional[str] = None) -> None:
+def mark_cancelled_invoice_workflow_fields(doc: Any, method: str | None = None) -> None:
 	"""Keep Jarz workflow fields aligned whenever a Sales Invoice is cancelled."""
 	if not frappe or not doc or not getattr(doc, "name", None):
 		return
@@ -242,7 +242,7 @@ def mark_cancelled_invoice_workflow_fields(doc: Any, method: Optional[str] = Non
 			frappe.log_error(frappe.get_traceback(), "mark_cancelled_invoice_workflow_fields failed")
 
 
-def block_cancel_if_dispatched(doc: Any, method: Optional[str] = None) -> None:
+def block_cancel_if_dispatched(doc: Any, method: str | None = None) -> None:
 	"""FIX 5 (2026-07-20): document-level guard blocking cancel of a dispatched invoice.
 
 	The OFD hard-mutation guard previously lived ONLY inside
@@ -322,7 +322,7 @@ def block_cancel_if_dispatched(doc: Any, method: Optional[str] = None) -> None:
 		frappe.throw(reason, title=frappe._("Cancellation blocked"))
 
 
-def release_unsettled_partner_transactions(doc: Any, method: Optional[str] = None) -> None:
+def release_unsettled_partner_transactions(doc: Any, method: str | None = None) -> None:
 	"""Drop the pending partner fee rows of a cancelled invoice (on_cancel).
 
 	A paid-online sales-partner order carries a Sales Partner Transaction from the
@@ -354,7 +354,7 @@ def release_unsettled_partner_transactions(doc: Any, method: Optional[str] = Non
 			frappe.log_error(frappe.get_traceback(), "release_unsettled_partner_transactions failed")
 
 
-def validate_invoice_before_submit(doc: Any, method: Optional[str] = None) -> None:
+def validate_invoice_before_submit(doc: Any, method: str | None = None) -> None:
 	"""Placeholder for pre-submit validations (e.g., bundle checks).
 
 	Currently a no-op to avoid interrupting flows. Add validations here later.
@@ -362,7 +362,7 @@ def validate_invoice_before_submit(doc: Any, method: Optional[str] = None) -> No
 	return None
 
 
-def stamp_out_for_delivery_flag(doc: Any, method: Optional[str] = None) -> None:
+def stamp_out_for_delivery_flag(doc: Any, method: str | None = None) -> None:
 	"""Permanently set custom_was_out_for_delivery=1 the first time the invoice
 	enters the 'Out for Delivery' state.  Once set, this flag is never cleared —
 	it acts as a hard lock preventing automated amendments even if the state
@@ -396,7 +396,7 @@ def stamp_out_for_delivery_flag(doc: Any, method: Optional[str] = None) -> None:
 			frappe.log_error(frappe.get_traceback(), "stamp_out_for_delivery_flag failed")
 
 
-def mint_tracking_token_on_ofd(doc: Any, method: Optional[str] = None) -> None:
+def mint_tracking_token_on_ofd(doc: Any, method: str | None = None) -> None:
 	"""Mint the customer tracking token the first time an order goes out.
 
 	Registered on ``on_update_after_submit`` because that is the one point every

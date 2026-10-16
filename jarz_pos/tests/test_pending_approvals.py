@@ -15,7 +15,6 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-
 if "frappe" not in sys.modules:
 	fake_frappe = types.ModuleType("frappe")
 

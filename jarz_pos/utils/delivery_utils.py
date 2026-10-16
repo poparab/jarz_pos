@@ -73,7 +73,7 @@ def add_delivery_charges_to_taxes(
 		)
 
 	except Exception as e:
-		frappe.log_error(f"Error adding delivery charges: {str(e)}", "Delivery Charges")
+		frappe.log_error(f"Error adding delivery charges: {e!s}", "Delivery Charges")
 		# Don't fail invoice for delivery charge errors - just log and continue
 		pass
 
@@ -90,7 +90,7 @@ def validate_delivery_charges(delivery_charges):
 			return False, "Delivery charges seem too high (over 10,000)"
 		return True, "Valid delivery charges"
 	except Exception as e:
-		return False, f"Invalid delivery charges format: {str(e)}"
+		return False, f"Invalid delivery charges format: {e!s}"
 
 
 def get_delivery_tax_summary(invoice_doc):
@@ -122,5 +122,5 @@ def get_delivery_tax_summary(invoice_doc):
 			"has_delivery_charges": delivery_charges > 0,
 		}
 	except Exception as e:
-		frappe.log_error(f"Error getting delivery tax summary: {str(e)}", "Delivery Charges")
+		frappe.log_error(f"Error getting delivery tax summary: {e!s}", "Delivery Charges")
 		return {"total_delivery_charges": 0, "delivery_entries": [], "has_delivery_charges": False}

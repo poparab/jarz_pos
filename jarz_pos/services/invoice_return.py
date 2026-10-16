@@ -45,6 +45,12 @@ import frappe
 from frappe import _
 from frappe.utils import flt
 
+from jarz_pos.services.delivery_handling import (
+	_find_existing_je_by_tag,
+	_get_courier_outstanding_account,
+	_tag_journal_entry,
+	update_submitted_sales_invoice_fields,
+)
 from jarz_pos.utils.access_control import (
 	ClosedShiftError,
 	ShiftRequiredError,
@@ -58,12 +64,6 @@ from jarz_pos.utils.account_utils import (
 	get_freight_expense_account,
 	get_pos_cash_account,
 	validate_account_exists,
-)
-from jarz_pos.services.delivery_handling import (
-	_find_existing_je_by_tag,
-	_get_courier_outstanding_account,
-	_tag_journal_entry,
-	update_submitted_sales_invoice_fields,
 )
 from jarz_pos.utils.employee_link import EMPLOYEE_ORDER_PURPOSE
 from jarz_pos.utils.invoice_utils import normalize_woo_order_id
@@ -143,7 +143,7 @@ def _invoice_state(inv: Any) -> str:
 	)
 
 
-def _board_state_fields() -> List[str]:
+def _board_state_fields() -> list[str]:
 	"""Whichever of the board-state aliases this site actually carries.
 
 	Returned in probe order, so a site with more than one of them keeps every
@@ -163,7 +163,7 @@ def _coerce_bool(value: Any) -> bool:
 	return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _parse_lines(lines: Any) -> List[Dict[str, Any]]:
+def _parse_lines(lines: Any) -> list[dict[str, Any]]:
 	"""Normalise the requested return lines to ``[{si_detail, qty}]``."""
 	if not lines:
 		return []
@@ -172,7 +172,7 @@ def _parse_lines(lines: Any) -> List[Dict[str, Any]]:
 			lines = json.loads(lines)
 		except Exception:
 			return []
-	parsed: List[Dict[str, Any]] = []
+	parsed: list[dict[str, Any]] = []
 	for row in lines or []:
 		if not isinstance(row, dict):
 			continue
@@ -183,7 +183,7 @@ def _parse_lines(lines: Any) -> List[Dict[str, Any]]:
 	return parsed
 
 
-def _returned_qty_by_row(invoice_name: str) -> Dict[str, float]:
+def _returned_qty_by_row(invoice_name: str) -> dict[str, float]:
 	"""Quantity already returned per source invoice row.
 
 	Summed from prior credit notes rather than recomputed, so a second partial
@@ -213,7 +213,7 @@ def _returned_qty_by_row(invoice_name: str) -> Dict[str, float]:
 		or []
 	)
 
-	returned: Dict[str, float] = {}
+	returned: dict[str, float] = {}
 	for row in return_rows:
 		key = row.get("sales_invoice_item")
 		if not key:
@@ -223,7 +223,7 @@ def _returned_qty_by_row(invoice_name: str) -> Dict[str, float]:
 	return returned
 
 
-def _completes_the_order(inv: Any, requested: Dict[str, float], returned_before: Dict[str, float]) -> bool:
+def _completes_the_order(inv: Any, requested: dict[str, float], returned_before: dict[str, float]) -> bool:
 	"""Whether *requested* brings every line of *inv* fully back.
 
 	The single source of truth for "is this the last return on this order",
@@ -241,14 +241,14 @@ def _completes_the_order(inv: Any, requested: Dict[str, float], returned_before:
 	return True
 
 
-def _fixed_charges_already_credited(invoice_name: str) -> Dict[Tuple[str, str], float]:
+def _fixed_charges_already_credited(invoice_name: str) -> dict[tuple[str, str], float]:
 	"""Absolute fixed-amount charge already credited per (account, description).
 
 	Only ``Actual`` rows are tracked. Percentage rows need no bookkeeping — they
 	are recomputed from the credit note's own net total, so they scale with the
 	goods automatically.
 	"""
-	credited: Dict[Tuple[str, str], float] = {}
+	credited: dict[tuple[str, str], float] = {}
 	prior_notes = (
 		frappe.get_all(
 			"Sales Invoice",
@@ -274,7 +274,7 @@ def _fixed_charges_already_credited(invoice_name: str) -> Dict[Tuple[str, str], 
 	return credited
 
 
-def _original_delivery_note(invoice_name: str) -> Optional[str]:
+def _original_delivery_note(invoice_name: str) -> str | None:
 	"""The submitted, non-return Delivery Note this invoice shipped on."""
 	rows = (
 		frappe.get_all(
@@ -294,7 +294,7 @@ def _original_delivery_note(invoice_name: str) -> Optional[str]:
 	return None
 
 
-def _unsettled_courier_transactions(invoice_name: str) -> List[Dict[str, Any]]:
+def _unsettled_courier_transactions(invoice_name: str) -> list[dict[str, Any]]:
 	try:
 		return (
 			frappe.get_all(
@@ -395,7 +395,7 @@ def _employee_credit_return_blocked(inv: Any, money_state: str) -> bool:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def get_invoice_return_eligibility(inv: Any) -> Dict[str, Any]:
+def get_invoice_return_eligibility(inv: Any) -> dict[str, Any]:
 	"""Whether *inv* can go through the return workflow.
 
 	The mirror image of cancellation eligibility: the artifacts that *block* a
@@ -404,8 +404,8 @@ def get_invoice_return_eligibility(inv: Any) -> Dict[str, Any]:
 	"""
 	invoice_name = str(getattr(inv, "name", None) or inv.get("name") or "").strip()
 
-	def _blocked(code: str, reason: str, **extra: Any) -> Dict[str, Any]:
-		payload: Dict[str, Any] = {
+	def _blocked(code: str, reason: str, **extra: Any) -> dict[str, Any]:
+		payload: dict[str, Any] = {
 			"can_return": False,
 			"return_block_code": code,
 			"return_block_reason": reason,
@@ -457,7 +457,7 @@ def get_invoice_return_eligibility(inv: Any) -> Dict[str, Any]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def build_return_preview(invoice_id: str) -> Dict[str, Any]:
+def build_return_preview(invoice_id: str) -> dict[str, Any]:
 	"""Everything the confirmation dialog needs. Writes nothing."""
 	invoice_id = str(invoice_id or "").strip()
 	if not invoice_id:
@@ -469,7 +469,7 @@ def build_return_preview(invoice_id: str) -> Dict[str, Any]:
 	eligibility = get_invoice_return_eligibility(inv)
 
 	already_returned = _returned_qty_by_row(invoice_id)
-	lines: List[Dict[str, Any]] = []
+	lines: list[dict[str, Any]] = []
 	for row in inv.items:
 		sold = flt(row.qty)
 		done = flt(already_returned.get(row.name))
@@ -577,8 +577,8 @@ def _post_return_je(
 	dedup_key: str,
 	je_type: str,
 	human: str,
-	legs: List[Dict[str, Any]],
-) -> Optional[str]:
+	legs: list[dict[str, Any]],
+) -> str | None:
 	"""Post a balanced, idempotent Journal Entry for a return step.
 
 	Every return posting goes through here so the three v16 rules that have
@@ -624,7 +624,7 @@ def _post_return_je(
 			amount = abs(amount)
 			is_debit = not is_debit
 
-		row: Dict[str, Any] = {
+		row: dict[str, Any] = {
 			"account": account,
 			"debit_in_account_currency": amount if is_debit else 0,
 			"credit_in_account_currency": 0 if is_debit else amount,
@@ -668,8 +668,8 @@ def plan_return_journal_legs(
 	return_total: float,
 	credit_note_name: str,
 	pay_courier_for_trip: bool,
-	courier: Optional[Dict[str, Any]],
-) -> List[Dict[str, Any]]:
+	courier: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
 	"""Describe every Journal Entry a return will post, without posting any.
 
 	Shared by the real run and by ``dry_run`` previews, so a dry run exercises
@@ -680,7 +680,7 @@ def plan_return_journal_legs(
 	customer = inv.customer
 	receivable = get_company_receivable_account(company)
 	partner_order = _is_partner_order(inv)
-	plans: List[Dict[str, Any]] = []
+	plans: list[dict[str, Any]] = []
 
 	if money_state == MONEY_UNPAID:
 		# Nothing was ever collected: the credit note's debit and the invoice's
@@ -787,7 +787,7 @@ def plan_return_journal_legs(
 	return plans
 
 
-def dry_run_return_postings(invoice_id: str) -> Dict[str, Any]:
+def dry_run_return_postings(invoice_id: str) -> dict[str, Any]:
 	"""Resolve and balance every posting a return would make — without writing.
 
 	The highest-value check to run against real production-cloned data: it
@@ -799,7 +799,7 @@ def dry_run_return_postings(invoice_id: str) -> Dict[str, Any]:
 	transactions = _unsettled_courier_transactions(inv.name)
 	courier = next((t for t in transactions if flt(t.get("amount")) > _TOL), None)
 
-	result: Dict[str, Any] = {
+	result: dict[str, Any] = {
 		"invoice_id": inv.name,
 		"money_state": money_state,
 		"ok": True,
@@ -855,7 +855,7 @@ def dry_run_return_postings(invoice_id: str) -> Dict[str, Any]:
 
 
 def _build_credit_note(
-	inv: Any, requested: Dict[str, float], request_id: str, *, completes_order: bool
+	inv: Any, requested: dict[str, float], request_id: str, *, completes_order: bool
 ) -> Any:
 	"""Map the source invoice to a credit note limited to the requested lines.
 
@@ -953,9 +953,7 @@ def _apply_fixed_charge_rule(cn: Any, inv: Any, *, completes_order: bool) -> Non
 		row.tax_amount_after_discount_amount = -target
 
 
-def _build_return_delivery_note(
-	original_dn: str, inv_name: str, requested: Dict[str, float]
-) -> Optional[Any]:
+def _build_return_delivery_note(original_dn: str, inv_name: str, requested: dict[str, float]) -> Any | None:
 	"""Map the original Delivery Note to a return DN for the requested lines."""
 	from erpnext.controllers.sales_and_purchase_return import make_return_doc
 
@@ -998,12 +996,12 @@ def _build_return_delivery_note(
 
 def _compensating_courier_transaction(
 	inv: Any,
-	courier: Dict[str, Any],
+	courier: dict[str, Any],
 	*,
 	return_total: float,
 	shipping_reversed: float,
 	credit_note_name: str,
-) -> Optional[str]:
+) -> str | None:
 	"""Insert a negative-amount Courier Transaction that cancels the original.
 
 	Courier Transaction is not submittable and has only Unsettled/Settled — there
@@ -1049,9 +1047,7 @@ def _compensating_courier_transaction(
 		return None
 
 
-def _compensating_sales_partner_transaction(
-	inv: Any, *, ratio: float, credit_note_name: str
-) -> Optional[str]:
+def _compensating_sales_partner_transaction(inv: Any, *, ratio: float, credit_note_name: str) -> str | None:
 	"""Negate the partner's commission row in proportion to what came back."""
 	partner = inv.get("sales_partner")
 	if not partner:
@@ -1098,7 +1094,7 @@ def _compensating_sales_partner_transaction(
 
 def _create_refund_payment_entry(
 	inv: Any, *, credit_note_name: str, amount: float, branch: str
-) -> Optional[str]:
+) -> str | None:
 	"""Pay the customer back out of branch cash against the credit note."""
 	if amount <= _TOL:
 		return None
@@ -1189,7 +1185,7 @@ def _set_credit_note_board_state(doc: Any) -> None:
 		frappe.log_error(frappe.get_traceback(), f"Return: could not set board state on {name}")
 
 
-def _returned_column_updates(inv: Any) -> Dict[str, Any]:
+def _returned_column_updates(inv: Any) -> dict[str, Any]:
 	"""Field updates that park a fully-returned order in the ``Returned`` column.
 
 	Without these the card stays wherever the return found it — usually "Out for
@@ -1207,7 +1203,7 @@ def _returned_column_updates(inv: Any) -> Dict[str, Any]:
 			title="Return: board state field missing",
 			message=(
 				f"Sales Invoice carries none of {_STATE_FIELD_ALIASES}, so "
-				f"{str(getattr(inv, 'name', '') or '?')} was fully returned but "
+				f"{getattr(inv, 'name', '') or '?'!s} was fully returned but "
 				f"stays on its old board column."
 			),
 		)
@@ -1218,10 +1214,10 @@ def _returned_column_updates(inv: Any) -> Dict[str, Any]:
 def _stamp_return_state(
 	inv: Any,
 	*,
-	requested: Dict[str, float],
-	returned_before: Dict[str, float],
+	requested: dict[str, float],
+	returned_before: dict[str, float],
 	reason: str,
-	notes: Optional[str],
+	notes: str | None,
 	return_total: float,
 ) -> str:
 	"""Record the return on the source invoice and say whether it is now complete."""
@@ -1230,7 +1226,7 @@ def _stamp_return_state(
 	reason_text = reason if not notes else f"{reason}\nNotes: {notes}"
 	prior = flt(inv.get("custom_returned_amount"))
 
-	updates: Dict[str, Any] = {
+	updates: dict[str, Any] = {
 		"custom_return_status": status,
 		"custom_return_reason": reason_text,
 		"custom_returned_amount": prior + abs(flt(return_total)),
@@ -1258,7 +1254,7 @@ def _stamp_return_state(
 		# the column on the next migrate.
 		frappe.log_error(
 			frappe.get_traceback(),
-			f"Return: board state rejected on {str(getattr(inv, 'name', '') or '?')}",
+			f"Return: board state rejected on {getattr(inv, 'name', '') or '?'!s}",
 		)
 		# Reload before retrying. update_submitted_sales_invoice_fields normally
 		# works on a freshly fetched copy, but it degrades to mutating the doc it
@@ -1283,9 +1279,9 @@ def run_invoice_return(
 	return_type: str = "Customer Return",
 	refund_mode: str = REFUND_CUSTOMER_CREDIT,
 	pay_courier_for_trip: bool = True,
-	notes: Optional[str] = None,
-	request_id: Optional[str] = None,
-) -> Dict[str, Any]:
+	notes: str | None = None,
+	request_id: str | None = None,
+) -> dict[str, Any]:
 	"""Execute a return. Never raises to the caller; returns a result dict.
 
 	Structured after ``api.manager._run_invoice_amendment_job``: advisory lock →
@@ -1388,7 +1384,7 @@ def run_invoice_return(
 
 		returned_before = _returned_qty_by_row(invoice_id)
 		row_by_name = {row.name: row for row in inv.items}
-		requested: Dict[str, float] = {}
+		requested: dict[str, float] = {}
 		for entry in requested_rows:
 			source_row = row_by_name.get(entry["si_detail"])
 			if not source_row:
@@ -1482,7 +1478,7 @@ def run_invoice_return(
 			ratio = min(max(ratio, 0.0), 1.0)
 
 			# 3. Money that already moved.
-			journal_entries: List[str] = []
+			journal_entries: list[str] = []
 			for plan in plan_return_journal_legs(
 				inv=inv,
 				money_state=money_state,
@@ -1594,8 +1590,8 @@ def run_invoice_return(
 			}
 
 			try:
-				from jarz_pos.utils.realtime import publish_invoice_event_by_name
 				from jarz_pos.constants import WS_EVENTS
+				from jarz_pos.utils.realtime import publish_invoice_event_by_name
 
 				publish_invoice_event_by_name(WS_EVENTS.KANBAN_UPDATE, result, inv.name)
 			except Exception:

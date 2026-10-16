@@ -33,8 +33,9 @@ manager hands another stays between the two of them.
 from __future__ import annotations
 
 import datetime
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import frappe
 
@@ -55,16 +56,16 @@ STATUS_IN_PROGRESS = "In Progress"
 STATUS_IN_REVIEW = "In Review"
 STATUS_DONE = "Done"
 #: Board column order. The wire contract: the client renders these verbatim.
-STATUSES: Tuple[str, ...] = (STATUS_TODO, STATUS_IN_PROGRESS, STATUS_IN_REVIEW, STATUS_DONE)
+STATUSES: tuple[str, ...] = (STATUS_TODO, STATUS_IN_PROGRESS, STATUS_IN_REVIEW, STATUS_DONE)
 #: Statuses in which the assignee is still working the card.
-OPEN_STATUSES: Tuple[str, ...] = (STATUS_TODO, STATUS_IN_PROGRESS)
+OPEN_STATUSES: tuple[str, ...] = (STATUS_TODO, STATUS_IN_PROGRESS)
 
 PRIORITY_NORMAL = "Normal"
 PRIORITY_HIGH = "High"
 PRIORITY_URGENT = "Urgent"
-PRIORITIES: Tuple[str, ...] = (PRIORITY_NORMAL, PRIORITY_HIGH, PRIORITY_URGENT)
+PRIORITIES: tuple[str, ...] = (PRIORITY_NORMAL, PRIORITY_HIGH, PRIORITY_URGENT)
 #: Board sort: Urgent first, then High, then Normal.
-PRIORITY_RANK: Dict[str, int] = {PRIORITY_URGENT: 0, PRIORITY_HIGH: 1, PRIORITY_NORMAL: 2}
+PRIORITY_RANK: dict[str, int] = {PRIORITY_URGENT: 0, PRIORITY_HIGH: 1, PRIORITY_NORMAL: 2}
 
 # ── Entries ────────────────────────────────────────────────────────────────
 
@@ -72,7 +73,7 @@ KIND_LOG = "Log"
 KIND_COMMENT = "Comment"
 KIND_HISTORY = "History"
 #: Kinds a person may write. History is written by the server only.
-USER_ENTRY_KINDS: Tuple[str, ...] = (KIND_LOG, KIND_COMMENT)
+USER_ENTRY_KINDS: tuple[str, ...] = (KIND_LOG, KIND_COMMENT)
 
 # History ``event`` codes (Jarz Task Entry.event). Wire contract.
 EV_CREATED = "created"
@@ -217,7 +218,7 @@ def _flag(value: Any) -> bool:
 		return bool(value)
 
 
-def _as_date(value: Any) -> Optional[datetime.date]:
+def _as_date(value: Any) -> datetime.date | None:
 	if not value:
 		return None
 	if isinstance(value, datetime.datetime):
@@ -230,11 +231,11 @@ def _as_date(value: Any) -> Optional[datetime.date]:
 		return None
 
 
-def subtasks_of(task: Any) -> List[Any]:
+def subtasks_of(task: Any) -> list[Any]:
 	return list(_val(task, "subtasks", []) or [])
 
 
-def open_subtasks(task: Any) -> List[Any]:
+def open_subtasks(task: Any) -> list[Any]:
 	return [s for s in subtasks_of(task) if not _flag(_val(s, "is_done"))]
 
 
@@ -272,7 +273,7 @@ def is_locked(task: Any) -> bool:
 	return is_archived(task) or is_done(task)
 
 
-def lock_reason(task: Any) -> Optional[str]:
+def lock_reason(task: Any) -> str | None:
 	if is_archived(task):
 		return MSG_ARCHIVED
 	if is_done(task):
@@ -313,7 +314,7 @@ def can_add_subtask(task: Any, viewer: Viewer) -> bool:
 	return can_assign_subtask_to_others(task, viewer) or is_assignee(task, viewer)
 
 
-def subtask_assignee_error(task: Any, viewer: Viewer, assignee: Optional[str]) -> Optional[str]:
+def subtask_assignee_error(task: Any, viewer: Viewer, assignee: str | None) -> str | None:
 	"""Why *viewer* may not put *assignee* on a subtask of *task*, or None.
 
 	Unassigned and "myself" are always fine for whoever may touch the subtask;
@@ -363,7 +364,7 @@ def can_upload(task: Any, viewer: Viewer) -> bool:
 	return is_visible(task, viewer) and not is_locked(task)
 
 
-def upload_error(task: Any, viewer: Viewer, entry: Any = None) -> Optional[Tuple[str, str]]:
+def upload_error(task: Any, viewer: Viewer, entry: Any = None) -> tuple[str, str] | None:
 	"""``(kind, message)`` refusing an upload, or None.
 
 	Card-level files follow :func:`can_upload` (not on Done or archived cards).
@@ -388,7 +389,7 @@ def upload_error(task: Any, viewer: Viewer, entry: Any = None) -> Optional[Tuple
 	return ("validation", reason) if reason else ("permission", "You cannot attach files to this task.")
 
 
-def blocked_upload_extension(filename: Any) -> Optional[str]:
+def blocked_upload_extension(filename: Any) -> str | None:
 	"""The refused extension of *filename* (lower-cased), or None."""
 	text = str(filename or "").strip().lower()
 	dot = text.rfind(".")
@@ -404,7 +405,7 @@ def content_disposition_for(content_type: Any) -> str:
 	return "inline" if value in INLINE_CONTENT_TYPES else "attachment"
 
 
-def can_remove_attachment(task: Any, viewer: Viewer, uploaded_by: Optional[str]) -> bool:
+def can_remove_attachment(task: Any, viewer: Viewer, uploaded_by: str | None) -> bool:
 	"""Card-level attachments only; entry attachments are immutable."""
 	if is_locked(task):
 		return False
@@ -416,7 +417,7 @@ def can_remove_attachment(task: Any, viewer: Viewer, uploaded_by: Optional[str])
 # ── Status transitions ─────────────────────────────────────────────────────
 
 
-def _transition_candidates(task: Any, viewer: Viewer) -> Dict[str, bool]:
+def _transition_candidates(task: Any, viewer: Viewer) -> dict[str, bool]:
 	"""``{target_status: reason_required}`` the viewer may move *task* to.
 
 	Deliberately does NOT look at open subtasks: a submit (or approve) blocked
@@ -430,7 +431,7 @@ def _transition_candidates(task: Any, viewer: Viewer) -> Dict[str, bool]:
 	creator = is_creator(task, viewer)
 	assignee = is_assignee(task, viewer)
 	full = viewer.can_view_all
-	out: Dict[str, bool] = {}
+	out: dict[str, bool] = {}
 
 	if status in OPEN_STATUSES:
 		other = STATUS_IN_PROGRESS if status == STATUS_TODO else STATUS_TODO
@@ -452,19 +453,19 @@ def _transition_candidates(task: Any, viewer: Viewer) -> Dict[str, bool]:
 	return out
 
 
-def allowed_transitions(task: Any, viewer: Viewer) -> List[str]:
+def allowed_transitions(task: Any, viewer: Viewer) -> list[str]:
 	candidates = _transition_candidates(task, viewer)
 	return [s for s in STATUSES if s in candidates]
 
 
-def needs_reason_for(task: Any, viewer: Viewer) -> List[str]:
+def needs_reason_for(task: Any, viewer: Viewer) -> list[str]:
 	candidates = _transition_candidates(task, viewer)
 	return [s for s in STATUSES if candidates.get(s)]
 
 
 def transition_error(
-	task: Any, viewer: Viewer, target: str, reason: Optional[str] = None
-) -> Optional[Tuple[str, str]]:
+	task: Any, viewer: Viewer, target: str, reason: str | None = None
+) -> tuple[str, str] | None:
 	"""``(kind, message)`` refusing the move, or None when it is allowed.
 
 	``kind`` is ``"permission"`` (the caller may not make this move at all) or
@@ -489,7 +490,7 @@ def transition_error(
 	return None
 
 
-def transition_event(from_status: str, to_status: str) -> Optional[str]:
+def transition_event(from_status: str, to_status: str) -> str | None:
 	"""Which push a status move sends, if any."""
 	if to_status == STATUS_IN_REVIEW:
 		return N_SUBMITTED
@@ -502,14 +503,14 @@ def transition_event(from_status: str, to_status: str) -> Optional[str]:
 	return None
 
 
-def transition_updates(task: Any, target: str, actor: str, now: Any) -> Dict[str, Any]:
+def transition_updates(task: Any, target: str, actor: str, now: Any) -> dict[str, Any]:
 	"""Field writes that accompany a move to *target*.
 
 	Moving back to a working column clears the review/completion stamps, so
 	``submitted_on`` / ``completed_on`` always describe the CURRENT round and
 	the overview's on-time maths never reads a stale completion.
 	"""
-	updates: Dict[str, Any] = {"status": target}
+	updates: dict[str, Any] = {"status": target}
 	if target in OPEN_STATUSES:
 		if target == STATUS_IN_PROGRESS and not _val(task, "started_on"):
 			updates["started_on"] = now
@@ -526,7 +527,7 @@ def transition_updates(task: Any, target: str, actor: str, now: Any) -> Dict[str
 	return updates
 
 
-def permissions_for(task: Any, viewer: Viewer) -> Dict[str, Any]:
+def permissions_for(task: Any, viewer: Viewer) -> dict[str, Any]:
 	"""The ``Permissions`` object of the contract."""
 	return {
 		"can_edit": can_edit_task(task, viewer),
@@ -542,14 +543,14 @@ def permissions_for(task: Any, viewer: Viewer) -> Dict[str, Any]:
 
 
 def invalid_mentions(
-	task: Any, mentions: Sequence[str], viewer_for: Callable[[str], Optional[Viewer]]
-) -> List[str]:
+	task: Any, mentions: Sequence[str], viewer_for: Callable[[str], Viewer | None]
+) -> list[str]:
 	"""Mentioned users who could not see *task* (or do not exist).
 
 	``viewer_for(user)`` returns that user's :class:`Viewer`, or None for an
 	unknown/disabled user. Injected so this stays pure.
 	"""
-	bad: List[str] = []
+	bad: list[str] = []
 	for user in mentions or []:
 		other = viewer_for(user)
 		if other is None or not is_visible(task, other):
@@ -560,7 +561,7 @@ def invalid_mentions(
 # ── Notifications ──────────────────────────────────────────────────────────
 
 
-def clean_recipients(recipients: Iterable[Any], actor: Optional[str] = None) -> List[str]:
+def clean_recipients(recipients: Iterable[Any], actor: str | None = None) -> list[str]:
 	"""Unique, sorted, non-empty recipients -- never the actor, never Guest."""
 	out = set()
 	for user in recipients or []:
@@ -572,8 +573,8 @@ def clean_recipients(recipients: Iterable[Any], actor: Optional[str] = None) -> 
 
 
 def notification_recipients(
-	event: str, task: Any, actor: Optional[str], extra: Optional[Dict[str, Any]] = None
-) -> List[str]:
+	event: str, task: Any, actor: str | None, extra: dict[str, Any] | None = None
+) -> list[str]:
 	"""Who hears about *event* on *task*. The actor is always excluded."""
 	extra = extra or {}
 	if event in (N_ASSIGNED, N_APPROVED, N_SENT_BACK, N_REOPENED):
@@ -601,8 +602,8 @@ def _truncate(text: Any, limit: int) -> str:
 
 
 def notification_text(
-	event: str, task_title: str, actor_name: str, extra: Optional[Dict[str, Any]] = None
-) -> Tuple[str, str]:
+	event: str, task_title: str, actor_name: str, extra: dict[str, Any] | None = None
+) -> tuple[str, str]:
 	"""``(title, body)`` of a task push. English, per the contract."""
 	extra = extra or {}
 	title = _truncate(task_title, 80) or "Task"
@@ -643,7 +644,7 @@ def notification_text(
 # ── Reminders ──────────────────────────────────────────────────────────────
 
 
-def plan_task_reminder(task: Any, today: datetime.date) -> Optional[Dict[str, Any]]:
+def plan_task_reminder(task: Any, today: datetime.date) -> dict[str, Any] | None:
 	"""The reminder one task earns today, or None.
 
 	``{"event", "recipients", "updates"}``. ``updates`` is the bookkeeping to
@@ -670,7 +671,7 @@ def plan_task_reminder(task: Any, today: datetime.date) -> Optional[Dict[str, An
 		}
 	if due < today:
 		recipients = [assignee]
-		updates: Dict[str, Any] = {"last_reminder_on": today}
+		updates: dict[str, Any] = {"last_reminder_on": today}
 		if not _flag(_val(task, "creator_overdue_notified")):
 			updates["creator_overdue_notified"] = 1
 			if creator and creator != assignee:
@@ -683,7 +684,7 @@ def plan_task_reminder(task: Any, today: datetime.date) -> Optional[Dict[str, An
 	return None
 
 
-def plan_subtask_reminder(subtask: Any, task: Any, today: datetime.date) -> Optional[Dict[str, Any]]:
+def plan_subtask_reminder(subtask: Any, task: Any, today: datetime.date) -> dict[str, Any] | None:
 	"""The reminder one open, assigned, dated subtask earns today, or None."""
 	if is_archived(task) or is_done(task):
 		return None
@@ -712,7 +713,7 @@ def plan_subtask_reminder(subtask: Any, task: Any, today: datetime.date) -> Opti
 # ── Board ordering ─────────────────────────────────────────────────────────
 
 
-def sort_cards(cards: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def sort_cards(cards: list[dict[str, Any]]) -> list[dict[str, Any]]:
 	"""Priority (Urgent, High, Normal), then due date (nulls last), then newest."""
 	by_modified = sorted(cards, key=lambda c: str(c.get("modified") or ""), reverse=True)
 	return sorted(
@@ -737,7 +738,7 @@ def is_overdue(task: Any, today: datetime.date) -> bool:
 _CACHE_ATTR = "jarz_task_board_cache"
 
 
-def _cache() -> Dict[str, Any]:
+def _cache() -> dict[str, Any]:
 	try:
 		cache = getattr(frappe.local, _CACHE_ATTR, None)
 		if cache is None:
@@ -755,7 +756,7 @@ def clear_cache() -> None:
 		pass
 
 
-def get_full_access_users() -> List[str]:
+def get_full_access_users() -> list[str]:
 	"""Users on the Jarz Task Settings full-access list."""
 	cache = _cache()
 	if "full_access" in cache:
@@ -804,7 +805,7 @@ def get_manager_users() -> frozenset:
 	return result
 
 
-def get_viewer(user: Optional[str] = None) -> Viewer:
+def get_viewer(user: str | None = None) -> Viewer:
 	"""The :class:`Viewer` for *user* (defaults to the session user)."""
 	user = str(user or getattr(getattr(frappe, "session", None), "user", "") or "")
 	cache = _cache()
@@ -820,7 +821,7 @@ def get_viewer(user: Optional[str] = None) -> Viewer:
 	return viewer
 
 
-def get_board_users() -> List[Dict[str, str]]:
+def get_board_users() -> list[dict[str, str]]:
 	"""Enabled board users as ``[{user, full_name}]``, sorted by full name.
 
 	Administrator is left out: it is a system account, not a person to hand a
@@ -848,7 +849,7 @@ def get_board_users() -> List[Dict[str, str]]:
 		frappe.log_error(frappe.get_traceback(), "task_board: board user lookup failed")
 		rows = []
 	seen = set()
-	users: List[Dict[str, str]] = []
+	users: list[dict[str, str]] = []
 	for row in rows or []:
 		name = row.get("user")
 		if not name or name in seen:
@@ -860,7 +861,7 @@ def get_board_users() -> List[Dict[str, str]]:
 	return users
 
 
-def is_assignable(user: Optional[str]) -> bool:
+def is_assignable(user: str | None) -> bool:
 	"""May *user* be put on a card or a subtask? (enabled board user)"""
 	if not user:
 		return False

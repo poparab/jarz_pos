@@ -96,7 +96,7 @@ def _bool(value: Any) -> bool:
 	return text not in ("0", "false", "no", "none")
 
 
-def _parse_rows(value: Any) -> List[Dict[str, Any]]:
+def _parse_rows(value: Any) -> list[dict[str, Any]]:
 	"""Frappe delivers list arguments as JSON strings; accept both shapes.
 
 	The Flutter repository ``jsonEncode``s its payloads for exactly this
@@ -116,7 +116,7 @@ def _parse_rows(value: Any) -> List[Dict[str, Any]]:
 	return [row for row in value if isinstance(row, dict)]
 
 
-def _float_or_none(value: Any) -> Optional[float]:
+def _float_or_none(value: Any) -> float | None:
 	try:
 		parsed = float(value)
 	except (TypeError, ValueError):
@@ -129,7 +129,7 @@ def _float_or_none(value: Any) -> Optional[float]:
 # ---------------------------------------------------------------------------
 
 
-def _map_stop(row) -> Dict[str, Any]:
+def _map_stop(row) -> dict[str, Any]:
 	return {
 		"name": row.name,
 		"idx": row.idx,
@@ -155,7 +155,7 @@ def _map_stop(row) -> Dict[str, Any]:
 	}
 
 
-def _map_plan(plan, with_stops: bool = True) -> Dict[str, Any]:
+def _map_plan(plan, with_stops: bool = True) -> dict[str, Any]:
 	payload = {
 		"name": plan.name,
 		"visit_date": str(plan.visit_date) if plan.visit_date else None,
@@ -214,7 +214,7 @@ def get_visit_plans(from_date=None, to_date=None, scope="mine", status=None):
 		return {"plans": [], "count": 0, "from_date": from_date, "to_date": to_date}
 
 	start, end = _month_range(from_date, to_date)
-	filters: Dict[str, Any] = {"visit_date": ["between", [start, end]]}
+	filters: dict[str, Any] = {"visit_date": ["between", [start, end]]}
 	if str(scope or "").strip().lower() != "all":
 		filters["rep"] = frappe.session.user
 	if status:
@@ -307,9 +307,9 @@ def get_visit_plan(name, with_geometry=0):
 	return payload
 
 
-def _plan_geometry(plan) -> Optional[List[List[float]]]:
+def _plan_geometry(plan) -> list[list[float]] | None:
 	"""Road path through the plan, or ``None`` to let the client draw straight legs."""
-	points: List[RoutePoint] = []
+	points: list[RoutePoint] = []
 	start = visit_planning.start_point_for(plan)
 	if start:
 		points.append(start)
@@ -654,7 +654,7 @@ def suggest_visit_plan(
 # ---------------------------------------------------------------------------
 
 
-def _apply_plan_fields(plan, values: Dict[str, Any]) -> None:
+def _apply_plan_fields(plan, values: dict[str, Any]) -> None:
 	"""Copy the writable header fields a client may set."""
 	simple = (
 		"title",
@@ -681,7 +681,7 @@ def _apply_plan_fields(plan, values: Dict[str, Any]) -> None:
 		plan.return_to_start = 1 if _bool(values["return_to_start"]) else 0
 
 
-def _stop_row(payload: Dict[str, Any]) -> Dict[str, Any]:
+def _stop_row(payload: dict[str, Any]) -> dict[str, Any]:
 	"""Normalise one client-supplied stop into child-row fields.
 
 	Coordinates are taken from the payload and stored on the row rather than
@@ -976,7 +976,7 @@ def set_visit_stop_status(
 	return payload
 
 
-def _log_visit_note(row, note_text, next_action, next_action_date) -> Optional[str]:
+def _log_visit_note(row, note_text, next_action, next_action_date) -> str | None:
 	"""Write the diary entry for a completed stop. Never raises."""
 	try:
 		from jarz_pos.api.journey import add_journey_note, journey_enabled

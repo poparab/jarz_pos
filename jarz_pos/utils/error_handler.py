@@ -1,8 +1,9 @@
 """Error handling utilities for consistent API responses"""
 
+import traceback
+
 import frappe
 from frappe import _
-import traceback
 
 from jarz_pos.observability.error_response import unexpected_error_response
 

@@ -11,7 +11,7 @@ Bundle logic:
 
 import frappe
 from frappe import _
-from frappe.utils import flt, cint
+from frappe.utils import cint, flt
 
 
 class BundleProcessor:
@@ -73,7 +73,7 @@ class BundleProcessor:
 			return 100.0  # Default fallback rate
 
 		except Exception as e:
-			frappe.log_error(f"Error getting rate for {item_code}: {str(e)}", "Bundle Processing")
+			frappe.log_error(f"Error getting rate for {item_code}: {e!s}", "Bundle Processing")
 			return 100.0  # Default fallback rate
 
 	def load_bundle(self):
@@ -106,7 +106,7 @@ class BundleProcessor:
 			)
 
 		except Exception as e:
-			frappe.log_error(f"Bundle loading error: {str(e)}", "Bundle Processing")
+			frappe.log_error(f"Bundle loading error: {e!s}", "Bundle Processing")
 			raise
 
 	def _selection_keys(self):
@@ -682,7 +682,7 @@ def process_bundle_for_invoice(
 
 	except Exception as e:
 		frappe.log_error(
-			f"❌ Bundle processing error for identifier {bundle_identifier}: {str(e)}", "Bundle Processing"
+			f"❌ Bundle processing error for identifier {bundle_identifier}: {e!s}", "Bundle Processing"
 		)
 		raise
 
@@ -718,7 +718,7 @@ def validate_bundle_configuration_by_item(bundle_identifier):
 		return is_valid, message, bundle_code
 
 	except Exception as e:
-		return False, f"Bundle validation error: {str(e)}", None
+		return False, f"Bundle validation error: {e!s}", None
 
 
 def validate_bundle_configuration(bundle_code):
@@ -767,7 +767,7 @@ def validate_bundle_configuration(bundle_code):
 		return True, "Bundle configuration is valid"
 
 	except Exception as e:
-		return False, f"Bundle validation error: {str(e)}"
+		return False, f"Bundle validation error: {e!s}"
 
 
 # Legacy function for backward compatibility
@@ -788,7 +788,7 @@ def process_bundle_item(bundle_id, bundle_qty, bundle_price, selling_price_list)
 		# Try to process as ERPNext item first (new way)
 		return process_bundle_for_invoice(bundle_id, bundle_qty)
 	except Exception as e:
-		frappe.log_error(f"Legacy bundle processing failed for {bundle_id}: {str(e)}", "Bundle Processing")
+		frappe.log_error(f"Legacy bundle processing failed for {bundle_id}: {e!s}", "Bundle Processing")
 
 		# If that fails, try to find if bundle_id is actually a Jarz Bundle record ID
 		try:

@@ -19,11 +19,11 @@ from typing import Any, Dict, List, Optional
 
 import frappe
 
+from jarz_pos.events.employee_checkin import EMPLOYEE_EXEMPT_FIELD
 from jarz_pos.services.roster import (
 	EMPLOYEE_STANDARD_HOURS_FIELD,
 	POS_PROFILE_LOCATION_FIELD,
 )
-from jarz_pos.events.employee_checkin import EMPLOYEE_EXEMPT_FIELD
 
 
 def _logger():
@@ -44,7 +44,7 @@ def _custom_field_exists(doctype: str, fieldname: str) -> bool:
 		return False
 
 
-def _ensure_fields(doctype: str, specs: List[Dict[str, Any]], log: Dict[str, List[str]]) -> None:
+def _ensure_fields(doctype: str, specs: list[dict[str, Any]], log: dict[str, list[str]]) -> None:
 	if not frappe.db.exists("DocType", doctype):
 		log.setdefault("skipped", []).append(f"{doctype}: DocType not present")
 		return
@@ -83,9 +83,9 @@ def _normalise(text: Any) -> str:
 	return " ".join(lowered.split())
 
 
-def ensure_roster_setup() -> Dict[str, List[str]]:
+def ensure_roster_setup() -> dict[str, list[str]]:
 	"""Idempotent. Safe to run on every migrate, with or without HRMS."""
-	log: Dict[str, List[str]] = {"created": [], "existing": [], "mapped": []}
+	log: dict[str, list[str]] = {"created": [], "existing": [], "mapped": []}
 
 	_ensure_fields(
 		"Employee",
@@ -141,7 +141,7 @@ def ensure_roster_setup() -> Dict[str, List[str]]:
 	return log
 
 
-def _auto_map_profiles(log: Dict[str, List[str]]) -> None:
+def _auto_map_profiles(log: dict[str, list[str]]) -> None:
 	"""Fill empty POS Profile -> Shift Location links where the name is obvious.
 
 	Only unambiguous matches are taken: a normalised name that matches exactly
@@ -160,7 +160,7 @@ def _auto_map_profiles(log: Dict[str, List[str]]) -> None:
 		_logger().error("Could not read POS Profiles / Shift Locations", exc_info=True)
 		return
 
-	by_key: Dict[str, List[str]] = {}
+	by_key: dict[str, list[str]] = {}
 	for location in locations:
 		by_key.setdefault(_normalise(location), []).append(location)
 

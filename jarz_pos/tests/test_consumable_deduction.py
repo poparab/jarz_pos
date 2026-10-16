@@ -35,7 +35,6 @@ from unittest.mock import MagicMock, patch
 
 from jarz_pos.services import consumable_deduction as cd
 
-
 # ---------------------------------------------------------------------------
 # Fakes
 # ---------------------------------------------------------------------------

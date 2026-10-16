@@ -14,7 +14,6 @@ from unittest.mock import MagicMock, patch
 
 from jarz_pos.api import purchase as pu
 
-
 INVOICE = {"name": "ACC-PINV-0001", "supplier": "Acme Supplies"}
 LINE = {
 	"parent": "ACC-PINV-0001",

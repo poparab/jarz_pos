@@ -42,10 +42,11 @@ Removing a shift here is a real access change, not a display change.
 
 from __future__ import annotations
 
+import json
+from collections.abc import Callable, Iterable
 from datetime import date as date_cls
 from datetime import timedelta
-import json
-from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import frappe
 from frappe import _
@@ -131,7 +132,7 @@ def is_unrestricted() -> bool:
 	return frappe.session.user == "Administrator"
 
 
-def allowed_shift_locations() -> Optional[Set[str]]:
+def allowed_shift_locations() -> set[str] | None:
 	"""Shift Locations this user may roster, or ``None`` meaning "all".
 
 	Resolution order:
@@ -176,7 +177,7 @@ def allowed_shift_locations() -> Optional[Set[str]]:
 	return set()
 
 
-def _unbranched_locations() -> Set[str]:
+def _unbranched_locations() -> set[str]:
 	"""Shift Locations no POS Profile claims, for the manager tier only.
 
 	The Factory is the case that forced this. It is a production site, not a
@@ -259,7 +260,7 @@ def hrms_available() -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _as_timedelta(value: Any) -> Optional[timedelta]:
+def _as_timedelta(value: Any) -> timedelta | None:
 	"""Frappe returns a ``Time`` field as ``timedelta``, not ``time``.
 
 	Reading one as if it were a ``datetime.time`` (``.hour``) raises, and
@@ -310,7 +311,7 @@ def shift_length_hours(start_time: Any, end_time: Any) -> float:
 	return round(delta.total_seconds() / 3600.0, 4)
 
 
-def shift_catalog() -> List[Dict[str, Any]]:
+def shift_catalog() -> list[dict[str, Any]]:
 	"""Every Shift Type, with its computed length.
 
 	The screen's shift picker is built from this rather than from a hard-coded
@@ -326,7 +327,7 @@ def shift_catalog() -> List[Dict[str, Any]]:
 		fields=["name", "start_time", "end_time", "color", "holiday_list"],
 		order_by="name",
 	)
-	catalog: List[Dict[str, Any]] = []
+	catalog: list[dict[str, Any]] = []
 	for row in rows:
 		catalog.append(
 			{
@@ -346,11 +347,11 @@ def shift_catalog() -> List[Dict[str, Any]]:
 	return catalog
 
 
-def _shift_hours_map() -> Dict[str, float]:
+def _shift_hours_map() -> dict[str, float]:
 	return {row["shift_type"]: row["hours"] for row in shift_catalog()}
 
 
-def shift_locations(include_pos_access: bool = False) -> List[Dict[str, Any]]:
+def shift_locations(include_pos_access: bool = False) -> list[dict[str, Any]]:
 	"""Every Shift Location, optionally with the POS branch it maps to.
 
 	``include_pos_access`` adds ``pos_profile`` (the enabled POS Profile whose
@@ -371,8 +372,8 @@ def shift_locations(include_pos_access: bool = False) -> List[Dict[str, Any]]:
 	except Exception:
 		return []
 
-	profile_by_location: Dict[str, str] = {}
-	manageable: Set[str] = set()
+	profile_by_location: dict[str, str] = {}
+	manageable: set[str] = set()
 	if include_pos_access:
 		try:
 			from jarz_pos.services import branch_access
@@ -384,7 +385,7 @@ def shift_locations(include_pos_access: bool = False) -> List[Dict[str, Any]]:
 			# taking the whole roster screen down with it.
 			profile_by_location, manageable = {}, set()
 
-	out: List[Dict[str, Any]] = []
+	out: list[dict[str, Any]] = []
 	for r in rows:
 		item = {
 			"shift_location": r["name"],
@@ -405,21 +406,21 @@ def shift_locations(include_pos_access: bool = False) -> List[Dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
-def _courier_designation_tokens() -> List[str]:
+def _courier_designation_tokens() -> list[str]:
 	raw = frappe.db.get_single_value(SETTINGS, "roster_courier_designations")
 	text = str(raw or "").strip() or DEFAULT_COURIER_DESIGNATIONS
 	tokens = [t.strip().lower() for t in text.replace("\n", ",").split(",")]
 	return [t for t in tokens if t]
 
 
-def is_courier_designation(designation: Optional[str]) -> bool:
+def is_courier_designation(designation: str | None) -> bool:
 	text = str(designation or "").strip().lower()
 	if not text:
 		return False
 	return any(token in text for token in _courier_designation_tokens())
 
 
-def is_courier(employee: Optional[str], designation: Optional[str] = None) -> bool:
+def is_courier(employee: str | None, designation: str | None = None) -> bool:
 	"""Whether this person's overtime is paid at the courier rate.
 
 	Designation alone is not enough, and on this site it answers nothing at all:
@@ -445,7 +446,7 @@ def is_courier(employee: Optional[str], designation: Optional[str] = None) -> bo
 	)
 
 
-def overtime_multiplier(employee: Optional[str], designation: Optional[str] = None) -> float:
+def overtime_multiplier(employee: str | None, designation: str | None = None) -> float:
 	"""Credit per overtime hour: 2x for couriers, 1x for everyone else.
 
 	The rule came from the owner directly -- a courier's extra hour is paid as
@@ -459,7 +460,7 @@ def overtime_multiplier(employee: Optional[str], designation: Optional[str] = No
 	return single_float(SETTINGS, "roster_default_overtime_multiplier", DEFAULT_STANDARD_OT_MULTIPLIER)
 
 
-def standard_hours(employee: str, employee_row: Optional[Dict[str, Any]] = None) -> float:
+def standard_hours(employee: str, employee_row: dict[str, Any] | None = None) -> float:
 	"""The length of a normal day for this person.
 
 	Order: explicit per-employee override, then the shift type on their enabled
@@ -492,7 +493,7 @@ def _employee_standard_hours_field_exists() -> bool:
 		return False
 
 
-def _scheduled_shift_types(employee: str) -> List[str]:
+def _scheduled_shift_types(employee: str) -> list[str]:
 	"""Shift types behind this employee's enabled schedules.
 
 	Cached per request: it is read once for the overtime baseline and again for
@@ -506,7 +507,7 @@ def _scheduled_shift_types(employee: str) -> List[str]:
 	if employee in cache:
 		return cache[employee]
 
-	shift_types: List[str] = []
+	shift_types: list[str] = []
 	try:
 		schedules = frappe.get_all(
 			"Shift Schedule Assignment",
@@ -550,8 +551,8 @@ def _create_assignment(
 	start_date: Any,
 	end_date: Any,
 	status: str = "Active",
-	shift_location: Optional[str] = None,
-	shift_schedule_assignment: Optional[str] = None,
+	shift_location: str | None = None,
+	shift_schedule_assignment: str | None = None,
 ) -> str:
 	"""``hrms...create_shift_assignment`` with permissions bypassed.
 
@@ -586,7 +587,7 @@ def _create_assignment(
 	return assignment.name
 
 
-def _assignment_on(employee: str, on_date: Any) -> Optional[frappe._dict]:
+def _assignment_on(employee: str, on_date: Any) -> frappe._dict | None:
 	"""The Active submitted assignment covering ``on_date``, if any."""
 	if not hrms_available():
 		return None
@@ -660,7 +661,7 @@ def _insert_assignment(
 	start_date: Any,
 	end_date: Any,
 	status: str = "Active",
-	shift_location: Optional[str] = None,
+	shift_location: str | None = None,
 ) -> None:
 	"""Add an assignment, merging with identical neighbours.
 
@@ -703,7 +704,7 @@ def _employee_company(employee: str) -> str:
 	return company
 
 
-def _schedule_location(employee: str) -> Optional[str]:
+def _schedule_location(employee: str) -> str | None:
 	"""The branch this employee's baseline schedule geofences them to.
 
 	Used as the fallback location when a day is assigned to somebody who has no
@@ -731,10 +732,10 @@ def _schedule_location(employee: str) -> Optional[str]:
 def set_shift_for_day(
 	employee: str,
 	on_date: Any,
-	shift_type: Optional[str],
-	shift_location: Optional[str] = None,
+	shift_type: str | None,
+	shift_location: str | None = None,
 	clear_conflicting_day_off: bool = True,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	"""Put one employee on one shift for exactly one day.
 
 	``shift_type=None`` empties the day instead. Emptying is what a day off
@@ -816,13 +817,13 @@ def set_day_off(
 	employee: str,
 	off_date: Any,
 	off_type: str = "Weekly Off",
-	covered_by: Optional[str] = None,
-	cover_shift_type: Optional[str] = None,
-	notes: Optional[str] = None,
-	original_shift_type: Optional[str] = None,
-	original_shift_location: Optional[str] = None,
+	covered_by: str | None = None,
+	cover_shift_type: str | None = None,
+	notes: str | None = None,
+	original_shift_type: str | None = None,
+	original_shift_location: str | None = None,
 	from_plan: bool = False,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	"""Mark somebody off, optionally moving a colleague onto a cover shift.
 
 	The two halves are one operation on purpose. A branch day that loses one of
@@ -851,7 +852,7 @@ def set_day_off(
 	fallback_shift_type = None if original else (original_shift_type or None)
 	fallback_location = None if original else (original_shift_location or None)
 
-	cover_previous: Optional[frappe._dict] = None
+	cover_previous: frappe._dict | None = None
 	if covered_by:
 		if not cover_shift_type:
 			frappe.throw(_("Pick the shift the covering colleague moves onto."))
@@ -864,7 +865,7 @@ def set_day_off(
 	if original:
 		_break_assignment(original.name, day)
 
-	cover_result: Optional[Dict[str, Any]] = None
+	cover_result: dict[str, Any] | None = None
 	if covered_by:
 		cover_result = set_shift_for_day(
 			covered_by,
@@ -909,7 +910,7 @@ def set_day_off(
 	}
 
 
-def clear_day_off(employee: str, off_date: Any) -> Dict[str, Any]:
+def clear_day_off(employee: str, off_date: Any) -> dict[str, Any]:
 	"""Undo a day off, putting both people back on what they were on.
 
 	Restoration reads the shift types recorded on the day-off row rather than
@@ -968,7 +969,7 @@ def clear_day_off(employee: str, off_date: Any) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def month_bounds(month: Optional[str]) -> Tuple[date_cls, date_cls]:
+def month_bounds(month: str | None) -> tuple[date_cls, date_cls]:
 	"""First and last day of ``YYYY-MM`` (or of the current month)."""
 	anchor = getdate(f"{month}-01") if month else getdate()
 	return getdate(get_first_day(anchor)), getdate(get_last_day(anchor))
@@ -981,7 +982,7 @@ def _daterange(start: date_cls, end: date_cls):
 		current = add_days(current, 1)
 
 
-def _holidays_by_employee(employees: List[str], start: date_cls, end: date_cls) -> Dict[str, Set[str]]:
+def _holidays_by_employee(employees: list[str], start: date_cls, end: date_cls) -> dict[str, set[str]]:
 	"""Holiday dates per employee, cached by holiday list.
 
 	The factory is the case that makes this worth carrying: it is Friday-off
@@ -991,8 +992,8 @@ def _holidays_by_employee(employees: List[str], start: date_cls, end: date_cls) 
 	"""
 	from erpnext.setup.doctype.employee.employee import get_holiday_list_for_employee
 
-	per_list: Dict[str, Set[str]] = {}
-	out: Dict[str, Set[str]] = {}
+	per_list: dict[str, set[str]] = {}
+	out: dict[str, set[str]] = {}
 	for employee in employees:
 		try:
 			holiday_list = get_holiday_list_for_employee(employee, raise_exception=False, as_on=end)
@@ -1012,9 +1013,9 @@ def _holidays_by_employee(employees: List[str], start: date_cls, end: date_cls) 
 
 
 def get_month(
-	month: Optional[str] = None,
-	shift_location: Optional[str] = None,
-) -> Dict[str, Any]:
+	month: str | None = None,
+	shift_location: str | None = None,
+) -> dict[str, Any]:
 	"""The whole calendar the screen draws: people down, days across.
 
 	Returns one row per employee in scope with a per-date cell carrying the
@@ -1072,7 +1073,7 @@ def get_month(
 	# it from the assignments rather than from Employee.branch is deliberate:
 	# the Shift Location is what the geofence actually measures against, so it
 	# is the only branch value that can be wrong in a way that matters.
-	locations_by_employee: Dict[str, Set[str]] = {}
+	locations_by_employee: dict[str, set[str]] = {}
 	for row in assignments:
 		if row.get("shift_location"):
 			locations_by_employee.setdefault(row["employee"], set()).add(row["shift_location"])
@@ -1080,7 +1081,7 @@ def get_month(
 		if row.get("shift_location"):
 			locations_by_employee.setdefault(row["employee"], set()).add(row["shift_location"])
 
-	candidates: Set[str] = {row["employee"] for row in assignments}
+	candidates: set[str] = {row["employee"] for row in assignments}
 	candidates.update(row["employee"] for row in day_offs)
 	try:
 		for row in frappe.get_all(
@@ -1107,7 +1108,7 @@ def get_month(
 
 	employee_names = sorted(e for e in candidates if in_scope(e))
 
-	employee_rows: Dict[str, Dict[str, Any]] = {}
+	employee_rows: dict[str, dict[str, Any]] = {}
 	if employee_names:
 		fields = ["name", "employee_name", "designation", "department", "company", "status"]
 		if _employee_standard_hours_field_exists():
@@ -1122,7 +1123,7 @@ def get_month(
 	hours_map = _shift_hours_map()
 	holidays = _holidays_by_employee(employee_names, start, end)
 
-	cells: Dict[str, Dict[str, Dict[str, Any]]] = {e: {} for e in employee_names}
+	cells: dict[str, dict[str, dict[str, Any]]] = {e: {} for e in employee_names}
 	for row in assignments:
 		employee = row["employee"]
 		if employee not in cells:
@@ -1137,12 +1138,12 @@ def get_month(
 				"assignment": row["name"],
 			}
 
-	day_off_index: Dict[Tuple[str, str], Dict[str, Any]] = {}
+	day_off_index: dict[tuple[str, str], dict[str, Any]] = {}
 	for row in day_offs:
 		key = (row["employee"], str(getdate(row["off_date"])))
 		day_off_index[key] = row
 
-	employees_payload: List[Dict[str, Any]] = []
+	employees_payload: list[dict[str, Any]] = []
 	for employee in employee_names:
 		row = employee_rows.get(employee, {})
 		designation = row.get("designation")
@@ -1150,7 +1151,7 @@ def get_month(
 		multiplier = overtime_multiplier(employee, designation)
 		employee_holidays = holidays.get(employee, set())
 
-		days: Dict[str, Any] = {}
+		days: dict[str, Any] = {}
 		for day in _daterange(start, end):
 			key = str(day)
 			cell = dict(cells[employee].get(key) or {})
@@ -1209,7 +1210,7 @@ def get_month(
 	}
 
 
-def _uncovered_days(day_offs: List[Dict[str, Any]], visible: List[str]) -> List[Dict[str, Any]]:
+def _uncovered_days(day_offs: list[dict[str, Any]], visible: list[str]) -> list[dict[str, Any]]:
 	"""Days somebody is off with nobody named as covering.
 
 	Surfaced because this is the mistake the screen exists to prevent: a branch
@@ -1235,9 +1236,9 @@ def _uncovered_days(day_offs: List[Dict[str, Any]], visible: List[str]) -> List[
 
 
 def month_hours(
-	month: Optional[str] = None,
-	shift_location: Optional[str] = None,
-) -> Dict[str, Any]:
+	month: str | None = None,
+	shift_location: str | None = None,
+) -> dict[str, Any]:
 	"""Per-employee hours for a month, with overtime credited at their rate.
 
 	Overtime is **rostered** overtime: the gap between the shift somebody was
@@ -1256,7 +1257,7 @@ def month_hours(
 	if not month_data.get("hrms_available"):
 		return month_data
 
-	rows: List[Dict[str, Any]] = []
+	rows: list[dict[str, Any]] = []
 	for employee in month_data["employees"]:
 		baseline = flt(employee["standard_hours"])
 		multiplier = flt(employee["overtime_multiplier"])
@@ -1267,7 +1268,7 @@ def month_hours(
 		worked_days = 0
 		off_days = 0
 		cover_days = 0
-		by_shift: Dict[str, Dict[str, Any]] = {}
+		by_shift: dict[str, dict[str, Any]] = {}
 
 		for cell in employee["days"].values():
 			if cell.get("day_off"):
@@ -1346,7 +1347,7 @@ def month_hours(
 # shift their own row is about to rewrite.
 
 #: HRMS "Assignment Rule Day" values, indexed by ``date.weekday()``.
-WEEKDAYS: Tuple[str, ...] = (
+WEEKDAYS: tuple[str, ...] = (
 	"Monday",
 	"Tuesday",
 	"Wednesday",
@@ -1392,7 +1393,7 @@ def _today() -> date_cls:
 	return getdate()
 
 
-def _as_date(value: Any) -> Optional[date_cls]:
+def _as_date(value: Any) -> date_cls | None:
 	if value is None or value == "":
 		return None
 	return getdate(value)
@@ -1402,9 +1403,9 @@ def _weekday(day: date_cls) -> str:
 	return WEEKDAYS[day.weekday()]
 
 
-def _days_between(start: date_cls, end: date_cls) -> List[date_cls]:
+def _days_between(start: date_cls, end: date_cls) -> list[date_cls]:
 	"""Inclusive day list. Pure ``timedelta`` so the plan maths needs no site."""
-	out: List[date_cls] = []
+	out: list[date_cls] = []
 	current = start
 	while current <= end:
 		out.append(current)
@@ -1412,7 +1413,7 @@ def _days_between(start: date_cls, end: date_cls) -> List[date_cls]:
 	return out
 
 
-def _text(value: Any) -> Optional[str]:
+def _text(value: Any) -> str | None:
 	text = str(value or "").strip()
 	return text or None
 
@@ -1428,7 +1429,7 @@ def _flag(value: Any, default: bool = False) -> bool:
 	return str(value).strip().lower() in ("1", "true", "yes", "on")
 
 
-def _canonical_weekday(value: Any) -> Optional[str]:
+def _canonical_weekday(value: Any) -> str | None:
 	text = str(value or "").strip().lower()
 	if not text:
 		return None
@@ -1446,11 +1447,11 @@ class _ShiftTypes:
 	the database entirely -- that is what the tests use.
 	"""
 
-	def __init__(self, known: Optional[Iterable[str]] = None):
-		self._known: Optional[Set[str]] = set(known) if known is not None else None
-		self._cache: Dict[str, bool] = {}
+	def __init__(self, known: Iterable[str] | None = None):
+		self._known: set[str] | None = set(known) if known is not None else None
+		self._cache: dict[str, bool] = {}
 
-	def exists(self, name: Optional[str]) -> bool:
+	def exists(self, name: str | None) -> bool:
 		if not name:
 			return False
 		if name not in self._cache:
@@ -1460,7 +1461,7 @@ class _ShiftTypes:
 				self._cache[name] = bool(frappe.db.exists("Shift Type", name))
 		return self._cache[name]
 
-	def friday_variant(self, name: Optional[str]) -> Optional[str]:
+	def friday_variant(self, name: str | None) -> str | None:
 		"""``"<name> - Friday"`` when it exists; never a variant of a variant."""
 		if not name or name.endswith(FRIDAY_SUFFIX):
 			return None
@@ -1468,9 +1469,9 @@ class _ShiftTypes:
 		return candidate if self.exists(candidate) else None
 
 
-def _date_runs(days: Iterable[date_cls]) -> List[Tuple[date_cls, date_cls]]:
+def _date_runs(days: Iterable[date_cls]) -> list[tuple[date_cls, date_cls]]:
 	"""Group dates into (first, last) runs of consecutive days."""
-	runs: List[Tuple[date_cls, date_cls]] = []
+	runs: list[tuple[date_cls, date_cls]] = []
 	for day in sorted(set(days)):
 		if runs and runs[-1][1] + timedelta(days=1) == day:
 			runs[-1] = (runs[-1][0], day)
@@ -1480,8 +1481,8 @@ def _date_runs(days: Iterable[date_cls]) -> List[Tuple[date_cls, date_cls]]:
 
 
 def _contiguous_ranges(
-	entries: Iterable[Tuple[date_cls, str, Optional[str]]],
-) -> List[Tuple[date_cls, date_cls, str, Optional[str]]]:
+	entries: Iterable[tuple[date_cls, str, str | None]],
+) -> list[tuple[date_cls, date_cls, str, str | None]]:
 	"""Turn per-day (date, shift_type, location) into assignment ranges.
 
 	One Shift Assignment per run of consecutive days with the same shift and
@@ -1489,7 +1490,7 @@ def _contiguous_ranges(
 	what ``_insert_assignment``'s merge exists to avoid, and every one of them
 	is scanned by HRMS's overlap check on each later write.
 	"""
-	ranges: List[Tuple[date_cls, date_cls, str, Optional[str]]] = []
+	ranges: list[tuple[date_cls, date_cls, str, str | None]] = []
 	for day, shift_type, location in sorted(entries, key=lambda e: e[0]):
 		if ranges:
 			first, last, prev_type, prev_location = ranges[-1]
@@ -1501,11 +1502,11 @@ def _contiguous_ranges(
 
 
 def _row_pattern(
-	shift_type: str, off_days: Iterable[str], friday_shift_type: Optional[str]
-) -> Dict[str, Optional[str]]:
+	shift_type: str, off_days: Iterable[str], friday_shift_type: str | None
+) -> dict[str, str | None]:
 	"""Weekday -> shift type, or None on an off day."""
 	off = set(off_days)
-	pattern: Dict[str, Optional[str]] = {}
+	pattern: dict[str, str | None] = {}
 	for weekday in WEEKDAYS:
 		if weekday in off:
 			pattern[weekday] = None
@@ -1516,7 +1517,7 @@ def _row_pattern(
 	return pattern
 
 
-def _planned_shift(row: Dict[str, Any], weekday: str) -> str:
+def _planned_shift(row: dict[str, Any], weekday: str) -> str:
 	"""The shift this row would work on ``weekday`` if it were not off.
 
 	Recorded on plan day-offs as ``original_shift_type`` so that clearing one
@@ -1527,7 +1528,7 @@ def _planned_shift(row: Dict[str, Any], weekday: str) -> str:
 	return row["shift_type"]
 
 
-def _expand_plan(row: Dict[str, Any], start: date_cls, end: date_cls) -> List[Tuple[date_cls, Optional[str]]]:
+def _expand_plan(row: dict[str, Any], start: date_cls, end: date_cls) -> list[tuple[date_cls, str | None]]:
 	"""Every day of the period with the shift the plan puts there (None = off)."""
 	return [(day, row["pattern"][_weekday(day)]) for day in _days_between(start, end)]
 
@@ -1541,14 +1542,14 @@ def _parse_plan_date(value: Any, label: str) -> date_cls:
 		frappe.throw(_("{0} is not a valid date: {1}").format(label, value))
 
 
-def _weekday_list(value: Any) -> List[str]:
+def _weekday_list(value: Any) -> list[str]:
 	if value is None or value == "":
 		return []
 	if isinstance(value, str):
 		value = [v for v in value.replace(";", ",").split(",")]
 	if not isinstance(value, (list, tuple)):
 		frappe.throw(_("Days off must be a list of weekdays."))
-	out: List[str] = []
+	out: list[str] = []
 	for item in value:
 		weekday = _canonical_weekday(item)
 		if not weekday:
@@ -1558,7 +1559,7 @@ def _weekday_list(value: Any) -> List[str]:
 	return sorted(out, key=WEEKDAYS.index)
 
 
-def _normalize_plan(plan: Any, types: _ShiftTypes, today: Optional[date_cls] = None) -> Dict[str, Any]:
+def _normalize_plan(plan: Any, types: _ShiftTypes, today: date_cls | None = None) -> dict[str, Any]:
 	"""Validate the payload into a plan, or throw before anything is written.
 
 	Everything here is a hard error rather than an issue: a plan with a
@@ -1587,8 +1588,8 @@ def _normalize_plan(plan: Any, types: _ShiftTypes, today: Optional[date_cls] = N
 	if not isinstance(raw_rows, list) or not raw_rows:
 		frappe.throw(_("Pick at least one person."))
 
-	rows: List[Dict[str, Any]] = []
-	seen: Set[str] = set()
+	rows: list[dict[str, Any]] = []
+	seen: set[str] = set()
 	for raw in raw_rows:
 		if not isinstance(raw, dict):
 			frappe.throw(_("Malformed plan row."))
@@ -1615,7 +1616,7 @@ def _normalize_plan(plan: Any, types: _ShiftTypes, today: Optional[date_cls] = N
 		if len(off_days) >= len(WEEKDAYS):
 			frappe.throw(_("{0} cannot be off every day.").format(employee))
 
-		covers: Dict[str, Dict[str, Any]] = {}
+		covers: dict[str, dict[str, Any]] = {}
 		raw_covers = raw.get("covers") or []
 		if not isinstance(raw_covers, list):
 			frappe.throw(_("Covers must be a list."))
@@ -1688,17 +1689,17 @@ class _PlanState:
 
 	def __init__(
 		self,
-		employee_names: Optional[Dict[str, str]] = None,
-		assignments: Optional[Dict[str, List[Dict[str, Any]]]] = None,
-		day_offs: Optional[List[Dict[str, Any]]] = None,
-		rota: Optional[Dict[str, Dict[str, Tuple[str, Optional[str]]]]] = None,
-		rota_horizon: Optional[Dict[str, Optional[date_cls]]] = None,
+		employee_names: dict[str, str] | None = None,
+		assignments: dict[str, list[dict[str, Any]]] | None = None,
+		day_offs: list[dict[str, Any]] | None = None,
+		rota: dict[str, dict[str, tuple[str, str | None]]] | None = None,
+		rota_horizon: dict[str, date_cls | None] | None = None,
 	):
 		self.employee_names = dict(employee_names or {})
 		self.rota = dict(rota or {})
 		self.rota_horizon = {k: _as_date(v) for k, v in (rota_horizon or {}).items()}
 
-		self.assignments: Dict[str, List[Dict[str, Any]]] = {}
+		self.assignments: dict[str, list[dict[str, Any]]] = {}
 		for employee, rows in (assignments or {}).items():
 			normalised = []
 			for row in rows:
@@ -1709,9 +1710,9 @@ class _PlanState:
 			normalised.sort(key=lambda r: r["start_date"], reverse=True)
 			self.assignments[employee] = normalised
 
-		self.day_offs: List[Dict[str, Any]] = []
-		self._own_off: Dict[Tuple[str, date_cls], Dict[str, Any]] = {}
-		self._covering: Dict[Tuple[str, date_cls], List[Dict[str, Any]]] = {}
+		self.day_offs: list[dict[str, Any]] = []
+		self._own_off: dict[tuple[str, date_cls], dict[str, Any]] = {}
+		self._covering: dict[tuple[str, date_cls], list[dict[str, Any]]] = {}
 		for row in day_offs or []:
 			item = dict(row)
 			item["off_date"] = _as_date(item.get("off_date"))
@@ -1721,16 +1722,16 @@ class _PlanState:
 			if item.get("covered_by"):
 				self._covering.setdefault((item["covered_by"], item["off_date"]), []).append(item)
 
-	def name(self, employee: Optional[str]) -> str:
+	def name(self, employee: str | None) -> str:
 		return self.employee_names.get(employee) or employee or ""
 
-	def own_day_off(self, employee: str, day: date_cls) -> Optional[Dict[str, Any]]:
+	def own_day_off(self, employee: str, day: date_cls) -> dict[str, Any] | None:
 		return self._own_off.get((employee, day))
 
-	def covering(self, employee: str, day: date_cls) -> List[Dict[str, Any]]:
+	def covering(self, employee: str, day: date_cls) -> list[dict[str, Any]]:
 		return self._covering.get((employee, day), [])
 
-	def assignment_on(self, employee: str, day: date_cls) -> Optional[Dict[str, Any]]:
+	def assignment_on(self, employee: str, day: date_cls) -> dict[str, Any] | None:
 		for row in self.assignments.get(employee, []):
 			if (
 				row["start_date"]
@@ -1741,7 +1742,7 @@ class _PlanState:
 		return None
 
 
-def _rota_matches(assignment: Dict[str, Any], expected: Optional[Tuple[str, Optional[str]]]) -> bool:
+def _rota_matches(assignment: dict[str, Any], expected: tuple[str, str | None] | None) -> bool:
 	if not expected:
 		return False
 	shift_type, location = expected
@@ -1751,8 +1752,8 @@ def _rota_matches(assignment: Dict[str, Any], expected: Optional[Tuple[str, Opti
 
 
 def _manual_entry(
-	day: date_cls, current: str, kind: str, record: Optional[Dict[str, Any]] = None
-) -> Dict[str, Any]:
+	day: date_cls, current: str, kind: str, record: dict[str, Any] | None = None
+) -> dict[str, Any]:
 	return {"date": day, "current": current, "kind": kind, "record": record}
 
 
@@ -1760,8 +1761,8 @@ def _manual_days(
 	employee: str,
 	days: Iterable[date_cls],
 	state: _PlanState,
-	planned: Set[str],
-) -> Dict[date_cls, Dict[str, Any]]:
+	planned: set[str],
+) -> dict[date_cls, dict[str, Any]]:
 	"""Days in the period that somebody shaped by hand, for one person.
 
 	Used identically by preview and apply, so what the manager is shown as
@@ -1783,7 +1784,7 @@ def _manual_days(
 	"""
 	rota = state.rota.get(employee) or {}
 	horizon = state.rota_horizon.get(employee)
-	out: Dict[date_cls, Dict[str, Any]] = {}
+	out: dict[date_cls, dict[str, Any]] = {}
 	for day in days:
 		own = state.own_day_off(employee, day)
 		if own:
@@ -1824,20 +1825,20 @@ def _manual_days(
 	return out
 
 
-def _issue(day: Optional[date_cls], code: str, severity: str, message: str) -> Dict[str, Any]:
+def _issue(day: date_cls | None, code: str, severity: str, message: str) -> dict[str, Any]:
 	return {"date": str(day) if day else None, "code": code, "severity": severity, "message": message}
 
 
 def _cover_conflict(
 	covered_by: str,
 	day: date_cls,
-	infos: Dict[str, Dict[str, Any]],
+	infos: dict[str, dict[str, Any]],
 	state: _PlanState,
 	replace_manual: bool,
-	outside_manual: Dict[str, Dict[date_cls, Dict[str, Any]]],
-	planned: Set[str],
-	period: List[date_cls],
-) -> Optional[str]:
+	outside_manual: dict[str, dict[date_cls, dict[str, Any]]],
+	planned: set[str],
+	period: list[date_cls],
+) -> str | None:
 	"""Why the coverer cannot take ``day``: an issue code, or None if they can.
 
 	A coverer in the plan is judged by their NEW plan (their old day-offs are
@@ -1862,7 +1863,7 @@ def _cover_conflict(
 	return None
 
 
-def _compute_plan(plan: Dict[str, Any], state: _PlanState) -> Dict[str, Any]:
+def _compute_plan(plan: dict[str, Any], state: _PlanState) -> dict[str, Any]:
 	"""The whole preview, plus the per-row working data apply needs.
 
 	Pure: reads only ``plan`` and ``state``. Returns
@@ -1871,15 +1872,15 @@ def _compute_plan(plan: Dict[str, Any], state: _PlanState) -> Dict[str, Any]:
 	start: date_cls = plan["start"]
 	end: date_cls = plan["end"]
 	replace_manual: bool = plan["replace_manual"]
-	rows: List[Dict[str, Any]] = plan["rows"]
+	rows: list[dict[str, Any]] = plan["rows"]
 	planned = {row["employee"] for row in rows}
 	period = _days_between(start, end)
 
-	first_by_weekday: Dict[str, date_cls] = {}
+	first_by_weekday: dict[str, date_cls] = {}
 	for day in period:
 		first_by_weekday.setdefault(_weekday(day), day)
 
-	infos: Dict[str, Dict[str, Any]] = {}
+	infos: dict[str, dict[str, Any]] = {}
 	for row in rows:
 		employee = row["employee"]
 		manual = _manual_days(employee, period, state, planned)
@@ -1895,8 +1896,8 @@ def _compute_plan(plan: Dict[str, Any], state: _PlanState) -> Dict[str, Any]:
 			"covers": 0,
 		}
 
-	outside_manual: Dict[str, Dict[date_cls, Dict[str, Any]]] = {}
-	tally: Dict[Tuple[str, date_cls], List[str]] = {}
+	outside_manual: dict[str, dict[date_cls, dict[str, Any]]] = {}
+	tally: dict[tuple[str, date_cls], list[str]] = {}
 
 	for row in rows:
 		employee = row["employee"]
@@ -1996,8 +1997,8 @@ def _compute_plan(plan: Dict[str, Any], state: _PlanState) -> Dict[str, Any]:
 				)
 			)
 
-	out_rows: List[Dict[str, Any]] = []
-	all_issues: List[Dict[str, Any]] = []
+	out_rows: list[dict[str, Any]] = []
+	all_issues: list[dict[str, Any]] = []
 	manual_total = 0
 	for row in rows:
 		employee = row["employee"]
@@ -2048,11 +2049,11 @@ def _compute_plan(plan: Dict[str, Any], state: _PlanState) -> Dict[str, Any]:
 
 
 def _touched_outside(
-	rows: List[Dict[str, Any]],
-	infos: Dict[str, Dict[str, Any]],
+	rows: list[dict[str, Any]],
+	infos: dict[str, dict[str, Any]],
 	state: _PlanState,
 	replace_manual: bool,
-) -> List[str]:
+) -> list[str]:
 	"""People NOT in the plan whose day the apply would change.
 
 	Their names never appear in the payload, so the API's per-row scope check
@@ -2062,7 +2063,7 @@ def _touched_outside(
 	in the payload are not listed -- the API checks those already.
 	"""
 	planned = {row["employee"] for row in rows}
-	touched: Set[str] = set()
+	touched: set[str] = set()
 	for record in state.day_offs:
 		if (
 			record.get("from_plan")
@@ -2085,7 +2086,7 @@ def _touched_outside(
 # -- reads ------------------------------------------------------------------
 
 
-def _schedule_shape(schedule: Optional[str]) -> Optional[Tuple[str, List[str]]]:
+def _schedule_shape(schedule: str | None) -> tuple[str, list[str]] | None:
 	"""(shift_type, weekdays) of a Shift Schedule, or None."""
 	if not schedule:
 		return None
@@ -2101,11 +2102,11 @@ def _schedule_shape(schedule: Optional[str]) -> Optional[Tuple[str, List[str]]]:
 
 
 def _standing_rota(
-	employees: List[str],
-) -> Tuple[
-	Dict[str, Dict[str, Tuple[str, Optional[str]]]],
-	Dict[str, Optional[date_cls]],
-	Dict[str, List[Dict[str, Any]]],
+	employees: list[str],
+) -> tuple[
+	dict[str, dict[str, tuple[str, str | None]]],
+	dict[str, date_cls | None],
+	dict[str, list[dict[str, Any]]],
 ]:
 	"""Each person's enabled standing rota as a weekday pattern.
 
@@ -2113,9 +2114,9 @@ def _standing_rota(
 	two schedules -- the week and the Friday variant -- so the pattern is the
 	union of them.
 	"""
-	rota: Dict[str, Dict[str, Tuple[str, Optional[str]]]] = {}
-	horizon: Dict[str, Optional[date_cls]] = {}
-	schedules: Dict[str, List[Dict[str, Any]]] = {}
+	rota: dict[str, dict[str, tuple[str, str | None]]] = {}
+	horizon: dict[str, date_cls | None] = {}
+	schedules: dict[str, list[dict[str, Any]]] = {}
 	if not employees:
 		return rota, horizon, schedules
 	try:
@@ -2128,7 +2129,7 @@ def _standing_rota(
 	except Exception:
 		return rota, horizon, schedules
 
-	shapes: Dict[str, Optional[Tuple[str, List[str]]]] = {}
+	shapes: dict[str, tuple[str, list[str]] | None] = {}
 	for ssa in ssas:
 		schedule = ssa.get("shift_schedule")
 		if schedule not in shapes:
@@ -2166,7 +2167,7 @@ def _load_plan_state(employees: Iterable[str], start: date_cls, end: date_cls) -
 		)
 	}
 
-	assignments: Dict[str, List[Dict[str, Any]]] = {}
+	assignments: dict[str, list[dict[str, Any]]] = {}
 	for row in frappe.get_all(
 		"Shift Assignment",
 		filters=dict(ACTIVE_ASSIGNMENT_FILTERS, employee=("in", employees), start_date=("<=", end)),
@@ -2194,7 +2195,7 @@ def _load_plan_state(employees: Iterable[str], start: date_cls, end: date_cls) -
 		"cover_previous_shift_location",
 		"cover_shift_location",
 	]
-	day_offs: Dict[str, Dict[str, Any]] = {}
+	day_offs: dict[str, dict[str, Any]] = {}
 	for link_field in ("employee", "covered_by"):
 		for row in frappe.get_all(
 			DAY_OFF_DOCTYPE,
@@ -2207,15 +2208,15 @@ def _load_plan_state(employees: Iterable[str], start: date_cls, end: date_cls) -
 	return _PlanState(names, assignments, list(day_offs.values()), rota, horizon)
 
 
-def _plan_people(plan: Dict[str, Any]) -> Set[str]:
-	people: Set[str] = set()
+def _plan_people(plan: dict[str, Any]) -> set[str]:
+	people: set[str] = set()
 	for row in plan["rows"]:
 		people.add(row["employee"])
 		people.update(c["covered_by"] for c in row["covers"].values())
 	return people
 
 
-def plan_preview(plan: Any) -> Dict[str, Any]:
+def plan_preview(plan: Any) -> dict[str, Any]:
 	"""Dry run: what ``apply_plan`` would write, and what stands in its way.
 
 	Writes nothing. Hard validation errors throw; everything softer comes back
@@ -2252,13 +2253,13 @@ def _delete_assignment(name: str) -> None:
 
 
 def _plan_cut(
-	assignment: Dict[str, Any],
+	assignment: dict[str, Any],
 	start: date_cls,
 	end: date_cls,
-	kept: Set[date_cls],
-	old_rota: Dict[str, Tuple[str, Optional[str]]],
-	protected_after: Set[date_cls],
-) -> Optional[Dict[str, Any]]:
+	kept: set[date_cls],
+	old_rota: dict[str, tuple[str, str | None]],
+	protected_after: set[date_cls],
+) -> dict[str, Any] | None:
 	"""Decide what happens to one assignment when the plan replaces the rota.
 
 	Pure. Returns None when the assignment stays as it is, otherwise
@@ -2286,7 +2287,7 @@ def _plan_cut(
 		return None
 
 	link = assignment.get("shift_schedule_assignment")
-	keep_days: List[date_cls] = []
+	keep_days: list[date_cls] = []
 	changed = False
 
 	low = max(a_start, start)
@@ -2318,13 +2319,13 @@ def _plan_cut(
 
 
 def _remaining_after_end(
-	assignments: Iterable[Dict[str, Any]],
-	cuts: Dict[str, Dict[str, Any]],
+	assignments: Iterable[dict[str, Any]],
+	cuts: dict[str, dict[str, Any]],
 	end: date_cls,
-) -> List[Tuple[date_cls, Optional[date_cls]]]:
+) -> list[tuple[date_cls, date_cls | None]]:
 	"""What is left of the assignments after ``end`` once ``cuts`` are applied."""
 	after = end + timedelta(days=1)
-	out: List[Tuple[date_cls, Optional[date_cls]]] = []
+	out: list[tuple[date_cls, date_cls | None]] = []
 	for assignment in assignments:
 		cut = cuts.get(assignment.get("name"))
 		if cut is None:
@@ -2340,7 +2341,7 @@ def _remaining_after_end(
 def _plan_horizon(
 	end: date_cls,
 	old_create_after: Iterable[Any],
-	remaining: Iterable[Tuple[date_cls, Optional[date_cls]]],
+	remaining: Iterable[tuple[date_cls, date_cls | None]],
 	off_dates_after: Iterable[Any],
 ) -> date_cls:
 	"""The last day the plan writes explicitly; HRMS takes over the day after.
@@ -2369,15 +2370,15 @@ def _plan_horizon(
 def _fill_entries(
 	end: date_cls,
 	horizon: date_cls,
-	pattern: Dict[str, Optional[str]],
-	location: Optional[str],
-	remaining: Iterable[Tuple[date_cls, Optional[date_cls]]],
+	pattern: dict[str, str | None],
+	location: str | None,
+	remaining: Iterable[tuple[date_cls, date_cls | None]],
 	off_dates_after: Iterable[Any],
-) -> List[Tuple[date_cls, str, Optional[str]]]:
+) -> list[tuple[date_cls, str, str | None]]:
 	"""New-rota days for (end, horizon], skipping days something already holds."""
 	if horizon <= end:
 		return []
-	occupied: Set[date_cls] = {_as_date(v) for v in off_dates_after if v}
+	occupied: set[date_cls] = {_as_date(v) for v in off_dates_after if v}
 	for seg_start, seg_end in remaining:
 		occupied.update(_days_between(seg_start, min(seg_end or horizon, horizon)))
 	entries = []
@@ -2388,7 +2389,7 @@ def _fill_entries(
 	return entries
 
 
-def _apply_cut(assignment: Dict[str, Any], cut: Dict[str, Any]) -> None:
+def _apply_cut(assignment: dict[str, Any], cut: dict[str, Any]) -> None:
 	"""Write one ``_plan_cut`` decision."""
 	employee = assignment["employee"]
 	company = assignment.get("company") or _employee_company(employee)
@@ -2411,8 +2412,8 @@ def _apply_cut(assignment: Dict[str, Any], cut: Dict[str, Any]) -> None:
 def _write_ranges(
 	employee: str,
 	company: str,
-	entries: Iterable[Tuple[date_cls, str, Optional[str]]],
-	ssa_by_shift: Optional[Dict[str, str]] = None,
+	entries: Iterable[tuple[date_cls, str, str | None]],
+	ssa_by_shift: dict[str, str] | None = None,
 ) -> int:
 	"""Write per-day entries as contiguous assignments; returns how many."""
 	count = 0
@@ -2431,7 +2432,7 @@ def _write_ranges(
 	return count
 
 
-def _shift_schedule_name(shift_type: str, days: List[str]) -> str:
+def _shift_schedule_name(shift_type: str, days: list[str]) -> str:
 	base = "{0} ({1})".format(shift_type, ",".join(WEEKDAY_ABBR[d] for d in days))
 	name, suffix = base, 2
 	while frappe.db.exists("Shift Schedule", name):
@@ -2440,7 +2441,7 @@ def _shift_schedule_name(shift_type: str, days: List[str]) -> str:
 	return name
 
 
-def _find_or_create_shift_schedule(shift_type: str, days: List[str]) -> str:
+def _find_or_create_shift_schedule(shift_type: str, days: list[str]) -> str:
 	"""``hrms...get_or_insert_shift_schedule`` with permissions bypassed.
 
 	Same matching (submitted, same shift type, frequency and set of days) so
@@ -2478,7 +2479,7 @@ def _find_or_create_shift_schedule(shift_type: str, days: List[str]) -> str:
 
 
 def _insert_schedule_assignment(
-	employee: str, company: str, schedule: str, location: Optional[str], create_after: date_cls
+	employee: str, company: str, schedule: str, location: str | None, create_after: date_cls
 ) -> str:
 	doc = frappe.get_doc(
 		{
@@ -2497,7 +2498,7 @@ def _insert_schedule_assignment(
 	return doc.name
 
 
-def _restore_coverer(record: Dict[str, Any]) -> None:
+def _restore_coverer(record: dict[str, Any]) -> None:
 	"""Put a coverer who is NOT being re-planned back on their own day.
 
 	Mirrors the cover half of ``clear_day_off``. Without it, deleting or
@@ -2513,7 +2514,7 @@ def _restore_coverer(record: Dict[str, Any]) -> None:
 	)
 
 
-def _drop_plan_day_off(record: Dict[str, Any], planned: Set[str]) -> None:
+def _drop_plan_day_off(record: dict[str, Any], planned: set[str]) -> None:
 	if not frappe.db.exists(DAY_OFF_DOCTYPE, record["name"]):
 		return
 	if record.get("covered_by") and record["covered_by"] not in planned:
@@ -2522,7 +2523,7 @@ def _drop_plan_day_off(record: Dict[str, Any], planned: Set[str]) -> None:
 	frappe.delete_doc(DAY_OFF_DOCTYPE, record["name"], ignore_permissions=True)
 
 
-def _detach_cover(record: Dict[str, Any]) -> None:
+def _detach_cover(record: dict[str, Any]) -> None:
 	"""Strip the cover off somebody else's day-off; the absence stays.
 
 	Used when ``replace_manual`` rewrites a day this person was covering by
@@ -2547,10 +2548,10 @@ def _detach_cover(record: Dict[str, Any]) -> None:
 
 
 def _apply_row(
-	info: Dict[str, Any],
-	plan: Dict[str, Any],
+	info: dict[str, Any],
+	plan: dict[str, Any],
 	state: _PlanState,
-	planned: Set[str],
+	planned: set[str],
 ) -> None:
 	"""Pass 1 for one person: clear, rewrite the period, set the standing rota."""
 	row = info["row"]
@@ -2558,7 +2559,7 @@ def _apply_row(
 	location = row["shift_location"]
 	start: date_cls = plan["start"]
 	end: date_cls = plan["end"]
-	kept: Set[date_cls] = info["kept"]
+	kept: set[date_cls] = info["kept"]
 	company = _employee_company(employee)
 
 	# 1. Plan-made day-offs are the previous run's output; this run replaces them.
@@ -2620,7 +2621,7 @@ def _apply_row(
 		],
 	)
 	old_rota = state.rota.get(employee) or {}
-	cuts: Dict[str, Dict[str, Any]] = {}
+	cuts: dict[str, dict[str, Any]] = {}
 	for assignment in assignments:
 		cut = _plan_cut(assignment, start, end, kept, old_rota, protected_after)
 		if cut:
@@ -2631,12 +2632,12 @@ def _apply_row(
 		frappe.db.set_value("Shift Schedule Assignment", ssa["name"], "enabled", 0)
 
 	# 5b. The new standing rota: one schedule per distinct shift type.
-	days_by_shift: Dict[str, List[str]] = {}
+	days_by_shift: dict[str, list[str]] = {}
 	for weekday in WEEKDAYS:
 		shift_type = row["pattern"][weekday]
 		if shift_type:
 			days_by_shift.setdefault(shift_type, []).append(weekday)
-	ssa_by_shift: Dict[str, str] = {}
+	ssa_by_shift: dict[str, str] = {}
 	for shift_type, days in days_by_shift.items():
 		schedule = _find_or_create_shift_schedule(shift_type, days)
 		ssa_by_shift[shift_type] = _insert_schedule_assignment(employee, company, schedule, location, end)
@@ -2664,7 +2665,7 @@ def _apply_row(
 		frappe.db.set_value("Shift Schedule Assignment", name, "create_shifts_after", horizon)
 
 
-def _plan_failed(employee_name: str, day: Optional[date_cls], exc: Exception, mark: int) -> None:
+def _plan_failed(employee_name: str, day: date_cls | None, exc: Exception, mark: int) -> None:
 	"""Re-throw a write failure with the person and day it happened on.
 
 	The original message (an HRMS overlap, a check-in already linked) is kept,
@@ -2680,7 +2681,7 @@ def _plan_failed(employee_name: str, day: Optional[date_cls], exc: Exception, ma
 	frappe.throw(_("Plan not saved: {0}: {1}").format(employee_name, detail), title=_("Plan not saved"))
 
 
-def apply_plan(plan: Any, check_employee: Optional[Callable[[str], None]] = None) -> Dict[str, Any]:
+def apply_plan(plan: Any, check_employee: Callable[[str], None] | None = None) -> dict[str, Any]:
 	"""Write the plan, all or nothing. Refuses when the preview has any error.
 
 	All or nothing because a half-applied plan is worse than none: one person
@@ -2724,7 +2725,7 @@ def apply_plan(plan: Any, check_employee: Optional[Callable[[str], None]] = None
 		except Exception as exc:
 			_plan_failed(state.name(employee), None, exc, mark)
 
-	created_covers: List[Dict[str, Any]] = []
+	created_covers: list[dict[str, Any]] = []
 	for row in normalized["rows"]:
 		employee = row["employee"]
 		info = computed["rows"][employee]
@@ -2764,7 +2765,7 @@ def apply_plan(plan: Any, check_employee: Optional[Callable[[str], None]] = None
 # -- defaults for the wizard --------------------------------------------------
 
 
-def _standing_shift_type(schedules: List[Dict[str, Any]]) -> Optional[str]:
+def _standing_shift_type(schedules: list[dict[str, Any]]) -> str | None:
 	"""The person's main (non-Friday) standing shift: the one with most days."""
 	plain = [s for s in schedules if not s["shift_type"].endswith(FRIDAY_SUFFIX)]
 	if plain:
@@ -2775,10 +2776,10 @@ def _standing_shift_type(schedules: List[Dict[str, Any]]) -> Optional[str]:
 
 
 def _common_recent_shift(
-	rows: List[Dict[str, Any]], window_start: date_cls, window_end: date_cls, types: _ShiftTypes
-) -> Optional[str]:
+	rows: list[dict[str, Any]], window_start: date_cls, window_end: date_cls, types: _ShiftTypes
+) -> str | None:
 	"""Most-worked shift type in the window, Friday variants folded into their base."""
-	days_by_type: Dict[str, int] = {}
+	days_by_type: dict[str, int] = {}
 	for row in rows:
 		shift_type = row.get("shift_type")
 		if not shift_type:
@@ -2797,7 +2798,7 @@ def _common_recent_shift(
 	return max(sorted(days_by_type), key=lambda k: days_by_type[k])
 
 
-def _recent_plan_covers(employees: List[str], today: date_cls) -> Dict[Tuple[str, str], Dict[str, Any]]:
+def _recent_plan_covers(employees: list[str], today: date_cls) -> dict[tuple[str, str], dict[str, Any]]:
 	"""The latest plan-made cover per (employee, weekday)."""
 	if not employees:
 		return {}
@@ -2816,7 +2817,7 @@ def _recent_plan_covers(employees: List[str], today: date_cls) -> Dict[Tuple[str
 	except Exception:
 		# ``from_plan`` arrives with a migrate; before it the wizard still opens.
 		return {}
-	out: Dict[Tuple[str, str], Dict[str, Any]] = {}
+	out: dict[tuple[str, str], dict[str, Any]] = {}
 	for row in rows:
 		weekday = _weekday(_as_date(row["off_date"]))
 		out.setdefault(
@@ -2831,7 +2832,7 @@ def _recent_plan_covers(employees: List[str], today: date_cls) -> Dict[Tuple[str
 	return out
 
 
-def plan_defaults(shift_location: Optional[str] = None) -> Dict[str, Any]:
+def plan_defaults(shift_location: str | None = None) -> dict[str, Any]:
 	"""Pre-fill for the wizard: each person's current week as the plan would see it.
 
 	Read from the standing rota first, because that is what the plan replaces,
@@ -2840,7 +2841,7 @@ def plan_defaults(shift_location: Optional[str] = None) -> Dict[str, Any]:
 	shifts and schedules point at.
 	"""
 	today = _today()
-	out: Dict[str, Any] = {
+	out: dict[str, Any] = {
 		"suggested_start": str(getdate(get_first_day(add_months(today, 1)))),
 		"employees": [],
 	}
@@ -2853,8 +2854,8 @@ def plan_defaults(shift_location: Optional[str] = None) -> Dict[str, Any]:
 	window_start = today - timedelta(days=60)
 	window_end = today + timedelta(days=31)
 
-	locations: Dict[str, Set[str]] = {}
-	schedule_location: Dict[str, str] = {}
+	locations: dict[str, set[str]] = {}
+	schedule_location: dict[str, str] = {}
 	try:
 		for row in frappe.get_all(
 			"Shift Schedule Assignment",
@@ -2869,7 +2870,7 @@ def plan_defaults(shift_location: Optional[str] = None) -> Dict[str, Any]:
 	except Exception:
 		pass
 
-	recent_by_employee: Dict[str, List[Dict[str, Any]]] = {}
+	recent_by_employee: dict[str, list[dict[str, Any]]] = {}
 	for row in frappe.get_all(
 		"Shift Assignment",
 		filters={
@@ -2911,7 +2912,7 @@ def plan_defaults(shift_location: Optional[str] = None) -> Dict[str, Any]:
 	covers = _recent_plan_covers(employees, today)
 	types = _ShiftTypes()
 
-	payload: List[Dict[str, Any]] = []
+	payload: list[dict[str, Any]] = []
 	for employee in employees:
 		row = employee_rows[employee]
 		recent = recent_by_employee.get(employee, [])

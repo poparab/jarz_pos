@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional, Set
 import frappe
 from frappe import _
 from frappe.utils import cint, getdate
+
 from jarz_pos.constants import ROLES
 from jarz_pos.utils.posting_datetime import apply_ledger_posting_datetime
 
@@ -16,7 +17,7 @@ def _ensure_manager_access() -> None:
 		frappe.throw(_("Not permitted: Managers only"), frappe.PermissionError)
 
 
-def _resolve_named_account(company: str, label: str) -> Optional[str]:
+def _resolve_named_account(company: str, label: str) -> str | None:
 	"""Find an Account name for a given human label under a company.
 
 	Strategy:
@@ -56,13 +57,13 @@ def _resolve_named_account(company: str, label: str) -> Optional[str]:
 	return None
 
 
-def _get_cashlike_accounts(company: str) -> List[Dict[str, Any]]:
+def _get_cashlike_accounts(company: str) -> list[dict[str, Any]]:
 	"""Return core cash/bank/mobile accounts for the company.
 
 	Strategy:
 	  - Fetch Accounts with account_type IN ("Cash", "Bank") or names matching common mobile wallet keywords.
 	"""
-	accounts: List[Dict[str, Any]] = []
+	accounts: list[dict[str, Any]] = []
 	# Core cash and bank by account_type
 	rows = frappe.get_all(
 		"Account",
@@ -137,9 +138,9 @@ def _get_cashlike_accounts(company: str) -> List[Dict[str, Any]]:
 	return accounts
 
 
-def _get_pos_profile_accounts(company: str) -> List[Dict[str, Any]]:
-	out: List[Dict[str, Any]] = []
-	filters: Dict[str, Any] = {"company": company}
+def _get_pos_profile_accounts(company: str) -> list[dict[str, Any]]:
+	out: list[dict[str, Any]] = []
+	filters: dict[str, Any] = {"company": company}
 	try:
 		if frappe.db.has_column("POS Profile", "disabled"):
 			filters["disabled"] = 0
@@ -163,10 +164,10 @@ def _get_pos_profile_accounts(company: str) -> List[Dict[str, Any]]:
 	return out
 
 
-def _get_sales_partner_accounts(company: str) -> List[Dict[str, Any]]:
-	out: List[Dict[str, Any]] = []
+def _get_sales_partner_accounts(company: str) -> list[dict[str, Any]]:
+	out: list[dict[str, Any]] = []
 	# Some setups may not have a dedicated 'disabled' column on Sales Partner
-	filters: Dict[str, Any] = {}
+	filters: dict[str, Any] = {}
 	try:
 		if frappe.db.has_column("Sales Partner", "disabled"):
 			filters["disabled"] = 0
@@ -189,7 +190,7 @@ def _get_sales_partner_accounts(company: str) -> List[Dict[str, Any]]:
 	return out
 
 
-def _get_balance_on(account: str, date: Optional[str] = None) -> float:
+def _get_balance_on(account: str, date: str | None = None) -> float:
 	# ERPNext helper report util
 	from erpnext.accounts.utils import get_balance_on
 
@@ -202,7 +203,7 @@ def _get_balance_on(account: str, date: Optional[str] = None) -> float:
 
 
 @frappe.whitelist()
-def list_accounts(company: Optional[str] = None, as_of: Optional[str] = None) -> List[Dict[str, Any]]:
+def list_accounts(company: str | None = None, as_of: str | None = None) -> list[dict[str, Any]]:
 	"""List all relevant cash transfer accounts with current balance.
 
 	Includes:
@@ -219,14 +220,14 @@ def list_accounts(company: Optional[str] = None, as_of: Optional[str] = None) ->
 	if not company:
 		frappe.throw(_("Company is required"))
 
-	accs: List[Dict[str, Any]] = []
+	accs: list[dict[str, Any]] = []
 	accs.extend(_get_cashlike_accounts(company))
 	accs.extend(_get_pos_profile_accounts(company))
 	accs.extend(_get_sales_partner_accounts(company))
 
 	# De-duplicate by account name
 	seen: set[str] = set()
-	out: List[Dict[str, Any]] = []
+	out: list[dict[str, Any]] = []
 	for a in accs:
 		name = a["name"]
 		if name in seen:
@@ -244,7 +245,7 @@ def list_accounts(company: Optional[str] = None, as_of: Optional[str] = None) ->
 		)
 
 	# Sort for stable UI: Cash/Bank first, then others alpha by label
-	def _sort_key(x: Dict[str, Any]):
+	def _sort_key(x: dict[str, Any]):
 		cat = (x.get("category") or "other").lower()
 		cat_priority = {
 			"cash": 0,
@@ -265,9 +266,9 @@ def submit_transfer(
 	from_account: str,
 	to_account: str,
 	amount: float,
-	posting_date: Optional[str] = None,
-	remark: Optional[str] = None,
-) -> Dict[str, Any]:
+	posting_date: str | None = None,
+	remark: str | None = None,
+) -> dict[str, Any]:
 	"""Create a Journal Entry to move funds between two asset accounts.
 
 	Both accounts must be leaf accounts and (typically) of Asset type; we will not enforce root type here but ensure they are not the same.
@@ -344,14 +345,14 @@ def submit_transfer(
 	return {"ok": True, "journal_entry": je.name}
 
 
-def _transferable_account_names(company: str) -> Set[str]:
+def _transferable_account_names(company: str) -> set[str]:
 	"""Every account this module can move money between, by name.
 
 	Same membership as :func:`list_accounts` exposes, minus the per-account
 	balance lookups — the history only needs to recognise an account, not
 	price it, and ``get_balance_on`` is one query per account.
 	"""
-	names: Set[str] = set()
+	names: set[str] = set()
 	for group in (
 		_get_cashlike_accounts(company),
 		_get_pos_profile_accounts(company),
@@ -367,12 +368,12 @@ def _transferable_account_names(company: str) -> Set[str]:
 def list_transfers(
 	limit: Any = 30,
 	page: Any = 0,
-	company: Optional[str] = None,
-	account: Optional[str] = None,
-	from_date: Optional[str] = None,
-	to_date: Optional[str] = None,
-	search: Optional[str] = None,
-) -> Dict[str, Any]:
+	company: str | None = None,
+	account: str | None = None,
+	from_date: str | None = None,
+	to_date: str | None = None,
+	search: str | None = None,
+) -> dict[str, Any]:
 	"""Return submitted cash transfers — the history view.
 
 	:func:`submit_transfer` writes a plain Journal Entry with no marker on it,
@@ -423,7 +424,7 @@ def list_transfers(
 	# Now the shape test, which needs *every* row of each candidate — a shift
 	# discrepancy entry also touches a cash account, but its other leg is Cash
 	# Over/Short, so it is not a transfer.
-	rows_by_parent: Dict[str, List[Dict[str, Any]]] = {}
+	rows_by_parent: dict[str, list[dict[str, Any]]] = {}
 	for row in frappe.get_all(
 		"Journal Entry Account",
 		filters={"parent": ["in", sorted(candidates)], "parenttype": "Journal Entry"},
@@ -439,7 +440,7 @@ def list_transfers(
 	):
 		rows_by_parent.setdefault(row["parent"], []).append(row)
 
-	legs_by_parent: Dict[str, Dict[str, Any]] = {}
+	legs_by_parent: dict[str, dict[str, Any]] = {}
 	for parent, rows in rows_by_parent.items():
 		if len(rows) != 2:
 			continue
@@ -460,7 +461,7 @@ def list_transfers(
 	if not legs_by_parent:
 		return empty
 
-	filters: Dict[str, Any] = {
+	filters: dict[str, Any] = {
 		"name": ["in", sorted(legs_by_parent)],
 		"docstatus": 1,
 		"company": company,
@@ -472,7 +473,7 @@ def list_transfers(
 	elif to_date:
 		filters["posting_date"] = ["<=", getdate(to_date)]
 
-	or_filters: List[Any] = []
+	or_filters: list[Any] = []
 	search = (search or "").strip()
 	if search:
 		like = f"%{search}%"
@@ -531,7 +532,7 @@ def list_transfers(
 		)
 	}
 
-	out: List[Dict[str, Any]] = []
+	out: list[dict[str, Any]] = []
 	for entry in entries:
 		legs = legs_by_parent[entry["name"]]
 		out.append(

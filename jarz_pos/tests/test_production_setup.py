@@ -18,7 +18,6 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-
 _frappe = sys.modules.get("frappe")
 if _frappe is None:
 	_frappe = types.ModuleType("frappe")
@@ -55,7 +54,6 @@ if _perms is None:
 _frappe.permissions = _perms
 
 from jarz_pos.setup import production_setup
-
 
 ROLE = production_setup.ROLE_NAME
 

@@ -31,7 +31,6 @@ from frappe import _
 from jarz_pos.constants import DELIVERY_GROUPS
 from jarz_pos.utils.courier_visibility import resolve_courier_branch
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 # "Is this person actually a courier?"
 # ─────────────────────────────────────────────────────────────────────────────
@@ -65,7 +64,7 @@ def _delivery_employee_group_name() -> str:
 	return DELIVERY_GROUPS.EMPLOYEE_GROUP
 
 
-def delivery_group_employees() -> Set[str]:
+def delivery_group_employees() -> set[str]:
 	"""Employee names in the delivery Employee Group.
 
 	Read via ``as_dict()`` and a scan for any child list carrying an
@@ -82,7 +81,7 @@ def delivery_group_employees() -> Set[str]:
 	if isinstance(cached, set):
 		return cached
 
-	employees: Set[str] = set()
+	employees: set[str] = set()
 	try:
 		group_label = _delivery_employee_group_name()
 		group_name = frappe.db.get_value("Employee Group", {"employee_group_name": group_label}, "name")
@@ -111,7 +110,7 @@ def delivery_group_employees() -> Set[str]:
 	return employees
 
 
-def is_delivery_courier(employee: Optional[str]) -> bool:
+def is_delivery_courier(employee: str | None) -> bool:
 	"""True when *employee* is in the delivery Employee Group."""
 	name = str(employee or "").strip()
 	if not name:
@@ -119,7 +118,7 @@ def is_delivery_courier(employee: Optional[str]) -> bool:
 	return name in delivery_group_employees()
 
 
-def resolve_courier_party(user: Optional[str] = None) -> Optional[Dict[str, str]]:
+def resolve_courier_party(user: str | None = None) -> dict[str, str] | None:
 	"""Return the Employee party for *user*, or ``None`` if there is none.
 
 	``None`` is a normal answer: not every login has an Employee record.
@@ -168,7 +167,7 @@ def resolve_courier_party(user: Optional[str] = None) -> Optional[Dict[str, str]
 	}
 
 
-def resolve_delivery_courier(user: Optional[str] = None) -> Optional[Dict[str, str]]:
+def resolve_delivery_courier(user: str | None = None) -> dict[str, str] | None:
 	"""The caller as a *courier*, or ``None`` if they are not one.
 
 	The narrow question. ``None`` here means "this login is not a courier" —
@@ -183,7 +182,7 @@ def resolve_delivery_courier(user: Optional[str] = None) -> Optional[Dict[str, s
 	return courier
 
 
-def ensure_courier_party(user: Optional[str] = None) -> Dict[str, str]:
+def ensure_courier_party(user: str | None = None) -> dict[str, str]:
 	""":func:`resolve_courier_party`, but throws when the user has no Employee."""
 	courier = resolve_courier_party(user)
 	if not courier:
@@ -198,7 +197,7 @@ def ensure_courier_party(user: Optional[str] = None) -> Dict[str, str]:
 	return courier
 
 
-def invoice_courier_party(inv: Any) -> Dict[str, str]:
+def invoice_courier_party(inv: Any) -> dict[str, str]:
 	"""The courier named on *inv*, as ``{party_type, party}`` (blank when unassigned)."""
 	if inv is None:
 		return {"party_type": "", "party": ""}
@@ -211,7 +210,7 @@ def invoice_courier_party(inv: Any) -> Dict[str, str]:
 	}
 
 
-def user_is_assigned_courier(inv: Any, user: Optional[str] = None) -> Optional[bool]:
+def user_is_assigned_courier(inv: Any, user: str | None = None) -> bool | None:
 	"""Is *user* the courier named on *inv*?
 
 	Three-valued on purpose:
@@ -237,7 +236,7 @@ def user_is_assigned_courier(inv: Any, user: Optional[str] = None) -> Optional[b
 	return assigned["party_type"] == courier["party_type"] and assigned["party"] == courier["party"]
 
 
-def assert_invoice_assigned_to_courier(inv: Any, *, action_label: str, user: Optional[str] = None) -> None:
+def assert_invoice_assigned_to_courier(inv: Any, *, action_label: str, user: str | None = None) -> None:
 	"""Refuse when a *courier* acts on an invoice assigned to another courier.
 
 	A no-op for non-courier users (see :func:`user_is_assigned_courier`), so
@@ -254,7 +253,7 @@ def assert_invoice_assigned_to_courier(inv: Any, *, action_label: str, user: Opt
 	)
 
 
-def get_courier_run_filters(user: Optional[str] = None) -> Dict[str, Any]:
+def get_courier_run_filters(user: str | None = None) -> dict[str, Any]:
 	"""Filters selecting the caller's live stops.
 
 	Returned rather than executed so the run-sheet query itself can live in
@@ -271,7 +270,7 @@ def get_courier_run_filters(user: Optional[str] = None) -> Dict[str, Any]:
 	}
 
 
-def list_courier_users(branch: Optional[str] = None) -> List[Dict[str, str]]:
+def list_courier_users(branch: str | None = None) -> list[dict[str, str]]:
 	"""Couriers who actually have a login, optionally narrowed to one branch.
 
 	Restricted to the delivery Employee Group: without that filter this returns
@@ -281,7 +280,7 @@ def list_courier_users(branch: Optional[str] = None) -> List[Dict[str, str]]:
 	if not members:
 		return []
 
-	filters: Dict[str, Any] = {
+	filters: dict[str, Any] = {
 		"status": "Active",
 		"user_id": ["is", "set"],
 		"name": ["in", sorted(members)],

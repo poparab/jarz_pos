@@ -1,18 +1,19 @@
 """API endpoints for POS Payment Receipt management."""
 
 from __future__ import annotations
-import frappe
+
 import base64
 import os
 from dataclasses import dataclass
-from typing import List, Dict, Any
+from typing import Any, Dict, List
+
+import frappe
 from frappe import _
 from frappe.exceptions import PermissionError as FrappePermissionError
 from frappe.exceptions import ValidationError as FrappeValidationError
 
 from jarz_pos.constants import ROLES
 from jarz_pos.utils.invoice_utils import normalize_woo_order_id
-
 
 RECEIPT_STATUS_UNCONFIRMED = "Unconfirmed"
 RECEIPT_STATUS_CONFIRMED = "Confirmed"
@@ -698,8 +699,8 @@ def list_payment_receipts(pos_profile: str = None, status: str = None):
 		# relabel it "Failed to list payment receipts", which reads as a bug.
 		raise
 	except Exception as e:
-		frappe.logger().error(f"Failed to list payment receipts: {str(e)}")
-		frappe.throw(f"Failed to list payment receipts: {str(e)}")
+		frappe.logger().error(f"Failed to list payment receipts: {e!s}")
+		frappe.throw(f"Failed to list payment receipts: {e!s}")
 
 
 @frappe.whitelist()
@@ -773,8 +774,8 @@ def create_payment_receipt(sales_invoice: str, payment_method: str, amount: floa
 		# which reads as a bug rather than a permission boundary.
 		raise
 	except Exception as e:
-		frappe.logger().error(f"Failed to create payment receipt: {str(e)}")
-		frappe.throw(f"Failed to create payment receipt: {str(e)}")
+		frappe.logger().error(f"Failed to create payment receipt: {e!s}")
+		frappe.throw(f"Failed to create payment receipt: {e!s}")
 
 
 @frappe.whitelist()
@@ -863,8 +864,8 @@ def upload_receipt_image(receipt_name: str, image_data: str, filename: str):
 	except (FrappeValidationError, FrappePermissionError):
 		raise
 	except Exception as e:
-		frappe.logger().error(f"Failed to upload receipt image: {str(e)}")
-		frappe.throw(f"Failed to upload receipt image: {str(e)}")
+		frappe.logger().error(f"Failed to upload receipt image: {e!s}")
+		frappe.throw(f"Failed to upload receipt image: {e!s}")
 
 
 @frappe.whitelist()
@@ -915,8 +916,8 @@ def remove_receipt_image(receipt_name: str):
 	except (FrappeValidationError, FrappePermissionError):
 		raise
 	except Exception as e:
-		frappe.logger().error(f"Failed to remove receipt image: {str(e)}")
-		frappe.throw(f"Failed to remove receipt image: {str(e)}")
+		frappe.logger().error(f"Failed to remove receipt image: {e!s}")
+		frappe.throw(f"Failed to remove receipt image: {e!s}")
 
 
 #: Shapes returned by ``services.delivery_handling.classify_receipt_collection``.
@@ -1097,7 +1098,7 @@ def confirm_receipt(receipt_name: str):
 						str(getattr(receipt, "payment_method", None) or "").strip(),
 						profile,
 						receipt_name=receipt.name,
-						notes="Confirmed transfer receipt {0}".format(receipt.name),
+						notes=f"Confirmed transfer receipt {receipt.name}",
 						# DERIVED FROM THE RECEIPT, never left to the service to
 						# mint. Both replay guards key on this token -- the stored
 						# one on the Courier Transaction and the Journal Entry title
@@ -1106,7 +1107,7 @@ def confirm_receipt(receipt_name: str):
 						# entry twice. The invoice row lock does not save us: the
 						# loser re-reads the courier row from its own REPEATABLE
 						# READ snapshot and still sees the money unmoved.
-						idempotency_token="RCPT-{0}".format(receipt.name),
+						idempotency_token=f"RCPT-{receipt.name}",
 					)
 					or {}
 				)
@@ -1168,8 +1169,8 @@ def confirm_receipt(receipt_name: str):
 	except FrappePermissionError:
 		raise
 	except Exception as e:
-		frappe.logger().error(f"Failed to confirm receipt: {str(e)}")
-		frappe.throw(f"Failed to confirm receipt: {str(e)}")
+		frappe.logger().error(f"Failed to confirm receipt: {e!s}")
+		frappe.throw(f"Failed to confirm receipt: {e!s}")
 
 
 @frappe.whitelist()
@@ -1187,8 +1188,8 @@ def get_accessible_pos_profiles():
 		return profile_names
 
 	except Exception as e:
-		frappe.logger().error(f"Failed to get accessible profiles: {str(e)}")
-		frappe.throw(f"Failed to get accessible profiles: {str(e)}")
+		frappe.logger().error(f"Failed to get accessible profiles: {e!s}")
+		frappe.throw(f"Failed to get accessible profiles: {e!s}")
 
 
 @frappe.whitelist()

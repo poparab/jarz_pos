@@ -46,17 +46,17 @@ symbol instead of the world.
 
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
+from collections.abc import Iterable, Mapping, Sequence
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import frappe
 from frappe import _
-
-from jarz_pos.constants import DEFAULT_UOM, ROLES
 
 # The single source of truth for "which item groups are a sellable jar".  A base
 # is defined as the complement of this, so re-declaring the tuple here would
 # make a base silently appear on both screens the day somebody adds a group.
 from jarz_pos.api.daily_plan import FINISHED_GOODS_GROUPS
+from jarz_pos.constants import DEFAULT_UOM, ROLES
 from jarz_pos.services import production_planning as planning
 from jarz_pos.services import subassembly_planning as bases
 
@@ -116,12 +116,12 @@ def _log_failure(title: str, message: str) -> None:
 	try:
 		frappe.log_error(title=title, message=message)
 		return
-	except Exception as logging_error:  # noqa: BLE001 — see docstring
+	except Exception as logging_error:
 		fallback = f"{title}: {message} (log_error itself failed: {logging_error})"
 
 	try:
 		frappe.logger().error(fallback)
-	except Exception:  # noqa: BLE001
+	except Exception:
 		# Nothing left to log with.  Raising here would substitute a logging
 		# error for the real one, which is the exact trap this helper exists to
 		# avoid, so the fallback ends silently and only here.
@@ -151,7 +151,7 @@ def _coerce_str(value: Any) -> str:
 	return value.strip() if isinstance(value, str) else ""
 
 
-def _resolve_company(company: Optional[str]) -> str:
+def _resolve_company(company: str | None) -> str:
 	company = _coerce_str(company) or planning._resolve_default_company()
 	if not company:
 		frappe.throw(_("Company is not configured and no Default Company is set"))
@@ -169,7 +169,7 @@ def _resolve_today() -> str:
 	return frappe.utils.nowdate()
 
 
-def _resolve_base_rows(company: str, search: Optional[str]) -> List[Dict[str, Any]]:
+def _resolve_base_rows(company: str, search: str | None) -> list[dict[str, Any]]:
 	"""Every producible item that is **not** a finished jar.
 
 	Reuses the board's own producible query rather than writing a third variant
@@ -193,7 +193,7 @@ def _resolve_mix_item() -> str:
 	return resolver()
 
 
-def _resolve_mix_run_sizes() -> Optional[List[float]]:
+def _resolve_mix_run_sizes() -> list[float] | None:
 	"""Configured mixer run sizes, or ``None`` when nobody has set any.
 
 	Read as a ``Data`` field, which casts through ``cstr`` rather than
@@ -208,7 +208,7 @@ def _resolve_mix_run_sizes() -> Optional[List[float]]:
 	return bases.parse_run_sizes(raw)
 
 
-def _resolve_open_plan(company: str, plan_date: str) -> Optional[str]:
+def _resolve_open_plan(company: str, plan_date: str) -> str | None:
 	"""The open plan for that day, newest first if somebody made two."""
 	try:
 		return frappe.db.get_value(
@@ -229,7 +229,7 @@ def _resolve_open_plan(company: str, plan_date: str) -> Optional[str]:
 		return None
 
 
-def _resolve_plan_targets(company: str, plan_date: str) -> List[Dict[str, Any]]:
+def _resolve_plan_targets(company: str, plan_date: str) -> list[dict[str, Any]]:
 	"""Jar targets from the day's plan, as ``{item_code, qty, bom_name}``.
 
 	A line whose ``default_bom`` was never stamped (the item was not on the
@@ -254,8 +254,8 @@ def _resolve_plan_targets(company: str, plan_date: str) -> List[Dict[str, Any]]:
 		)
 		return []
 
-	targets: List[Dict[str, Any]] = []
-	missing_bom: List[str] = []
+	targets: list[dict[str, Any]] = []
+	missing_bom: list[str] = []
 	for row in rows or []:
 		qty = bases.countable(row.get("planned_qty"))
 		if qty <= 0:
@@ -277,7 +277,7 @@ def _resolve_plan_targets(company: str, plan_date: str) -> List[Dict[str, Any]]:
 	return [t for t in targets if t["bom_name"]]
 
 
-def _resolve_default_bom_map(item_codes: Sequence[str]) -> Dict[str, str]:
+def _resolve_default_bom_map(item_codes: Sequence[str]) -> dict[str, str]:
 	"""``item_code -> submitted default BOM`` for a batch of items, in one query."""
 	codes = sorted({c for c in (item_codes or []) if c})
 	if not codes:
@@ -300,7 +300,7 @@ def _resolve_default_bom_map(item_codes: Sequence[str]) -> Dict[str, str]:
 	return {r["item_code"]: r["bom_name"] for r in rows or []}
 
 
-def _resolve_jar_board(company: str) -> Dict[str, Any]:
+def _resolve_jar_board(company: str) -> dict[str, Any]:
 	"""The Plan tab's own payload, read once and shared by both derivations.
 
 	Deliberately calls the existing endpoint rather than re-deriving velocity,
@@ -326,9 +326,9 @@ def _resolve_jar_board(company: str) -> Dict[str, Any]:
 		return {}
 
 
-def _jar_rows(payload: Mapping[str, Any]) -> List[Dict[str, Any]]:
+def _jar_rows(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
 	"""Finished-jar rows of a board payload, with a usable BOM."""
-	rows: List[Dict[str, Any]] = []
+	rows: list[dict[str, Any]] = []
 	for item in (payload or {}).get("items") or []:
 		if item.get("item_group") not in FINISHED_GOODS_GROUPS:
 			continue
@@ -352,14 +352,14 @@ def _effective_velocity(item: Mapping[str, Any]) -> float:
 	return bases.countable(item.get("velocity_60d")) * bases.to_float(item.get("season_multiplier"), 1.0)
 
 
-def _resolve_suggestion_targets(company: str) -> List[Dict[str, Any]]:
+def _resolve_suggestion_targets(company: str) -> list[dict[str, Any]]:
 	"""Jar targets from the Plan tab's own suggestion maths.
 
 	What the board says somebody should fill *today* — the fallback demand
 	driver when no plan has been saved.  A jar the board is not asking for
 	contributes nothing.
 	"""
-	targets: List[Dict[str, Any]] = []
+	targets: list[dict[str, Any]] = []
 	for item in _jar_rows(_resolve_jar_board(company)):
 		if bases.to_float(item.get("suggested_batches"), 0.0) <= 0:
 			continue
@@ -373,7 +373,7 @@ def _resolve_suggestion_targets(company: str) -> List[Dict[str, Any]]:
 	return targets
 
 
-def _resolve_velocity_targets(company: str) -> List[Dict[str, Any]]:
+def _resolve_velocity_targets(company: str) -> list[dict[str, Any]]:
 	"""Jar **rates** — one day's worth of each jar — as demand targets.
 
 	The same ``{item_code, qty, bom_name}`` shape ``_resolve_suggestion_targets``
@@ -385,7 +385,7 @@ def _resolve_velocity_targets(company: str) -> List[Dict[str, Any]]:
 	of: a jar that is well stocked today still eats its base tomorrow, and
 	dropping it would understate the freezer's burn rate.
 	"""
-	targets: List[Dict[str, Any]] = []
+	targets: list[dict[str, Any]] = []
 	for item in _jar_rows(_resolve_jar_board(company)):
 		velocity = _effective_velocity(item)
 		if velocity <= bases.QTY_EPSILON:
@@ -400,7 +400,7 @@ def _resolve_velocity_targets(company: str) -> List[Dict[str, Any]]:
 	return targets
 
 
-def _resolve_jar_bom_rows(bom_names: Iterable[str]) -> List[Dict[str, Any]]:
+def _resolve_jar_bom_rows(bom_names: Iterable[str]) -> list[dict[str, Any]]:
 	"""One-level ``BOM Item`` rows for a set of jar BOMs, with each BOM's yield.
 
 	One level on purpose.  The explosion would report flour and cream, which is
@@ -443,7 +443,7 @@ def _resolve_jar_bom_rows(bom_names: Iterable[str]) -> List[Dict[str, Any]]:
 	return [dict(r) for r in rows or []]
 
 
-def _resolve_base_component_rows(bom_names: Iterable[str]) -> Dict[str, List[Dict[str, Any]]]:
+def _resolve_base_component_rows(bom_names: Iterable[str]) -> dict[str, list[dict[str, Any]]]:
 	"""One-level component rows of the **bases' own** BOMs, keyed by BOM name.
 
 	One query for the whole screen, then grouped in Python — the alternative is
@@ -489,7 +489,7 @@ def _resolve_base_component_rows(bom_names: Iterable[str]) -> Dict[str, List[Dic
 		)
 		return {}
 
-	grouped: Dict[str, List[Dict[str, Any]]] = {}
+	grouped: dict[str, list[dict[str, Any]]] = {}
 	for row in rows or []:
 		bom_name = _coerce_str(row.get("bom_name"))
 		if not bom_name:
@@ -498,7 +498,7 @@ def _resolve_base_component_rows(bom_names: Iterable[str]) -> Dict[str, List[Dic
 	return grouped
 
 
-def _resolve_jar_consumers(base_item_codes: Set[str]) -> Dict[str, List[Dict[str, Any]]]:
+def _resolve_jar_consumers(base_item_codes: set[str]) -> dict[str, list[dict[str, Any]]]:
 	"""``{base_item_code: [{item_code, item_name, qty_per_jar}, ...]}``.
 
 	Everything whose **default, active, submitted** one-level BOM lists the base,
@@ -550,7 +550,7 @@ def _resolve_jar_consumers(base_item_codes: Set[str]) -> Dict[str, List[Dict[str
 		)
 		return {}
 
-	accumulated: Dict[str, Dict[str, Dict[str, Any]]] = {}
+	accumulated: dict[str, dict[str, dict[str, Any]]] = {}
 	for row in rows or []:
 		base_code = _coerce_str(row.get("base_item_code"))
 		consumer_code = _coerce_str(row.get("item_code"))
@@ -576,7 +576,7 @@ def _resolve_jar_consumers(base_item_codes: Set[str]) -> Dict[str, List[Dict[str
 		else:
 			existing["qty_per_jar"] += per_jar
 
-	consumers: Dict[str, List[Dict[str, Any]]] = {}
+	consumers: dict[str, list[dict[str, Any]]] = {}
 	for base_code, bucket in accumulated.items():
 		shaped = [
 			{
@@ -595,7 +595,7 @@ def _resolve_jar_consumers(base_item_codes: Set[str]) -> Dict[str, List[Dict[str
 	return consumers
 
 
-def _resolve_sop_index(item_codes: Sequence[str]) -> Dict[str, Dict[str, Any]]:
+def _resolve_sop_index(item_codes: Sequence[str]) -> dict[str, dict[str, Any]]:
 	"""Active SOP and its per-batch step durations for a batch of items.
 
 	One query for the whole screen.  Calling ``api/sop.get_sop_for_item`` per
@@ -634,7 +634,7 @@ def _resolve_sop_index(item_codes: Sequence[str]) -> Dict[str, Dict[str, Any]]:
 		_log_failure("JARZ Bases – SOP index read failed", frappe.get_traceback())
 		return {}
 
-	per_sop: Dict[str, Dict[str, Any]] = {}
+	per_sop: dict[str, dict[str, Any]] = {}
 	for row in rows or []:
 		sop = row.get("sop")
 		if not sop:
@@ -653,7 +653,7 @@ def _resolve_sop_index(item_codes: Sequence[str]) -> Dict[str, Dict[str, Any]]:
 		if row.get("duration_mins") is not None or row.get("scaling_mode") is not None:
 			bucket["steps"].append((row.get("duration_mins"), row.get("scaling_mode")))
 
-	winners: Dict[str, Dict[str, Any]] = {}
+	winners: dict[str, dict[str, Any]] = {}
 	for bucket in per_sop.values():
 		item_code = bucket["item_code"]
 		current = winners.get(item_code)
@@ -666,7 +666,7 @@ def _resolve_sop_index(item_codes: Sequence[str]) -> Dict[str, Dict[str, Any]]:
 	return winners
 
 
-def _sop_duration_for_batch(bucket: Optional[Mapping[str, Any]], batch_yield: float) -> Optional[float]:
+def _sop_duration_for_batch(bucket: Mapping[str, Any] | None, batch_yield: float) -> float | None:
 	"""Total minutes one batch of this item takes, per its SOP.
 
 	``None`` when the item has no SOP at all.  An SOP whose steps carry no
@@ -692,14 +692,14 @@ def _sop_duration_for_batch(bucket: Optional[Mapping[str, Any]], batch_yield: fl
 	return round(total, 3)
 
 
-def _resolve_item_row(item_code: str) -> Dict[str, Any]:
+def _resolve_item_row(item_code: str) -> dict[str, Any]:
 	row = frappe.db.get_value(
 		"Item", item_code, ["name", "item_name", "item_group", "stock_uom", "disabled"], as_dict=True
 	)
 	return dict(row) if row else {}
 
 
-def _resolve_bom_row(bom_name: str) -> Dict[str, Any]:
+def _resolve_bom_row(bom_name: str) -> dict[str, Any]:
 	row = frappe.db.get_value(
 		"BOM", bom_name, ["name", "item", "quantity", "company", "docstatus"], as_dict=True
 	)
@@ -711,7 +711,7 @@ def _resolve_required_material_rows(
 	company: str,
 	qty: float,
 	material_selections: Any = None,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
 	"""Components of one batch, read from ``api/manufacturing``.
 
 	Deliberately not a second implementation of the bill read: the transfer that
@@ -729,7 +729,7 @@ def _resolve_required_material_rows(
 	"""
 	from jarz_pos.api.manufacturing import _get_required_material_rows
 
-	kwargs: Dict[str, Any] = {"fetch_exploded": 0}
+	kwargs: dict[str, Any] = {"fetch_exploded": 0}
 	if material_selections:
 		kwargs["material_selections"] = material_selections
 	return _get_required_material_rows(bom_name, company, qty, **kwargs)
@@ -766,7 +766,7 @@ def _resolve_has_sop(item_code: str) -> bool:
 # ── Shaping ─────────────────────────────────────────────────────────────
 
 
-def _shape_limiting_component(row: Optional[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
+def _shape_limiting_component(row: Mapping[str, Any] | None) -> dict[str, Any] | None:
 	"""The board's capacity row, reduced to the fields the card renders."""
 	if not row:
 		return None
@@ -793,8 +793,8 @@ def _shape_limiting_component(row: Optional[Mapping[str, Any]]) -> Optional[Dict
 def _resolve_demand(
 	company: str,
 	plan_date: str,
-	base_codes: Set[str],
-) -> Tuple[Dict[str, float], str, Optional[str]]:
+	base_codes: set[str],
+) -> tuple[dict[str, float], str, str | None]:
 	"""``(demand_map, demand_source, driver)`` for the whole screen.
 
 	Order is the contract's: today's plan first because it is somebody's stated
@@ -828,7 +828,7 @@ def _resolve_demand(
 	return demand, source, driver
 
 
-def _resolve_consumption(company: str, base_codes: Set[str]) -> Dict[str, float]:
+def _resolve_consumption(company: str, base_codes: set[str]) -> dict[str, float]:
 	"""``{base_item_code: qty consumed per day}`` for the whole screen.
 
 	Bases are never sold, so ``jarz_velocity_60d`` is 0 for every one of them
@@ -858,12 +858,12 @@ def _resolve_consumption(company: str, base_codes: Set[str]) -> Dict[str, float]
 
 @frappe.whitelist()
 def get_base_items(
-	company: Optional[str] = None,
-	search: Optional[str] = None,
+	company: str | None = None,
+	search: str | None = None,
 	include_demand: Any = 1,
-	plan_date: Optional[str] = None,
+	plan_date: str | None = None,
 	include_cover: Any = 1,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	"""The bases the floor can make, with stock, capacity, demand and cover.
 
 	A "base item" is any item with a submitted default BOM that is not disabled
@@ -922,17 +922,17 @@ def get_base_items(
 	component_rows = _resolve_base_component_rows([row.get("default_bom") for row in rows])
 	jar_consumers = _resolve_jar_consumers(set(item_codes))
 
-	demand_map: Dict[str, float] = {}
+	demand_map: dict[str, float] = {}
 	demand_source = DEMAND_SOURCE_NONE
-	driver: Optional[str] = None
+	driver: str | None = None
 	if want_demand:
 		demand_map, demand_source, driver = _resolve_demand(company, plan_date, set(item_codes))
 
-	consumption_map: Dict[str, float] = {}
+	consumption_map: dict[str, float] = {}
 	if want_cover:
 		consumption_map = _resolve_consumption(company, set(item_codes))
 
-	items: List[Dict[str, Any]] = []
+	items: list[dict[str, Any]] = []
 	for row in rows:
 		item_code = row["item_code"]
 		batch_yield = bases.to_float(row.get("bom_qty"), 0.0)
@@ -1033,12 +1033,12 @@ def get_base_items(
 @frappe.whitelist()
 def preview_base_batch(
 	item_code: str,
-	bom_name: Optional[str] = None,
+	bom_name: str | None = None,
 	batches: Any = 1,
-	company: Optional[str] = None,
+	company: str | None = None,
 	material_selections: Any = None,
 	qty: Any = None,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	"""What one run of a base would consume, cost and produce.
 
 	``item_qty`` is the number the client hands straight to
@@ -1076,7 +1076,7 @@ def preview_base_batch(
 	# "Given" is not-None and not blank: a client that leaves the field empty
 	# sends ``""`` over HTTP and means "size this in batches", while a client
 	# that sends a 0 is asking for a run of nothing and gets told so.
-	requested_qty: Optional[float] = None
+	requested_qty: float | None = None
 	if qty is not None and str(qty).strip() != "":
 		requested_qty = bases.to_float(qty, 0.0)
 		if requested_qty <= 0:
@@ -1122,7 +1122,7 @@ def preview_base_batch(
 		bom_name, company, item_qty, material_selections=material_selections
 	)
 
-	components: List[Dict[str, Any]] = []
+	components: list[dict[str, Any]] = []
 	estimated_cost = 0.0
 	priced_any = False
 	has_shortage = False

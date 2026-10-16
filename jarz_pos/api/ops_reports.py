@@ -31,8 +31,9 @@ from __future__ import annotations
 
 import math
 import re
+from collections.abc import Iterable, Sequence
 from datetime import date, datetime, time, timedelta
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import frappe
 from frappe import _
@@ -45,9 +46,9 @@ from jarz_pos.constants import ACCOUNTS, ROLES
 NO_BRANCH = "(No Profile)"
 
 #: Channel keys the spec guarantees, always emitted in this order.
-SPEC_CHANNELS: Tuple[str, ...] = ("pos", "woo", "talabat", "b2b", "staff")
+SPEC_CHANNELS: tuple[str, ...] = ("pos", "woo", "talabat", "b2b", "staff")
 #: Extra channels, emitted only when they carry data (additive keys).
-EXTRA_CHANNELS: Tuple[str, ...] = ("samples", "partner")
+EXTRA_CHANNELS: tuple[str, ...] = ("samples", "partner")
 
 STATE_OFD = "Out for Delivery"
 STATE_DELIVERED = "Delivered"
@@ -83,12 +84,12 @@ def _r(value: Any, places: int = 2) -> float:
 	return 0.0 if out == 0 else out
 
 
-def _iso(value: Any) -> Optional[str]:
+def _iso(value: Any) -> str | None:
 	dt = _dt(value)
 	return dt.replace(microsecond=0).isoformat() if dt else None
 
 
-def _dt(value: Any) -> Optional[datetime]:
+def _dt(value: Any) -> datetime | None:
 	"""Coerce a DB value to a naive datetime (server local time)."""
 	if value is None or value == "":
 		return None
@@ -102,7 +103,7 @@ def _dt(value: Any) -> Optional[datetime]:
 		return None
 
 
-def _seconds_of_day(value: Any) -> Optional[float]:
+def _seconds_of_day(value: Any) -> float | None:
 	"""A Frappe Time value (timedelta, time or 'HH:MM[:SS]') as seconds."""
 	if value is None or value == "":
 		return None
@@ -123,7 +124,7 @@ def _minutes(later: datetime, earlier: datetime) -> float:
 	return (later - earlier).total_seconds() / 60.0
 
 
-def median(values: Sequence[float]) -> Optional[float]:
+def median(values: Sequence[float]) -> float | None:
 	vals = sorted(v for v in values if v is not None)
 	if not vals:
 		return None
@@ -133,7 +134,7 @@ def median(values: Sequence[float]) -> Optional[float]:
 	return round((vals[mid - 1] + vals[mid]) / 2.0, 1)
 
 
-def percentile(values: Sequence[float], pct: float) -> Optional[float]:
+def percentile(values: Sequence[float], pct: float) -> float | None:
 	"""Nearest-rank percentile (``pct`` in 0..100)."""
 	vals = sorted(v for v in values if v is not None)
 	if not vals:
@@ -147,7 +148,7 @@ def _chunks(seq: Sequence[str], size: int = _CHUNK) -> Iterable[Sequence[str]]:
 		yield seq[i : i + size]
 
 
-def _parse_dates(date_from: Optional[str], date_to: Optional[str]) -> Tuple[date, date]:
+def _parse_dates(date_from: str | None, date_to: str | None) -> tuple[date, date]:
 	today = getdate(nowdate())
 	fd = getdate(date_from) if date_from else getdate(get_first_day(today))
 	td = getdate(date_to) if date_to else today
@@ -156,7 +157,7 @@ def _parse_dates(date_from: Optional[str], date_to: Optional[str]) -> Tuple[date
 	return fd, td
 
 
-def _day_bounds(fd: date, td: date) -> Tuple[datetime, datetime]:
+def _day_bounds(fd: date, td: date) -> tuple[datetime, datetime]:
 	"""[fd 00:00, td+1 00:00) -- a sargable range for Datetime columns."""
 	return datetime.combine(fd, time.min), datetime.combine(td + timedelta(days=1), time.min)
 
@@ -164,7 +165,7 @@ def _day_bounds(fd: date, td: date) -> Tuple[datetime, datetime]:
 def _has_col(doctype: str, column: str) -> bool:
 	try:
 		return bool(frappe.db.has_column(doctype, column))
-	except Exception:  # noqa: BLE001 - a missing table reads as a missing column
+	except Exception:
 		return False
 
 
@@ -176,7 +177,7 @@ def _si_col(column: str, alias: str = "si", default: str = "NULL") -> str:
 # ── access ────────────────────────────────────────────────────────────────
 
 
-def _ensure_ops_report_access() -> Optional[List[str]]:
+def _ensure_ops_report_access() -> list[str] | None:
 	"""Gate every ops report; return the branch scope.
 
 	Returns ``None`` when the user may see every branch, otherwise the list of
@@ -194,9 +195,7 @@ def _ensure_ops_report_access() -> Optional[List[str]]:
 	return []  # unreachable; keeps type checkers quiet
 
 
-def _resolve_scope(
-	branch: Optional[str], allowed: Optional[List[str]]
-) -> Tuple[Optional[str], Optional[List[str]]]:
+def _resolve_scope(branch: str | None, allowed: list[str] | None) -> tuple[str | None, list[str] | None]:
 	"""Return (branch, scope). ``scope`` None = unrestricted; a list = only these."""
 	branch = (str(branch).strip() if branch else "") or None
 	if branch:
@@ -206,7 +205,7 @@ def _resolve_scope(
 	return None, allowed
 
 
-def _scope_sql(column_sql: str, scope: Optional[List[str]], params: Dict[str, Any]) -> str:
+def _scope_sql(column_sql: str, scope: list[str] | None, params: dict[str, Any]) -> str:
 	if scope is None:
 		return ""
 	if not scope:
@@ -216,8 +215,8 @@ def _scope_sql(column_sql: str, scope: Optional[List[str]], params: Dict[str, An
 
 
 def _filters_echo(
-	fd: date, td: date, branch: Optional[str], allowed: Optional[List[str]], **extra
-) -> Dict[str, Any]:
+	fd: date, td: date, branch: str | None, allowed: list[str] | None, **extra
+) -> dict[str, Any]:
 	out = {
 		"date_from": fd.isoformat(),
 		"date_to": td.isoformat(),
@@ -276,7 +275,7 @@ def _woo_origin_sql(alias: str = "si") -> str:
 	Woo-app columns are referenced by name only, behind ``has_column``.
 	"""
 	a = alias
-	origin: List[str] = []
+	origin: list[str] = []
 	if _has_col("Sales Invoice", "woo_source_type"):
 		origin.append(f"LOWER(TRIM(IFNULL({a}.`woo_source_type`, ''))) NOT IN ('', 'pos')")
 	if _has_col("Sales Invoice", "woo_transaction_id"):
@@ -315,7 +314,7 @@ def _channel_sql(alias: str = "si") -> str:
     END"""
 
 
-def _channel_list(acc: Dict[str, Dict[str, float]]) -> List[Dict[str, Any]]:
+def _channel_list(acc: dict[str, dict[str, float]]) -> list[dict[str, Any]]:
 	out = []
 	for ch in SPEC_CHANNELS:
 		row = acc.get(ch) or {}
@@ -331,19 +330,19 @@ def _channel_list(acc: Dict[str, Dict[str, float]]) -> List[Dict[str, Any]]:
 	return out
 
 
-def _payment_list(acc: Dict[str, float]) -> List[Dict[str, Any]]:
+def _payment_list(acc: dict[str, float]) -> list[dict[str, Any]]:
 	rows = [{"mode": m, "amount": _r(v)} for m, v in acc.items() if _r(v) != 0]
 	rows.sort(key=lambda r: (-abs(r["amount"]), r["mode"]))
 	return rows
 
 
 def build_daily_close(
-	filters: Dict[str, Any],
-	invoice_rows: List[Dict[str, Any]],
-	shipping_rows: List[Dict[str, Any]],
-	cancelled_rows: List[Dict[str, Any]],
-	payment_rows: List[Dict[str, Any]],
-) -> Dict[str, Any]:
+	filters: dict[str, Any],
+	invoice_rows: list[dict[str, Any]],
+	shipping_rows: list[dict[str, Any]],
+	cancelled_rows: list[dict[str, Any]],
+	payment_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
 	"""Assemble the daily-close payload from grouped rows.
 
 	``invoice_rows``: branch, channel, hour, orders, return_count, net_sales,
@@ -360,11 +359,11 @@ def build_daily_close(
 		"return_count": 0,
 		"outstanding": 0.0,
 	}
-	channels: Dict[str, Dict[str, float]] = {}
+	channels: dict[str, dict[str, float]] = {}
 	by_hour = {h: {"orders": 0, "net_sales": 0.0} for h in range(24)}
-	branches: Dict[str, Dict[str, Any]] = {}
+	branches: dict[str, dict[str, Any]] = {}
 
-	def branch_acc(name: str) -> Dict[str, Any]:
+	def branch_acc(name: str) -> dict[str, Any]:
 		return branches.setdefault(
 			name, {"orders": 0, "net_sales": 0.0, "shipping_income": 0.0, "channels": {}, "payments": {}}
 		)
@@ -409,14 +408,14 @@ def build_daily_close(
 		branch_acc(row.get("branch") or NO_BRANCH)["shipping_income"] += amt
 
 	cancelled_total = 0
-	cancelled_by_branch: Dict[str, int] = {}
+	cancelled_by_branch: dict[str, int] = {}
 	for row in cancelled_rows:
 		n = int(row.get("cancelled") or 0)
 		cancelled_total += n
 		b = row.get("branch") or NO_BRANCH
 		cancelled_by_branch[b] = cancelled_by_branch.get(b, 0) + n
 
-	payments: Dict[str, float] = {}
+	payments: dict[str, float] = {}
 	for row in payment_rows:
 		mode = (row.get("mode") or "").strip() or "Unspecified"
 		amt = _f(row.get("amount"))
@@ -507,7 +506,7 @@ def get_daily_close(date_from=None, date_to=None, branch=None):
 	fd, td = _parse_dates(date_from, date_to)
 	branch, scope = _resolve_scope(branch, allowed)
 
-	params: Dict[str, Any] = {"fd": fd, "td": td, "nb": NO_BRANCH}
+	params: dict[str, Any] = {"fd": fd, "td": td, "nb": NO_BRANCH}
 	cond = _scope_sql("si.pos_profile", scope, params)
 	branch_expr = "IFNULL(NULLIF(si.pos_profile, ''), %(nb)s)"
 	channel = _channel_sql("si")
@@ -618,7 +617,7 @@ def get_daily_close(date_from=None, date_to=None, branch=None):
 # ── A2: cash over / short ─────────────────────────────────────────────────
 
 
-def parse_discrepancy_remark(remark: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+def parse_discrepancy_remark(remark: str | None) -> tuple[str | None, str | None]:
 	"""Return (opening_entry, closing_label) from a shift discrepancy JE remark.
 
 	``closing_label`` is a POS Closing Entry name, or ``"Opening"`` for the
@@ -634,19 +633,19 @@ def parse_discrepancy_remark(remark: Optional[str]) -> Tuple[Optional[str], Opti
 	return (opening or None), (closing or None)
 
 
-def _over_short(diff: float) -> Tuple[float, float]:
+def _over_short(diff: float) -> tuple[float, float]:
 	"""(over, short) for one signed difference; short is a positive number."""
 	return (diff, 0.0) if diff > 0 else (0.0, -diff)
 
 
 def build_cash_over_short(
-	filters: Dict[str, Any],
+	filters: dict[str, Any],
 	fd: date,
-	shift_rows: List[Dict[str, Any]],
-	ledger_rows: List[Dict[str, Any]],
-	opening_branch: Dict[str, str],
-	scope: Optional[List[str]],
-) -> Dict[str, Any]:
+	shift_rows: list[dict[str, Any]],
+	ledger_rows: list[dict[str, Any]],
+	opening_branch: dict[str, str],
+	scope: list[str] | None,
+) -> dict[str, Any]:
 	"""Assemble the cash over/short payload.
 
 	``shift_rows`` (newest first): closing, opening, branch, user, full_name,
@@ -655,11 +654,11 @@ def build_cash_over_short(
 	Cash Over/Short account(s). ``opening_branch``: opening entry -> branch.
 	"""
 	totals = {"shifts": 0, "over": 0.0, "short": 0.0, "net": 0.0, "shifts_with_diff": 0}
-	by_branch: Dict[str, Dict[str, float]] = {}
-	by_user: Dict[str, Dict[str, Any]] = {}
+	by_branch: dict[str, dict[str, float]] = {}
+	by_user: dict[str, dict[str, Any]] = {}
 
 	# Opening-time variances (closing label "Opening") per opening entry.
-	opening_var: Dict[str, float] = {}
+	opening_var: dict[str, float] = {}
 	ledger = {
 		"over": 0.0,
 		"short": 0.0,
@@ -691,7 +690,7 @@ def build_cash_over_short(
 		else:
 			ledger["at_close_net"] += net
 
-	shifts_out: List[Dict[str, Any]] = []
+	shifts_out: list[dict[str, Any]] = []
 	for row in shift_rows:
 		diff = _f(row.get("difference"))
 		over, short = _over_short(diff)
@@ -779,7 +778,7 @@ def build_cash_over_short(
 	}
 
 
-def _over_short_accounts() -> List[str]:
+def _over_short_accounts() -> list[str]:
 	names = set()
 	try:
 		from jarz_pos.doctype.jarz_pos_settings.jarz_pos_settings import get_jarz_settings
@@ -788,7 +787,7 @@ def _over_short_accounts() -> List[str]:
 		configured = (getattr(settings, "cash_over_short_account", None) or "").strip() if settings else ""
 		if configured:
 			names.add(configured)
-	except Exception:  # noqa: BLE001 - settings are optional here
+	except Exception:
 		pass
 	names.update(
 		frappe.get_all(
@@ -826,7 +825,7 @@ def get_cash_over_short(date_from=None, date_to=None, branch=None):
 	branch, scope = _resolve_scope(branch, allowed)
 	start, end = _day_bounds(fd, td)
 
-	params: Dict[str, Any] = {"start": start, "end": end}
+	params: dict[str, Any] = {"start": start, "end": end}
 	cond = _scope_sql("pce.pos_profile", scope, params)
 
 	shift_rows = (
@@ -869,8 +868,8 @@ def get_cash_over_short(date_from=None, date_to=None, branch=None):
 		or []
 	)
 
-	ledger_rows: List[Dict[str, Any]] = []
-	opening_branch: Dict[str, str] = {}
+	ledger_rows: list[dict[str, Any]] = []
+	opening_branch: dict[str, str] = {}
 	accounts = _over_short_accounts()
 	if accounts:
 		ledger_rows = (
@@ -922,7 +921,7 @@ def get_cash_over_short(date_from=None, date_to=None, branch=None):
 
 def slot_window(
 	delivery_date: Any, time_from: Any, duration_seconds: Any
-) -> Tuple[Optional[datetime], Optional[datetime]]:
+) -> tuple[datetime | None, datetime | None]:
 	"""(slot_start, slot_end) from the Sales Invoice slot fields.
 
 	* date + time + duration -> [date time, date time + duration]
@@ -934,7 +933,7 @@ def slot_window(
 		return None, None
 	try:
 		d = getdate(delivery_date)
-	except Exception:  # noqa: BLE001
+	except Exception:
 		return None, None
 	secs = _seconds_of_day(time_from)
 	if secs is None:
@@ -945,7 +944,7 @@ def slot_window(
 	return start, (start + timedelta(seconds=dur) if dur > 0 else None)
 
 
-def _slot_label(row: Dict[str, Any], start: Optional[datetime], end: Optional[datetime]) -> Optional[str]:
+def _slot_label(row: dict[str, Any], start: datetime | None, end: datetime | None) -> str | None:
 	label = (row.get("slot_label") or "").strip()
 	if label:
 		return label
@@ -958,7 +957,7 @@ def _slot_label(row: Dict[str, Any], start: Optional[datetime], end: Optional[da
 	return f"{start:%Y-%m-%d %H:%M}"
 
 
-def _cancel_reason(row: Dict[str, Any]) -> str:
+def _cancel_reason(row: dict[str, Any]) -> str:
 	reason = str(row.get("cancellation_reason") or "").strip()
 	if reason:
 		# kanban.cancel_invoice stores "reason\nNotes: ..." -- group on the reason.
@@ -970,16 +969,16 @@ def _cancel_reason(row: Dict[str, Any]) -> str:
 
 
 def build_fulfilment_sla(
-	filters: Dict[str, Any],
+	filters: dict[str, Any],
 	fd: date,
 	td: date,
-	rows: List[Dict[str, Any]],
-	dispatch_at: Dict[str, Any],
-	delivered_log_at: Dict[str, Any],
+	rows: list[dict[str, Any]],
+	dispatch_at: dict[str, Any],
+	delivered_log_at: dict[str, Any],
 	returned: Iterable[str],
 	threshold_min: int,
 	now: datetime,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	"""Assemble the SLA payload. See ``get_fulfilment_sla`` for the rules.
 
 	``rows``: name, customer, customer_name, creation, docstatus, branch, state,
@@ -988,16 +987,16 @@ def build_fulfilment_sla(
 	"""
 	returned = set(returned)
 	totals = {"orders": 0, "delivered": 0, "cancelled": 0, "returned": 0, "late": 0, "open_late": 0}
-	disp_all: List[float] = []
-	deliv_all: List[float] = []
-	per_branch: Dict[str, Dict[str, Any]] = {}
-	per_day: Dict[str, Dict[str, Any]] = {}
+	disp_all: list[float] = []
+	deliv_all: list[float] = []
+	per_branch: dict[str, dict[str, Any]] = {}
+	per_day: dict[str, dict[str, Any]] = {}
 	d = fd
 	while d <= td:
 		per_day[d.isoformat()] = {"orders": 0, "deliver": [], "late": 0}
 		d += timedelta(days=1)
-	late_rows: List[Dict[str, Any]] = []
-	reasons: Dict[str, int] = {}
+	late_rows: list[dict[str, Any]] = []
+	reasons: dict[str, int] = {}
 
 	for row in rows:
 		name = row.get("name")
@@ -1194,7 +1193,7 @@ def get_fulfilment_sla(date_from=None, date_to=None, branch=None, late_threshold
 
 	kanban = _si_col("custom_kanban_profile", "si", "NULL")
 	branch_expr = f"COALESCE(NULLIF({kanban}, ''), NULLIF(si.pos_profile, ''))"
-	params: Dict[str, Any] = {"start": start, "end": end, "nb": NO_BRANCH}
+	params: dict[str, Any] = {"start": start, "end": end, "nb": NO_BRANCH}
 	cond = _scope_sql(branch_expr, scope, params)
 	cancel_type = _si_col("custom_cancellation_type", "si", "''")
 
@@ -1238,13 +1237,13 @@ def get_fulfilment_sla(date_from=None, date_to=None, branch=None, late_threshold
 	)
 
 	names = [r["name"] for r in rows if int(r.get("docstatus") or 0) == 1]
-	dispatch_at: Dict[str, Any] = {}
-	delivered_log_at: Dict[str, Any] = {}
+	dispatch_at: dict[str, Any] = {}
+	delivered_log_at: dict[str, Any] = {}
 	returned: set = set()
 	has_log = False
 	try:
 		has_log = bool(frappe.db.table_exists("Invoice State Log"))
-	except Exception:  # noqa: BLE001
+	except Exception:
 		has_log = False
 
 	for chunk in _chunks(names):

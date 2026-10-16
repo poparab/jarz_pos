@@ -18,11 +18,11 @@ import json
 import frappe
 
 from jarz_pos.api.price_lists import (
+	_can_access_b2b,
 	_category_rate,
 	_ensure_full_manager_pricing_access,
 	_ensure_pricing_read_access,
 	_has_manager_pricing_access,
-	_can_access_b2b,
 	_pricing_categories,
 )
 from jarz_pos.services.customer_deals import (

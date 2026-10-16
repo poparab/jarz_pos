@@ -33,7 +33,8 @@ API layer is a flag the staging harness and any background caller bypass.
 
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List, Optional
+from collections.abc import Iterable
+from typing import Any, Dict, List, Optional
 
 import frappe
 from frappe import _
@@ -65,7 +66,7 @@ def pin_gate_enabled() -> bool:
 		return False
 
 
-def invoice_delivery_address(invoice_name: str) -> Optional[str]:
+def invoice_delivery_address(invoice_name: str) -> str | None:
 	"""The Address an invoice will actually be delivered to, or ``None``.
 
 	``shipping_address_name`` first, ``customer_address`` as the fallback — the
@@ -92,7 +93,7 @@ def invoice_delivery_address(invoice_name: str) -> Optional[str]:
 	)
 
 
-def address_has_pin(address_name: Optional[str]) -> bool:
+def address_has_pin(address_name: str | None) -> bool:
 	"""True when *address_name* carries a usable coordinate pair.
 
 	Delegates the "usable" judgement to
@@ -134,7 +135,7 @@ def missing_pin_error(invoice_name: str) -> str:
 	).format(invoice_name)
 
 
-def build_missing_pin_errors(preview: Optional[Dict[str, Any]]) -> List[str]:
+def build_missing_pin_errors(preview: dict[str, Any] | None) -> list[str]:
 	"""Blockers for every invoice in *preview* whose address has no pin.
 
 	``preview`` is the dict from
@@ -150,7 +151,7 @@ def build_missing_pin_errors(preview: Optional[Dict[str, Any]]) -> List[str]:
 	if not invoice_names:
 		return []
 
-	errors: List[str] = []
+	errors: list[str] = []
 	for invoice_name in invoice_names:
 		try:
 			if invoice_has_delivery_pin(invoice_name):
@@ -169,7 +170,7 @@ def build_missing_pin_errors(preview: Optional[Dict[str, Any]]) -> List[str]:
 	return errors
 
 
-def _invoice_names(preview: Optional[Dict[str, Any]]) -> List[str]:
+def _invoice_names(preview: dict[str, Any] | None) -> list[str]:
 	"""Invoice names from a shortage preview, tolerant of a partial dict.
 
 	Both API modules' unit suites hand ``_build_ofd_preview_errors`` a
@@ -181,7 +182,7 @@ def _invoice_names(preview: Optional[Dict[str, Any]]) -> List[str]:
 	raw: Iterable[Any] = preview.get("invoices") or []
 	if isinstance(raw, (str, bytes)):
 		raw = [raw]
-	out: List[str] = []
+	out: list[str] = []
 	for item in raw:
 		name = str(item or "").strip()
 		if name and name not in out:

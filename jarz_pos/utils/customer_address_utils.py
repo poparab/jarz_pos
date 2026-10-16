@@ -4,7 +4,6 @@ from typing import Any, Dict, List, Optional
 
 import frappe
 
-
 ADDRESS_PHONE_FIELDS = ("mobile_no", "phone", "phone_no", "phone_number")
 
 
@@ -17,7 +16,7 @@ def _as_bool(value: Any) -> bool:
 	return normalized in {"1", "true", "yes", "y", "on"}
 
 
-def _address_fields() -> List[str]:
+def _address_fields() -> list[str]:
 	fields = [
 		"name",
 		"address_title",
@@ -38,7 +37,7 @@ def _address_fields() -> List[str]:
 	return fields
 
 
-def _address_phone(address_row: Dict[str, Any], fallback: str = "") -> str:
+def _address_phone(address_row: dict[str, Any], fallback: str = "") -> str:
 	for fieldname in ADDRESS_PHONE_FIELDS:
 		value = str(address_row.get(fieldname) or "").strip()
 		if value:
@@ -50,7 +49,7 @@ def _normalize_address_text(value: Any) -> str:
 	return " ".join(str(value or "").replace(",", " ").split()).strip().lower()
 
 
-def _normalize_address_row(address_row: Dict[str, Any]) -> Dict[str, Any]:
+def _normalize_address_row(address_row: dict[str, Any]) -> dict[str, Any]:
 	record = dict(address_row)
 	record["branch_name"] = str(record.get("address_title") or "").strip()
 	record["is_primary_address"] = _as_bool(record.get("is_primary_address"))
@@ -60,7 +59,7 @@ def _normalize_address_row(address_row: Dict[str, Any]) -> Dict[str, Any]:
 	return record
 
 
-def _address_signature(address_row: Dict[str, Any]) -> str:
+def _address_signature(address_row: dict[str, Any]) -> str:
 	parts = tuple(
 		_normalize_address_text(address_row.get(fieldname))
 		for fieldname in ("address_line1", "address_line2", "city")
@@ -70,14 +69,14 @@ def _address_signature(address_row: Dict[str, Any]) -> str:
 	return f"name:{_normalize_address_text(address_row.get('name'))}"
 
 
-def _is_shipping_candidate(address_row: Dict[str, Any]) -> bool:
+def _is_shipping_candidate(address_row: dict[str, Any]) -> bool:
 	return (
 		_as_bool(address_row.get("is_shipping_address"))
 		or str(address_row.get("address_type") or "").strip().lower() == "shipping"
 	)
 
 
-def _address_sort_key(address_row: Dict[str, Any]) -> tuple[int, int, str, str]:
+def _address_sort_key(address_row: dict[str, Any]) -> tuple[int, int, str, str]:
 	return (
 		1 if _is_shipping_candidate(address_row) else 0,
 		1 if _as_bool(address_row.get("is_primary_address")) else 0,
@@ -86,9 +85,9 @@ def _address_sort_key(address_row: Dict[str, Any]) -> tuple[int, int, str, str]:
 	)
 
 
-def _dedupe_address_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-	deduped: List[Dict[str, Any]] = []
-	seen: Dict[str, Dict[str, Any]] = {}
+def _dedupe_address_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+	deduped: list[dict[str, Any]] = []
+	seen: dict[str, dict[str, Any]] = {}
 
 	for row in sorted((_normalize_address_row(row) for row in rows), key=_address_sort_key, reverse=True):
 		signature = _address_signature(row)
@@ -108,7 +107,7 @@ def _dedupe_address_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 	return deduped
 
 
-def format_address_text(address_row: Dict[str, Any]) -> str:
+def format_address_text(address_row: dict[str, Any]) -> str:
 	parts = []
 	for fieldname in ("address_line1", "address_line2", "city"):
 		value = str(address_row.get(fieldname) or "").strip()
@@ -117,7 +116,7 @@ def format_address_text(address_row: Dict[str, Any]) -> str:
 	return ", ".join(parts)
 
 
-def get_linked_customer_address_names(customer: str) -> List[str]:
+def get_linked_customer_address_names(customer: str) -> list[str]:
 	rows = (
 		frappe.get_all(
 			"Dynamic Link",
@@ -132,7 +131,7 @@ def get_linked_customer_address_names(customer: str) -> List[str]:
 		or []
 	)
 
-	names: List[str] = []
+	names: list[str] = []
 	seen = set()
 	for row in rows:
 		parent_name = str(row.get("parent") or "").strip()
@@ -142,7 +141,7 @@ def get_linked_customer_address_names(customer: str) -> List[str]:
 	return names
 
 
-def get_linked_customer_addresses(customer: str) -> List[Dict[str, Any]]:
+def get_linked_customer_addresses(customer: str) -> list[dict[str, Any]]:
 	address_names = get_linked_customer_address_names(customer)
 	if not address_names:
 		return []
@@ -161,7 +160,7 @@ def get_linked_customer_addresses(customer: str) -> List[Dict[str, Any]]:
 	return [_normalize_address_row(row) for row in rows]
 
 
-def get_customer_shipping_addresses(customer: str) -> List[Dict[str, Any]]:
+def get_customer_shipping_addresses(customer: str) -> list[dict[str, Any]]:
 	# Return a stable, deduped address book for the customer.
 	# Shipping addresses stay first, but legacy linked addresses are still visible
 	# so previously saved customer addresses do not disappear from the picker.
@@ -170,9 +169,9 @@ def get_customer_shipping_addresses(customer: str) -> List[Dict[str, Any]]:
 
 def _resolve_candidate_by_name_or_signature(
 	customer: str,
-	address_name: Optional[str],
-	candidates: List[Dict[str, Any]],
-) -> Optional[Dict[str, Any]]:
+	address_name: str | None,
+	candidates: list[dict[str, Any]],
+) -> dict[str, Any] | None:
 	normalized_name = str(address_name or "").strip()
 	if not normalized_name:
 		return None
@@ -201,8 +200,8 @@ def _resolve_candidate_by_name_or_signature(
 
 def resolve_customer_shipping_address(
 	customer: str,
-	preferred_address_name: Optional[str] = None,
-) -> Optional[Dict[str, Any]]:
+	preferred_address_name: str | None = None,
+) -> dict[str, Any] | None:
 	candidates = get_customer_shipping_addresses(customer)
 	if not candidates:
 		return None
@@ -224,8 +223,8 @@ def resolve_customer_shipping_address(
 
 def preferred_address_was_honoured(
 	customer: str,
-	address_name: Optional[str],
-	resolved: Optional[Dict[str, Any]],
+	address_name: str | None,
+	resolved: dict[str, Any] | None,
 ) -> bool:
 	"""Did ``resolve_customer_shipping_address`` honour ``address_name``?
 
@@ -280,7 +279,7 @@ def preferred_address_was_honoured(
 	return _address_signature(raw_row) == _address_signature(resolved)
 
 
-def find_matching_customer_address(customer: str, address_text: str) -> Optional[Dict[str, Any]]:
+def find_matching_customer_address(customer: str, address_text: str) -> dict[str, Any] | None:
 	normalized_address = _normalize_address_text(address_text)
 	if not customer or not normalized_address:
 		return None
@@ -294,7 +293,7 @@ def find_matching_customer_address(customer: str, address_text: str) -> Optional
 	return None
 
 
-def ensure_shipping_address(address_name: str) -> Optional[Any]:
+def ensure_shipping_address(address_name: str) -> Any | None:
 	address_name = str(address_name or "").strip()
 	if not address_name or not frappe.db.exists("Address", address_name):
 		return None

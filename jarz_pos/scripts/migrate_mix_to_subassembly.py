@@ -67,7 +67,7 @@ MILKANA_KG_PER_BATCH = 2.5
 #   standard medium = 9.520 / 120     standard large = 9.520 / 77
 #   mango and tiramisu carry less because the fruit and the espresso stretch the
 #   same batch further; their figures are the ones already in the BOMs.
-JAR_MIX_QTY: Dict[str, float] = {
+JAR_MIX_QTY: dict[str, float] = {
 	"Blueberry Medium": 0.079333,
 	"Chocolate Hazelnut Medium": 0.079333,
 	"Lotus Medium": 0.079333,
@@ -110,7 +110,7 @@ FREEZER_SUB_ASSEMBLIES = (
 )
 
 # Medium jars must not consume 330 packaging.
-PACKAGING_SWAPS: Dict[str, Dict[str, str]] = {
+PACKAGING_SWAPS: dict[str, dict[str, str]] = {
 	"Mango Medium": {
 		"Glass Jar 330": "Glass Jar",
 		"Jar Lid 330": "Jar Lid",
@@ -123,13 +123,13 @@ PACKAGING_SWAPS: Dict[str, Dict[str, str]] = {
 # them.  This exists because the first apply deleted Tiramisu's espresso sugar
 # and nothing downstream could tell: the sugar shares an item code with the mix
 # share, so its absence looked like a successful removal.
-REQUIRED_EXTRA_COMPONENTS: Dict[str, Dict[str, Tuple[float, str]]] = {
+REQUIRED_EXTRA_COMPONENTS: dict[str, dict[str, tuple[float, str]]] = {
 	"Tiramisu Medium": {"powder sugar": (0.004, "Kg")},
 	"Tiramisu Large": {"powder sugar": (0.006, "Kg")},
 }
 
 # (qty, uom) corrections that survive the mix rebuild.
-QTY_CORRECTIONS: Dict[str, Dict[str, Tuple[float, str]]] = {
+QTY_CORRECTIONS: dict[str, dict[str, tuple[float, str]]] = {
 	# Entered as 0.020 Gram where every sibling uses 0.020 Kg.
 	"Redvelvet Large": {"jelly": (0.020, "Kg")},
 }
@@ -146,7 +146,7 @@ MIX_DERIVATION_TOLERANCE = 0.03
 # holds only the flattened half; the other half is inside the sub-assembly line
 # and contributes no milkana row. So it derives at 1.0x like everything else,
 # and an exemption here would make the guard fire on a BOM that is fine.
-DOUBLE_COUNTED_JARS: Dict[str, float] = {}
+DOUBLE_COUNTED_JARS: dict[str, float] = {}
 DOUBLE_COUNT_TOLERANCE = 0.05
 
 
@@ -173,11 +173,11 @@ def _mix_sugar_line(doc, target_mix: float):
 	return best
 
 
-def _default_bom(item_code: str) -> Optional[str]:
+def _default_bom(item_code: str) -> str | None:
 	return frappe.db.get_value("BOM", {"item": item_code, "is_default": 1, "docstatus": 1}, "name")
 
 
-def _derive_mix_from_milkana(bom_name: str) -> Optional[float]:
+def _derive_mix_from_milkana(bom_name: str) -> float | None:
 	"""How much mix a jar BOM currently carries, read off its milkana line."""
 	qty = frappe.db.get_value("BOM Item", {"parent": bom_name, "item_code": "milkana cheese"}, "stock_qty")
 	if not qty:
@@ -188,7 +188,7 @@ def _derive_mix_from_milkana(bom_name: str) -> Optional[float]:
 # ── Step 1: correct the mix BOM ─────────────────────────────────────────
 
 
-def rebuild_mix_bom(apply: bool) -> Dict[str, Any]:
+def rebuild_mix_bom(apply: bool) -> dict[str, Any]:
 	current = _default_bom(MIX_ITEM)
 	if not current:
 		return {"ok": False, "reason": f"{MIX_ITEM} has no submitted default BOM"}
@@ -241,9 +241,9 @@ def rebuild_mix_bom(apply: bool) -> Dict[str, Any]:
 # ── Step 2: rebuild the jar BOMs ────────────────────────────────────────
 
 
-def _missing_required_extras(doc, item_code: str) -> List[str]:
+def _missing_required_extras(doc, item_code: str) -> list[str]:
 	"""Declared non-mix components this BOM is missing or carrying at the wrong qty."""
-	missing: List[str] = []
+	missing: list[str] = []
 	for code, (qty, _uom) in REQUIRED_EXTRA_COMPONENTS.get(item_code, {}).items():
 		rows = [r for r in doc.items if r.item_code == code]
 		if not any(abs(flt(r.stock_qty) - qty) <= 1e-6 for r in rows):
@@ -280,7 +280,7 @@ def _already_migrated(doc, target_mix: float, item_code: str = "") -> bool:
 	return True
 
 
-def _plan_jar(item_code: str, mix_bom: str) -> Dict[str, Any]:
+def _plan_jar(item_code: str, mix_bom: str) -> dict[str, Any]:
 	bom_name = _default_bom(item_code)
 	if not bom_name:
 		return {"item_code": item_code, "skipped": "no default BOM"}
@@ -314,10 +314,10 @@ def _plan_jar(item_code: str, mix_bom: str) -> Dict[str, Any]:
 				f"check before applying"
 			)
 
-	removed: List[str] = []
-	adjusted: List[str] = []
-	swapped: List[str] = []
-	corrected: List[str] = []
+	removed: list[str] = []
+	adjusted: list[str] = []
+	swapped: list[str] = []
+	corrected: list[str] = []
 
 	sugar_row = _mix_sugar_line(doc, target_mix)
 	for row in doc.items:
@@ -364,7 +364,7 @@ def _plan_jar(item_code: str, mix_bom: str) -> Dict[str, Any]:
 	}
 
 
-def _rebuild_jar(plan: Dict[str, Any], mix_bom: str) -> Dict[str, Any]:
+def _rebuild_jar(plan: dict[str, Any], mix_bom: str) -> dict[str, Any]:
 	doc = frappe.get_doc("BOM", plan["from_bom"])
 	new = frappe.copy_doc(doc)
 	new.rm_cost_as_per = COST_BASIS
@@ -453,7 +453,7 @@ def _rebuild_jar(plan: Dict[str, Any], mix_bom: str) -> Dict[str, Any]:
 # ── Step 3: deactivate everything superseded ────────────────────────────
 
 
-def deactivate_superseded(apply: bool) -> Dict[str, Any]:
+def deactivate_superseded(apply: bool) -> dict[str, Any]:
 	rows = frappe.db.sql(
 		"""
         SELECT name, item FROM `tabBOM`
@@ -472,7 +472,7 @@ def deactivate_superseded(apply: bool) -> Dict[str, Any]:
 # ── Runner ──────────────────────────────────────────────────────────────
 
 
-def apply_now() -> Dict[str, Any]:
+def apply_now() -> dict[str, Any]:
 	"""Run the migration for real.
 
 	A no-argument entry point on purpose.  ``--kwargs "{'apply':True}"`` has to
@@ -484,7 +484,7 @@ def apply_now() -> Dict[str, Any]:
 	return run(apply=True)
 
 
-def run(apply: Any = False) -> Dict[str, Any]:
+def run(apply: Any = False) -> dict[str, Any]:
 	apply = bool(apply)
 	print("=" * 96)
 	print("JARZ — cheesecake mix to sub-assembly" + ("" if apply else "   (DRY RUN)"))

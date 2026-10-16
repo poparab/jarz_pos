@@ -45,7 +45,7 @@ class _Thrown(Exception):
 	"""Stand-in for frappe.throw so the raised message can be inspected."""
 
 
-def _throwing(message, *args, **kwargs):  # noqa: ARG001
+def _throwing(message, *args, **kwargs):
 	raise _Thrown(str(message))
 
 
@@ -151,12 +151,12 @@ class TestZeroOverrideEndToEnd(unittest.TestCase):
 				)
 
 	def test_manager_zero_override_is_audit_marked(self):
+		from jarz_pos.services.delivery_promotions import DeliveryPromotionDecision
 		from jarz_pos.tests.test_invoice_creation_accounting import (
 			_InvoiceDocCapture,
 			_mock_customer,
 			_mock_pos_profile,
 		)
-		from jarz_pos.services.delivery_promotions import DeliveryPromotionDecision
 
 		inv = _InvoiceDocCapture()
 		customer = _mock_customer()
@@ -405,12 +405,12 @@ class TestClientPricedAuditMarkerEndToEnd(unittest.TestCase):
 	but leaves the `[CLIENT PRICED]` breadcrumb."""
 
 	def test_client_priced_flag_is_stamped_on_the_invoice(self):
+		from jarz_pos.services.delivery_promotions import DeliveryPromotionDecision
 		from jarz_pos.tests.test_invoice_creation_accounting import (
 			_InvoiceDocCapture,
 			_mock_customer,
 			_mock_pos_profile,
 		)
-		from jarz_pos.services.delivery_promotions import DeliveryPromotionDecision
 
 		inv = _InvoiceDocCapture()
 		customer = _mock_customer()

@@ -60,7 +60,7 @@ def _for_company(company: str) -> None:
 			doc.insert()
 			name = doc.name
 			print(f"create_accrued_expenses_account: created {name} under {parent}")
-		for column, value in zip(("custom_account_name_en", "custom_account_name_ar"), LABELS):
+		for column, value in zip(("custom_account_name_en", "custom_account_name_ar"), LABELS, strict=False):
 			if frappe.db.has_column("Account", column) and not frappe.db.get_value("Account", name, column):
 				frappe.db.set_value("Account", name, column, value, update_modified=False)
 

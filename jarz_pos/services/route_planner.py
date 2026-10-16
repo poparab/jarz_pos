@@ -39,8 +39,9 @@ km/minutes a screen shows happens once, at the edge.
 from __future__ import annotations
 
 import math
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Tuple
 
 # ---------------------------------------------------------------------------
 # Tunables
@@ -95,7 +96,7 @@ class RoutePoint:
 	service_minutes: int = 0
 	label: str = ""
 
-	def as_coord(self) -> Tuple[float, float]:
+	def as_coord(self) -> tuple[float, float]:
 		return (self.lat, self.lng)
 
 
@@ -107,10 +108,10 @@ class CostMatrix:
 	changes what the numbers *mean*, and the UI has to say so.
 	"""
 
-	distances_m: List[List[float]]
-	durations_s: List[List[float]]
+	distances_m: list[list[float]]
+	durations_s: list[list[float]]
 	engine: str
-	note: Optional[str] = None
+	note: str | None = None
 
 	@property
 	def size(self) -> int:
@@ -136,13 +137,13 @@ class RouteResult:
 	rep already is, not somewhere to be scheduled.
 	"""
 
-	order: List[int]
-	legs: List[RouteLeg] = field(default_factory=list)
+	order: list[int]
+	legs: list[RouteLeg] = field(default_factory=list)
 	total_distance_m: float = 0.0
 	total_drive_s: float = 0.0
 	total_service_s: float = 0.0
 	engine: str = "haversine"
-	note: Optional[str] = None
+	note: str | None = None
 	improved: bool = False
 
 	@property
@@ -203,7 +204,7 @@ def build_matrix(
 	points: Sequence[RoutePoint],
 	road_factor: float = DEFAULT_ROAD_FACTOR,
 	speed_kmh: float = DEFAULT_SPEED_KMH,
-	osrm_provider: Optional[Callable[[Sequence[RoutePoint]], Optional[CostMatrix]]] = None,
+	osrm_provider: Callable[[Sequence[RoutePoint]], CostMatrix | None] | None = None,
 ) -> CostMatrix:
 	"""The engine ladder: real road distances if we can get them, else honest estimates.
 
@@ -242,7 +243,7 @@ def build_matrix(
 # ---------------------------------------------------------------------------
 
 
-def _route_cost(sequence: Sequence[int], matrix: CostMatrix, origin: Optional[int], close: bool) -> float:
+def _route_cost(sequence: Sequence[int], matrix: CostMatrix, origin: int | None, close: bool) -> float:
 	"""Total drive time of a visiting ``sequence``.
 
 	Optimising on *duration* rather than distance is the deliberate choice:
@@ -261,7 +262,7 @@ def _route_cost(sequence: Sequence[int], matrix: CostMatrix, origin: Optional[in
 	return total
 
 
-def _assemble(free_order: Sequence[int], reserved: Dict[int, int], length: int) -> List[int]:
+def _assemble(free_order: Sequence[int], reserved: dict[int, int], length: int) -> list[int]:
 	"""Interleave the solver's free stops with the pinned ones.
 
 	``reserved`` maps a position number to the point index nailed to it. The
@@ -269,7 +270,7 @@ def _assemble(free_order: Sequence[int], reserved: Dict[int, int], length: int) 
 	single place locking is enforced, which is why no improvement move needs to
 	know about it.
 	"""
-	assembled: List[int] = []
+	assembled: list[int] = []
 	free_iter = iter(free_order)
 	for position in range(length):
 		if position in reserved:
@@ -280,8 +281,8 @@ def _assemble(free_order: Sequence[int], reserved: Dict[int, int], length: int) 
 
 
 def _nearest_neighbour(
-	free: Sequence[int], matrix: CostMatrix, origin: Optional[int], reserved: Dict[int, int], length: int
-) -> List[int]:
+	free: Sequence[int], matrix: CostMatrix, origin: int | None, reserved: dict[int, int], length: int
+) -> list[int]:
 	"""Greedy construction: from where you are, go to the closest place left.
 
 	Walks the *assembled* route so a pinned stop genuinely influences what gets
@@ -289,7 +290,7 @@ def _nearest_neighbour(
 	sitting in the middle of the day and hand 2-opt a poor starting point.
 	"""
 	remaining = list(free)
-	chosen: List[int] = []
+	chosen: list[int] = []
 	current = origin
 	for position in range(length):
 		if position in reserved:
@@ -310,13 +311,13 @@ def _nearest_neighbour(
 
 
 def _two_opt(
-	free_order: List[int],
+	free_order: list[int],
 	matrix: CostMatrix,
-	origin: Optional[int],
-	reserved: Dict[int, int],
+	origin: int | None,
+	reserved: dict[int, int],
 	length: int,
 	close: bool,
-) -> Tuple[List[int], bool]:
+) -> tuple[list[int], bool]:
 	"""Uncross the route.
 
 	2-opt reverses a run of stops; the classic win is undoing the X-shaped
@@ -344,14 +345,14 @@ def _two_opt(
 
 
 def _or_opt(
-	free_order: List[int],
+	free_order: list[int],
 	matrix: CostMatrix,
-	origin: Optional[int],
-	reserved: Dict[int, int],
+	origin: int | None,
+	reserved: dict[int, int],
 	length: int,
 	close: bool,
 	max_segment: int = 3,
-) -> Tuple[List[int], bool]:
+) -> tuple[list[int], bool]:
 	"""Relocate short runs of stops.
 
 	2-opt cannot express "this one shop belongs at the other end of the day";
@@ -393,10 +394,10 @@ def _or_opt(
 def _solve(
 	matrix: CostMatrix,
 	stop_indices: Sequence[int],
-	origin: Optional[int],
-	reserved: Dict[int, int],
+	origin: int | None,
+	reserved: dict[int, int],
 	close: bool,
-) -> Tuple[List[int], float]:
+) -> tuple[list[int], float]:
 	"""Construct then improve. Returns the assembled order and its drive time."""
 	length = len(stop_indices)
 	free = [idx for idx in stop_indices if idx not in reserved.values()]
@@ -414,13 +415,13 @@ def _solve(
 
 def plan_route(
 	stops: Sequence[RoutePoint],
-	start: Optional[RoutePoint] = None,
+	start: RoutePoint | None = None,
 	return_to_start: bool = False,
 	road_factor: float = DEFAULT_ROAD_FACTOR,
 	speed_kmh: float = DEFAULT_SPEED_KMH,
 	default_visit_minutes: int = DEFAULT_VISIT_MINUTES,
-	osrm_provider: Optional[Callable[[Sequence[RoutePoint]], Optional[CostMatrix]]] = None,
-	matrix: Optional[CostMatrix] = None,
+	osrm_provider: Callable[[Sequence[RoutePoint]], CostMatrix | None] | None = None,
+	matrix: CostMatrix | None = None,
 ) -> RouteResult:
 	"""Order ``stops`` into the fastest route and cost it.
 
@@ -448,7 +449,7 @@ def plan_route(
 	if not stops:
 		return RouteResult(order=[], engine=(matrix.engine if matrix else "haversine"))
 
-	points: List[RoutePoint] = ([start] if start else []) + stops
+	points: list[RoutePoint] = ([start] if start else []) + stops
 	if matrix is None:
 		matrix = build_matrix(points, road_factor, speed_kmh, osrm_provider)
 
@@ -467,7 +468,7 @@ def plan_route(
 		# No fixed origin: every stop is a candidate opener. n solves of an
 		# n-stop problem is nothing at these sizes and removes the single
 		# biggest source of a bad greedy start.
-		best_assembled: Optional[List[int]] = None
+		best_assembled: list[int] | None = None
 		best_cost = float("inf")
 		if 0 in reserved:
 			# The rep pinned what they open with; there is nothing to search.
@@ -487,7 +488,7 @@ def plan_route(
 				best_assembled, best_cost = assembled_try, cost
 		assembled, drive_s = (best_assembled or stop_indices), best_cost
 
-	legs: List[RouteLeg] = []
+	legs: list[RouteLeg] = []
 	previous = 0 if start else assembled[0]
 	sequence_start = 0 if start else 1
 	for position in range(sequence_start, len(assembled)):
@@ -527,12 +528,12 @@ def plan_route(
 
 def cost_fixed_order(
 	stops: Sequence[RoutePoint],
-	start: Optional[RoutePoint] = None,
+	start: RoutePoint | None = None,
 	return_to_start: bool = False,
 	road_factor: float = DEFAULT_ROAD_FACTOR,
 	speed_kmh: float = DEFAULT_SPEED_KMH,
 	default_visit_minutes: int = DEFAULT_VISIT_MINUTES,
-	osrm_provider: Optional[Callable[[Sequence[RoutePoint]], Optional[CostMatrix]]] = None,
+	osrm_provider: Callable[[Sequence[RoutePoint]], CostMatrix | None] | None = None,
 ) -> RouteResult:
 	"""Cost ``stops`` exactly as given, optimising nothing.
 

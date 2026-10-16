@@ -54,8 +54,14 @@ from __future__ import annotations
 import re
 from datetime import (
 	date as _date_cls,
+)
+from datetime import (
 	datetime as _datetime_cls,
+)
+from datetime import (
 	time as _time_cls,
+)
+from datetime import (
 	timedelta as _timedelta_cls,
 )
 from typing import Any, Optional, Tuple
@@ -100,7 +106,7 @@ def _invalid(value: Any) -> None:
 	frappe.throw(_("Invalid posting date/time: {0}").format(value))
 
 
-def _format_fraction(fraction: Optional[str]) -> str:
+def _format_fraction(fraction: str | None) -> str:
 	"""Normalise a ``.123`` / ``.123456789`` fraction to Frappe's 6 digits.
 
 	An all-zero fraction returns ``""``.  Dart's ``toIso8601String()`` always
@@ -127,7 +133,7 @@ def _compose_time(hour: int, minute: int, second: int, fraction: str) -> str:
 	return f"{hour:02d}:{minute:02d}:{second:02d}{fraction}"
 
 
-def _parse_text(text: str) -> Tuple[Optional[str], Optional[str]]:
+def _parse_text(text: str) -> tuple[str | None, str | None]:
 	"""Split an already-stripped, non-empty string. Throws if it is not ours."""
 	match = _POSTING_DATETIME_RE.match(text)
 	if not match:
@@ -166,7 +172,7 @@ def _parse_text(text: str) -> Tuple[Optional[str], Optional[str]]:
 	return date_text, time_text
 
 
-def split_posting_datetime(value: Any) -> Tuple[Optional[str], Optional[str]]:
+def split_posting_datetime(value: Any) -> tuple[str | None, str | None]:
 	"""Split an operator-supplied posting moment into ``(date, time)`` strings.
 
 	``('2026-09-08 14:30:00')`` -> ``('2026-09-08', '14:30:00')``
@@ -201,7 +207,7 @@ def split_posting_datetime(value: Any) -> Tuple[Optional[str], Optional[str]]:
 	return _parse_text(text)
 
 
-def format_time_value(value: Any) -> Optional[str]:
+def format_time_value(value: Any) -> str | None:
 	"""Render a Frappe ``Time`` field value as ``HH:MM:SS[.ffffff]``.
 
 	Frappe hands a ``Time`` column back as a ``datetime.timedelta``, not a
@@ -242,7 +248,7 @@ def format_time_value(value: Any) -> Optional[str]:
 		return None
 
 
-def join_posting_datetime(date_value: Any, time_value: Any) -> Optional[str]:
+def join_posting_datetime(date_value: Any, time_value: Any) -> str | None:
 	"""Rebuild a ``"YYYY-MM-DD HH:MM:SS"`` string from two stored halves.
 
 	For the flows that persist the date on one document and the time on another

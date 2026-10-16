@@ -15,7 +15,7 @@ from typing import Any, Dict, Tuple
 import frappe
 
 
-def _call(module: str, func: str, kwargs: Dict[str, Any] | None = None) -> Tuple[bool, Any]:
+def _call(module: str, func: str, kwargs: dict[str, Any] | None = None) -> tuple[bool, Any]:
 	try:
 		mod = importlib.import_module(module)
 		fn = getattr(mod, func)
@@ -24,10 +24,10 @@ def _call(module: str, func: str, kwargs: Dict[str, Any] | None = None) -> Tuple
 		return False, {"error": str(e), "trace": traceback.format_exc(limit=3)}
 
 
-def run() -> Dict[str, Any]:
-	results: Dict[str, Any] = {}
+def run() -> dict[str, Any]:
+	results: dict[str, Any] = {}
 
-	def rec(mod: str, fn: str, kwargs: Dict[str, Any] | None = None):
+	def rec(mod: str, fn: str, kwargs: dict[str, Any] | None = None):
 		key = f"{mod}.{fn}"
 		ok, val = _call(mod, fn, kwargs)
 		results[key] = {"ok": ok, "result": val if ok else None, "error": None if ok else val}

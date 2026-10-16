@@ -45,7 +45,7 @@ def _idx_of(row: Any) -> int:
 		return 0
 
 
-def renumber_steps(rows: Any) -> List[Any]:
+def renumber_steps(rows: Any) -> list[Any]:
 	"""Assign ``step_no`` 1..n in ``idx`` order.
 
 	``sorted`` is stable, so rows that share an ``idx`` (or have none) keep the

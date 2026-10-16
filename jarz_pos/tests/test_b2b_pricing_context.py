@@ -1,11 +1,10 @@
-from types import SimpleNamespace
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import frappe
 
 from jarz_pos.api import pos
-
 
 PROFILE = "_TEST B2B POS"
 CUSTOMER = "_TEST B2B Customer"

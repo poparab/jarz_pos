@@ -3,17 +3,18 @@ This module provides common helper functions that are used across different API 
 """
 
 from __future__ import annotations
-import frappe
+
 import re
 import unicodedata
-from typing import Dict, List, Any, Optional, Union
+from typing import Any, Dict, List, Optional, Union
+
+import frappe
 
 from jarz_pos.utils.address_pins import (
 	get_address_pin_map,
 	invoice_pin_override,
 	pin_fields_for,
 )
-
 
 _PRINT_CONTROL_PATTERN = re.compile(r"[\x00-\x08\x0B-\x1F\x7F-\x9F]")
 _HTML_TAG_PATTERN = re.compile(r"<[^>]+>")
@@ -67,7 +68,7 @@ ORDER_CHANNEL_FIELD = "custom_order_channel"
 POS_SOURCE_TYPE = "pos"
 
 
-def _append_unique_line(existing: Any, marker: str) -> Optional[str]:
+def _append_unique_line(existing: Any, marker: str) -> str | None:
 	"""Return ``existing`` with ``marker`` appended on its own line.
 
 	Returns ``None`` when there is nothing to do (blank marker, or the marker is
@@ -204,7 +205,7 @@ def _log_loud(logger, message: str, title: str) -> None:
 def set_invoice_fields(invoice_doc, customer_doc, pos_profile, delivery_datetime, logger):
 	"""Set basic fields on the Sales Invoice document."""
 	logger.debug("Setting invoice fields...")
-	print(f"   Setting basic invoice fields...")
+	print("   Setting basic invoice fields...")
 
 	# Set basic invoice fields
 	invoice_doc.customer = customer_doc.name
@@ -353,7 +354,7 @@ def add_items_to_invoice(invoice_doc, processed_items, logger):
 			)
 
 		except Exception as e:
-			error_msg = f"Error adding item {item_data.get('item_code','Unknown')}: {str(e)}"
+			error_msg = f"Error adding item {item_data.get('item_code','Unknown')}: {e!s}"
 			logger.error(error_msg)
 			print(f"   ❌ {error_msg}")
 			raise
@@ -364,7 +365,7 @@ def add_items_to_invoice(invoice_doc, processed_items, logger):
 			f"   💸 Discount bearing lines: {discount_items}; Estimated total discount: {total_planned_discount}"
 		)
 	else:
-		print(f"   ℹ️ No discount lines detected in added items")
+		print("   ℹ️ No discount lines detected in added items")
 
 
 def add_delivery_charges_to_invoice(invoice_doc, delivery_charges, pos_profile, logger):
@@ -382,7 +383,7 @@ def add_delivery_charges_to_invoice(invoice_doc, delivery_charges, pos_profile, 
 
 		logger.info(f"Delivery charges total: ${total_delivery:.2f} (handled in taxes section)")
 		print(f"   📦 Delivery charges total: ${total_delivery:.2f}")
-		print(f"   💡 Delivery charges are handled in taxes section, not as items")
+		print("   💡 Delivery charges are handled in taxes section, not as items")
 
 		# Optionally add a note to the invoice remarks
 		for i, charge in enumerate(delivery_charges, 1):
@@ -393,15 +394,15 @@ def add_delivery_charges_to_invoice(invoice_doc, delivery_charges, pos_profile, 
 			print(f"      {i}. {charge_desc}: ${charge_amount:.2f}")
 
 	else:
-		print(f"   📦 No delivery charges to process")
+		print("   📦 No delivery charges to process")
 
-	print(f"   ✅ Delivery charges processing completed (handled in taxes)")
+	print("   ✅ Delivery charges processing completed (handled in taxes)")
 
 
 def verify_invoice_totals(invoice_doc, logger):
 	"""Verify that invoice totals are calculated correctly."""
 	logger.debug("Verifying invoice totals...")
-	print(f"   Verifying invoice totals...")
+	print("   Verifying invoice totals...")
 
 	try:
 		# Calculate expected totals
@@ -426,13 +427,13 @@ def verify_invoice_totals(invoice_doc, logger):
 		print(f"   ✅ Totals verified: Net=${invoice_doc.net_total}, Grand=${invoice_doc.grand_total}")
 
 	except Exception as e:
-		error_msg = f"Error verifying invoice totals: {str(e)}"
+		error_msg = f"Error verifying invoice totals: {e!s}"
 		logger.error(error_msg)
 		print(f"   ❌ {error_msg}")
 		raise
 
 
-def get_territory_labels(territory: str | None) -> Dict[str, str]:
+def get_territory_labels(territory: str | None) -> dict[str, str]:
 	"""Human names for a Territory whose record name is a WooCommerce area code.
 
 	Territories synced from WooCommerce are *named* by their Woo state code
@@ -508,7 +509,7 @@ def get_address_details(address_name: str) -> str:
 			)
 		return full_address.strip(", ")
 	except Exception as e:
-		frappe.log_error(f"Error fetching address details: {str(e)}", "Address Utils")
+		frappe.log_error(f"Error fetching address details: {e!s}", "Address Utils")
 		return ""
 
 
@@ -546,7 +547,7 @@ def read_invoice_shipping_income(invoice: Any) -> float:
 	return 0.0
 
 
-def normalize_woo_order_id(value: Any) -> Optional[int]:
+def normalize_woo_order_id(value: Any) -> int | None:
 	"""Return the WooCommerce order id, or ``None`` when the order isn't a Woo order.
 
 	``woo_order_id`` is an ``Int`` custom field on Sales Invoice, so an order that
@@ -561,7 +562,7 @@ def normalize_woo_order_id(value: Any) -> Optional[int]:
 	return woo_id or None
 
 
-def get_woo_order_ids(invoice_names) -> Dict[str, int]:
+def get_woo_order_ids(invoice_names) -> dict[str, int]:
 	"""Batch-map Sales Invoice name -> WooCommerce order id.
 
 	Only invoices that actually carry a Woo id appear in the result, so a plain
@@ -583,7 +584,7 @@ def get_woo_order_ids(invoice_names) -> Dict[str, int]:
 		frappe.log_error(frappe.get_traceback(), "Jarz POS get_woo_order_ids failed")
 		return {}
 
-	out: Dict[str, int] = {}
+	out: dict[str, int] = {}
 	for row in rows:
 		woo_id = normalize_woo_order_id(row.get("woo_order_id"))
 		if woo_id is not None:
@@ -594,7 +595,7 @@ def get_woo_order_ids(invoice_names) -> Dict[str, int]:
 def _derive_bundle_group_metadata(
 	bundle_code: str,
 	item_code: str,
-	cache: Dict[str, Dict[str, Dict[str, str]]],
+	cache: dict[str, dict[str, dict[str, str]]],
 ) -> tuple:
 	"""Return (group_key, group_name) for a bundle child item.
 
@@ -605,7 +606,7 @@ def _derive_bundle_group_metadata(
 	cannot be resolved.
 	"""
 	if bundle_code not in cache:
-		bundle_map: Dict[str, Dict[str, str]] = {}
+		bundle_map: dict[str, dict[str, str]] = {}
 		try:
 			bundle_doc = frappe.get_doc("Jarz Bundle", bundle_code)
 			for group_row in bundle_doc.items:
@@ -634,7 +635,7 @@ def _derive_bundle_group_metadata(
 
 def _derive_bundle_code_from_parent_item(
 	item_code: str,
-	cache: Dict[str, str],
+	cache: dict[str, str],
 ) -> str:
 	"""Return Jarz Bundle name linked to a bundle parent ERPNext item."""
 	item_code = str(item_code or "").strip()
@@ -661,7 +662,7 @@ def _derive_bundle_code_from_parent_item(
 	return cache[item_code]
 
 
-def format_invoice_data(invoice: frappe.Document) -> Dict[str, Any]:
+def format_invoice_data(invoice: frappe.Document) -> dict[str, Any]:
 	"""Format a Sales Invoice document into a standardized dictionary format.
 
 	Args:
@@ -677,8 +678,8 @@ def format_invoice_data(invoice: frappe.Document) -> Dict[str, Any]:
 	# Get items
 	items = []
 	_has_bundle_parent_missing_code = False
-	_bundle_group_derivation_cache: Dict[str, Dict[str, Dict[str, str]]] = {}
-	_bundle_parent_derivation_cache: Dict[str, str] = {}
+	_bundle_group_derivation_cache: dict[str, dict[str, dict[str, str]]] = {}
+	_bundle_parent_derivation_cache: dict[str, str] = {}
 	for item in invoice.items:
 		bundle_code_val = getattr(item, "bundle_code", None)
 		if bundle_code_val is None:
@@ -811,7 +812,7 @@ def format_invoice_data(invoice: frappe.Document) -> Dict[str, Any]:
 	return data
 
 
-def apply_invoice_filters(filters: Optional[Union[str, Dict]] = None) -> Dict[str, Any]:
+def apply_invoice_filters(filters: str | dict | None = None) -> dict[str, Any]:
 	"""Process and apply filters for Sales Invoice queries.
 
 	Args:
@@ -843,7 +844,7 @@ def apply_invoice_filters(filters: Optional[Union[str, Dict]] = None) -> Dict[st
 			frappe.log_error(f"Invalid JSON in filters: {filters}", "Filter Processing")
 			return filter_conditions
 
-	def _normalise_date(value: Any) -> Optional[str]:
+	def _normalise_date(value: Any) -> str | None:
 		if value in (None, ""):
 			return None
 		text = str(value).strip()
@@ -910,7 +911,7 @@ def apply_invoice_filters(filters: Optional[Union[str, Dict]] = None) -> Dict[st
 	return filter_conditions
 
 
-def _coerce_amount(value: Any) -> Optional[float]:
+def _coerce_amount(value: Any) -> float | None:
 	"""Parse a client-supplied amount bound, treating blanks as "no bound"."""
 	if value in (None, ""):
 		return None
@@ -990,7 +991,7 @@ def _fold_territory_lookup_text(value: Any) -> str:
 	return re.sub(r"\s+", " ", text).strip()
 
 
-def _folded_territory_index() -> Dict[str, Optional[str]]:
+def _folded_territory_index() -> dict[str, str | None]:
 	"""Map folded label → Territory name, or → None where the label is ambiguous.
 
 	Cached per request: it is only built when exact matching has already failed.
@@ -999,7 +1000,7 @@ def _folded_territory_index() -> Dict[str, Optional[str]]:
 	if cached is not None:
 		return cached
 
-	index: Dict[str, Optional[str]] = {}
+	index: dict[str, str | None] = {}
 	try:
 		fields = ["name"] + [f for f in _TERRITORY_LOOKUP_FIELDS if _territory_has_column(f)]
 		for row in frappe.get_all("Territory", fields=fields, limit=0):
@@ -1034,7 +1035,7 @@ def _territory_has_column(fieldname: str) -> bool:
 			return False
 
 
-def _lookup_territory_by_field(fieldname: str, value: str) -> Optional[str]:
+def _lookup_territory_by_field(fieldname: str, value: str) -> str | None:
 	if not value:
 		return None
 	try:
@@ -1053,7 +1054,7 @@ def _lookup_territory_by_field(fieldname: str, value: str) -> Optional[str]:
 		return None
 
 
-def resolve_territory_name(territory_value: Any) -> Optional[str]:
+def resolve_territory_name(territory_value: Any) -> str | None:
 	"""Return the canonical Territory name for a code/display value, if known."""
 	candidates = _territory_lookup_candidates(territory_value)
 	if not candidates:
@@ -1107,7 +1108,7 @@ def resolve_territory_name(territory_value: Any) -> Optional[str]:
 ADDRESS_TERRITORY_FIELD_PRECEDENCE = ("city", "state")
 
 
-def _territory_from_address_row(address_row: Optional[Dict[str, Any]]) -> Optional[str]:
+def _territory_from_address_row(address_row: dict[str, Any] | None) -> str | None:
 	"""First field in :data:`ADDRESS_TERRITORY_FIELD_PRECEDENCE` that resolves."""
 	if not address_row:
 		return None
@@ -1120,8 +1121,8 @@ def _territory_from_address_row(address_row: Optional[Dict[str, Any]]) -> Option
 
 
 def describe_address_territory_resolution(
-	address_row: Optional[Dict[str, Any]],
-) -> Dict[str, Any]:
+	address_row: dict[str, Any] | None,
+) -> dict[str, Any]:
 	"""Explain how an Address row resolves to a Territory, field by field.
 
 	Diagnostic only — it changes nothing.  It exists so the city-vs-state question
@@ -1133,7 +1134,7 @@ def describe_address_territory_resolution(
 	Returns a dict with the raw values, the per-field resolutions, the winner and
 	which field won.  Never raises.
 	"""
-	result: Dict[str, Any] = {
+	result: dict[str, Any] = {
 		"resolved_territory": None,
 		"resolved_from": None,
 		"fields_disagree": False,
@@ -1158,7 +1159,7 @@ def describe_address_territory_resolution(
 	return result
 
 
-def resolve_address_territory(address_name: str | None) -> Optional[str]:
+def resolve_address_territory(address_name: str | None) -> str | None:
 	"""Resolve a selected Address to a Territory using Jarz's Address.city convention."""
 	address_name = str(address_name or "").strip()
 	if not address_name:
@@ -1180,8 +1181,8 @@ def resolve_order_territory(
 	customer_name: str | None,
 	*,
 	shipping_address_name: str | None = None,
-	resolved_shipping_address: Optional[Dict[str, Any]] = None,
-) -> Optional[str]:
+	resolved_shipping_address: dict[str, Any] | None = None,
+) -> str | None:
 	"""Resolve the territory that should control a POS order.
 
 	Precedence, highest first (F-07 — explicit on purpose, do not reorder without
@@ -1218,7 +1219,7 @@ def resolve_order_territory(
 	return resolve_territory_name(customer_territory)
 
 
-def resolve_pos_profile_for_territory(territory_name: str | None) -> Optional[str]:
+def resolve_pos_profile_for_territory(territory_name: str | None) -> str | None:
 	territory_name = resolve_territory_name(territory_name)
 	if not territory_name:
 		return None
@@ -1232,7 +1233,7 @@ def resolve_pos_profile_for_territory(territory_name: str | None) -> Optional[st
 	return frappe.db.get_value("Territory", territory_name, "pos_profile") or None
 
 
-def resolve_territory_pos_profile(customer_name: str, territory_name: str | None = None) -> Optional[str]:
+def resolve_territory_pos_profile(customer_name: str, territory_name: str | None = None) -> str | None:
 	"""Return the POS Profile configured on the customer's territory, or None if not set.
 
 	Returns None when:

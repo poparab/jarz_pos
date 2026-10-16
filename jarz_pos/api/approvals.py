@@ -62,7 +62,7 @@ def _log(key: str) -> None:
 		pass
 
 
-def _month_of(value: Any) -> Optional[str]:
+def _month_of(value: Any) -> str | None:
 	text = str(value or "").strip()
 	return text[:7] if len(text) >= 7 else None
 
@@ -74,7 +74,7 @@ def _month_of(value: Any) -> Optional[str]:
 # filed last month is counted here and invisible there.
 
 
-def _expenses_queue() -> Optional[Dict[str, Any]]:
+def _expenses_queue() -> dict[str, Any] | None:
 	from jarz_pos.api.expenses import _is_manager
 
 	if not _is_manager():
@@ -97,7 +97,7 @@ def _expenses_queue() -> Optional[Dict[str, Any]]:
 	return {"count": count, "oldest_month": oldest}
 
 
-def _employee_advances_queue() -> Optional[Dict[str, Any]]:
+def _employee_advances_queue() -> dict[str, Any] | None:
 	from jarz_pos.api.employee_advances import _can_approve, hrms_available
 
 	if not _can_approve() or not hrms_available():
@@ -119,14 +119,14 @@ def _employee_advances_queue() -> Optional[Dict[str, Any]]:
 	return {"count": count, "oldest_month": oldest}
 
 
-def _item_requests_queue() -> Optional[Dict[str, Any]]:
+def _item_requests_queue() -> dict[str, Any] | None:
 	from jarz_pos.api import purchase_request
 
 	# Reviewers only: "Accept" is the review action, and a requester's own open
 	# requests are waiting on somebody else, not on them.
 	if not purchase_request._can_review():
 		return None
-	filters: Dict[str, Any] = {
+	filters: dict[str, Any] = {
 		"material_request_type": "Purchase",
 		"docstatus": 1,
 		"status": ["in", list(purchase_request.OPEN_STATUSES)],
@@ -136,7 +136,7 @@ def _item_requests_queue() -> Optional[Dict[str, Any]]:
 	return {"count": int(frappe.db.count("Material Request", filters=filters) or 0)}
 
 
-def _payment_receipts_queue() -> Optional[Dict[str, Any]]:
+def _payment_receipts_queue() -> dict[str, Any] | None:
 	from jarz_pos.api import payment_receipts
 
 	# The confirm gate with no branch named answers "may this user confirm
@@ -157,7 +157,7 @@ def _payment_receipts_queue() -> Optional[Dict[str, Any]]:
 	return {"count": int(count or 0)}
 
 
-def _custom_shipping_queue() -> Optional[Dict[str, Any]]:
+def _custom_shipping_queue() -> dict[str, Any] | None:
 	from jarz_pos.api.custom_shipping import _can_approve_shipping
 
 	if not _can_approve_shipping():
@@ -180,7 +180,7 @@ def _task_board_viewer():
 	return viewer if viewer.is_board_user else None
 
 
-def _tasks_assigned_queue() -> Optional[Dict[str, Any]]:
+def _tasks_assigned_queue() -> dict[str, Any] | None:
 	from jarz_pos.services import task_board
 
 	viewer = _task_board_viewer()
@@ -190,7 +190,7 @@ def _tasks_assigned_queue() -> Optional[Dict[str, Any]]:
 	return {"count": task_board.count_assigned_open(viewer.user)}
 
 
-def _tasks_review_queue() -> Optional[Dict[str, Any]]:
+def _tasks_review_queue() -> dict[str, Any] | None:
 	from jarz_pos.services import task_board
 
 	viewer = _task_board_viewer()
@@ -201,7 +201,7 @@ def _tasks_review_queue() -> Optional[Dict[str, Any]]:
 	return {"count": task_board.count_review_waiting(viewer)}
 
 
-def _credit_collections_queue() -> Optional[Dict[str, Any]]:
+def _credit_collections_queue() -> dict[str, Any] | None:
 	from jarz_pos.api.manager import _has_manager_dashboard_access
 	from jarz_pos.api.settlement_terms import count_collections_needing_attention
 
@@ -215,7 +215,7 @@ def _credit_collections_queue() -> Optional[Dict[str, Any]]:
 	return {"count": int(count_collections_needing_attention() or 0)}
 
 
-_QUEUES: List[tuple] = [
+_QUEUES: list[tuple] = [
 	(Q_EXPENSES, _expenses_queue),
 	(Q_EMPLOYEE_ADVANCES, _employee_advances_queue),
 	(Q_ITEM_REQUESTS, _item_requests_queue),
@@ -228,7 +228,7 @@ _QUEUES: List[tuple] = [
 
 
 @frappe.whitelist()
-def get_pending_approvals() -> Dict[str, Any]:
+def get_pending_approvals() -> dict[str, Any]:
 	"""Counts of everything awaiting the caller's decision.
 
 	Returns ``{"eligible", "total", "queues": [{"key", "count", ...}]}``.
@@ -238,7 +238,7 @@ def get_pending_approvals() -> Dict[str, Any]:
 	answer that cannot change. ``queues`` lists every queue the caller may act
 	on, including ones at zero, in a fixed order.
 	"""
-	queues: List[Dict[str, Any]] = []
+	queues: list[dict[str, Any]] = []
 	eligible = False
 	for key, build in _QUEUES:
 		try:

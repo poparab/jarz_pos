@@ -42,7 +42,7 @@ except Exception:
 	frappe = None  # type: ignore
 
 
-def clamp_geo_confidence(doc: Any, method: Optional[str] = None) -> None:
+def clamp_geo_confidence(doc: Any, method: str | None = None) -> None:
 	"""Force ``custom_geo_confidence`` to agree with ``custom_geo_source``.
 
 	In-memory only, no queries, never raises. See the module docstring for why

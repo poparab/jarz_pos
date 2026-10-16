@@ -69,7 +69,8 @@ reads ``{{item:SUGR}}`` is visibly broken and gets fixed.
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from collections.abc import Mapping, Sequence
+from typing import Any, Dict, List, Optional, Tuple
 
 # ── Vocabulary shared with the DocType Select options ───────────────────
 # Kept here rather than in constants.py so the pure module stays importable
@@ -180,7 +181,7 @@ def format_version_stamp(sop_name: Any, version: Any) -> str:
 	return f"{name}{VERSION_STAMP_SEPARATOR}{number}"
 
 
-def parse_version_stamp(stamp: Any) -> Tuple[Optional[str], Optional[int]]:
+def parse_version_stamp(stamp: Any) -> tuple[str | None, int | None]:
 	"""Split a stamp back into ``(sop_name, version)``.
 
 	Tolerant by design — a malformed or empty stamp yields ``(None, None)`` so
@@ -202,19 +203,19 @@ def parse_version_stamp(stamp: Any) -> Tuple[Optional[str], Optional[int]]:
 	return name, version
 
 
-def _remember(bucket: List[str], value: str) -> None:
+def _remember(bucket: list[str], value: str) -> None:
 	"""Append preserving first-seen order, without duplicates."""
 	if value and value not in bucket:
 		bucket.append(value)
 
 
-def _lowered_index(*maps: Mapping[str, Any]) -> Dict[str, str]:
+def _lowered_index(*maps: Mapping[str, Any]) -> dict[str, str]:
 	"""Case-insensitive fallback index of every known component code.
 
 	Item codes are typed by hand into the instruction; matching only on an
 	exact case would fail the author for a reason they cannot see.
 	"""
-	index: Dict[str, str] = {}
+	index: dict[str, str] = {}
 	for mapping in maps:
 		for code in mapping or {}:
 			key = str(code).strip().lower()
@@ -223,7 +224,7 @@ def _lowered_index(*maps: Mapping[str, Any]) -> Dict[str, str]:
 	return index
 
 
-def _parse_multiplier(segment: str) -> Optional[float]:
+def _parse_multiplier(segment: str) -> float | None:
 	"""``"x3"`` -> ``3.0``; ``None`` for anything else or a non-positive value."""
 	match = _MULTIPLIER_RE.match(segment.strip())
 	if not match:
@@ -232,7 +233,7 @@ def _parse_multiplier(segment: str) -> Optional[float]:
 	return value if value > 0 else None
 
 
-def _split_payload(payload: str) -> Tuple[str, str, float, bool, bool]:
+def _split_payload(payload: str) -> tuple[str, str, float, bool, bool]:
 	"""``"X|grams|x3|each"`` -> ``("X", "grams", 3.0, True, True)``.
 
 	Returns ``(code, variant, multiplier, each, valid)``.  After the variant
@@ -254,7 +255,7 @@ def _split_payload(payload: str) -> Tuple[str, str, float, bool, bool]:
 		# A trailing pipe with nothing after it is a typo, not the full form.
 		return invalid
 
-	multiplier: Optional[float] = None
+	multiplier: float | None = None
 	each = False
 	for raw in parts[2:]:
 		if variant not in _MULTIPLIABLE_VARIANTS:
@@ -281,7 +282,7 @@ def uses_each(text: Any) -> bool:
 	return False
 
 
-def to_grams(qty: float, uom: Any) -> Optional[float]:
+def to_grams(qty: float, uom: Any) -> float | None:
 	"""``(0.08, "Kg")`` -> ``80.0``; ``None`` when the UOM is not a mass."""
 	factor = _GRAMS_PER_UOM.get(str(uom or "").strip().lower())
 	if factor is None:
@@ -289,7 +290,7 @@ def to_grams(qty: float, uom: Any) -> Optional[float]:
 	return qty * factor
 
 
-def format_grams(qty: float, uom: Any) -> Optional[str]:
+def format_grams(qty: float, uom: Any) -> str | None:
 	"""``(0.08, "Kg")`` -> ``"80 g"``; ``None`` when the UOM is not a mass.
 
 	One decimal, trailing ``.0`` dropped: the scales on the bench read to a
@@ -321,7 +322,7 @@ def _lookup_code(
 	name_map: Mapping[str, Any],
 	uom_map: Mapping[str, Any],
 	lowered: Mapping[str, str],
-) -> Optional[str]:
+) -> str | None:
 	if code in component_qty_map or code in name_map or code in uom_map:
 		return code
 	return lowered.get(code.strip().lower())
@@ -333,14 +334,14 @@ def _resolve_parts(
 	name_map: Mapping[str, Any],
 	uom_map: Mapping[str, Any],
 	lowered: Mapping[str, str],
-) -> Optional[List[str]]:
+) -> list[str] | None:
 	"""The component code(s) a token names, or ``None`` if any is unknown."""
 	whole = _lookup_code(code, component_qty_map, name_map, uom_map, lowered)
 	if whole is not None:
 		return [whole]
 	if _SUM_SEPARATOR not in code:
 		return None
-	resolved: List[str] = []
+	resolved: list[str] = []
 	for part in code.split(_SUM_SEPARATOR):
 		part = part.strip()
 		found = _lookup_code(part, component_qty_map, name_map, uom_map, lowered) if part else None
@@ -377,7 +378,7 @@ def render_instruction(
 	batches: Any,
 	decimals: int = DEFAULT_DECIMALS,
 	units_per_batch: Any = None,
-) -> Tuple[str, List[str]]:
+) -> tuple[str, list[str]]:
 	"""Substitute every ``{{item:...}}`` token; return ``(text, unresolved)``.
 
 	``component_qty_map`` holds the requirement for **one** BOM batch; every
@@ -403,9 +404,9 @@ def render_instruction(
 		places = DEFAULT_DECIMALS
 
 	lowered = _lowered_index(component_qty_map, name_map, uom_map)
-	unresolved: List[str] = []
+	unresolved: list[str] = []
 
-	def _replace(match: "re.Match[str]") -> str:
+	def _replace(match: re.Match[str]) -> str:
 		payload = match.group(1)
 		code, variant, multiplier, each, valid = _split_payload(payload)
 
@@ -432,7 +433,7 @@ def render_instruction(
 		name_text = " + ".join(str(name_map.get(p) or p).strip() for p in parts)
 
 		if variant == "grams":
-			grams = [to_grams(q, u) for q, u in zip(quantities, uoms)]
+			grams = [to_grams(q, u) for q, u in zip(quantities, uoms, strict=False)]
 			if any(g is None for g in grams):
 				# Not a unit of mass: refuse rather than print a wrong number.
 				_remember(unresolved, str(payload).strip())
@@ -488,7 +489,7 @@ def _step_payload(
 	uom_map: Mapping[str, Any],
 	name_map: Mapping[str, Any],
 	units_per_batch: Any = None,
-) -> Tuple[Dict[str, Any], List[str]]:
+) -> tuple[dict[str, Any], list[str]]:
 	render_kwargs = {
 		"component_qty_map": component_qty_map,
 		"uom_map": uom_map,
@@ -540,7 +541,7 @@ def render_sop(
 	uom_map: Mapping[str, Any],
 	name_map: Mapping[str, Any],
 	units_per_batch: Any = None,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	"""Render every step of an SOP for a specific run size.
 
 	``units_per_batch`` (the BOM yield) feeds ``each`` tokens; left unset it is
@@ -557,8 +558,8 @@ def render_sop(
 	if per_batch_units <= 0 and batch_count > 0 and unit_count > 0:
 		per_batch_units = unit_count / batch_count
 
-	steps: List[Dict[str, Any]] = []
-	unresolved: List[str] = []
+	steps: list[dict[str, Any]] = []
+	unresolved: list[str] = []
 
 	raw_steps: Sequence[Mapping[str, Any]] = (sop_dict or {}).get("steps") or []
 	for position, raw in enumerate(raw_steps, start=1):

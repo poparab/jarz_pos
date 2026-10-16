@@ -78,14 +78,14 @@ _TOL = 0.01
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _vouchers_for(invoice: str, extra: Optional[List[tuple]] = None) -> List[tuple]:
+def _vouchers_for(invoice: str, extra: list[tuple] | None = None) -> list[tuple]:
 	"""Every voucher whose GL belongs to this order's lifecycle.
 
 	Collected by *discovery* rather than from the return's return-value, so a
 	posting the code makes but does not report still shows up in the audit. A
 	silent extra journal entry is precisely the kind of thing this is for.
 	"""
-	found: List[tuple] = [("Sales Invoice", invoice)]
+	found: list[tuple] = [("Sales Invoice", invoice)]
 
 	credit_notes = (
 		frappe.get_all(
@@ -154,9 +154,9 @@ def _vouchers_for(invoice: str, extra: Optional[List[tuple]] = None) -> List[tup
 	return found + list(extra or [])
 
 
-def _net_by_account(vouchers: List[tuple]) -> Dict[str, float]:
+def _net_by_account(vouchers: list[tuple]) -> dict[str, float]:
 	"""Signed net (debit positive) per account across *vouchers*."""
-	net: Dict[str, float] = {}
+	net: dict[str, float] = {}
 	for voucher_type, voucher_no in vouchers:
 		for row in (
 			frappe.get_all(
@@ -185,7 +185,7 @@ class Accounts:
 
 
 def _record_expectation(
-	ctx: RunContext, case: str, actual: Dict[str, float], expected: Dict[str, float]
+	ctx: RunContext, case: str, actual: dict[str, float], expected: dict[str, float]
 ) -> None:
 	"""Compare a measured per-account net against the hand-derived expectation."""
 	accounts = set(actual) | {a for a, v in expected.items() if abs(v) > _TOL}
@@ -207,7 +207,7 @@ def _record_expectation(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _build_env() -> Dict[str, Any]:
+def _build_env() -> dict[str, Any]:
 	pos_profile = _pick_pos_profile()
 	company = frappe.db.get_value("POS Profile", pos_profile, "company")
 	return {
@@ -254,7 +254,7 @@ def _courier_shipping_expense(invoice: str) -> float:
 	return round(flt(row[0]["shipping_amount"]), 2) if row else 0.0
 
 
-def _dispatch_as_partner(invoice: str, profile: str, courier: Dict[str, Any]) -> None:
+def _dispatch_as_partner(invoice: str, profile: str, courier: dict[str, Any]) -> None:
 	"""Dispatch through the delivery-partner path.
 
 	``handle_out_for_delivery_transition`` sends every unpaid order to
@@ -277,13 +277,13 @@ def _dispatch_as_partner(invoice: str, profile: str, courier: Dict[str, Any]) ->
 
 def _setup_order(
 	ctx: RunContext,
-	env: Dict[str, Any],
+	env: dict[str, Any],
 	case: str,
 	*,
 	prepay: bool,
-	courier: Optional[Dict[str, Any]],
-	pos_profile: Optional[str] = None,
-	dispatch_fn: Optional[Any] = None,
+	courier: dict[str, Any] | None,
+	pos_profile: str | None = None,
+	dispatch_fn: Any | None = None,
 ) -> str:
 	"""Create -> (pay) -> dispatch, on *pos_profile* or the environment default.
 
@@ -316,7 +316,7 @@ def _setup_order(
 
 
 def _case_cod_full_return(
-	ctx: RunContext, env: Dict[str, Any], *, case: str, pay_courier: bool, courier: Optional[Dict[str, Any]]
+	ctx: RunContext, env: dict[str, Any], *, case: str, pay_courier: bool, courier: dict[str, Any] | None
 ) -> None:
 	"""COD order the courier still holds, returned in full.
 
@@ -348,7 +348,7 @@ def _case_cod_full_return(
 	_record_expectation(ctx, case, _net_by_account(_vouchers_for(invoice)), expected)
 
 
-def _case_prepaid_full_return(ctx: RunContext, env: Dict[str, Any], *, case: str, refund_mode: str) -> None:
+def _case_prepaid_full_return(ctx: RunContext, env: dict[str, Any], *, case: str, refund_mode: str) -> None:
 	"""Prepaid pickup-style order returned in full.
 
 	``refund_now``  -> the cash goes back out; every account returns to zero.
@@ -380,7 +380,7 @@ def _case_prepaid_full_return(ctx: RunContext, env: Dict[str, Any], *, case: str
 	_record_expectation(ctx, case, _net_by_account(_vouchers_for(invoice)), expected)
 
 
-def _case_partial_shipping(ctx: RunContext, env: Dict[str, Any], courier: Optional[Dict[str, Any]]) -> None:
+def _case_partial_shipping(ctx: RunContext, env: dict[str, Any], courier: dict[str, Any] | None) -> None:
 	"""Return ONE line of a two-line order.
 
 	The customer keeps the rest and the delivery happened, so the delivery charge
@@ -422,7 +422,7 @@ def _case_partial_shipping(ctx: RunContext, env: Dict[str, Any], courier: Option
 
 
 def _case_partial_twice_never_exceeds_invoice(
-	ctx: RunContext, env: Dict[str, Any], courier: Optional[Dict[str, Any]]
+	ctx: RunContext, env: dict[str, Any], courier: dict[str, Any] | None
 ) -> None:
 	"""Return each line separately; the two credit notes must sum to the invoice.
 
@@ -462,9 +462,7 @@ def _case_partial_twice_never_exceeds_invoice(
 	)
 
 
-def _case_settle_after_return(
-	ctx: RunContext, env: Dict[str, Any], courier: Optional[Dict[str, Any]]
-) -> None:
+def _case_settle_after_return(ctx: RunContext, env: dict[str, Any], courier: dict[str, Any] | None) -> None:
 	"""Fully return a COD order, then run the one-by-one courier settlement.
 
 	The return already released the courier's liability. Settling afterwards must
@@ -499,7 +497,7 @@ def _case_settle_after_return(
 
 	from jarz_pos.services.delivery_handling import settle_single_invoice_paid
 
-	settled: Dict[str, Any] = {}
+	settled: dict[str, Any] = {}
 	settlement_ran = False
 	try:
 		settled = (
@@ -554,7 +552,7 @@ def _case_settle_after_return(
 	_record_expectation(ctx, case, _net_by_account(_vouchers_for(invoice)), expected)
 
 
-def _case_partner_return(ctx: RunContext, env: Dict[str, Any]) -> None:
+def _case_partner_return(ctx: RunContext, env: dict[str, Any]) -> None:
 	"""Return a delivery-partner order.
 
 	Partner orders never touch Courier Outstanding — dispatch moves the receivable
@@ -661,7 +659,7 @@ def _case_partner_return(ctx: RunContext, env: Dict[str, Any]) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def run(cleanup: bool = True) -> Dict[str, Any]:
+def run(cleanup: bool = True) -> dict[str, Any]:
 	_guard_environment()
 	previous_flag = _enable_returns()
 	ctx = RunContext()

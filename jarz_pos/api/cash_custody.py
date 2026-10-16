@@ -19,7 +19,8 @@ that would take it below zero, on every path that can spend it.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Sequence
+from collections.abc import Sequence
+from typing import Any, Dict, List, Optional
 
 import frappe
 from frappe import _
@@ -62,7 +63,7 @@ def _require_holder_admin() -> None:
 		)
 
 
-def _load_holder(holder: Optional[str]):
+def _load_holder(holder: str | None):
 	name = str(holder or "").strip()
 	if not name:
 		frappe.throw(_("Custody holder is required."))
@@ -96,7 +97,7 @@ def _truthy(value: Any) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _holder_stats(accounts: Sequence[str]) -> Dict[str, Dict[str, Any]]:
+def _holder_stats(accounts: Sequence[str]) -> dict[str, dict[str, Any]]:
 	"""``{account: {balance, last_movement}}`` in one query."""
 	accounts = [a for a in accounts if a]
 	if not accounts:
@@ -122,7 +123,7 @@ def _holder_stats(accounts: Sequence[str]) -> Dict[str, Dict[str, Any]]:
 	}
 
 
-def _serialize_holder(doc, stats: Optional[Dict[str, Dict[str, Any]]] = None) -> Dict[str, Any]:
+def _serialize_holder(doc, stats: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
 	account = doc.get("account")
 	if stats is None:
 		stats = _holder_stats([account] if account else [])
@@ -143,12 +144,12 @@ def _serialize_holder(doc, stats: Optional[Dict[str, Dict[str, Any]]] = None) ->
 	}
 
 
-def _serialize_holders(rows: Sequence[Any]) -> List[Dict[str, Any]]:
+def _serialize_holders(rows: Sequence[Any]) -> list[dict[str, Any]]:
 	stats = _holder_stats([r.get("account") for r in rows if r.get("account")])
 	return [_serialize_holder(r, stats) for r in rows]
 
 
-def _serialize_option(src) -> Dict[str, Any]:
+def _serialize_option(src) -> dict[str, Any]:
 	return {
 		"account": src.account,
 		"label": src.label,
@@ -165,7 +166,7 @@ def _serialize_option(src) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _without_custody(sources, custody: Dict[str, str]):
+def _without_custody(sources, custody: dict[str, str]):
 	"""Drop custody accounts and anything that is not an ASSET ledger.
 
 	``expenses._cashlike_accounts`` matches wallets by NAME, so an expense or
@@ -250,7 +251,7 @@ def _post_custody_je(
 	amount: float,
 	tag_type: str,
 	human: str,
-	posting_date: Optional[str] = None,
+	posting_date: str | None = None,
 ):
 	from jarz_pos.services.delivery_handling import _strip_je_tag_lookalikes, _tag_journal_entry
 
@@ -278,7 +279,7 @@ def _post_custody_je(
 	return je
 
 
-def _checked_posting_date(posting_date: Optional[str], can_manage: bool) -> Optional[str]:
+def _checked_posting_date(posting_date: str | None, can_manage: bool) -> str | None:
 	"""Only a manager may date a custody move, and never in the future.
 
 	A holder dating their own withdrawal back would move drawer money inside a
@@ -295,7 +296,7 @@ def _checked_posting_date(posting_date: Optional[str], can_manage: bool) -> Opti
 	return value
 
 
-def _human(prefix: str, employee_name: str, remark: Optional[str]) -> str:
+def _human(prefix: str, employee_name: str, remark: str | None) -> str:
 	text = f"{prefix} {employee_name}".strip()
 	remark = str(remark or "").strip()
 	return f"{text}: {remark}" if remark else text
@@ -307,7 +308,7 @@ def _human(prefix: str, employee_name: str, remark: Optional[str]) -> str:
 
 
 @frappe.whitelist()
-def get_custody_overview() -> Dict[str, Any]:
+def get_custody_overview() -> dict[str, Any]:
 	"""Everything the custody screen needs, scoped to the caller."""
 	company = _expenses._default_company()
 	can_manage = _can_manage()
@@ -348,11 +349,11 @@ def get_custody_overview() -> Dict[str, Any]:
 
 
 @frappe.whitelist()
-def list_custody_candidates(search: Optional[str] = None) -> Dict[str, Any]:
+def list_custody_candidates(search: str | None = None) -> dict[str, Any]:
 	"""Active employees with a user who are not holders yet (max 50)."""
 	_require_holder_admin()
 	existing = [e for e in (frappe.get_all(HOLDER_DOCTYPE, pluck="employee", limit_page_length=0) or []) if e]
-	filters: Dict[str, Any] = {"status": "Active", "user_id": ["is", "set"]}
+	filters: dict[str, Any] = {"status": "Active", "user_id": ["is", "set"]}
 	if existing:
 		filters["name"] = ["not in", existing]
 	or_filters = None
@@ -378,7 +379,7 @@ def list_custody_candidates(search: Optional[str] = None) -> Dict[str, Any]:
 
 
 @frappe.whitelist()
-def add_custody_holder(employee: str) -> Dict[str, Any]:
+def add_custody_holder(employee: str) -> dict[str, Any]:
 	"""Make *employee* a custody holder (creates their custody account).
 
 	Re-adding a disabled holder re-enables it rather than failing.
@@ -405,7 +406,7 @@ def add_custody_holder(employee: str) -> Dict[str, Any]:
 
 
 @frappe.whitelist()
-def set_custody_holder_enabled(holder: str, enabled: Any) -> Dict[str, Any]:
+def set_custody_holder_enabled(holder: str, enabled: Any) -> dict[str, Any]:
 	"""Enable or disable a holder. Disabling is refused while money is held."""
 	_require_holder_admin()
 	doc = _load_holder(holder)
@@ -421,9 +422,9 @@ def issue_custody(
 	holder: str,
 	from_account: str,
 	amount: Any,
-	posting_date: Optional[str] = None,
-	remark: Optional[str] = None,
-) -> Dict[str, Any]:
+	posting_date: str | None = None,
+	remark: str | None = None,
+) -> dict[str, Any]:
 	"""Move *amount* from *from_account* into the holder's custody.
 
 	Dr custody / Cr from_account. A manager may draw on any source account; the
@@ -475,9 +476,9 @@ def return_custody(
 	holder: str,
 	to_account: str,
 	amount: Any,
-	posting_date: Optional[str] = None,
-	remark: Optional[str] = None,
-) -> Dict[str, Any]:
+	posting_date: str | None = None,
+	remark: str | None = None,
+) -> dict[str, Any]:
 	"""Return *amount* of custody into *to_account* (any branch drawer).
 
 	Dr to_account / Cr custody. Refused beyond the locked balance; the ledger
@@ -524,7 +525,7 @@ def return_custody(
 # ---------------------------------------------------------------------------
 
 
-def _je_tags(names: Sequence[str]) -> Dict[str, Optional[str]]:
+def _je_tags(names: Sequence[str]) -> dict[str, str | None]:
 	"""Trusted tag text per Journal Entry (provenance field, legacy remark)."""
 	if not names:
 		return {}
@@ -542,7 +543,7 @@ def _je_tags(names: Sequence[str]) -> Dict[str, Optional[str]]:
 	return {row.get("name"): _trusted_je_tag_source(row) for row in rows or []}
 
 
-def _voucher_kinds(rows: Sequence[Dict[str, Any]]) -> Dict[tuple, str]:
+def _voucher_kinds(rows: Sequence[dict[str, Any]]) -> dict[tuple, str]:
 	"""``{(voucher_type, voucher_no): kind}`` for every non-transfer voucher."""
 	je_names = cash_custody.unique(
 		r.get("voucher_no") for r in rows if r.get("voucher_type") == "Journal Entry"
@@ -550,7 +551,7 @@ def _voucher_kinds(rows: Sequence[Dict[str, Any]]) -> Dict[tuple, str]:
 	pe_names = cash_custody.unique(
 		r.get("voucher_no") for r in rows if r.get("voucher_type") == "Payment Entry"
 	)
-	kinds: Dict[tuple, str] = {}
+	kinds: dict[tuple, str] = {}
 
 	if je_names:
 		for name, tag in _je_tags(je_names).items():
@@ -592,7 +593,7 @@ def _voucher_kinds(rows: Sequence[Dict[str, Any]]) -> Dict[tuple, str]:
 	return kinds
 
 
-def _classify(row: Dict[str, Any], kinds: Dict[tuple, str]) -> str:
+def _classify(row: dict[str, Any], kinds: dict[tuple, str]) -> str:
 	kind = kinds.get((row.get("voucher_type"), row.get("voucher_no")))
 	if kind:
 		return kind
@@ -603,7 +604,7 @@ def _classify(row: Dict[str, Any], kinds: Dict[tuple, str]) -> str:
 	return "other"
 
 
-def _first_counter(against: Optional[str]) -> Optional[str]:
+def _first_counter(against: str | None) -> str | None:
 	for part in str(against or "").split(","):
 		part = part.strip()
 		if part:
@@ -612,15 +613,15 @@ def _first_counter(against: Optional[str]) -> Optional[str]:
 
 
 def build_statement_entries(
-	rows: Sequence[Dict[str, Any]],
+	rows: Sequence[dict[str, Any]],
 	opening_balance: float,
-	kinds: Dict[tuple, str],
-	counter_labels: Optional[Dict[str, Dict[str, str]]] = None,
-) -> List[Dict[str, Any]]:
+	kinds: dict[tuple, str],
+	counter_labels: dict[str, dict[str, str]] | None = None,
+) -> list[dict[str, Any]]:
 	"""Chronological rows -> entries with a running balance (chronological)."""
 	counter_labels = counter_labels or {}
 	running = flt(opening_balance)
-	out: List[Dict[str, Any]] = []
+	out: list[dict[str, Any]] = []
 	for row in rows:
 		debit = flt(row.get("debit"))
 		credit = flt(row.get("credit"))
@@ -647,10 +648,10 @@ def build_statement_entries(
 @frappe.whitelist()
 def get_custody_statement(
 	holder: str,
-	from_date: Optional[str] = None,
-	to_date: Optional[str] = None,
+	from_date: str | None = None,
+	to_date: str | None = None,
 	limit: Any = 200,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	"""Custody ledger for a window (default: the last 30 days).
 
 	``entries`` are NEWEST FIRST; each carries the running balance after that
@@ -671,7 +672,7 @@ def get_custody_statement(
 
 	account = doc.account
 	opening = 0.0
-	rows: List[Dict[str, Any]] = []
+	rows: list[dict[str, Any]] = []
 	if account:
 		opening_rows = frappe.db.sql(
 			"""

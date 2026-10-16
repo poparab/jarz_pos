@@ -11,12 +11,11 @@ invoice type variant:
 - Free-shipping bundle shipping waiver
 """
 
-import unittest
 import json
+import unittest
 from datetime import datetime
 from types import SimpleNamespace
-from unittest.mock import patch, MagicMock, PropertyMock
-
+from unittest.mock import MagicMock, PropertyMock, patch
 
 # ---------------------------------------------------------------------------
 # Mock helpers

@@ -31,7 +31,7 @@ def validate_cart_data(cart_json, logger):
 	try:
 		cart_items = frappe.parse_json(cart_json) if isinstance(cart_json, str) else cart_json
 	except (ValueError, TypeError) as e:
-		error_msg = f"Invalid cart JSON format: {str(e)}"
+		error_msg = f"Invalid cart JSON format: {e!s}"
 		logger.error(error_msg)
 		print(f"   ❌ {error_msg}")
 		frappe.throw(error_msg)
@@ -48,7 +48,7 @@ def validate_cart_data(cart_json, logger):
 		try:
 			cart_items = frappe.parse_json(cart_items)
 		except Exception as e:
-			error_msg = f"Cart data must be a JSON list: {str(e)}"
+			error_msg = f"Cart data must be a JSON list: {e!s}"
 			logger.error(error_msg)
 			print(f"   ❌ {error_msg}")
 			frappe.throw(error_msg)
@@ -136,7 +136,7 @@ def validate_customer(customer_name, logger):
 		print(f"      - Territory: {customer_doc.territory}")
 		return customer_doc
 	except Exception as e:
-		error_msg = f"Error loading customer '{customer_name}': {str(e)}"
+		error_msg = f"Error loading customer '{customer_name}': {e!s}"
 		logger.error(error_msg)
 		print(f"   ❌ {error_msg}")
 		frappe.throw(error_msg)
@@ -154,13 +154,13 @@ def validate_pos_profile(pos_profile_name, logger):
 			pos_profile = frappe.get_doc("POS Profile", pos_profile_name)
 			logger.debug(f"POS Profile loaded: {pos_profile.name}")
 		except Exception as e:
-			error_msg = f"Error loading POS Profile '{pos_profile_name}': {str(e)}"
+			error_msg = f"Error loading POS Profile '{pos_profile_name}': {e!s}"
 			logger.error(error_msg)
 			print(f"   ❌ {error_msg}")
 			frappe.throw(error_msg)
 	else:
 		logger.debug("Finding default POS Profile")
-		print(f"   Finding default POS Profile...")
+		print("   Finding default POS Profile...")
 
 		# Frappe best practice: Use filters dict for complex queries
 		pos_profile_name = frappe.db.get_value("POS Profile", {"disabled": 0}, "name")
@@ -175,7 +175,7 @@ def validate_pos_profile(pos_profile_name, logger):
 			logger.debug(f"Default POS Profile: {pos_profile.name}")
 			print(f"   Using default POS Profile: {pos_profile.name}")
 		except Exception as e:
-			error_msg = f"Error loading default POS Profile: {str(e)}"
+			error_msg = f"Error loading default POS Profile: {e!s}"
 			logger.error(error_msg)
 			print(f"   ❌ {error_msg}")
 			frappe.throw(error_msg)
@@ -187,7 +187,7 @@ def validate_pos_profile(pos_profile_name, logger):
 		print(f"   ❌ {error_msg}")
 		frappe.throw(error_msg)
 
-	print(f"   ✅ POS Profile validated:")
+	print("   ✅ POS Profile validated:")
 	print(f"      - Name: {pos_profile.name}")
 	print(f"      - Company: {pos_profile.company}")
 	print(f"      - Price List: {pos_profile.selling_price_list}")
@@ -232,11 +232,11 @@ def validate_delivery_datetime(required_delivery_datetime, logger):
 				print(f"   ✅ Delivery datetime validated: {delivery_datetime}")
 
 		except Exception as e:
-			error_msg = f"Invalid delivery datetime format: {str(e)}"
+			error_msg = f"Invalid delivery datetime format: {e!s}"
 			logger.error(error_msg)
 			print(f"   ❌ {error_msg}")
 			frappe.throw(error_msg)
 	else:
-		print(f"   🕐 No delivery datetime provided")
+		print("   🕐 No delivery datetime provided")
 
 	return delivery_datetime

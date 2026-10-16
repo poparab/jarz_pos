@@ -135,16 +135,16 @@ def _session_user() -> str:
 	return frappe.session.user
 
 
-def _roles(user: Optional[str] = None) -> set:
+def _roles(user: str | None = None) -> set:
 	return {str(r or "").strip() for r in (frappe.get_roles(user) or []) if str(r or "").strip()}
 
 
-def _clean(value: Any) -> Optional[str]:
+def _clean(value: Any) -> str | None:
 	text = str(value or "").strip()
 	return text or None
 
 
-def _fmt(value: Any) -> Optional[str]:
+def _fmt(value: Any) -> str | None:
 	"""Render a date/datetime for the client in one fixed shape."""
 	if value is None or value == "":
 		return None
@@ -189,7 +189,7 @@ def _safe_log(title: str) -> None:
 		pass
 
 
-def _full_name(user: Optional[str]) -> Optional[str]:
+def _full_name(user: str | None) -> str | None:
 	if not user:
 		return None
 	try:
@@ -198,7 +198,7 @@ def _full_name(user: Optional[str]) -> Optional[str]:
 		return user
 
 
-def _employee_for_user(user: str) -> Tuple[Optional[str], Optional[str]]:
+def _employee_for_user(user: str) -> tuple[str | None, str | None]:
 	"""(employee, employee_name) for a user, preferring an Active record.
 
 	``status asc`` puts Active before Inactive/Left/Suspended, so a rehired
@@ -222,20 +222,20 @@ def _employee_for_user(user: str) -> Tuple[Optional[str], Optional[str]]:
 	return rows[0].get("name"), rows[0].get("employee_name")
 
 
-def _user_row(user: str) -> Optional[Dict[str, Any]]:
+def _user_row(user: str) -> dict[str, Any] | None:
 	row = frappe.db.get_value("User", user, ["name", "full_name", "enabled"], as_dict=True)
 	return dict(row) if row else None
 
 
-def _enabled_profiles() -> List[str]:
+def _enabled_profiles() -> list[str]:
 	return sorted(frappe.get_all("POS Profile", filters={"disabled": 0}, pluck="name") or [])
 
 
-def _user_profiles(user: str) -> List[str]:
+def _user_profiles(user: str) -> list[str]:
 	return access_control.get_user_pos_profiles(user) or []
 
 
-def _open_shift(pos_profile: str) -> Optional[Dict[str, Any]]:
+def _open_shift(pos_profile: str) -> dict[str, Any] | None:
 	return access_control.get_open_shift_for_profile(pos_profile)
 
 
@@ -244,7 +244,7 @@ def _open_shift(pos_profile: str) -> Optional[Dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
-def has_access(user: Optional[str] = None) -> bool:
+def has_access(user: str | None = None) -> bool:
 	"""The screen's door: the same LINE_MANAGER_TIER that gates the roster."""
 	user = user or _session_user()
 	if user == ROLES.ADMINISTRATOR:
@@ -260,14 +260,14 @@ def ensure_access() -> None:
 		)
 
 
-def can_manage_all(user: Optional[str] = None) -> bool:
+def can_manage_all(user: str | None = None) -> bool:
 	user = user or _session_user()
 	if user == ROLES.ADMINISTRATOR:
 		return True
 	return bool(_roles(user).intersection(MANAGE_ALL_ROLES))
 
 
-def manageable_profiles(user: Optional[str] = None) -> List[str]:
+def manageable_profiles(user: str | None = None) -> list[str]:
 	"""Enabled branches this user may change membership on.
 
 	A line manager's reach is their own POS Profile User rows -- the same
@@ -288,7 +288,7 @@ def manageable_profiles(user: Optional[str] = None) -> List[str]:
 	return [p for p in enabled if p in own]
 
 
-def ensure_can_manage(pos_profile: str, target_user: Optional[str] = None) -> None:
+def ensure_can_manage(pos_profile: str, target_user: str | None = None) -> None:
 	"""Assert the caller may change *target_user*'s access at *pos_profile*."""
 	ensure_access()
 	profile = _clean(pos_profile)
@@ -330,7 +330,7 @@ def _is_manager_or_line_manager(user: str) -> bool:
 	return can_manage_all(user) or bool(_roles(user).intersection(LINE_MANAGER_ROLES))
 
 
-def can_edit_user(target_user: str, caller: Optional[str] = None) -> bool:
+def can_edit_user(target_user: str, caller: str | None = None) -> bool:
 	"""Whether the caller may change *target_user*'s access at all (any branch).
 
 	The client uses this to lock a whole row instead of letting every tap end
@@ -344,7 +344,7 @@ def can_edit_user(target_user: str, caller: Optional[str] = None) -> bool:
 	return not _is_manager_or_line_manager(target_user)
 
 
-def _ensure_target_user(user: Optional[str], *, for_adding: bool) -> Dict[str, Any]:
+def _ensure_target_user(user: str | None, *, for_adding: bool) -> dict[str, Any]:
 	"""Resolve and sanity-check the user whose access is being changed.
 
 	Removing access from a disabled user is allowed (it is cleanup); adding it
@@ -386,7 +386,7 @@ def _since_text(value: Any) -> str:
 	return opened.strftime("%Y-%m-%d %H:%M")
 
 
-def open_shift_message(pos_profile: str, shift: Dict[str, Any]) -> str:
+def open_shift_message(pos_profile: str, shift: dict[str, Any]) -> str:
 	holder = _full_name(shift.get("user")) or _("someone")
 	return _(
 		"{0} has an open shift ({1} since {2}). Branch access can only change when the branch is closed."
@@ -409,7 +409,7 @@ def ensure_branch_closed(pos_profile: str) -> None:
 		)
 
 
-def _open_shift_payload(pos_profile: str) -> Optional[Dict[str, Any]]:
+def _open_shift_payload(pos_profile: str) -> dict[str, Any] | None:
 	shift = _open_shift(pos_profile)
 	if not shift:
 		return None
@@ -459,7 +459,7 @@ def _touch_profile(pos_profile: str) -> None:
 		_safe_log(f"Could not touch POS Profile {pos_profile}")
 
 
-def _membership_rows(user: str, pos_profile: str) -> List[str]:
+def _membership_rows(user: str, pos_profile: str) -> list[str]:
 	"""Names of the POS Profile User rows linking *user* to *pos_profile*.
 
 	Filtered exactly like ``access_control.get_user_pos_profiles`` (parent +
@@ -523,7 +523,7 @@ def _delete_membership_rows(user: str, pos_profile: str) -> int:
 	return len(names)
 
 
-def _invalidate(user: str, pos_profile: Optional[str] = None) -> None:
+def _invalidate(user: str, pos_profile: str | None = None) -> None:
 	"""Drop cached answers about *user*'s branches for the rest of this request.
 
 	``access_control`` caches ``pos_profiles::<user>`` on ``frappe.local`` for
@@ -546,7 +546,7 @@ def _invalidate(user: str, pos_profile: Optional[str] = None) -> None:
 	_notify_user(user, pos_profile)
 
 
-def _notify_user(user: str, pos_profile: Optional[str]) -> None:
+def _notify_user(user: str, pos_profile: str | None) -> None:
 	"""Tell *user*'s open apps their branch list changed, once this commits.
 
 	Without it the app kept the branch list it loaded at sign-in, so a person
@@ -576,9 +576,9 @@ def _log(
 	action: str,
 	source: str,
 	*,
-	notes: Optional[str] = None,
-	day_access: Optional[str] = None,
-	changed_by: Optional[str] = None,
+	notes: str | None = None,
+	day_access: str | None = None,
+	changed_by: str | None = None,
 ) -> str:
 	"""Insert one Jarz Branch Access Log row and return its name.
 
@@ -626,7 +626,7 @@ _GRANT_FIELDS = [
 ]
 
 
-def window_for(access_date: Any) -> Tuple[datetime, datetime]:
+def window_for(access_date: Any) -> tuple[datetime, datetime]:
 	"""(starts_at, expires_at) for a day access on *access_date*."""
 	day = getdate(access_date)
 	return (
@@ -635,12 +635,12 @@ def window_for(access_date: Any) -> Tuple[datetime, datetime]:
 	)
 
 
-def _load_grant(name: str) -> Optional[Dict[str, Any]]:
+def _load_grant(name: str) -> dict[str, Any] | None:
 	row = frappe.db.get_value(DAY_ACCESS_DOCTYPE, name, _GRANT_FIELDS, as_dict=True)
 	return dict(row) if row else None
 
 
-def _set_grant(name: str, values: Dict[str, Any]) -> None:
+def _set_grant(name: str, values: dict[str, Any]) -> None:
 	"""Write status fields straight to the row.
 
 	``db.set_value`` rather than ``doc.save()`` on purpose: the controller's
@@ -650,7 +650,7 @@ def _set_grant(name: str, values: Dict[str, Any]) -> None:
 	frappe.db.set_value(DAY_ACCESS_DOCTYPE, name, values)
 
 
-def _create_grant(values: Dict[str, Any]) -> str:
+def _create_grant(values: dict[str, Any]) -> str:
 	doc = frappe.new_doc(DAY_ACCESS_DOCTYPE)
 	doc.update(values)
 	doc.flags.ignore_permissions = True
@@ -658,8 +658,8 @@ def _create_grant(values: Dict[str, Any]) -> str:
 	return doc.name
 
 
-def _active_grants(user: str, pos_profile: str, exclude: Optional[str] = None) -> List[Dict[str, Any]]:
-	filters: Dict[str, Any] = {"user": user, "pos_profile": pos_profile, "status": STATUS_ACTIVE}
+def _active_grants(user: str, pos_profile: str, exclude: str | None = None) -> list[dict[str, Any]]:
+	filters: dict[str, Any] = {"user": user, "pos_profile": pos_profile, "status": STATUS_ACTIVE}
 	if exclude:
 		filters["name"] = ("!=", exclude)
 	return [
@@ -671,7 +671,7 @@ def _active_grants(user: str, pos_profile: str, exclude: Optional[str] = None) -
 	]
 
 
-def _open_grants_on(user: str, pos_profile: str, day: Any) -> List[str]:
+def _open_grants_on(user: str, pos_profile: str, day: Any) -> list[str]:
 	return (
 		frappe.get_all(
 			DAY_ACCESS_DOCTYPE,
@@ -687,14 +687,14 @@ def _open_grants_on(user: str, pos_profile: str, day: Any) -> List[str]:
 	)
 
 
-def _is_permanent_member(user: str, pos_profile: str, exclude: Optional[str] = None) -> bool:
+def _is_permanent_member(user: str, pos_profile: str, exclude: str | None = None) -> bool:
 	"""A row exists AND no running day access is the reason it exists."""
 	if not _membership_rows(user, pos_profile):
 		return False
 	return not any(cint(g.get("row_added")) for g in _active_grants(user, pos_profile, exclude))
 
 
-def grant_payload(grant: Dict[str, Any]) -> Dict[str, Any]:
+def grant_payload(grant: dict[str, Any]) -> dict[str, Any]:
 	return {
 		"name": grant.get("name"),
 		"user": grant.get("user"),
@@ -708,11 +708,11 @@ def grant_payload(grant: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _start_grant(
-	grant: Dict[str, Any],
+	grant: dict[str, Any],
 	*,
 	source: str,
-	changed_by: Optional[str],
-	notes: Optional[str] = None,
+	changed_by: str | None,
+	notes: str | None = None,
 ) -> int:
 	"""Activate a grant; returns its ``row_added``.
 
@@ -753,13 +753,13 @@ def _start_grant(
 
 
 def _end_grant(
-	grant: Dict[str, Any],
+	grant: dict[str, Any],
 	*,
 	status: str,
 	action: str,
 	source: str,
-	changed_by: Optional[str],
-	notes: Optional[str] = None,
+	changed_by: str | None,
+	notes: str | None = None,
 ) -> bool:
 	"""Close a running grant; returns whether a membership row was removed.
 
@@ -791,9 +791,9 @@ def set_branch_access(
 	user: str,
 	pos_profile: str,
 	allowed: bool,
-	notes: Optional[str] = None,
+	notes: str | None = None,
 	source: str = SOURCE_SCREEN,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	"""Make *user* a permanent member of *pos_profile* (``allowed``) or not.
 
 	Adding while a day access is running converts it: the row that grant
@@ -822,7 +822,7 @@ def set_branch_access(
 	running = _active_grants(user, profile)
 	temporary = [g for g in running if cint(g.get("row_added"))]
 
-	result: Dict[str, Any] = {
+	result: dict[str, Any] = {
 		"changed": False,
 		"user": user,
 		"pos_profile": profile,
@@ -896,10 +896,10 @@ def grant_day_access(
 	user: str,
 	pos_profile: str,
 	access_date: Any,
-	notes: Optional[str] = None,
+	notes: str | None = None,
 	source: str = SOURCE_SCREEN,
-	roster_day_off: Optional[str] = None,
-) -> Dict[str, Any]:
+	roster_day_off: str | None = None,
+) -> dict[str, Any]:
 	"""Give *user* POS access to *pos_profile* for one branch day.
 
 	Today starts at once, which is refused while the branch is open (a manager
@@ -997,7 +997,7 @@ def grant_day_access(
 			"{0} will get POS access to {1} on {2}, from when the branch is closed until {3}."
 		).format(display, profile, day, expires_at.strftime("%Y-%m-%d %H:%M"))
 
-	roster: Optional[Dict[str, Any]] = None
+	roster: dict[str, Any] | None = None
 	if source == SOURCE_SCREEN:
 		# A roster-sourced grant has already put the person at this branch;
 		# only a grant made on the access screen still needs the rota moved.
@@ -1020,7 +1020,7 @@ def grant_day_access(
 	return out
 
 
-def location_for_profile(pos_profile: Optional[str]) -> Optional[str]:
+def location_for_profile(pos_profile: str | None) -> str | None:
 	"""The Shift Location a branch checks people in at, if it has one."""
 	if not pos_profile:
 		return None
@@ -1037,8 +1037,8 @@ def _is_day_off(employee: str, day: Any) -> bool:
 
 
 def _move_roster_for_grant(
-	grant_name: str, employee: Optional[str], pos_profile: str, day: Any
-) -> Dict[str, Any]:
+	grant_name: str, employee: str | None, pos_profile: str, day: Any
+) -> dict[str, Any]:
 	"""Move the person's shift on *day* to the branch they were given.
 
 	Day access used to change only the POS membership. The check-in geofence
@@ -1051,7 +1051,7 @@ def _move_roster_for_grant(
 	invented into a shift here -- what they work is the manager's call in
 	Shift distribution, and the reason says so.
 	"""
-	out: Dict[str, Any] = {
+	out: dict[str, Any] = {
 		"moved": False,
 		"shift_type": None,
 		"shift_location": None,
@@ -1107,7 +1107,7 @@ def _move_roster_for_grant(
 	return out
 
 
-def _restore_roster_for_grant(grant_name: str) -> Optional[Dict[str, Any]]:
+def _restore_roster_for_grant(grant_name: str) -> dict[str, Any] | None:
 	"""Undo ``_move_roster_for_grant`` when its grant is cancelled.
 
 	Only while the day is today or later and the shift is still where the
@@ -1117,7 +1117,7 @@ def _restore_roster_for_grant(grant_name: str) -> Optional[Dict[str, Any]]:
 	row = _load_grant(grant_name)
 	if not row or not cint(row.get("roster_moved")):
 		return None
-	out: Dict[str, Any] = {"restored": False, "shift_location": row.get("roster_moved_from"), "reason": None}
+	out: dict[str, Any] = {"restored": False, "shift_location": row.get("roster_moved_from"), "reason": None}
 	day = getdate(row["access_date"])
 	if day < _now().date():
 		out["reason"] = _("The day has passed, so the shift was left as it was.")
@@ -1154,7 +1154,7 @@ def _restore_roster_for_grant(grant_name: str) -> Optional[Dict[str, Any]]:
 	return out
 
 
-def cancel_day_access(name: str) -> Dict[str, Any]:
+def cancel_day_access(name: str) -> dict[str, Any]:
 	"""Withdraw a day access before it runs out.
 
 	Scheduled -> Cancelled with nothing else to undo. Active -> refused while
@@ -1197,7 +1197,7 @@ def cancel_day_access(name: str) -> Dict[str, Any]:
 	else:
 		frappe.throw(_("This day access is already {0}.").format(str(grant["status"] or "").lower()))
 
-	out: Dict[str, Any] = {"day_access": grant_payload(grant)}
+	out: dict[str, Any] = {"day_access": grant_payload(grant)}
 	roster = _restore_roster_for_grant(grant["name"])
 	if roster is not None:
 		out["roster"] = roster
@@ -1209,7 +1209,7 @@ def cancel_day_access(name: str) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _home_locations(employees: List[str]) -> Dict[str, str]:
+def _home_locations(employees: list[str]) -> dict[str, str]:
 	"""{employee: Shift Location of their enabled baseline schedule}.
 
 	The schedule is where every future shift is generated from, so it is the
@@ -1231,7 +1231,7 @@ def _home_locations(employees: List[str]) -> Dict[str, str]:
 		)
 	except Exception:
 		return {}
-	out: Dict[str, str] = {}
+	out: dict[str, str] = {}
 	for row in rows:
 		out.setdefault(row["employee"], row["shift_location"])
 	return out
@@ -1245,9 +1245,7 @@ def _checked_in_today(employee: str) -> bool:
 		return False
 
 
-def _move_roster_home(
-	employee: Optional[str], old_locations: set, new_location: Optional[str]
-) -> Dict[str, Any]:
+def _move_roster_home(employee: str | None, old_locations: set, new_location: str | None) -> dict[str, Any]:
 	"""Re-home *employee*'s rota at *new_location* from today on.
 
 	* Every enabled Shift Schedule Assignment moves, so the shifts the
@@ -1262,7 +1260,7 @@ def _move_roster_home(
 	Not best-effort: the move is one decision, so a roster failure rolls the
 	POS change back with it rather than leaving the person half-moved.
 	"""
-	out: Dict[str, Any] = {
+	out: dict[str, Any] = {
 		"from_date": None,
 		"shift_location": new_location,
 		"previous_location": next(iter(sorted(old_locations)), None) if old_locations else None,
@@ -1343,10 +1341,10 @@ def _move_roster_home(
 def move_branch(
 	user: str,
 	to_pos_profile: str,
-	from_pos_profile: Optional[str] = None,
+	from_pos_profile: str | None = None,
 	keep_old_access: Any = False,
-	notes: Optional[str] = None,
-) -> Dict[str, Any]:
+	notes: str | None = None,
+) -> dict[str, Any]:
 	"""Move *user* to another branch for good: POS access and rota together.
 
 	Before this, a permanent move was three separate jobs in three places --
@@ -1449,13 +1447,13 @@ def move_branch(
 # ---------------------------------------------------------------------------
 
 
-def profiles_by_shift_location() -> Dict[str, str]:
+def profiles_by_shift_location() -> dict[str, str]:
 	"""{Shift Location: enabled POS Profile}. First profile by name wins if
 	two ever claim the same location."""
 	if not roster_service._pos_profile_location_field_exists():
 		return {}
 	field = roster_service.POS_PROFILE_LOCATION_FIELD
-	out: Dict[str, str] = {}
+	out: dict[str, str] = {}
 	try:
 		rows = (
 			frappe.get_all(
@@ -1475,13 +1473,13 @@ def profiles_by_shift_location() -> Dict[str, str]:
 	return out
 
 
-def profile_for_shift_location(shift_location: Optional[str]) -> Optional[str]:
+def profile_for_shift_location(shift_location: str | None) -> str | None:
 	if not shift_location:
 		return None
 	return profiles_by_shift_location().get(shift_location)
 
 
-def get_branch_access() -> Dict[str, Any]:
+def get_branch_access() -> dict[str, Any]:
 	"""Everything the Branch Access screen draws, in one call."""
 	ensure_access()
 	caller = _session_user()
@@ -1500,7 +1498,7 @@ def get_branch_access() -> Dict[str, Any]:
 		for profile in enabled
 	]
 
-	memberships: Dict[str, set] = {}
+	memberships: dict[str, set] = {}
 	if enabled:
 		for row in (
 			frappe.get_all(
@@ -1513,7 +1511,7 @@ def get_branch_access() -> Dict[str, Any]:
 			if row.get("user"):
 				memberships.setdefault(row["user"], set()).add(row["parent"])
 
-	employees: Dict[str, Dict[str, Any]] = {}
+	employees: dict[str, dict[str, Any]] = {}
 	active_employee_users: set = set()
 	for row in (
 		frappe.get_all(
@@ -1533,7 +1531,7 @@ def get_branch_access() -> Dict[str, Any]:
 			active_employee_users.add(uid)
 
 	candidates = (active_employee_users | set(memberships)) - EXCLUDED_USERS
-	users_info: Dict[str, Dict[str, Any]] = {}
+	users_info: dict[str, dict[str, Any]] = {}
 	if candidates:
 		for row in (
 			frappe.get_all(
@@ -1545,7 +1543,7 @@ def get_branch_access() -> Dict[str, Any]:
 		):
 			users_info[row["name"]] = row
 
-	grants_by_user: Dict[str, List[Dict[str, Any]]] = {}
+	grants_by_user: dict[str, list[dict[str, Any]]] = {}
 	if enabled:
 		for row in (
 			frappe.get_all(
@@ -1570,7 +1568,7 @@ def get_branch_access() -> Dict[str, Any]:
 	home_by_employee = _home_locations([e.get("name") for e in employees.values() if e.get("name")])
 	profile_by_location = profiles_by_shift_location()
 
-	users: List[Dict[str, Any]] = []
+	users: list[dict[str, Any]] = []
 	for uid in candidates:
 		info = users_info.get(uid)
 		if not info:
@@ -1603,11 +1601,11 @@ def get_branch_access() -> Dict[str, Any]:
 
 
 def get_access_log(
-	pos_profile: Optional[str] = None,
-	user: Optional[str] = None,
+	pos_profile: str | None = None,
+	user: str | None = None,
 	limit: int = 50,
 	start: int = 0,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	"""The change history, newest first. A line manager sees only their branches."""
 	ensure_access()
 	caller = _session_user()
@@ -1616,7 +1614,7 @@ def get_access_log(
 	pos_profile = _clean(pos_profile)
 	user = _clean(user)
 
-	filters: Dict[str, Any] = {}
+	filters: dict[str, Any] = {}
 	if not can_manage_all(caller):
 		scope = manageable_profiles(caller)
 		if pos_profile and pos_profile not in scope:
@@ -1670,14 +1668,14 @@ def get_access_log(
 # ---------------------------------------------------------------------------
 
 
-def _message_log_mark() -> Optional[int]:
+def _message_log_mark() -> int | None:
 	try:
 		return len(frappe.local.message_log)
 	except Exception:
 		return None
 
 
-def _message_log_reset(mark: Optional[int]) -> None:
+def _message_log_reset(mark: int | None) -> None:
 	"""Drop messages a caught ``frappe.throw`` queued.
 
 	``frappe.throw`` appends to ``message_log`` before raising, and Frappe
@@ -1701,12 +1699,12 @@ def _exc_text(exc: Exception) -> str:
 def grant_for_roster(
 	employee: str,
 	on_date: Any,
-	shift_location: Optional[str],
+	shift_location: str | None,
 	*,
 	source: str,
-	roster_day_off: Optional[str] = None,
-	notes: Optional[str] = None,
-) -> Dict[str, Any]:
+	roster_day_off: str | None = None,
+	notes: str | None = None,
+) -> dict[str, Any]:
 	"""Best-effort day access for somebody the roster just placed at a branch.
 
 	Never raises and never undoes the roster write: the rota is the decision
@@ -1714,7 +1712,7 @@ def grant_for_roster(
 	runs inside a savepoint so a failure half-way (row inserted, log refused)
 	is rolled back to nothing rather than leaving a membership row behind.
 	"""
-	outcome: Dict[str, Any] = {
+	outcome: dict[str, Any] = {
 		"requested": True,
 		"granted": False,
 		"status": None,
@@ -1826,7 +1824,7 @@ def release_for_day_off(day_off: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _scan(kind: str, now: datetime) -> List[str]:
+def _scan(kind: str, now: datetime) -> list[str]:
 	"""Names of grants the cycle must look at for *kind*."""
 	if kind == "start":
 		filters = {"status": STATUS_SCHEDULED, "starts_at": ("<=", now), "expires_at": (">", now)}
@@ -1849,7 +1847,7 @@ def _scan(kind: str, now: datetime) -> List[str]:
 	)
 
 
-def _defer(grant: Dict[str, Any], shift: Dict[str, Any], verb: str, now: datetime) -> None:
+def _defer(grant: dict[str, Any], shift: dict[str, Any], verb: str, now: datetime) -> None:
 	_set_grant(
 		grant["name"],
 		{
@@ -1860,7 +1858,7 @@ def _defer(grant: Dict[str, Any], shift: Dict[str, Any], verb: str, now: datetim
 	)
 
 
-def _start_blocker(grant: Dict[str, Any]) -> Optional[str]:
+def _start_blocker(grant: dict[str, Any]) -> str | None:
 	"""Why a grant booked days ago must not start now, or None.
 
 	A grant can be booked 14 days ahead; by its day the person may have been
@@ -1883,7 +1881,7 @@ def _start_blocker(grant: Dict[str, Any]) -> Optional[str]:
 	return None
 
 
-def _cycle_one(kind: str, name: str, now: datetime, summary: Dict[str, int]) -> None:
+def _cycle_one(kind: str, name: str, now: datetime, summary: dict[str, int]) -> None:
 	grant = _load_grant(name)
 	if not grant:
 		return
@@ -1963,7 +1961,7 @@ def _cycle_one(kind: str, name: str, now: datetime, summary: Dict[str, int]) -> 
 		summary["cancelled"] += 1
 
 
-def run_day_access_cycle() -> Dict[str, int]:
+def run_day_access_cycle() -> dict[str, int]:
 	"""Hourly: start due grants, end expired ones, cancel ones that never ran.
 
 	Never raises. Each grant is handled inside its own savepoint so one bad row

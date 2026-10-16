@@ -22,8 +22,10 @@ users assigned to the branch the event belongs to.
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Sequence
+from typing import Any, Dict, List, Optional
+
 import frappe
-from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 from jarz_pos.utils.access_control import get_invoice_branch, get_users_for_pos_profiles
 
@@ -31,8 +33,8 @@ from jarz_pos.utils.access_control import get_invoice_branch, get_users_for_pos_
 def resolve_branch_recipients(
 	profiles: Sequence[str],
 	*,
-	extra_users: Optional[Iterable[str]] = None,
-) -> List[str]:
+	extra_users: Iterable[str] | None = None,
+) -> list[str]:
 	"""Users who should receive an event about *profiles*."""
 	recipients = set(get_users_for_pos_profiles(profiles))
 	for user in extra_users or []:
@@ -45,12 +47,12 @@ def resolve_branch_recipients(
 
 def publish_to_branches(
 	event: str,
-	payload: Dict[str, Any],
+	payload: dict[str, Any],
 	profiles: Sequence[str],
 	*,
-	extra_users: Optional[Iterable[str]] = None,
+	extra_users: Iterable[str] | None = None,
 	after_commit: bool = False,
-) -> List[str]:
+) -> list[str]:
 	"""Emit *event* to every user assigned to any of *profiles*.
 
 	Returns the recipient list so callers can log or assert on it.
@@ -83,19 +85,19 @@ def publish_to_branches(
 
 def publish_invoice_event(
 	event: str,
-	payload: Dict[str, Any],
+	payload: dict[str, Any],
 	invoice: Any,
 	*,
-	extra_profiles: Optional[Sequence[str]] = None,
-	extra_users: Optional[Iterable[str]] = None,
+	extra_profiles: Sequence[str] | None = None,
+	extra_users: Iterable[str] | None = None,
 	after_commit: bool = False,
-) -> List[str]:
+) -> list[str]:
 	"""Emit *event* to the branch that owns *invoice*.
 
 	``extra_profiles`` covers transfers, where both the branch losing the order
 	and the branch receiving it need to redraw.
 	"""
-	profiles: List[str] = []
+	profiles: list[str] = []
 	branch = get_invoice_branch(invoice) if invoice is not None else ""
 	if branch:
 		profiles.append(branch)
@@ -115,12 +117,12 @@ def publish_invoice_event(
 
 def publish_invoice_event_by_name(
 	event: str,
-	payload: Dict[str, Any],
+	payload: dict[str, Any],
 	invoice_name: str,
 	*,
-	extra_profiles: Optional[Sequence[str]] = None,
-	extra_users: Optional[Iterable[str]] = None,
-) -> List[str]:
+	extra_profiles: Sequence[str] | None = None,
+	extra_users: Iterable[str] | None = None,
+) -> list[str]:
 	""":func:`publish_invoice_event` when only the invoice name is at hand."""
 	name = str(invoice_name or "").strip()
 	row = None

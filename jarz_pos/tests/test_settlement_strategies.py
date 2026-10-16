@@ -11,8 +11,9 @@ and state transitions.
 """
 
 import unittest
+from unittest.mock import MagicMock, patch
+
 import frappe
-from unittest.mock import patch, MagicMock
 
 
 class TestSettlementStrategies(unittest.TestCase):
@@ -462,15 +463,15 @@ class TestSettlementStrategies(unittest.TestCase):
 
 	def test_handler_signatures_consistency(self):
 		"""Test that all handler functions have consistent signatures."""
-		from jarz_pos.services.settlement_strategies import (
-			handle_unpaid_settle_now,
-			handle_unpaid_settle_later,
-			handle_paid_settle_now,
-			handle_paid_settle_later,
-		)
-
 		# All handlers should accept the same keyword arguments
 		import inspect
+
+		from jarz_pos.services.settlement_strategies import (
+			handle_paid_settle_later,
+			handle_paid_settle_now,
+			handle_unpaid_settle_later,
+			handle_unpaid_settle_now,
+		)
 
 		handlers = [
 			handle_unpaid_settle_now,

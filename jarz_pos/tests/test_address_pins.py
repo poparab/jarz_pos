@@ -18,7 +18,6 @@ from unittest.mock import MagicMock, patch
 
 from jarz_pos.utils import address_pins, geo
 
-
 PIN_KEYS = {
 	"address_latitude",
 	"address_longitude",
@@ -463,7 +462,7 @@ class TestInvoicePinSchema(unittest.TestCase):
 		path = os.path.join(
 			os.path.dirname(os.path.abspath(jarz_pos.__file__)), "fixtures", "custom_field.json"
 		)
-		with open(path, "r", encoding="utf-8") as handle:
+		with open(path, encoding="utf-8") as handle:
 			data = json.load(handle)
 		cls.fields = {e.get("fieldname"): e for e in data if e.get("dt") == "Sales Invoice"}
 		cls.data = data

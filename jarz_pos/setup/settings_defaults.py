@@ -51,7 +51,7 @@ SETTINGS_DOCTYPE = "Jarz POS Settings"
 #:
 #: Feature flags are deliberately ABSENT: their doctype default is 0, a fresh
 #: site should start dark, and an operator's decision must survive a deploy.
-SEED_DEFAULTS: Dict[str, Any] = {
+SEED_DEFAULTS: dict[str, Any] = {
 	# POS ledger accounts. accounts_setup.ensure_pos_accounts runs earlier in
 	# after_migrate and creates these, so the names resolve by the time we get here.
 	"cash_over_short_account": "Cash Over Short - J",
@@ -140,7 +140,7 @@ SEED_DEFAULTS: Dict[str, Any] = {
 }
 
 
-def _dynamic_defaults() -> Dict[str, Any]:
+def _dynamic_defaults() -> dict[str, Any]:
 	"""Defaults whose value cannot be written down as a constant.
 
 	The default purchase VAT template is named after the company abbreviation
@@ -150,7 +150,7 @@ def _dynamic_defaults() -> Dict[str, Any]:
 	on the chart, no unambiguous company) this returns nothing and the setting
 	stays blank, which is the safe state.
 	"""
-	out: Dict[str, Any] = {}
+	out: dict[str, Any] = {}
 	try:
 		from jarz_pos.setup.purchase_setup import default_item_tax_template_name
 

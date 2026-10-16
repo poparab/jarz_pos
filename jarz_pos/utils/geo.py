@@ -56,7 +56,7 @@ except Exception:
 #:
 #: ``manual_override`` sits highest deliberately: an authorised human with
 #: context must be able to correct a bad pin and have it stick against consensus.
-CONFIDENCE_RANK: Dict[str, int] = {
+CONFIDENCE_RANK: dict[str, int] = {
 	"territory_centroid": 10,
 	"pos_link": 20,
 	"customer_pin": 30,
@@ -110,7 +110,7 @@ def accepts_write(current_source: object, incoming_source: object) -> bool:
 	return confidence_rank(incoming_source) >= confidence_rank(current_source)
 
 
-def clamp_confidence(current_source: object, incoming_source: object) -> Tuple[str, int]:
+def clamp_confidence(current_source: object, incoming_source: object) -> tuple[str, int]:
 	"""Return the ``(source, rank)`` that must survive the write.
 
 	The single decision point for the ladder. Returns the incoming pair when the
@@ -142,7 +142,7 @@ PRECISION_PLUS_CODE = "plus_code"  # decoded Open Location Code
 #: ``Address.custom_geo_accuracy_m`` when the caller supplies nothing better.
 #: These are order-of-magnitude judgements, not measurements — the viewport
 #: figure is generous on purpose so a ``@``-only link never reads as a door pin.
-PRECISION_ACCURACY_M: Dict[str, float] = {
+PRECISION_ACCURACY_M: dict[str, float] = {
 	PRECISION_PIN: 25.0,
 	PRECISION_QUERY: 50.0,
 	PRECISION_PLUS_CODE: 15.0,
@@ -229,7 +229,7 @@ def maps_link_for(lat: object, lng: object) -> str:
 	return _MAPS_SEARCH_URL.format(lat=float(lat), lng=float(lng))
 
 
-def _coords(lat: object, lng: object, precision: str) -> Optional[Tuple[float, float, str]]:
+def _coords(lat: object, lng: object, precision: str) -> tuple[float, float, str] | None:
 	if not is_valid_coordinate(lat, lng):
 		return None
 	return (float(lat), float(lng), precision)
@@ -287,7 +287,7 @@ def is_full_plus_code(code: object) -> bool:
 	return all(ch in _OLC_ALPHABET for ch in body)
 
 
-def decode_plus_code(code: object) -> Optional[Tuple[float, float]]:
+def decode_plus_code(code: object) -> tuple[float, float] | None:
 	"""Decode a full Plus Code to the centre of the area it names.
 
 	Returns ``None`` for short, padded or malformed codes rather than raising —
@@ -373,7 +373,7 @@ def is_short_maps_link(url: object) -> bool:
 	return host in SHORT_LINK_HOSTS or host.endswith(".app.goo.gl")
 
 
-def parse_maps_link(url: object) -> Optional[Tuple[float, float, str]]:
+def parse_maps_link(url: object) -> tuple[float, float, str] | None:
 	"""Extract ``(lat, lng, precision)`` from a Maps URL, or ``None``.
 
 	**Parse order is load-bearing** (COURIER_CONTRACTS §A7):
@@ -438,7 +438,7 @@ def parse_maps_link(url: object) -> Optional[Tuple[float, float, str]]:
 	return None
 
 
-def _parse_query_coords(url: str) -> Optional[Tuple[float, float, str]]:
+def _parse_query_coords(url: str) -> tuple[float, float, str] | None:
 	"""``?q=<lat>,<lng>`` / ``?ll=`` / ``?query=`` and the other coordinate params."""
 	try:
 		parsed = urlparse(url)
@@ -457,7 +457,7 @@ def _parse_query_coords(url: str) -> Optional[Tuple[float, float, str]]:
 	return None
 
 
-def accuracy_for_precision(precision: object, fallback: Optional[float] = None) -> Optional[float]:
+def accuracy_for_precision(precision: object, fallback: float | None = None) -> float | None:
 	"""Rough accuracy radius in metres implied by a parse *precision*."""
 	key = str(precision or "").strip().lower()
 	if key in PRECISION_ACCURACY_M:
@@ -512,7 +512,7 @@ def haversine_m(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
 	return 2 * EARTH_RADIUS_M * math.asin(min(1.0, math.sqrt(a)))
 
 
-def distance_m_or_none(lat1: object, lng1: object, lat2: object, lng2: object) -> Optional[float]:
+def distance_m_or_none(lat1: object, lng1: object, lat2: object, lng2: object) -> float | None:
 	""":func:`haversine_m` that returns ``None`` instead of raising."""
 	try:
 		return haversine_m(float(lat1), float(lng1), float(lat2), float(lng2))

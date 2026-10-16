@@ -10,7 +10,6 @@ Runs against a real Frappe test database via FrappeTestCase.
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
-
 # ---------------------------------------------------------------------------
 # Helpers (shared with other case files)
 # ---------------------------------------------------------------------------

@@ -215,7 +215,7 @@ class SchemaTests(unittest.TestCase):
 
 	@classmethod
 	def setUpClass(cls):
-		with open(FIXTURE_PATH, "r", encoding="utf-8") as handle:
+		with open(FIXTURE_PATH, encoding="utf-8") as handle:
 			entries = json.load(handle)
 		cls.entry = next(
 			e

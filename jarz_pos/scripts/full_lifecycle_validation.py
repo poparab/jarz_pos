@@ -41,7 +41,6 @@ from frappe.utils import flt
 
 from jarz_pos.scripts.b2b_accounting_validation import (
 	RunContext,
-	assert_gl_balanced,
 	_cleanup,
 	_create_invoice,
 	_ensure_customer,
@@ -53,6 +52,7 @@ from jarz_pos.scripts.b2b_accounting_validation import (
 	_pick_courier_party,
 	_pick_pos_profile,
 	_pick_sellable_items,
+	assert_gl_balanced,
 )
 
 _TOL = 0.01
@@ -74,7 +74,7 @@ def _guard_environment() -> None:
 		raise RuntimeError(f"full_lifecycle_validation refuses to run on production ({base_url!r})")
 
 
-def _normalize_courier(picked: Any) -> Optional[Dict[str, Any]]:
+def _normalize_courier(picked: Any) -> dict[str, Any] | None:
 	if not picked:
 		return None
 	try:
@@ -86,7 +86,7 @@ def _normalize_courier(picked: Any) -> Optional[Dict[str, Any]]:
 	return {"party_type": party_type, "party": party}
 
 
-def _gl_by_account(voucher_type: str, voucher_no: str) -> Dict[str, float]:
+def _gl_by_account(voucher_type: str, voucher_no: str) -> dict[str, float]:
 	"""Net movement per account for one voucher (debit positive)."""
 	rows = frappe.db.sql(
 		"""
@@ -101,7 +101,7 @@ def _gl_by_account(voucher_type: str, voucher_no: str) -> Dict[str, float]:
 	return {r["account"]: flt(r["net"]) for r in rows}
 
 
-def _net_across_all_vouchers(invoice: str) -> Dict[str, float]:
+def _net_across_all_vouchers(invoice: str) -> dict[str, float]:
 	"""Net movement per account across EVERY voucher reachable from *invoice*.
 
 	WHY this exists: the dispatch assertion used to snapshot
@@ -116,7 +116,7 @@ def _net_across_all_vouchers(invoice: str) -> Dict[str, float]:
 	# module must stay importable without them.
 	from jarz_pos.scripts.return_money_audit import _vouchers_for
 
-	net: Dict[str, float] = {}
+	net: dict[str, float] = {}
 	for voucher_type, voucher_no in _vouchers_for(invoice):
 		for account, amount in _gl_by_account(voucher_type, voucher_no).items():
 			net[account] = round(net.get(account, 0.0) + flt(amount), 2)
@@ -137,7 +137,7 @@ def _assert_outstanding(ctx: RunContext, case: str, invoice: str, expected: floa
 	)
 
 
-def _assert_single_delivery_note(ctx: RunContext, case: str, invoice: str) -> Optional[str]:
+def _assert_single_delivery_note(ctx: RunContext, case: str, invoice: str) -> str | None:
 	dns = (
 		frappe.get_all(
 			"Delivery Note Item",
@@ -357,7 +357,7 @@ def _teardown_dispatched(ctx: RunContext) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _new_invoice(ctx: RunContext, env: Dict[str, Any], case: str, *, pickup: bool = False) -> str:
+def _new_invoice(ctx: RunContext, env: dict[str, Any], case: str, *, pickup: bool = False) -> str:
 	customer = _ensure_customer(ctx, case, env["territory"], env["customer_group"])
 	return _create_invoice(
 		ctx,
@@ -371,7 +371,7 @@ def _new_invoice(ctx: RunContext, env: Dict[str, Any], case: str, *, pickup: boo
 	)
 
 
-def _case_create_unpaid(ctx: RunContext, env: Dict[str, Any]) -> None:
+def _case_create_unpaid(ctx: RunContext, env: dict[str, Any]) -> None:
 	"""A fresh COD order: revenue recognised, full amount owed, no stock moved."""
 	case = "LC-CREATE-UNPAID"
 	invoice = _new_invoice(ctx, env, case)
@@ -392,7 +392,7 @@ def _case_create_unpaid(ctx: RunContext, env: Dict[str, Any]) -> None:
 	_absorb(ctx, invoice)
 
 
-def _case_create_paid_cash(ctx: RunContext, env: Dict[str, Any]) -> None:
+def _case_create_paid_cash(ctx: RunContext, env: dict[str, Any]) -> None:
 	"""Cash taken at the till: receivable cleared, cash in the branch account."""
 	case = "LC-CREATE-PAID-CASH"
 	invoice = _new_invoice(ctx, env, case)
@@ -418,7 +418,7 @@ def _case_create_paid_cash(ctx: RunContext, env: Dict[str, Any]) -> None:
 	_absorb(ctx, invoice)
 
 
-def _case_dispatch_paid(ctx: RunContext, env: Dict[str, Any]) -> None:
+def _case_dispatch_paid(ctx: RunContext, env: dict[str, Any]) -> None:
 	"""Dispatching an already-paid order must move money nowhere."""
 	from jarz_pos.services.delivery_handling import handle_out_for_delivery_transition
 
@@ -478,7 +478,7 @@ def _case_dispatch_paid(ctx: RunContext, env: Dict[str, Any]) -> None:
 	_absorb(ctx, invoice)
 
 
-def _case_dispatch_unpaid_cod(ctx: RunContext, env: Dict[str, Any]) -> None:
+def _case_dispatch_unpaid_cod(ctx: RunContext, env: dict[str, Any]) -> None:
 	"""Unpaid COD dispatch: receivable moves to Courier Outstanding, freight accrues."""
 	from jarz_pos.services.delivery_handling import handle_out_for_delivery_transition
 
@@ -556,7 +556,7 @@ def _case_dispatch_unpaid_cod(ctx: RunContext, env: Dict[str, Any]) -> None:
 	_absorb(ctx, invoice)
 
 
-def _case_dispatch_is_idempotent(ctx: RunContext, env: Dict[str, Any]) -> None:
+def _case_dispatch_is_idempotent(ctx: RunContext, env: dict[str, Any]) -> None:
 	"""Dispatching twice must not pay the invoice twice.
 
 	This is the real defect the audit found on production data: two Payment
@@ -668,7 +668,7 @@ def _case_dispatch_is_idempotent(ctx: RunContext, env: Dict[str, Any]) -> None:
 	_absorb(ctx, invoice)
 
 
-def _case_pickup_no_courier(ctx: RunContext, env: Dict[str, Any]) -> None:
+def _case_pickup_no_courier(ctx: RunContext, env: dict[str, Any]) -> None:
 	"""A pickup order must never acquire courier debt or freight expense."""
 	case = "LC-PICKUP"
 	invoice = _new_invoice(ctx, env, case, pickup=True)
@@ -693,7 +693,7 @@ def _case_pickup_no_courier(ctx: RunContext, env: Dict[str, Any]) -> None:
 	_absorb(ctx, invoice)
 
 
-def _case_cancel_unpaid(ctx: RunContext, env: Dict[str, Any]) -> None:
+def _case_cancel_unpaid(ctx: RunContext, env: dict[str, Any]) -> None:
 	"""Cancelling an unpaid pre-dispatch order must leave no live GL."""
 	from jarz_pos.api.kanban import cancel_invoice
 
@@ -715,7 +715,7 @@ def _case_cancel_unpaid(ctx: RunContext, env: Dict[str, Any]) -> None:
 	_absorb(ctx, invoice)
 
 
-def _case_cancel_paid(ctx: RunContext, env: Dict[str, Any]) -> None:
+def _case_cancel_paid(ctx: RunContext, env: dict[str, Any]) -> None:
 	"""Cancelling a paid order reverses both the invoice and its payment."""
 	from jarz_pos.api.kanban import cancel_invoice
 
@@ -753,7 +753,7 @@ def _case_cancel_paid(ctx: RunContext, env: Dict[str, Any]) -> None:
 	_absorb(ctx, invoice)
 
 
-def _case_cancel_blocked_after_dispatch(ctx: RunContext, env: Dict[str, Any]) -> None:
+def _case_cancel_blocked_after_dispatch(ctx: RunContext, env: dict[str, Any]) -> None:
 	"""A dispatched order must refuse cancellation from every path."""
 	from jarz_pos.api.kanban import cancel_invoice
 	from jarz_pos.services.delivery_handling import handle_out_for_delivery_transition
@@ -807,7 +807,7 @@ _CASES = [
 ]
 
 
-def run(cleanup: bool = True) -> Dict[str, Any]:
+def run(cleanup: bool = True) -> dict[str, Any]:
 	if isinstance(cleanup, str):
 		cleanup = cleanup.strip().lower() not in {"", "0", "false", "no"}
 
@@ -816,7 +816,7 @@ def run(cleanup: bool = True) -> Dict[str, Any]:
 	frappe.flags.ignore_woo_outbound = True
 
 	ctx = RunContext()
-	summary: Dict[str, Any] = {}
+	summary: dict[str, Any] = {}
 	try:
 		pos_profile = _pick_pos_profile()
 		items = _pick_sellable_items(pos_profile, 2)

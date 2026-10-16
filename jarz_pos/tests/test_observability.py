@@ -18,8 +18,7 @@ from unittest.mock import MagicMock, patch
 
 import frappe
 
-from jarz_pos.observability import error_response
-from jarz_pos.observability import sentry_bootstrap
+from jarz_pos.observability import error_response, sentry_bootstrap
 from jarz_pos.observability.request_context import infer_backend_app, normalize_environment
 
 
@@ -114,7 +113,7 @@ class TestReleaseName(unittest.TestCase):
 		if get_app_path is None:
 			resolved = self.package_dir if app_path is None else app_path
 
-			def get_app_path(app_name):  # noqa: ARG001
+			def get_app_path(app_name):
 				return resolved
 
 		return SimpleNamespace(conf=dict(conf or {}), get_app_path=get_app_path)

@@ -1,5 +1,5 @@
 import frappe
-from frappe.utils import today, add_days, getdate
+from frappe.utils import add_days, getdate, today
 
 # ---------------------------------------------------------------------------
 # Retail scope
@@ -175,7 +175,7 @@ def run_segmentation(dry_run=False):
 	# latest value comes from GROUP_CONCAT ordered newest first (only the first
 	# element is read, so the connection's group_concat_max_len cannot matter).
 	customers = frappe.db.sql(
-		"""
+		f"""
         SELECT
             si.customer                                   AS customer,
             MAX(si.posting_date)                          AS last_order_date,
@@ -191,7 +191,7 @@ def run_segmentation(dry_run=False):
         INNER JOIN `tabCustomer` c ON c.name = si.customer
         WHERE {scope}
         GROUP BY si.customer
-    """.format(scope=scope),
+    """,
 		{
 			"lookback_start": lookback_start,
 			"regular_start": regular_start,
@@ -350,7 +350,7 @@ def export_segment_csv(segment):
 		where = "c.customer_segment = %s"
 		params = (segment,)
 	return frappe.db.sql(
-		"""
+		f"""
         SELECT
             c.name            AS customer_id,
             c.customer_name,
@@ -366,7 +366,7 @@ def export_segment_csv(segment):
         WHERE {where}
           AND c.disabled = 0
         ORDER BY c.rfm_avg_order_value DESC
-    """.format(extra_cols=extra_cols, where=where),
+    """,
 		params,
 		as_dict=True,
 	)

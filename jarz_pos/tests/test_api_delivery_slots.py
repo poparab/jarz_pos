@@ -3,9 +3,9 @@
 This module tests delivery slot management endpoints.
 """
 
+import datetime
 import sys
 import unittest
-import datetime
 
 
 class TestDeliverySlotsAPI(unittest.TestCase):
@@ -344,6 +344,7 @@ class TestDeliverySlotsAPI(unittest.TestCase):
 	def test_day_labels_follow_the_site_clock_not_the_container(self):
 		"""At 00:20 site time the running after-midnight slot is Today, not Tomorrow."""
 		from unittest import mock
+
 		from jarz_pos.api import delivery_slots
 
 		now = self._at(0, 20, days=1)
@@ -372,6 +373,7 @@ class TestDeliverySlotsAPI(unittest.TestCase):
 
 	def _with_clock(self, now, fn):
 		from unittest import mock
+
 		from jarz_pos.api import delivery_slots
 
 		with mock.patch.object(delivery_slots.frappe.utils, "now_datetime", return_value=now):
@@ -434,6 +436,7 @@ class TestDeliverySlotsAPI(unittest.TestCase):
 		"""Through the endpoint: past midnight on Saturday the list starts with Today."""
 		from types import SimpleNamespace
 		from unittest import mock
+
 		from jarz_pos.api import delivery_slots
 
 		config = SimpleNamespace(
@@ -487,6 +490,7 @@ class TestDeliverySlotsAPI(unittest.TestCase):
 		"""The running slot sorts first but the default is the next one."""
 		from types import SimpleNamespace
 		from unittest import mock
+
 		from jarz_pos.api import delivery_slots
 
 		target = self._make_date()
@@ -533,6 +537,7 @@ class TestDeliverySlotsAPI(unittest.TestCase):
 	def test_preview_endpoint_reproduces_the_woo_week(self):
 		"""The Desk preview must render the same aligned week the POS serves."""
 		import json as _json
+
 		from jarz_pos.api.delivery_slots import preview_timetable_slots
 
 		timetable = [
@@ -602,6 +607,7 @@ class TestDeliverySlotsAPI(unittest.TestCase):
 	def _normalize(self, start, end=None, slots=None, now=None, explicit=None):
 		"""Run normalize_delivery_window against a fixed grid and clock."""
 		from unittest import mock
+
 		from jarz_pos.api import delivery_slots
 
 		grid = (
@@ -732,6 +738,7 @@ class TestDeliverySlotsAPI(unittest.TestCase):
 
 	def test_the_explicit_flag_is_read_from_the_request(self):
 		from unittest import mock
+
 		from jarz_pos.services import invoice_creation
 
 		cases = [
@@ -755,8 +762,9 @@ class TestDeliverySlotsAPI(unittest.TestCase):
 
 	def test_invoice_creation_forwards_the_explicit_flag(self):
 		from unittest import mock
-		from jarz_pos.services import invoice_creation
+
 		from jarz_pos.api import delivery_slots
+		from jarz_pos.services import invoice_creation
 
 		start = datetime.datetime(2030, 1, 6, 21, 0)
 		for raw, expected in ((None, None), ("1", True), ("0", False)):
@@ -776,6 +784,7 @@ class TestDeliverySlotsAPI(unittest.TestCase):
 	def test_an_amendment_keeping_its_own_window_counts_as_explicit(self):
 		"""Editing an order's address while its slot runs must not move the order."""
 		import frappe
+
 		from jarz_pos.api import manager
 
 		source = frappe._dict(custom_delivery_date="2030-01-06", custom_delivery_time_from="21:00:00")
@@ -800,6 +809,7 @@ class TestDeliverySlotsAPI(unittest.TestCase):
 	def test_the_amendment_form_context_writes_the_flag_it_is_given(self):
 		"""The job's argument decides, not whatever the request happened to carry."""
 		import frappe
+
 		from jarz_pos.api import manager
 
 		had_previous = hasattr(frappe.local, "form_dict")
@@ -841,6 +851,7 @@ class TestDeliverySlotsAPI(unittest.TestCase):
 		import threading
 
 		import frappe
+
 		from jarz_pos.api import manager
 
 		proxy = frappe.form_dict
@@ -886,6 +897,7 @@ class TestDeliverySlotsAPI(unittest.TestCase):
 	def test_the_amendment_form_context_restores_on_error(self):
 		"""An exception inside the block still puts the original object back."""
 		import frappe
+
 		from jarz_pos.api import manager
 
 		proxy = frappe.form_dict
@@ -908,6 +920,7 @@ class TestDeliverySlotsAPI(unittest.TestCase):
 		"""Declared on the endpoint, so it survives the job leaving the request."""
 		from types import SimpleNamespace
 		from unittest.mock import MagicMock, patch
+
 		from jarz_pos.api import manager
 
 		source = SimpleNamespace(
@@ -1002,6 +1015,7 @@ class TestDeliverySlotsAPI(unittest.TestCase):
 	def test_a_failing_slot_lookup_never_takes_the_order_down(self):
 		"""Slot normalisation is advisory; an exception must not block a sale."""
 		from unittest import mock
+
 		from jarz_pos.api import delivery_slots
 
 		with mock.patch.object(
@@ -1024,6 +1038,7 @@ class TestRescheduleRefusesEndedSlot(unittest.TestCase):
 
 	def _assert(self, date, time, duration):
 		from unittest import mock
+
 		from jarz_pos.api import invoices
 
 		with mock.patch.object(invoices.frappe.utils, "now_datetime", return_value=self.NOW):
@@ -1056,8 +1071,10 @@ class TestRescheduleRefusesEndedSlot(unittest.TestCase):
 			self._assert("not-a-date", "", 3600)
 
 	def test_the_endpoint_refuses_before_touching_the_invoice(self):
-		import frappe
 		from unittest import mock
+
+		import frappe
+
 		from jarz_pos.api import invoices
 
 		with (

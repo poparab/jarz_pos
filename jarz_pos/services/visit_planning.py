@@ -32,8 +32,9 @@ Nothing here writes a document. Persisting a suggestion is the caller's choice
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import frappe
 from frappe.utils import date_diff, getdate, nowdate
@@ -174,7 +175,7 @@ def default_start_time() -> str:
 	return str(raw) if raw else "10:00:00"
 
 
-def visit_days() -> List[str]:
+def visit_days() -> list[str]:
 	"""Weekday names the team does field visits on. Empty means "any day"."""
 	raw = str(_single("visit_days", "") or "").strip()
 	if not raw:
@@ -221,12 +222,12 @@ class VisitTarget:
 	tier: str = ""
 	category: str = ""
 	is_specialty: bool = False
-	last_visit_date: Optional[str] = None
-	days_since_visit: Optional[int] = None
-	next_followup_date: Optional[str] = None
+	last_visit_date: str | None = None
+	days_since_visit: int | None = None
+	next_followup_date: str | None = None
 	followup_overdue: bool = False
 	priority: float = 0.0
-	reasons: List[str] = field(default_factory=list)
+	reasons: list[str] = field(default_factory=list)
 
 	@property
 	def key(self) -> str:
@@ -246,7 +247,7 @@ class VisitTarget:
 		"""
 		return f"{self.reference_doctype}:{self.reference_name}:" f"{self.latitude:.5f},{self.longitude:.5f}"
 
-	def as_dict(self) -> Dict[str, Any]:
+	def as_dict(self) -> dict[str, Any]:
 		return {
 			"reference_doctype": self.reference_doctype,
 			"reference_name": self.reference_name,
@@ -279,7 +280,7 @@ def _has_field(doctype: str, fieldname: str) -> bool:
 		return False
 
 
-def _coord(value: Any) -> Optional[float]:
+def _coord(value: Any) -> float | None:
 	"""A usable coordinate, or ``None``.
 
 	Rejects exact zero. (0, 0) is in the Atlantic and is what an unset Float
@@ -295,7 +296,7 @@ def _coord(value: Any) -> Optional[float]:
 	return parsed
 
 
-def last_visit_map(reference_doctype: str, names: Sequence[str]) -> Dict[str, str]:
+def last_visit_map(reference_doctype: str, names: Sequence[str]) -> dict[str, str]:
 	"""``{reference_name: last visit date}`` from the journey diary.
 
 	ONE query for the whole set — the same discipline the leads catalog uses
@@ -316,7 +317,7 @@ def last_visit_map(reference_doctype: str, names: Sequence[str]) -> Dict[str, st
 	So the reduction happens in Python instead. The notes table is one row per
 	real-world touch, which is small next to the catalog it describes.
 	"""
-	result: Dict[str, str] = {}
+	result: dict[str, str] = {}
 	if not names:
 		return result
 	try:
@@ -349,13 +350,13 @@ def last_visit_map(reference_doctype: str, names: Sequence[str]) -> Dict[str, st
 
 
 def lead_targets(
-	category: Optional[str] = None,
-	tier: Optional[str] = None,
-	area: Optional[str] = None,
-	stages: Optional[Sequence[str]] = None,
+	category: str | None = None,
+	tier: str | None = None,
+	area: str | None = None,
+	stages: Sequence[str] | None = None,
 	specialty_only: bool = False,
 	min_fit_score: float = 0.0,
-) -> List[VisitTarget]:
+) -> list[VisitTarget]:
 	"""Every routable door on the lead catalog, coarsely filtered.
 
 	Filtering is deliberately coarse and mirrors ``leads.get_leads``: the
@@ -366,7 +367,7 @@ def lead_targets(
 	leads merged away as duplicates. Sending a rep to a door a colleague
 	already rejected is the fastest way to make them stop trusting the planner.
 	"""
-	filters: Dict[str, Any] = {}
+	filters: dict[str, Any] = {}
 	if category:
 		filters["custom_lead_category"] = category
 	if tier:
@@ -408,7 +409,7 @@ def lead_targets(
 	visits = last_visit_map("Lead", list(by_name.keys()))
 	today = getdate(nowdate())
 
-	targets: List[VisitTarget] = []
+	targets: list[VisitTarget] = []
 	for name, row in by_name.items():
 		fit = float(row.get("custom_fit_score") or 0)
 		if fit < min_fit_score:
@@ -464,14 +465,14 @@ def lead_targets(
 	return targets
 
 
-def _lead_branches(names: Sequence[str]) -> Dict[str, List[Dict[str, Any]]]:
+def _lead_branches(names: Sequence[str]) -> dict[str, list[dict[str, Any]]]:
 	"""``{lead: [door, ...]}`` — one query for the whole catalog.
 
 	The branch child table is where the coordinates actually live. Every one of
 	the corpus's ~2,970 rows carries a pin, which is what makes door-level
 	routing possible at all.
 	"""
-	result: Dict[str, List[Dict[str, Any]]] = {}
+	result: dict[str, list[dict[str, Any]]] = {}
 	if not names or not _has_field("Lead", "custom_branches"):
 		return result
 	try:
@@ -521,7 +522,7 @@ def _lead_branches(names: Sequence[str]) -> Dict[str, List[Dict[str, Any]]]:
 	return result
 
 
-def customer_targets(area: Optional[str] = None) -> List[VisitTarget]:
+def customer_targets(area: str | None = None) -> list[VisitTarget]:
 	"""Active B2B accounts, located through their primary address.
 
 	Far fewer of these than leads, and they matter for a different reason: a
@@ -554,7 +555,7 @@ def customer_targets(area: Optional[str] = None) -> List[VisitTarget]:
 	visits = last_visit_map("Customer", names)
 	today = getdate(nowdate())
 
-	targets: List[VisitTarget] = []
+	targets: list[VisitTarget] = []
 	for row in customers:
 		pin = pins.get(row["name"])
 		if not pin:
@@ -579,13 +580,13 @@ def customer_targets(area: Optional[str] = None) -> List[VisitTarget]:
 	return targets
 
 
-def _customer_pins(names: Sequence[str]) -> Dict[str, Dict[str, Any]]:
+def _customer_pins(names: Sequence[str]) -> dict[str, dict[str, Any]]:
 	"""``{customer: pin}`` via the Dynamic Link table, one query per side.
 
 	Preferring the primary address, then any located one. A customer with three
 	addresses and a pin on only the warehouse still gets routed somewhere real.
 	"""
-	result: Dict[str, Dict[str, Any]] = {}
+	result: dict[str, dict[str, Any]] = {}
 	if not names:
 		return result
 	try:
@@ -653,7 +654,7 @@ def _customer_pins(names: Sequence[str]) -> Dict[str, Dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
-def targets_for_record(reference_doctype: str, reference_name: str) -> List[VisitTarget]:
+def targets_for_record(reference_doctype: str, reference_name: str) -> list[VisitTarget]:
 	"""Every routable door belonging to ONE record.
 
 	This is what lets any screen offer "add to a visit" without knowing
@@ -766,7 +767,7 @@ def targets_for_record(reference_doctype: str, reference_name: str) -> List[Visi
 	return targets
 
 
-def _opportunity_lead(name: str) -> Optional[str]:
+def _opportunity_lead(name: str) -> str | None:
 	"""The Lead an Opportunity came from, or ``None``. Guarded."""
 	try:
 		row = frappe.db.get_value("Opportunity", name, ["opportunity_from", "party_name"], as_dict=True)
@@ -777,7 +778,7 @@ def _opportunity_lead(name: str) -> Optional[str]:
 	return row.get("party_name") or None
 
 
-def _customer_targets_for(name: str) -> List[VisitTarget]:
+def _customer_targets_for(name: str) -> list[VisitTarget]:
 	"""One customer's located address, as a target. Guarded -> []."""
 	if not _has_field("Address", "custom_latitude"):
 		return []
@@ -820,7 +821,7 @@ def _score(target: VisitTarget, today) -> None:
 	entitled to see why it was made, and "overdue follow-up + not visited in
 	134 days" is an argument, where "score 91.4" is not.
 	"""
-	reasons: List[str] = []
+	reasons: list[str] = []
 	score = float(target.fit_score or 0)
 	if score:
 		reasons.append(f"fit {int(score)}")
@@ -873,9 +874,9 @@ def _score(target: VisitTarget, today) -> None:
 def select_cluster(
 	candidates: Sequence[VisitTarget],
 	max_stops: int,
-	anchor: Optional[Tuple[float, float]] = None,
-	radius_km: Optional[float] = None,
-) -> List[VisitTarget]:
+	anchor: tuple[float, float] | None = None,
+	radius_km: float | None = None,
+) -> list[VisitTarget]:
 	"""Grow a geographically tight, high-value set of stops.
 
 	The greedy rule is ``priority - DETOUR_PENALTY_PER_KM * km from the running
@@ -907,7 +908,7 @@ def select_cluster(
 		pool.sort(key=lambda t: t.priority, reverse=True)
 
 	pool = pool[:CANDIDATE_POOL]
-	chosen: List[VisitTarget] = [pool[0]]
+	chosen: list[VisitTarget] = [pool[0]]
 	remaining = pool[1:]
 	centroid_lat, centroid_lng = pool[0].latitude, pool[0].longitude
 
@@ -930,7 +931,7 @@ def select_cluster(
 	return chosen
 
 
-def targets_to_points(targets: Sequence[VisitTarget], visit_minutes: int) -> List[RoutePoint]:
+def targets_to_points(targets: Sequence[VisitTarget], visit_minutes: int) -> list[RoutePoint]:
 	return [
 		RoutePoint(
 			key=target.key,
@@ -944,19 +945,19 @@ def targets_to_points(targets: Sequence[VisitTarget], visit_minutes: int) -> Lis
 
 
 def suggest(
-	max_stops: Optional[int] = None,
-	anchor: Optional[Tuple[float, float]] = None,
-	radius_km: Optional[float] = None,
-	category: Optional[str] = None,
-	tier: Optional[str] = None,
-	area: Optional[str] = None,
-	stages: Optional[Sequence[str]] = None,
+	max_stops: int | None = None,
+	anchor: tuple[float, float] | None = None,
+	radius_km: float | None = None,
+	category: str | None = None,
+	tier: str | None = None,
+	area: str | None = None,
+	stages: Sequence[str] | None = None,
 	specialty_only: bool = False,
 	min_fit_score: float = 0.0,
 	include_customers: bool = True,
-	day_minutes: Optional[int] = None,
-	config: Optional[RouteConfig] = None,
-) -> Dict[str, Any]:
+	day_minutes: int | None = None,
+	config: RouteConfig | None = None,
+) -> dict[str, Any]:
 	"""Propose a day: which doors, in what order, and why.
 
 	Returns a preview, not a saved plan. The rep sees the reasoning, drops what
@@ -1055,7 +1056,7 @@ def suggest(
 # ---------------------------------------------------------------------------
 
 
-def points_from_stops(stops: Sequence[Any], default_minutes: int) -> List[RoutePoint]:
+def points_from_stops(stops: Sequence[Any], default_minutes: int) -> list[RoutePoint]:
 	"""Route points for the child rows of a plan, skipping cancelled stops."""
 	points = []
 	for row in stops:
@@ -1078,7 +1079,7 @@ def points_from_stops(stops: Sequence[Any], default_minutes: int) -> List[RouteP
 	return points
 
 
-def start_point_for(plan) -> Optional[RoutePoint]:
+def start_point_for(plan) -> RoutePoint | None:
 	"""The plan's fixed start, or ``None`` when it starts wherever the rep is.
 
 	"Current Location" is resolved on the phone at drive time, not here: a
@@ -1146,8 +1147,8 @@ def apply_route(plan, result: RouteResult, points: Sequence[RoutePoint], reorder
 
 
 def route_plan(
-	plan, optimize: bool = True, config: Optional[RouteConfig] = None
-) -> Tuple[RouteResult, List[RoutePoint]]:
+	plan, optimize: bool = True, config: RouteConfig | None = None
+) -> tuple[RouteResult, list[RoutePoint]]:
 	"""Cost a plan — reordering it or accepting the order it already has.
 
 	Returns the solved route *and* the points it was solved over, because

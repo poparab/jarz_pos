@@ -10,37 +10,85 @@ import hmac
 import json
 
 import frappe
+from frappe.utils import get_datetime, now_datetime
 
+from jarz_pos.api.invoices import pay_invoice as _pay_invoice  # reuse payment creation
+from jarz_pos.constants import DELIVERY_GROUPS, ROLES
+from jarz_pos.services import delivery_handling as _delivery_services
 from jarz_pos.services.delivery_handling import (
-	mark_courier_outstanding as _mark_courier_outstanding,
-	pay_delivery_expense as _pay_delivery_expense,
-	courier_delivery_expense_only as _courier_delivery_expense_only,
-	get_courier_balances as _get_courier_balances,
-	settle_courier as _settle_courier,
-	settle_delivery_party as _settle_delivery_party,
-	settle_courier_for_invoice as _settle_courier_for_invoice,
-	handle_out_for_delivery_paid as _handle_out_for_delivery_paid,
-	handle_out_for_delivery_transition as _handle_out_for_delivery_transition,
-	settle_single_invoice_paid as _settle_single_invoice_paid,
-	settle_courier_collected_payment as _settle_courier_collected_payment,
 	change_payment_collection_method as _change_payment_collection_method,
-	deliver_online_unconfirmed as _deliver_online_unconfirmed,
-	deliver_credit_on_account as _deliver_credit_on_account,
-	list_unconfirmed_online_orders as _list_unconfirmed_online_orders,
+)
+from jarz_pos.services.delivery_handling import (
 	confirm_online_payment as _confirm_online_payment,
+)
+from jarz_pos.services.delivery_handling import (
 	convert_online_order_to_cod as _convert_online_order_to_cod,
+)
+from jarz_pos.services.delivery_handling import (
+	courier_delivery_expense_only as _courier_delivery_expense_only,
+)
+from jarz_pos.services.delivery_handling import (
+	deliver_credit_on_account as _deliver_credit_on_account,
+)
+from jarz_pos.services.delivery_handling import (
+	deliver_online_unconfirmed as _deliver_online_unconfirmed,
+)
+from jarz_pos.services.delivery_handling import (
+	get_courier_balances as _get_courier_balances,
+)
+from jarz_pos.services.delivery_handling import (
 	get_unsettle_preview as _get_unsettle_preview,
-	unsettle_courier_settlement as _unsettle_courier_settlement,
+)
+from jarz_pos.services.delivery_handling import (
+	handle_out_for_delivery_paid as _handle_out_for_delivery_paid,
+)
+from jarz_pos.services.delivery_handling import (
+	handle_out_for_delivery_transition as _handle_out_for_delivery_transition,
+)
+from jarz_pos.services.delivery_handling import (
 	list_recent_courier_settlements as _list_recent_courier_settlements,
 )
+from jarz_pos.services.delivery_handling import (
+	list_unconfirmed_online_orders as _list_unconfirmed_online_orders,
+)
+from jarz_pos.services.delivery_handling import (
+	mark_courier_outstanding as _mark_courier_outstanding,
+)
+from jarz_pos.services.delivery_handling import (
+	pay_delivery_expense as _pay_delivery_expense,
+)
+from jarz_pos.services.delivery_handling import (
+	settle_courier as _settle_courier,
+)
+from jarz_pos.services.delivery_handling import (
+	settle_courier_collected_payment as _settle_courier_collected_payment,
+)
+from jarz_pos.services.delivery_handling import (
+	settle_courier_for_invoice as _settle_courier_for_invoice,
+)
+from jarz_pos.services.delivery_handling import (
+	settle_delivery_party as _settle_delivery_party,
+)
+from jarz_pos.services.delivery_handling import (
+	settle_single_invoice_paid as _settle_single_invoice_paid,
+)
+from jarz_pos.services.delivery_handling import (
+	unsettle_courier_settlement as _unsettle_courier_settlement,
+)
 from jarz_pos.services.delivery_party import create_delivery_party as _create_delivery_party
-from jarz_pos.utils.invoice_utils import normalize_woo_order_id
-from jarz_pos.api.invoices import pay_invoice as _pay_invoice  # reuse payment creation
-from jarz_pos.services import delivery_handling as _delivery_services
+from jarz_pos.services.settlement_strategies import (
+	_is_credit_intent as _is_credit_intent,
+)
+from jarz_pos.services.settlement_strategies import (
+	_is_online_intent as _is_online_intent,
+)
 from jarz_pos.services.settlement_strategies import (
 	dispatch_settlement as _dispatch_settlement,
-	_is_online_intent as _is_online_intent,
-	_is_credit_intent as _is_credit_intent,
+)
+from jarz_pos.utils.access_control import (
+	ensure_open_shift,
+	ensure_open_shift_for_invoice,
+	ensure_profile_scoped_invoice_access,
 )
 from jarz_pos.utils.account_utils import (
 	get_freight_expense_account,
@@ -51,14 +99,7 @@ from jarz_pos.utils.courier_visibility import (
 	filter_available_couriers,
 	get_visible_pos_profiles,
 )
-from frappe.utils import now_datetime, get_datetime
-from jarz_pos.constants import DELIVERY_GROUPS, ROLES
-from jarz_pos.utils.access_control import (
-	ensure_open_shift,
-	ensure_open_shift_for_invoice,
-	ensure_profile_scoped_invoice_access,
-)
-
+from jarz_pos.utils.invoice_utils import normalize_woo_order_id
 
 # ---------------------------------------------------------------------------
 # Entry guards
@@ -627,10 +668,10 @@ def create_delivery_party(
 	except frappe.exceptions.ValidationError:
 		raise
 	except Exception as e:
-		frappe.logger().error(f"create_delivery_party failed: {str(e)}")
+		frappe.logger().error(f"create_delivery_party failed: {e!s}")
 		frappe.logger().error(frappe.get_traceback())
 		# Return user-friendly error instead of generic 409
-		frappe.throw(f"Failed to create courier: {str(e)}")
+		frappe.throw(f"Failed to create courier: {e!s}")
 
 
 @frappe.whitelist()  # type: ignore[attr-defined]
@@ -704,7 +745,7 @@ def _log_preview_cache_failure(which: str) -> None:
 	"""
 	try:
 		frappe.log_error(frappe.get_traceback(), f"{which} preview cache read failed")
-	except Exception:  # noqa: BLE001
+	except Exception:
 		pass
 
 
@@ -1143,7 +1184,7 @@ def confirm_settlement(
 		}
 		base.update({k: v for k, v in (res or {}).items() if k not in base})
 		return base
-	except Exception as e:
+	except Exception:
 		frappe.db.rollback(save_point="confirm_settlement")
 		frappe.log_error(frappe.get_traceback(), "confirm_settlement failed")
 		raise

@@ -50,7 +50,7 @@ MARKER_END = "FULL_STACK_VALIDATION_JSON_END"
 #: Ordered deliberately. The read-only surveys run first so a site that is
 #: already broken is reported as broken before anything writes to it; the
 #: mutating suites follow; the fixture sweep runs last.
-SUITES: List[Dict[str, Any]] = [
+SUITES: list[dict[str, Any]] = [
 	{
 		"key": "settings",
 		"module": "jarz_pos.scripts.settings_matrix_validation",
@@ -163,7 +163,7 @@ def _guard_environment() -> str:
 	return host_name or base_url or site or "unknown"
 
 
-def _raw_singles(doctype: str) -> Dict[str, Any]:
+def _raw_singles(doctype: str) -> dict[str, Any]:
 	"""Read a Single straight out of ``tabSingles``.
 
 	Not ``get_single_value``: that casts through ``cint`` for Check and Int
@@ -181,9 +181,9 @@ def _raw_singles(doctype: str) -> Dict[str, Any]:
 	return {r["field"]: r["value"] for r in rows}
 
 
-def _fingerprint() -> Dict[str, Any]:
+def _fingerprint() -> dict[str, Any]:
 	"""Everything needed to judge, months later, what this report actually meant."""
-	fp: Dict[str, Any] = {
+	fp: dict[str, Any] = {
 		"site": frappe.local.site,
 		"base_url": (frappe.utils.get_url() or ""),
 		"run_started": frappe.utils.now(),
@@ -228,7 +228,7 @@ def _is_secret(fieldname: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _normalise(result: Any) -> Dict[str, Any]:
+def _normalise(result: Any) -> dict[str, Any]:
 	"""Reduce any suite's return value to the same shape.
 
 	The suites predate each other and return slightly different dicts — some
@@ -277,9 +277,7 @@ def _normalise(result: Any) -> Dict[str, Any]:
 	return out
 
 
-def _run_suite(
-	suite: Dict[str, Any], cleanup: bool, extra: Optional[Dict[str, Any]] = None
-) -> Dict[str, Any]:
+def _run_suite(suite: dict[str, Any], cleanup: bool, extra: dict[str, Any] | None = None) -> dict[str, Any]:
 	"""Run one suite, converting a crash into a reported failure.
 
 	A suite that raises must not take the run down with it: the whole point of
@@ -287,7 +285,7 @@ def _run_suite(
 	interesting run is the one where something is already broken.
 	"""
 	started = time.time()
-	record: Dict[str, Any] = {
+	record: dict[str, Any] = {
 		"key": suite["key"],
 		"module": suite["module"],
 		"what": suite["what"],
@@ -379,7 +377,7 @@ def _run_suite(
 # ---------------------------------------------------------------------------
 
 
-def _sweep(report: Dict[str, Any]) -> None:
+def _sweep(report: dict[str, Any]) -> None:
 	"""Purge fixtures, then prove the purge worked.
 
 	Running the purge is not the check. A purge that silently fails leaves a
@@ -395,7 +393,7 @@ def _sweep(report: Dict[str, Any]) -> None:
 
 	try:
 		result = purge.run(dry_run=False)
-		residue: Dict[str, int] = {}
+		residue: dict[str, int] = {}
 		for prefix in purge.FIXTURE_PREFIXES:
 			for doctype in ("Customer", "Territory", "Customer Group"):
 				try:
@@ -421,10 +419,10 @@ def _sweep(report: Dict[str, Any]) -> None:
 
 def run(
 	cleanup: bool = True,
-	only: Optional[List[str]] = None,
-	skip: Optional[List[str]] = None,
+	only: list[str] | None = None,
+	skip: list[str] | None = None,
 	allow_woo_mutations: bool = False,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	"""Run the suites.
 
 	``allow_woo_mutations`` is off by default and deliberately separate from
@@ -458,7 +456,7 @@ def run(
 
 	selected = [s for s in SUITES if (not only or s["key"] in only) and (not skip or s["key"] not in skip)]
 
-	report: Dict[str, Any] = {
+	report: dict[str, Any] = {
 		"site": site,
 		"fingerprint": _fingerprint(),
 		"suites": [],
@@ -497,7 +495,7 @@ def run(
 	return report
 
 
-def _print_summary(report: Dict[str, Any]) -> None:
+def _print_summary(report: dict[str, Any]) -> None:
 	print("\n" + "=" * 72)
 	print("FULL STACK VALIDATION")
 	print("=" * 72)

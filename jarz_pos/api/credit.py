@@ -38,7 +38,7 @@ from frappe.utils import add_days, flt, getdate, nowdate
 
 from jarz_pos.constants import ROLES
 from jarz_pos.utils.credit_utils import (
-	CREDIT_PAYMENT_METHOD,  # noqa: F401  (re-export; see the note below)
+	CREDIT_PAYMENT_METHOD,
 	apply_credit_invoice_match,
 )
 
@@ -174,20 +174,20 @@ def _can_manage_credit_settings() -> bool:
 	return bool(roles.intersection(CREDIT_SETTINGS_ROLES))
 
 
-def _allowed_profiles() -> List[str]:
+def _allowed_profiles() -> list[str]:
 	from jarz_pos.api.manager import _current_user_allowed_profiles
 
 	return _current_user_allowed_profiles() or []
 
 
-def _customer_credit_settings(customer: str) -> Dict[str, Any]:
+def _customer_credit_settings(customer: str) -> dict[str, Any]:
 	"""The three credit columns off a Customer, failing CLOSED.
 
 	Every field is seeded by ``setup/credit_terms.py``, so on a bench that has
 	not migrated the read raises rather than returning ``None``. That must
 	degrade to "credit not allowed" and never to "allowed with no limit".
 	"""
-	result: Dict[str, Any] = {"allowed": False, "days": 0, "limit": 0.0}
+	result: dict[str, Any] = {"allowed": False, "days": 0, "limit": 0.0}
 	name = str(customer or "").strip()
 	if not name:
 		return result
@@ -217,7 +217,7 @@ def _customer_credit_settings(customer: str) -> Dict[str, Any]:
 	return result
 
 
-def _open_credit_invoice_fields() -> List[str]:
+def _open_credit_invoice_fields() -> list[str]:
 	fields = [
 		"name",
 		"customer",
@@ -240,7 +240,7 @@ def _open_credit_invoice_fields() -> List[str]:
 		pass
 	# de-dup while preserving order (branch field may already be in the list)
 	seen: set = set()
-	ordered: List[str] = []
+	ordered: list[str] = []
 	for field in fields:
 		if field not in seen:
 			seen.add(field)
@@ -250,9 +250,9 @@ def _open_credit_invoice_fields() -> List[str]:
 
 def _open_credit_invoices(
 	*,
-	customers: Optional[List[str]] = None,
-	profiles: Optional[List[str]] = None,
-) -> List[Dict[str, Any]]:
+	customers: list[str] | None = None,
+	profiles: list[str] | None = None,
+) -> list[dict[str, Any]]:
 	"""Every OPEN credit invoice, oldest first. Never date-filtered.
 
 	This is the BALANCE query. It is deliberately uncapped and deliberately
@@ -280,7 +280,7 @@ def _open_credit_invoices(
 	balance — it would hand ``record_credit_payment`` a negative-outstanding row to
 	allocate a Receive Payment Entry against.
 	"""
-	filters: Dict[str, Any] = {
+	filters: dict[str, Any] = {
 		"docstatus": 1,
 		"outstanding_amount": [">", 0.005],
 		"is_return": 0,
@@ -326,12 +326,12 @@ def _age_days(posting_date: Any) -> int:
 
 @frappe.whitelist(allow_guest=False)
 def get_credit_ledger(
-	customer: Optional[str] = None,
-	pos_profile: Optional[str] = None,
-	from_date: Optional[str] = None,
-	to_date: Optional[str] = None,
-	limit: Union[int, str, None] = 200,
-) -> Dict[str, Any]:
+	customer: str | None = None,
+	pos_profile: str | None = None,
+	from_date: str | None = None,
+	to_date: str | None = None,
+	limit: int | str | None = 200,
+) -> dict[str, Any]:
 	"""What each customer owes on account, with their open invoices oldest-first.
 
 	**THE DATE WINDOW DESCRIBES ACTIVITY. IT NEVER LIMITS THE BALANCE.**
@@ -407,14 +407,14 @@ def get_credit_ledger(
 	selected_customer = str(customer or "").strip()
 	selected_branch = str(pos_profile or "").strip()
 	currency = _credit_currency()
-	filters_echo: Dict[str, Any] = {
+	filters_echo: dict[str, Any] = {
 		"from_date": str(start_date),
 		"to_date": str(end_date),
 		"customer": selected_customer or None,
 		"branch": selected_branch or None,
 	}
 
-	def _empty(notice_code: str, notice: str) -> Dict[str, Any]:
+	def _empty(notice_code: str, notice: str) -> dict[str, Any]:
 		return {
 			"success": True,
 			"filters": filters_echo,
@@ -461,10 +461,10 @@ def get_credit_ledger(
 	open_rows = _open_credit_invoices(customers=customers_filter, profiles=profiles)
 
 	# --- What is LISTED: the activity window ---------------------------------
-	listed_rows: List[Dict[str, Any]] = []
+	listed_rows: list[dict[str, Any]] = []
 	listed_truncated = False
 	try:
-		activity_filters: Dict[str, Any] = {
+		activity_filters: dict[str, Any] = {
 			"docstatus": 1,
 			"posting_date": ["between", [str(start_date), str(end_date)]],
 			branch_field: ["in", profiles],
@@ -499,9 +499,9 @@ def get_credit_ledger(
 		listed_rows = []
 
 	# --- Rollup ---------------------------------------------------------------
-	people: Dict[str, Dict[str, Any]] = {}
+	people: dict[str, dict[str, Any]] = {}
 
-	def _bucket(name: str, display: str) -> Dict[str, Any]:
+	def _bucket(name: str, display: str) -> dict[str, Any]:
 		row = people.get(name)
 		if row is None:
 			settings = _customer_credit_settings(name)
@@ -521,7 +521,7 @@ def get_credit_ledger(
 		return row
 
 	total_outstanding = 0.0
-	oldest_overall: Optional[str] = None
+	oldest_overall: str | None = None
 
 	for row in open_rows:
 		name = str(row.get("customer") or "")
@@ -555,7 +555,7 @@ def get_credit_ledger(
 		)
 		total_outstanding += outstanding
 
-	customers_payload: List[Dict[str, Any]] = []
+	customers_payload: list[dict[str, Any]] = []
 	for row in people.values():
 		row["outstanding"] = flt(row["outstanding"], 2)
 		limit_amount = flt(row["credit_limit"])
@@ -567,7 +567,7 @@ def get_credit_ledger(
 	# requests (a jumping table reads as data changing when it has not).
 	customers_payload.sort(key=lambda r: (-r["outstanding"], str(r.get("customer_name") or "")))
 
-	invoices_payload: List[Dict[str, Any]] = []
+	invoices_payload: list[dict[str, Any]] = []
 	for row in listed_rows:
 		posting_date = str(row.get("posting_date") or "") or None
 		invoices_payload.append(
@@ -586,7 +586,7 @@ def get_credit_ledger(
 			}
 		)
 
-	payload: Dict[str, Any] = {
+	payload: dict[str, Any] = {
 		"success": True,
 		"filters": filters_echo,
 		"summary": {
@@ -620,7 +620,7 @@ def get_credit_ledger(
 
 
 @frappe.whitelist(allow_guest=False)
-def get_invoice_shop_branches(customer: str, invoices: Any = None) -> Dict[str, Any]:
+def get_invoice_shop_branches(customer: str, invoices: Any = None) -> dict[str, Any]:
 	"""Which of the shop's branches (delivery doors) each invoice went to.
 
 	The account statement groups a shop's orders under its branches. Asked for
@@ -680,7 +680,7 @@ def get_invoice_shop_branches(customer: str, invoices: Any = None) -> Dict[str, 
 
 
 @frappe.whitelist(allow_guest=False)
-def get_customer_credit_profile(customer: str) -> Dict[str, Any]:
+def get_customer_credit_profile(customer: str) -> dict[str, Any]:
 	"""Whether this shop may order on credit, and how much room is left.
 
 	Called by the POS the moment a customer is selected, so the checkout screen
@@ -742,10 +742,10 @@ MAX_CREDIT_DAYS = 365
 @frappe.whitelist(allow_guest=False)
 def update_customer_credit_settings(
 	customer: str,
-	credit_allowed: Union[int, str, bool],
-	credit_days: Optional[Union[int, str]] = None,
-	credit_limit: Optional[Union[float, str]] = None,
-) -> Dict[str, Any]:
+	credit_allowed: int | str | bool,
+	credit_days: int | str | None = None,
+	credit_limit: float | str | None = None,
+) -> dict[str, Any]:
 	"""Switch a shop's credit on or off and set its days / limit, from the app.
 
 	The same three Customer columns Desk edits (``custom_credit_allowed`` /
@@ -782,7 +782,7 @@ def update_customer_credit_settings(
 			frappe.throw(_("Credit fields are not installed on this site. Run bench migrate."))
 
 	allowed = str(credit_allowed).strip().lower() in {"1", "true", "yes", "on"}
-	updates: Dict[str, Any] = {"custom_credit_allowed": 1 if allowed else 0}
+	updates: dict[str, Any] = {"custom_credit_allowed": 1 if allowed else 0}
 
 	if credit_days not in (None, ""):
 		# int()/float() directly, never flt(): flt("abc") is 0, and 0 here
@@ -843,11 +843,11 @@ def update_customer_credit_settings(
 def _existing_credit_payment(
 	*,
 	customer: str,
-	reference_no: Optional[str],
+	reference_no: str | None,
 	amount: float,
 	paid_to: str,
-	invoice: Optional[str] = None,
-) -> Optional[str]:
+	invoice: str | None = None,
+) -> str | None:
 	"""A Payment Entry that already recorded THIS handover, or ``None``.
 
 	Double submission is the realistic failure here: the operator taps "Record
@@ -922,14 +922,14 @@ def _existing_credit_payment(
 @frappe.whitelist(allow_guest=False)
 def record_credit_payment(
 	customer: str,
-	amount: Union[float, str],
+	amount: float | str,
 	pos_profile: str,
 	payment_method: str = "Cash",
-	posting_date: Optional[str] = None,
-	remarks: Optional[str] = None,
-	idempotency_token: Optional[str] = None,
-	invoice: Optional[str] = None,
-) -> Dict[str, Any]:
+	posting_date: str | None = None,
+	remarks: str | None = None,
+	idempotency_token: str | None = None,
+	invoice: str | None = None,
+) -> dict[str, Any]:
 	"""Take one payment against a shop's credit balance, allocated FIFO.
 
 	THIS IS THE OWNER'S USUAL PATTERN, and it is why ``invoice`` is optional:
@@ -1123,7 +1123,7 @@ def record_credit_payment(
 
 	branch_field = _branch_field()
 	remaining = amount
-	allocations: List[Dict[str, Any]] = []
+	allocations: list[dict[str, Any]] = []
 	for row in open_rows:
 		if remaining <= 0.005:
 			break
@@ -1172,7 +1172,7 @@ def record_credit_payment(
 		max(0.0, sum(flt(r.get("outstanding_amount")) for r in open_rows) - allocated_total), 2
 	)
 
-	payload: Dict[str, Any] = {
+	payload: dict[str, Any] = {
 		"success": True,
 		"payment_entry": pe.name,
 		"customer": customer,

@@ -28,7 +28,8 @@ Three rules, all deliberate:
 from __future__ import annotations
 
 import math
-from typing import Any, Dict, Iterable, List, Optional
+from collections.abc import Iterable
+from typing import Any, Dict, List, Optional
 
 import frappe
 
@@ -78,7 +79,7 @@ STAFF_CONFIRMED_SOURCES = frozenset({SOURCE_COURIER_VERIFIED, SOURCE_MANUAL_OVER
 #: What a card carries when there is no address, no pin, or the lookup failed.
 #: ``pin_source`` / ``pin_flag`` come from the invoice snapshot only; the flag
 #: can be set even when no usable pin exists (``outside_egypt``).
-EMPTY_PIN_FIELDS: Dict[str, Any] = {
+EMPTY_PIN_FIELDS: dict[str, Any] = {
 	"address_latitude": None,
 	"address_longitude": None,
 	"geo_source": "",
@@ -90,12 +91,12 @@ EMPTY_PIN_FIELDS: Dict[str, Any] = {
 }
 
 
-def empty_pin_fields() -> Dict[str, Any]:
+def empty_pin_fields() -> dict[str, Any]:
 	"""A fresh copy of :data:`EMPTY_PIN_FIELDS` (callers mutate card dicts)."""
 	return dict(EMPTY_PIN_FIELDS)
 
 
-def _finite_float(value: Any) -> Optional[float]:
+def _finite_float(value: Any) -> float | None:
 	if value is None or value == "" or isinstance(value, bool):
 		return None
 	try:
@@ -114,7 +115,7 @@ def _safe_int(value: Any) -> int:
 		return 0
 
 
-def pin_fields_from_address(row: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+def pin_fields_from_address(row: dict[str, Any] | None) -> dict[str, Any]:
 	"""Project one Address row onto the card's pin keys. Pure; never raises.
 
 	The coordinates are emitted only when they form a usable pin. A ``0, 0``
@@ -152,7 +153,7 @@ def _safe_log_error(title: str) -> None:
 		pass
 
 
-def get_address_pin_map(address_names: Iterable[Any]) -> Dict[str, Dict[str, Any]]:
+def get_address_pin_map(address_names: Iterable[Any]) -> dict[str, dict[str, Any]]:
 	"""Address name -> pin keys, for every name in *address_names*, in ONE query.
 
 	Names that are missing from the result (blank, deleted, or the query failed)
@@ -184,7 +185,7 @@ def get_address_pin_map(address_names: Iterable[Any]) -> Dict[str, Dict[str, Any
 			or []
 		)
 
-		out: Dict[str, Dict[str, Any]] = {}
+		out: dict[str, dict[str, Any]] = {}
 		for row in rows:
 			name = str(row.get("name") or "").strip()
 			if name:
@@ -195,7 +196,7 @@ def get_address_pin_map(address_names: Iterable[Any]) -> Dict[str, Dict[str, Any
 		return {}
 
 
-def pin_fields_for(address_name: Any, pin_map: Optional[Dict[str, Dict[str, Any]]]) -> Dict[str, Any]:
+def pin_fields_for(address_name: Any, pin_map: dict[str, dict[str, Any]] | None) -> dict[str, Any]:
 	"""The pin keys for *address_name* from *pin_map*, or the empty set."""
 	try:
 		found = (pin_map or {}).get(str(address_name or "").strip())
@@ -204,7 +205,7 @@ def pin_fields_for(address_name: Any, pin_map: Optional[Dict[str, Dict[str, Any]
 	return dict(found) if found else empty_pin_fields()
 
 
-def invoice_pin_columns() -> List[str]:
+def invoice_pin_columns() -> list[str]:
 	"""The :data:`INVOICE_PIN_COLUMNS` that exist on this site's Sales Invoice.
 
 	A site that has not migrated them yet gets ``[]`` (selecting a missing
@@ -227,7 +228,7 @@ def _clean_flag(value: Any) -> str:
 	return ",".join(t for t in tokens if t)
 
 
-def invoice_pin_override(si_row: Any, address_fields: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+def invoice_pin_override(si_row: Any, address_fields: dict[str, Any] | None) -> dict[str, Any]:
 	"""Merge THIS invoice's pin snapshot over the Address pin keys. Pure; never raises.
 
 	* The invoice carries a valid snapshot pin -> it wins, shown as

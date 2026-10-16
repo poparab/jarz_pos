@@ -1,16 +1,16 @@
 import json
 import unicodedata
+from typing import Any, Dict, List, Optional, Tuple
 
 import frappe
 from frappe import _
-from typing import List, Dict, Any, Optional, Tuple
 
 from jarz_pos.constants import PAYMENT_MODES, PRICE_LISTS, ROLES
-from jarz_pos.utils.warehouse_utils import resolve_purchase_warehouse
 from jarz_pos.utils.posting_datetime import (
 	apply_ledger_posting_datetime,
 	apply_stock_posting_datetime,
 )
+from jarz_pos.utils.warehouse_utils import resolve_purchase_warehouse
 
 STANDARD_BUYING = PRICE_LISTS.STANDARD_BUYING
 
@@ -31,7 +31,7 @@ def _ensure_manager_access():
 		frappe.throw(_("Not permitted: Managers only"), frappe.PermissionError)
 
 
-def _coerce_rows(value: Any) -> List[Dict[str, Any]]:
+def _coerce_rows(value: Any) -> list[dict[str, Any]]:
 	"""Accept a list, or the JSON string Frappe hands us for form-encoded calls."""
 	if value is None:
 		return []
@@ -60,7 +60,7 @@ def _has_field(doctype: str, fieldname: str) -> bool:
 		return False
 
 
-def _default_item_tax_template(company: Optional[str] = None) -> Optional[str]:
+def _default_item_tax_template(company: str | None = None) -> str | None:
 	"""The site-wide default VAT template configured on Jarz POS Settings.
 
 	Returns ``None`` — i.e. "no default", never a throw — whenever the setting
@@ -115,9 +115,9 @@ _ARABIC_SPELLING = str.maketrans({"ة": "ه", "ى": "ي", "أ": "ا", "إ": "ا"
 _ARABIC_LIKE_WILDCARDS = str.maketrans({c: "_" for c in "ةهىيأإآا"})
 
 
-def _search_tokens(search: Optional[str]) -> List[str]:
+def _search_tokens(search: str | None) -> list[str]:
 	"""The words of a typed search: trimmed, split on any whitespace, deduped."""
-	tokens: Dict[str, str] = {}
+	tokens: dict[str, str] = {}
 	for word in str(search or "").split():
 		tokens.setdefault(_fold(word), word)
 	return list(tokens.values())
@@ -125,10 +125,10 @@ def _search_tokens(search: Optional[str]) -> List[str]:
 
 def _word_search(
 	doctype: str,
-	search_fields: List[str],
-	search: Optional[str],
-	filters: Dict[str, Any],
-) -> Optional[List[Any]]:
+	search_fields: list[str],
+	search: str | None,
+	filters: dict[str, Any],
+) -> list[Any] | None:
 	"""``or_filters`` matching every typed word, in any order, in any field.
 
 	The search box used to be one ``LIKE '%<raw text>%'``. On a phone that
@@ -177,9 +177,9 @@ def _word_search(
 
 
 @frappe.whitelist()
-def get_suppliers(search: Optional[str] = None, limit: int = 20) -> List[Dict[str, Any]]:
+def get_suppliers(search: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
 	_ensure_manager_access()
-	filters: Dict[str, Any] = {}
+	filters: dict[str, Any] = {}
 	fields = ["name", "supplier_name", "supplier_group", "supplier_type", "disabled"]
 	or_filters = _word_search("Supplier", ["name", "supplier_name"], search, filters)
 	if or_filters is None:
@@ -196,7 +196,7 @@ def get_suppliers(search: Optional[str] = None, limit: int = 20) -> List[Dict[st
 
 
 @frappe.whitelist()
-def get_recent_suppliers(limit: int = 20) -> List[Dict[str, Any]]:
+def get_recent_suppliers(limit: int = 20) -> list[dict[str, Any]]:
 	"""Return most recently used suppliers inferred from Purchase Invoices."""
 	_ensure_manager_access()
 	pi_rows = frappe.get_all(
@@ -205,7 +205,7 @@ def get_recent_suppliers(limit: int = 20) -> List[Dict[str, Any]]:
 		order_by="posting_date desc, creation desc",
 		limit=100,
 	)
-	ordered_suppliers: List[str] = []
+	ordered_suppliers: list[str] = []
 	seen = set()
 	for r in pi_rows:
 		s = r.get("supplier")
@@ -243,7 +243,7 @@ def get_recent_suppliers(limit: int = 20) -> List[Dict[str, Any]]:
 			limit=len(ordered_suppliers),
 		)
 	}
-	result: List[Dict[str, Any]] = []
+	result: list[dict[str, Any]] = []
 	for s in ordered_suppliers:
 		if s in details_map:
 			result.append(details_map[s])
@@ -252,12 +252,12 @@ def get_recent_suppliers(limit: int = 20) -> List[Dict[str, Any]]:
 
 @frappe.whitelist()
 def search_items(
-	search: Optional[str] = None,
+	search: str | None = None,
 	limit: int = 20,
 	page: int = 0,
-	item_group: Optional[str] = None,
+	item_group: str | None = None,
 	for_request: int = 0,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
 	"""Purchasable items, with the context a buyer needs to decide.
 
 	Each row carries on-hand quantity and the rate last actually paid, so the
@@ -277,7 +277,7 @@ def search_items(
 	limit = max(1, min(int(limit or 20), 100))
 	start = max(0, int(page or 0)) * limit
 
-	filters: Dict[str, Any] = {
+	filters: dict[str, Any] = {
 		"disabled": 0,
 		"is_purchase_item": 1,
 		"has_variants": 0,
@@ -335,7 +335,7 @@ def search_items(
 	return items
 
 
-def _get_item_uoms_bulk(item_codes: List[str]) -> Dict[str, List[Dict[str, Any]]]:
+def _get_item_uoms_bulk(item_codes: list[str]) -> dict[str, list[dict[str, Any]]]:
 	"""UOMs for many items in two queries instead of one get_doc per item."""
 	if not item_codes:
 		return {}
@@ -348,7 +348,7 @@ def _get_item_uoms_bulk(item_codes: List[str]) -> Dict[str, List[Dict[str, Any]]
 			limit_page_length=0,
 		)
 	}
-	out: Dict[str, List[Dict[str, Any]]] = {
+	out: dict[str, list[dict[str, Any]]] = {
 		code: [{"uom": stock_uoms.get(code), "conversion_factor": 1}] for code in item_codes
 	}
 	for row in frappe.get_all(
@@ -370,10 +370,10 @@ def _get_item_uoms_bulk(item_codes: List[str]) -> Dict[str, List[Dict[str, Any]]
 	return out
 
 
-def _get_item_prices_bulk(item_codes: List[str]) -> Dict[str, List[Dict[str, Any]]]:
+def _get_item_prices_bulk(item_codes: list[str]) -> dict[str, list[dict[str, Any]]]:
 	if not item_codes:
 		return {}
-	out: Dict[str, List[Dict[str, Any]]] = {}
+	out: dict[str, list[dict[str, Any]]] = {}
 	for row in frappe.get_all(
 		"Item Price",
 		filters={"price_list": STANDARD_BUYING, "item_code": ["in", item_codes], "buying": 1},
@@ -391,10 +391,10 @@ def _get_item_prices_bulk(item_codes: List[str]) -> Dict[str, List[Dict[str, Any
 
 
 def _item_tax_templates_bulk(
-	item_codes: List[str],
-	company: Optional[str] = None,
+	item_codes: list[str],
+	company: str | None = None,
 	include_default: bool = True,
-) -> Dict[str, Optional[str]]:
+) -> dict[str, str | None]:
 	"""The Item Tax Template each item should default to.
 
 	Two layers, in this order:
@@ -418,7 +418,7 @@ def _item_tax_templates_bulk(
 	"""
 	if not item_codes:
 		return {}
-	out: Dict[str, Optional[str]] = {}
+	out: dict[str, str | None] = {}
 	for row in frappe.get_all(
 		"Item Tax",
 		filters={"parent": ["in", item_codes], "parenttype": "Item"},
@@ -442,7 +442,7 @@ def _item_tax_templates_bulk(
 	return out
 
 
-def _resolve_line_tax_template(row: Dict[str, Any], inherited: Dict[str, Optional[str]]) -> str:
+def _resolve_line_tax_template(row: dict[str, Any], inherited: dict[str, str | None]) -> str:
 	"""The VAT template a cart line should carry. Strict precedence:
 
 	1. an explicit ``item_tax_template`` key on the line — **including an
@@ -461,10 +461,10 @@ def _resolve_line_tax_template(row: Dict[str, Any], inherited: Dict[str, Optiona
 	return (inherited.get(item_code) or "").strip()
 
 
-def _on_hand_bulk(item_codes: List[str]) -> Dict[str, float]:
+def _on_hand_bulk(item_codes: list[str]) -> dict[str, float]:
 	if not item_codes:
 		return {}
-	totals: Dict[str, float] = {}
+	totals: dict[str, float] = {}
 	for row in frappe.get_all(
 		"Bin",
 		filters={"item_code": ["in", item_codes]},
@@ -475,7 +475,7 @@ def _on_hand_bulk(item_codes: List[str]) -> Dict[str, float]:
 	return totals
 
 
-def _last_paid_bulk(item_codes: List[str]) -> Dict[str, float]:
+def _last_paid_bulk(item_codes: list[str]) -> dict[str, float]:
 	"""Rate last actually paid, from submitted invoice lines.
 
 	Deliberately not ``Item.last_purchase_rate``: that field is also written by
@@ -483,7 +483,7 @@ def _last_paid_bulk(item_codes: List[str]) -> Dict[str, float]:
 	"""
 	if not item_codes:
 		return {}
-	latest: Dict[str, float] = {}
+	latest: dict[str, float] = {}
 	for row in frappe.get_all(
 		"Purchase Invoice Item",
 		filters={"item_code": ["in", item_codes], "docstatus": 1},
@@ -495,7 +495,7 @@ def _last_paid_bulk(item_codes: List[str]) -> Dict[str, float]:
 	return latest
 
 
-def _get_item_uoms(item_code: str) -> List[Dict[str, Any]]:
+def _get_item_uoms(item_code: str) -> list[dict[str, Any]]:
 	try:
 		doc = frappe.get_doc("Item", item_code)
 		uoms = []
@@ -517,7 +517,7 @@ def _get_item_uoms(item_code: str) -> List[Dict[str, Any]]:
 		return []
 
 
-def _get_item_prices(item_code: str) -> List[Dict[str, Any]]:
+def _get_item_prices(item_code: str) -> list[dict[str, Any]]:
 	rows = frappe.get_all(
 		"Item Price",
 		filters={
@@ -533,7 +533,7 @@ def _get_item_prices(item_code: str) -> List[Dict[str, Any]]:
 
 
 @frappe.whitelist()
-def get_item_details(item_code: str) -> Dict[str, Any]:
+def get_item_details(item_code: str) -> dict[str, Any]:
 	_ensure_manager_access()
 	item = frappe.get_doc("Item", item_code)
 	return {
@@ -547,7 +547,7 @@ def get_item_details(item_code: str) -> Dict[str, Any]:
 
 
 @frappe.whitelist()
-def get_item_tax_templates(company: Optional[str] = None) -> List[Dict[str, Any]]:
+def get_item_tax_templates(company: str | None = None) -> list[dict[str, Any]]:
 	"""Item Tax Templates a purchase line can carry, with their rates.
 
 	``rate`` is the sum of the template's rows, which is what the buyer thinks
@@ -559,7 +559,7 @@ def get_item_tax_templates(company: Optional[str] = None) -> List[Dict[str, Any]
 	the list is otherwise unchanged.
 	"""
 	_ensure_manager_access()
-	filters: Dict[str, Any] = {"disabled": 0}
+	filters: dict[str, Any] = {"disabled": 0}
 	if company:
 		filters["company"] = company
 	templates = frappe.get_all(
@@ -572,7 +572,7 @@ def get_item_tax_templates(company: Optional[str] = None) -> List[Dict[str, Any]
 	if not templates:
 		return []
 
-	rates: Dict[str, List[Dict[str, Any]]] = {}
+	rates: dict[str, list[dict[str, Any]]] = {}
 	for row in frappe.get_all(
 		"Item Tax Template Detail",
 		filters={"parent": ["in", [t["name"] for t in templates]]},
@@ -597,7 +597,7 @@ def get_item_tax_templates(company: Optional[str] = None) -> List[Dict[str, Any]
 
 
 @frappe.whitelist()
-def get_item_price(item_code: str, uom: Optional[str] = None) -> Dict[str, Any]:
+def get_item_price(item_code: str, uom: str | None = None) -> dict[str, Any]:
 	_ensure_manager_access()
 	filters = {
 		"price_list": STANDARD_BUYING,
@@ -626,18 +626,18 @@ def get_item_price(item_code: str, uom: Optional[str] = None) -> Dict[str, Any]:
 @frappe.whitelist()
 def create_purchase_invoice(
 	supplier: str,
-	posting_date: Optional[str] = None,
+	posting_date: str | None = None,
 	is_paid: int = 0,
-	items: Optional[List[Dict[str, Any]]] = None,
-	company: Optional[str] = None,
-	payment_option: Optional[str] = None,
-	shipping_amount: Optional[float] = None,
-	bill_no: Optional[str] = None,
-	bill_date: Optional[str] = None,
-	taxes_template: Optional[str] = None,
-	remarks: Optional[str] = None,
-	idempotency_key: Optional[str] = None,
-) -> Dict[str, Any]:
+	items: list[dict[str, Any]] | None = None,
+	company: str | None = None,
+	payment_option: str | None = None,
+	shipping_amount: float | None = None,
+	bill_no: str | None = None,
+	bill_date: str | None = None,
+	taxes_template: str | None = None,
+	remarks: str | None = None,
+	idempotency_key: str | None = None,
+) -> dict[str, Any]:
 	"""Create and submit a Purchase Invoice with ``update_stock=1``.
 
 	``items``: list of ``{item_code, qty, uom, rate?, warehouse?,
@@ -777,7 +777,7 @@ def create_purchase_invoice(
 		# wrong branch. Always resolve one explicitly.
 		warehouse = resolve_purchase_warehouse(item_code, resolved_company, row.get("warehouse"))
 
-		line: Dict[str, Any] = {
+		line: dict[str, Any] = {
 			"item_code": item_code,
 			"qty": qty,
 			"uom": uom or stock_uom,
@@ -845,8 +845,8 @@ def create_purchase_invoice(
 	if int(is_paid or 0):
 		opt_raw = (payment_option or "cash").strip()
 		opt_lower = opt_raw.lower()
-		mop: Optional[str] = None
-		account: Optional[str] = None
+		mop: str | None = None
+		account: str | None = None
 		custody_account = _resolve_custody_option(opt_raw, resolved_company)
 
 		# Paid out of an employee's cash custody ("custody:<holder>"). The
@@ -919,7 +919,7 @@ def create_purchase_invoice(
 	}
 
 
-def _line_conversion_factor(item_code: str, uom: Optional[str], stock_uom: Optional[str]) -> float:
+def _line_conversion_factor(item_code: str, uom: str | None, stock_uom: str | None) -> float:
 	"""How many stock units one ``uom`` of *item_code* holds, or refuse the line.
 
 	The stock UOM (or no UOM, which means the stock UOM) is 1 by definition.
@@ -1015,7 +1015,7 @@ def _ensure_item_tax_rows(pi: Any, company: str) -> None:
 			existing.add(account)
 
 
-def _validate_bill_no(supplier: str, bill_no: Optional[str]) -> None:
+def _validate_bill_no(supplier: str, bill_no: str | None) -> None:
 	"""Enforce the supplier bill number when settings demand it.
 
 	ERPNext already refuses a duplicate ``bill_no`` for the same supplier — but
@@ -1035,7 +1035,7 @@ def _validate_bill_no(supplier: str, bill_no: Optional[str]) -> None:
 
 def _validate_request_link(
 	material_request: str, material_request_item: str, item_code: str
-) -> Tuple[str, str]:
+) -> tuple[str, str]:
 	"""Reject a request link that does not belong to the line it is attached to.
 
 	A mismatched link would make ERPNext credit the wrong request line as
@@ -1078,7 +1078,7 @@ def _validate_request_link(
 	return material_request, material_request_item
 
 
-def _follow_edited_request(material_request: str, item_code: str) -> Tuple[str, str]:
+def _follow_edited_request(material_request: str, item_code: str) -> tuple[str, str]:
 	"""The live line for ``item_code`` in the latest amendment of a cancelled request."""
 	current = material_request
 	# Bounded: each edit adds one link, and nobody edits a request 20 times.
@@ -1114,12 +1114,12 @@ def _follow_edited_request(material_request: str, item_code: str) -> Tuple[str, 
 def get_purchase_invoices(
 	limit: int = 50,
 	page: int = 0,
-	supplier: Optional[str] = None,
-	status: Optional[str] = None,
-	from_date: Optional[str] = None,
-	to_date: Optional[str] = None,
-	search: Optional[str] = None,
-) -> Dict[str, Any]:
+	supplier: str | None = None,
+	status: str | None = None,
+	from_date: str | None = None,
+	to_date: str | None = None,
+	search: str | None = None,
+) -> dict[str, Any]:
 	"""Return recent Purchase Invoices for the history tab.
 
 	Filters are all optional and combine with AND. ``search`` matches the
@@ -1129,7 +1129,7 @@ def get_purchase_invoices(
 	limit = max(1, min(int(limit or 50), 200))
 	start = max(0, int(page or 0)) * limit
 
-	filters: Dict[str, Any] = {}
+	filters: dict[str, Any] = {}
 	if supplier:
 		filters["supplier"] = supplier
 	if status:
@@ -1141,7 +1141,7 @@ def get_purchase_invoices(
 	elif to_date:
 		filters["posting_date"] = ["<=", to_date]
 
-	or_filters: List[Any] = []
+	or_filters: list[Any] = []
 	if search:
 		like = f"%{search}%"
 		or_filters = [["name", "like", like], ["bill_no", "like", like]]
@@ -1193,7 +1193,7 @@ def get_purchase_invoices(
 	# needs it to restate a line in the stock UOM once its UOM has been removed
 	# from the Item, and the Item can no longer tell it what a "Box" held.
 	names = [inv["name"] for inv in invoices]
-	lines_by_parent: Dict[str, List[Dict[str, Any]]] = {name: [] for name in names}
+	lines_by_parent: dict[str, list[dict[str, Any]]] = {name: [] for name in names}
 	if names:
 		for row in frappe.get_all(
 			"Purchase Invoice Item",
@@ -1218,7 +1218,7 @@ def get_purchase_invoices(
 	# The tax rows themselves, not just the total. `total_taxes_and_charges`
 	# lumps VAT together with the shipping charge — reporting that figure as
 	# "VAT" would overstate it by the freight on every delivered purchase.
-	taxes_by_parent: Dict[str, List[Dict[str, Any]]] = {name: [] for name in names}
+	taxes_by_parent: dict[str, list[dict[str, Any]]] = {name: [] for name in names}
 	if names:
 		for row in frappe.get_all(
 			"Purchase Taxes and Charges",
@@ -1239,10 +1239,10 @@ def get_purchase_invoices(
 @frappe.whitelist()
 def create_supplier(
 	supplier_name: str,
-	supplier_group: Optional[str] = None,
-	phone: Optional[str] = None,
-	tax_id: Optional[str] = None,
-) -> Dict[str, Any]:
+	supplier_group: str | None = None,
+	phone: str | None = None,
+	tax_id: str | None = None,
+) -> dict[str, Any]:
 	"""Create a supplier without leaving the app.
 
 	A new vendor turning up mid-purchase used to mean abandoning the cart and
@@ -1296,7 +1296,7 @@ def create_supplier(
 
 
 @frappe.whitelist()
-def get_supplier_groups(limit: int = 50) -> List[Dict[str, Any]]:
+def get_supplier_groups(limit: int = 50) -> list[dict[str, Any]]:
 	_ensure_manager_access()
 	return frappe.get_all(
 		"Supplier Group",
@@ -1308,10 +1308,10 @@ def get_supplier_groups(limit: int = 50) -> List[Dict[str, Any]]:
 
 
 @frappe.whitelist()
-def get_purchase_taxes_templates(company: Optional[str] = None) -> Dict[str, Any]:
+def get_purchase_taxes_templates(company: str | None = None) -> dict[str, Any]:
 	"""Purchase tax templates plus the configured default (e.g. the VAT one)."""
 	_ensure_manager_access()
-	filters: Dict[str, Any] = {"disabled": 0}
+	filters: dict[str, Any] = {"disabled": 0}
 	if company:
 		filters["company"] = company
 	templates = frappe.get_all(
@@ -1333,10 +1333,10 @@ def get_purchase_taxes_templates(company: Optional[str] = None) -> Dict[str, Any
 @frappe.whitelist()
 def pay_purchase_invoice(
 	purchase_invoice: str,
-	payment_option: Optional[str] = None,
-	amount: Optional[float] = None,
-	posting_date: Optional[str] = None,
-) -> Dict[str, Any]:
+	payment_option: str | None = None,
+	amount: float | None = None,
+	posting_date: str | None = None,
+) -> dict[str, Any]:
 	"""Settle an outstanding (credit) purchase with a Payment Entry.
 
 	The counterpart to buying on supplier terms: `create_purchase_invoice` with
@@ -1394,10 +1394,10 @@ def pay_purchase_invoice(
 @frappe.whitelist()
 def return_purchase_invoice(
 	purchase_invoice: str,
-	items: Optional[List[Dict[str, Any]]] = None,
-	reason: Optional[str] = None,
-	posting_date: Optional[str] = None,
-) -> Dict[str, Any]:
+	items: list[dict[str, Any]] | None = None,
+	reason: str | None = None,
+	posting_date: str | None = None,
+) -> dict[str, Any]:
 	"""Send goods back to the supplier — a debit note.
 
 	``items``: ``[{purchase_invoice_item, qty}]`` where ``qty`` is the positive
@@ -1415,7 +1415,7 @@ def return_purchase_invoice(
 
 	rows = _coerce_rows(items)
 	# {source line name: positive qty to send back}
-	requested: Dict[str, float] = {}
+	requested: dict[str, float] = {}
 	for row in rows:
 		line_name = str(row.get("purchase_invoice_item") or row.get("name") or "").strip()
 		qty = float(row.get("qty") or 0)
@@ -1489,7 +1489,7 @@ def return_purchase_invoice(
 CUSTODY_OPTION_PREFIX = "custody:"
 
 
-def _resolve_custody_option(payment_option: Optional[str], company: Optional[str]) -> Optional[str]:
+def _resolve_custody_option(payment_option: str | None, company: str | None) -> str | None:
 	"""The custody account behind a ``custody:<holder>`` option, else None.
 
 	Allowed for the holder themself, or for the manager tier (ROLES.MANAGER,
@@ -1537,10 +1537,10 @@ def _resolve_custody_option(payment_option: Optional[str], company: Optional[str
 	return row.get("account")
 
 
-def _resolve_payment_account(payment_option: Optional[str], company: str) -> str:
+def _resolve_payment_account(payment_option: str | None, company: str) -> str:
 	opt_raw = (payment_option or "cash").strip()
 	opt_lower = opt_raw.lower()
-	account: Optional[str] = None
+	account: str | None = None
 	custody_account = _resolve_custody_option(opt_raw, company)
 	if custody_account:
 		return custody_account
@@ -1559,12 +1559,12 @@ def _resolve_payment_account(payment_option: Optional[str], company: str) -> str
 	return account
 
 
-def _resolve_payment_mode(payment_option: Optional[str], company: str) -> str:
+def _resolve_payment_mode(payment_option: str | None, company: str) -> str:
 	opt_lower = (payment_option or "cash").strip().lower()
 	return "InstaPay" if opt_lower == "instapay" else PAYMENT_MODES.CASH
 
 
-def _get_pos_profile_cash_account(company: str) -> Optional[str]:
+def _get_pos_profile_cash_account(company: str) -> str | None:
 	"""Return the Account named exactly `<POS Profile> - <Company Abbr>`.
 
 	Fallback: if exact-named Account is missing, try POS Profile's Cash payment method default account.
@@ -1606,7 +1606,7 @@ def _get_pos_profile_cash_account(company: str) -> Optional[str]:
 	return None
 
 
-def _get_exact_pos_profile_account(profile_name: str, company: str) -> Optional[str]:
+def _get_exact_pos_profile_account(profile_name: str, company: str) -> str | None:
 	"""Resolve the exact-named Account for the given POS Profile within the target company.
 
 	Prefers "<POS Profile> - <Company Abbr>". Falls back to the profile's POS Payment Method default Cash account.
@@ -1635,7 +1635,7 @@ def _get_exact_pos_profile_account(profile_name: str, company: str) -> Optional[
 	return None
 
 
-def _get_mop_account_account(mode_of_payment: str, company: str) -> Optional[str]:
+def _get_mop_account_account(mode_of_payment: str, company: str) -> str | None:
 	try:
 		rows = frappe.get_all(
 			"Mode of Payment Account",
@@ -1650,7 +1650,7 @@ def _get_mop_account_account(mode_of_payment: str, company: str) -> Optional[str
 	return None
 
 
-def _get_cash_option_account(company: str) -> Optional[str]:
+def _get_cash_option_account(company: str) -> str | None:
 	"""The account behind the app's plain "Cash" option: the company's main cash.
 
 	The app labels this option "Use company default Cash account", so that is
@@ -1665,14 +1665,14 @@ def _get_cash_option_account(company: str) -> Optional[str]:
 	return _get_default_cash_account(company) or _get_mop_account_account(PAYMENT_MODES.CASH, company)
 
 
-def _get_default_cash_account(company: str) -> Optional[str]:
+def _get_default_cash_account(company: str) -> str | None:
 	try:
 		return frappe.db.get_value("Company", company, "default_cash_account")
 	except Exception:
 		return None
 
 
-def _get_default_bank_account(company: str) -> Optional[str]:
+def _get_default_bank_account(company: str) -> str | None:
 	try:
 		return frappe.db.get_value("Company", company, "default_bank_account")
 	except Exception:

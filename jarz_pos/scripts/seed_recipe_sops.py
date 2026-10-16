@@ -520,7 +520,7 @@ SPONGE_CAKE = {
 # Per-jar spec in grams, kept for the notes and checked by the tests against
 # what the ``|each`` tokens render.  ``version`` was bumped when the steps
 # became shared (L 1->2, M 2->3, S 1->2) so the per-size v1/v2 stay on file.
-TIRAMISU_JAR_PORTIONS: Dict[str, Dict[str, Any]] = {
+TIRAMISU_JAR_PORTIONS: dict[str, dict[str, Any]] = {
 	"Tiramisu Large": {"version": 2, "cream": 97, "syrup": 24, "savoiardi": 40, "cocoa": 3},
 	"Tiramisu Medium": {"version": 3, "cream": 70, "syrup": 16, "savoiardi": 28, "cocoa": 2},
 	# Small is exactly 2/3 of the Medium.
@@ -540,7 +540,7 @@ _MIX = "{{item:Cheesecake Mix|grams}}"
 # The cream is the mix plus the sweet coffee folded into it (= the sugar weight).
 _CREAM = "{{item:Cheesecake Mix+powder sugar|grams}}"
 
-TIRAMISU_STEPS: List[Dict[str, Any]] = [
+TIRAMISU_STEPS: list[dict[str, Any]] = [
 	{
 		"title": "Brew the coffee",
 		"instruction": (
@@ -615,7 +615,7 @@ def _grams(value: float) -> str:
 	return f"{text} g"
 
 
-def build_tiramisu_sop(item_code: str, portions: Dict[str, Any]) -> Dict[str, Any]:
+def build_tiramisu_sop(item_code: str, portions: dict[str, Any]) -> dict[str, Any]:
 	"""One Tiramisu jar SOP: the shared steps plus this size's spec in the notes."""
 	cream = _grams(portions["cream"])
 	syrup = _grams(portions["syrup"])
@@ -650,11 +650,11 @@ def build_tiramisu_sop(item_code: str, portions: Dict[str, Any]) -> Dict[str, An
 	}
 
 
-TIRAMISU_SOPS: List[Dict[str, Any]] = [
+TIRAMISU_SOPS: list[dict[str, Any]] = [
 	build_tiramisu_sop(item_code, portions) for item_code, portions in TIRAMISU_JAR_PORTIONS.items()
 ]
 
-RECIPES: List[Dict[str, Any]] = [
+RECIPES: list[dict[str, Any]] = [
 	CHEESECAKE_MIX,
 	FUDGE_CAKE,
 	RED_VELVET_CAKE,
@@ -667,11 +667,11 @@ RECIPES: List[Dict[str, Any]] = [
 # ── Seeder ──────────────────────────────────────────────────────────────
 
 
-def _default_bom(item_code: str) -> Optional[str]:
+def _default_bom(item_code: str) -> str | None:
 	return frappe.db.get_value("BOM", {"item": item_code, "is_default": 1, "docstatus": 1}, "name")
 
 
-def _apply(doc, recipe: Dict[str, Any]) -> None:
+def _apply(doc, recipe: dict[str, Any]) -> None:
 	doc.item_code = recipe["item_code"]
 	doc.version = recipe["version"]
 	doc.is_active = 1
@@ -700,7 +700,7 @@ def _apply(doc, recipe: Dict[str, Any]) -> None:
 		)
 
 
-def _parse_items(items: Any) -> Optional[List[str]]:
+def _parse_items(items: Any) -> list[str] | None:
 	"""``None``/blank -> no filter; else a de-duplicated list of item codes.
 
 	``bench execute --kwargs`` hands over a string, a script may hand over a
@@ -712,7 +712,7 @@ def _parse_items(items: Any) -> Optional[List[str]]:
 		raw = items.split(",")
 	else:
 		raw = list(items)
-	codes: List[str] = []
+	codes: list[str] = []
 	for code in raw:
 		code = str(code).strip()
 		if code and code not in codes:
@@ -720,7 +720,7 @@ def _parse_items(items: Any) -> Optional[List[str]]:
 	return codes or None
 
 
-def run(dry_run: Any = False, items: Any = None) -> Dict[str, Any]:
+def run(dry_run: Any = False, items: Any = None) -> dict[str, Any]:
 	"""Create or refresh one SOP per recipe.  Reports before it writes.
 
 	``items`` (a list, or a comma-separated string of item codes) restricts the
@@ -729,9 +729,9 @@ def run(dry_run: Any = False, items: Any = None) -> Dict[str, Any]:
 	Jarz SOP controller's ``on_update`` deactivates the older active version,
 	so seeding a v2 leaves v2 active and the v1 on file, inactive.
 	"""
-	created: List[str] = []
-	updated: List[str] = []
-	skipped: List[Dict[str, str]] = []
+	created: list[str] = []
+	updated: list[str] = []
+	skipped: list[dict[str, str]] = []
 
 	wanted = _parse_items(items)
 	recipes = [r for r in RECIPES if wanted is None or r["item_code"] in wanted]

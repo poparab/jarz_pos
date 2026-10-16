@@ -2,6 +2,7 @@
 
 import frappe
 from frappe import _
+
 from jarz_pos.constants import WS_EVENTS
 from jarz_pos.utils.error_handler import handle_api_error, success_response
 
@@ -50,10 +51,10 @@ def health_check():
 		}
 
 	except Exception as e:
-		frappe.log_error(f"Health check failed: {str(e)}", "Health Check Error")
+		frappe.log_error(f"Health check failed: {e!s}", "Health Check Error")
 		return {
 			"success": False,
-			"message": f"Health check failed: {str(e)}",
+			"message": f"Health check failed: {e!s}",
 			"timestamp": frappe.utils.now(),
 			"user": frappe.session.user,
 		}

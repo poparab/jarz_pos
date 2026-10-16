@@ -5,6 +5,7 @@ Call via: POST /api/method/jarz_pos.api.maintenance.fix_employee_series
 """
 
 import frappe
+
 from jarz_pos.constants import ROLES
 
 
@@ -87,8 +88,8 @@ def fix_employee_series():
 
 	except ValueError as e:
 		frappe.logger().error(f"Error parsing Employee ID: {e}")
-		return {"success": False, "message": f"Error parsing Employee ID: {str(e)}"}
+		return {"success": False, "message": f"Error parsing Employee ID: {e!s}"}
 	except Exception as e:
 		frappe.logger().error(f"Error fixing series: {e}")
 		frappe.logger().error(frappe.get_traceback())
-		return {"success": False, "message": f"Error fixing series: {str(e)}"}
+		return {"success": False, "message": f"Error fixing series: {e!s}"}

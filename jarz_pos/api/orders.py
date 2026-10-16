@@ -25,7 +25,7 @@ def _ensure_elevated_access():
 		frappe.throw(_("Access denied"), frappe.PermissionError)
 
 
-def _get_state_field() -> Optional[str]:
+def _get_state_field() -> str | None:
 	"""Return the state field name on Sales Invoice, if it exists."""
 	try:
 		meta = frappe.get_meta("Sales Invoice")
@@ -37,7 +37,7 @@ def _get_state_field() -> Optional[str]:
 	return None
 
 
-def _get_state_options() -> List[str]:
+def _get_state_options() -> list[str]:
 	"""Return available state option values."""
 	try:
 		meta = frappe.get_meta("Sales Invoice")
@@ -54,15 +54,15 @@ def _get_state_options() -> List[str]:
 
 @frappe.whitelist(allow_guest=False)
 def get_master_orders(
-	search: Optional[str] = None,
-	status: Optional[str] = None,
-	branch: Optional[str] = None,
-	from_date: Optional[str] = None,
-	to_date: Optional[str] = None,
-	payment_status: Optional[str] = None,
+	search: str | None = None,
+	status: str | None = None,
+	branch: str | None = None,
+	from_date: str | None = None,
+	to_date: str | None = None,
+	payment_status: str | None = None,
 	page: int = 1,
 	page_size: int = 20,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 	"""
 	Return a paginated, filtered list of POS invoices.
 
@@ -108,7 +108,7 @@ def get_master_orders(
 		branch_field = "pos_profile"
 
 	# Base filters: only submitted POS invoices
-	filters: Dict[str, Any] = {
+	filters: dict[str, Any] = {
 		"docstatus": 1,
 		"is_pos": 1,
 	}

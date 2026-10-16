@@ -29,7 +29,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 try:  # pragma: no cover - depends on the environment
-	import frappe  # noqa: F401
+	import frappe
 except ImportError:  # pragma: no cover
 	_fake = types.ModuleType("frappe")
 

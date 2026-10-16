@@ -30,7 +30,6 @@ import unittest
 from datetime import datetime
 from unittest.mock import MagicMock, patch
 
-
 # ── Fixtures shaped exactly like ERPNext's ``get_bom_items_as_dict`` ─────
 #
 # Both branches select ``item.stock_uom`` and both default to

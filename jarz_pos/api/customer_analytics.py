@@ -62,10 +62,10 @@ def _segment_sort_key(segment: str) -> int:
 
 @frappe.whitelist()
 def get_customer_analytics(
-	date_from: Optional[str] = None,
-	date_to: Optional[str] = None,
-	branch: Optional[str] = None,
-) -> Dict[str, Any]:
+	date_from: str | None = None,
+	date_to: str | None = None,
+	branch: str | None = None,
+) -> dict[str, Any]:
 	"""Aggregated customer / RFM analytics for the given date range.
 
 	``branch`` (optional POS Profile name) scopes every invoice-based figure to

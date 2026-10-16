@@ -12,29 +12,34 @@ from contextlib import contextmanager
 import frappe
 from erpnext.stock.stock_ledger import is_negative_stock_allowed
 from frappe import _
+
 from jarz_pos.api.payment_receipts import (
-	ensure_pending_payment_receipt,
-	get_live_transfer_receipt,
-	receipt_method_label,
-	ensure_uploaded_payment_receipt,
-	mark_payment_receipts_changed_for_invoice,
-	retire_pending_payment_receipts,
 	_confirm_receipt_record,
 	_ensure_payment_receipt_confirm_access,
 	_has_payment_receipt_confirm_access,
+	ensure_pending_payment_receipt,
+	ensure_uploaded_payment_receipt,
+	get_live_transfer_receipt,
+	mark_payment_receipts_changed_for_invoice,
+	receipt_method_label,
+	retire_pending_payment_receipts,
 )
 from jarz_pos.constants import ACCOUNTS, WS_EVENTS
 from jarz_pos.services.courier_carry import (
 	mark_settled as mark_courier_transactions_settled,
+)
+from jarz_pos.services.courier_carry import (
 	mark_unsettled as mark_courier_transactions_unsettled,
+)
+from jarz_pos.services.courier_carry import (
 	settlement_stamp as courier_settlement_stamp,
 )
 from jarz_pos.utils.account_utils import (
-	get_freight_expense_account,
 	get_courier_outstanding_account,
+	get_creditors_account,
+	get_freight_expense_account,
 	get_pos_cash_account,
 	validate_account_exists,
-	get_creditors_account,
 )
 from jarz_pos.utils.courier_visibility import (
 	assert_courier_matches_pos_profile,
@@ -4300,7 +4305,7 @@ def settle_single_invoice_paid(
 
 	if has_outstanding_mode:
 		# Unpaid + settle later final settlement (cases based on order_amount vs shipping_exp)
-		frappe.logger().info(f"DEBUG settle_single_invoice_paid: OUTSTANDING MODE - Creating settlement JE")
+		frappe.logger().info("DEBUG settle_single_invoice_paid: OUTSTANDING MODE - Creating settlement JE")
 		title = f"Courier Outstanding Settlement – {inv.name}"
 		je_type = "COURIER_OUTSTANDING_SETTLEMENT"
 		je_name = _existing_je(je_type)

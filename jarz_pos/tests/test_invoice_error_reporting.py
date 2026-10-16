@@ -38,7 +38,7 @@ class _Thrown(Exception):
 	"""Stand-in for frappe.throw so the message can be inspected."""
 
 
-def _throwing(message, *args, **kwargs):  # noqa: ARG001
+def _throwing(message, *args, **kwargs):
 	raise _Thrown(str(message))
 
 

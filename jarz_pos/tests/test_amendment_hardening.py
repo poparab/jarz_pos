@@ -19,8 +19,7 @@ They test:
 import json
 import unittest
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch, call
-
+from unittest.mock import MagicMock, call, patch
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -901,7 +900,7 @@ class TestFormatInvoiceDataPayloadShape(unittest.TestCase):
 		return inv
 
 	def test_customer_key_always_present(self):
-		from unittest.mock import patch, MagicMock
+		from unittest.mock import MagicMock, patch
 
 		mf = MagicMock()
 		mf.get_doc.side_effect = Exception("no address")
@@ -918,7 +917,7 @@ class TestFormatInvoiceDataPayloadShape(unittest.TestCase):
 
 	def test_empty_customer_still_emits_key(self):
 		"""When invoice.customer is empty, the key must still be present (with empty value)."""
-		from unittest.mock import patch, MagicMock
+		from unittest.mock import MagicMock, patch
 
 		mf = MagicMock()
 		mf.get_doc.side_effect = Exception("no address")
@@ -934,7 +933,7 @@ class TestFormatInvoiceDataPayloadShape(unittest.TestCase):
 
 	def test_bundle_code_always_in_each_item(self):
 		"""Every item in the output must carry a 'bundle_code' key."""
-		from unittest.mock import patch, MagicMock
+		from unittest.mock import MagicMock, patch
 
 		mf = MagicMock()
 		mf.get_doc.side_effect = Exception("no address")
@@ -987,7 +986,7 @@ class TestFormatInvoiceDataPayloadShape(unittest.TestCase):
 
 	def test_bundle_group_fields_are_emitted_when_present(self):
 		"""Bundle child group metadata must be exposed for amendment reconstruction."""
-		from unittest.mock import patch, MagicMock
+		from unittest.mock import MagicMock, patch
 
 		mf = MagicMock()
 		mf.get_doc.side_effect = Exception("no address")
@@ -1012,7 +1011,7 @@ class TestFormatInvoiceDataPayloadShape(unittest.TestCase):
 
 	def test_bundle_parent_missing_bundle_code_logs_error(self):
 		"""When a bundle-parent item has empty bundle_code, log_error must be called."""
-		from unittest.mock import patch, MagicMock
+		from unittest.mock import MagicMock, patch
 
 		mf = MagicMock()
 		mf.get_doc.side_effect = Exception("no address")
@@ -1039,7 +1038,7 @@ class TestFormatInvoiceDataPayloadShape(unittest.TestCase):
 
 	def test_bundle_parent_missing_bundle_code_is_derived_from_erpnext_item(self):
 		"""Legacy parent rows can recover bundle_code from Jarz Bundle.erpnext_item."""
-		from unittest.mock import patch, MagicMock
+		from unittest.mock import MagicMock, patch
 
 		mf = MagicMock()
 		mf.get_doc.side_effect = Exception("no address")

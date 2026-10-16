@@ -151,9 +151,9 @@ def link_b2b_sale_to_opportunity(doc, method=None):
 
 		# --- Post-sale follow-up ToDo (deduped) -------------------------
 		try:
-			from jarz_pos.crm.follow_ups import KIND_POST_SALE, _ensure_todo
-
 			from frappe.utils import add_days, today
+
+			from jarz_pos.crm.follow_ups import KIND_POST_SALE, _ensure_todo
 
 			followup_date = add_days(today(), _FOLLOWUP_DAYS)
 
@@ -249,12 +249,13 @@ def create_delivery_followup_on_state(doc, method=None):
 		# unrelated ToDo on the same record (an assignment, say) no longer
 		# suppresses this reminder entirely.
 		try:
+			from frappe.utils import add_days, today
+
 			from jarz_pos.crm.follow_ups import (
 				KIND_CHECK_UP,
 				KIND_SAMPLE_FEEDBACK,
 				_ensure_todo,
 			)
-			from frappe.utils import add_days, today
 		except Exception:
 			return
 

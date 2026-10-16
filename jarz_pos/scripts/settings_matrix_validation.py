@@ -86,7 +86,7 @@ SETTINGS = "Jarz POS Settings"
 #: different app and the two are independent by design (CLAUDE.md domain
 #: isolation). Reading its stored values through ``frappe.get_meta`` and
 #: ``tabSingles`` is a standard Frappe read, not a cross-app dependency.
-SNAPSHOT_DOCTYPES: Tuple[str, ...] = (
+SNAPSHOT_DOCTYPES: tuple[str, ...] = (
 	"Jarz POS Settings",
 	"WooCommerce Settings",
 	"Jarz Forecast Settings",
@@ -183,7 +183,7 @@ def _write_single(doctype: str, fieldname: str, value: Any) -> None:
 	_bust(doctype)
 
 
-def _norm(value: Any) -> Optional[str]:
+def _norm(value: Any) -> str | None:
 	"""Compare stored values as text. ``None`` (no row) stays distinct from ""."""
 	if value is None:
 		return None
@@ -213,7 +213,7 @@ class _SettingGuard:
 		self.baseline = raw_single_value(doctype, fieldname)
 
 	# -- lifecycle ----------------------------------------------------------
-	def __enter__(self) -> "_SettingGuard":
+	def __enter__(self) -> _SettingGuard:
 		return self
 
 	def __exit__(self, exc_type, exc, tb) -> bool:
@@ -267,7 +267,7 @@ class _SettingGuard:
 #: anchor is not a product defect, but a report that cites a line which no longer
 #: says what it claims is worse than one that cites nothing — so drift is
 #: recorded as a failure with the line it moved to.
-_LINE_ANCHORS: Tuple[Tuple[str, int, str], ...] = (
+_LINE_ANCHORS: tuple[tuple[str, int, str], ...] = (
 	("events/sales_invoice.py", 325, "def mint_tracking_token_on_ofd"),
 	("api/kanban.py", 895, "ofd_pin_gate.build_missing_pin_errors"),
 	("api/trips.py", 321, "ofd_pin_gate.build_missing_pin_errors"),
@@ -281,9 +281,9 @@ def _app_root() -> str:
 	return frappe.get_app_path("jarz_pos")
 
 
-def _read_lines(relpath: str) -> List[str]:
+def _read_lines(relpath: str) -> list[str]:
 	path = os.path.join(_app_root(), relpath.replace("/", os.sep))
-	with open(path, "r", encoding="utf-8", errors="replace") as handle:
+	with open(path, encoding="utf-8", errors="replace") as handle:
 		return handle.read().splitlines()
 
 
@@ -345,7 +345,7 @@ def _render_value(doctype: str, fieldname: str, fieldtype: str) -> str:
 	return text
 
 
-def _snapshot_doctype(ctx: RunContext, doctype: str) -> Optional[Dict[str, Any]]:
+def _snapshot_doctype(ctx: RunContext, doctype: str) -> dict[str, Any] | None:
 	if not frappe.db.exists("DocType", doctype):
 		ctx.skip(
 			f"SNAP.{doctype}",
@@ -360,8 +360,8 @@ def _snapshot_doctype(ctx: RunContext, doctype: str) -> Optional[Dict[str, Any]]
 		ctx.skip(f"SNAP.{doctype}", f"get_meta failed: {type(exc).__name__}: {exc}")
 		return None
 
-	fields: Dict[str, str] = {}
-	tables: Dict[str, str] = {}
+	fields: dict[str, str] = {}
+	tables: dict[str, str] = {}
 	known: set = set()
 	for df in meta.fields or []:
 		fieldname = str(getattr(df, "fieldname", "") or "")
@@ -385,7 +385,7 @@ def _snapshot_doctype(ctx: RunContext, doctype: str) -> Optional[Dict[str, Any]]
 	# Rows for fields the DocType no longer declares. These are invisible in
 	# Desk and survive forever; a reader still asking for one by name gets a
 	# live value that no form can show or change.
-	orphans: Dict[str, str] = {}
+	orphans: dict[str, str] = {}
 	try:
 		rows = frappe.db.sql("select `field` from `tabSingles` where `doctype`=%s", (doctype,)) or []
 		for (fieldname,) in rows:
@@ -404,8 +404,8 @@ def _snapshot_doctype(ctx: RunContext, doctype: str) -> Optional[Dict[str, Any]]
 	return {"fields": fields, "tables": tables, "orphan_rows": orphans}
 
 
-def _section_snapshot(ctx: RunContext) -> Dict[str, Any]:
-	out: Dict[str, Any] = {}
+def _section_snapshot(ctx: RunContext) -> dict[str, Any]:
+	out: dict[str, Any] = {}
 	for doctype in SNAPSHOT_DOCTYPES:
 		captured = _snapshot_doctype(ctx, doctype)
 		if captured is not None:
@@ -430,7 +430,7 @@ def _has_any_role(*names: str) -> bool:
 	return any(str(n).strip().lower() in mine for n in names)
 
 
-def _recent_invoices(limit: int = 60) -> List[Dict[str, Any]]:
+def _recent_invoices(limit: int = 60) -> list[dict[str, Any]]:
 	"""Recent submitted invoices, names only.
 
 	Deliberately asks for no custom column: a site one migration behind would
@@ -453,7 +453,7 @@ def _recent_invoices(limit: int = 60) -> List[Dict[str, Any]]:
 		return []
 
 
-def _tracked_invoices(limit: int = 60) -> List[Dict[str, Any]]:
+def _tracked_invoices(limit: int = 60) -> list[dict[str, Any]]:
 	"""Submitted invoices that ALREADY carry a tracking token.
 
 	Deliberately never mints one. ``ensure_tracking_token`` writes a live public
@@ -503,7 +503,7 @@ def _courier_phone(party_type: Any, party: Any) -> str:
 		return ""
 
 
-def _started_work_order() -> Optional[Dict[str, Any]]:
+def _started_work_order() -> dict[str, Any] | None:
 	"""A submitted Work Order with material actually in WIP, or ``None``.
 
 	``finish_production_batch`` rejects anything else long before it reaches the
@@ -530,7 +530,7 @@ def _started_work_order() -> Optional[Dict[str, Any]]:
 	return rows[0] if rows else None
 
 
-def _collect_env(ctx: RunContext) -> Dict[str, Any]:
+def _collect_env(ctx: RunContext) -> dict[str, Any]:
 	tracked = _tracked_invoices()
 	with_phone = next(
 		(
@@ -555,7 +555,7 @@ def _collect_env(ctx: RunContext) -> Dict[str, Any]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _case_a_invoice_returns(ctx: RunContext, env: Dict[str, Any]) -> None:
+def _case_a_invoice_returns(ctx: RunContext, env: dict[str, Any]) -> None:
 	"""``enable_invoice_returns`` gates the return preview's block code."""
 	case = "A.enable_invoice_returns"
 	from jarz_pos.api.returns import get_return_preview
@@ -623,7 +623,7 @@ def _case_a_invoice_returns(ctx: RunContext, env: Dict[str, Any]) -> None:
 		)
 
 
-def _case_b_courier_delivery(ctx: RunContext, env: Dict[str, Any]) -> None:
+def _case_b_courier_delivery(ctx: RunContext, env: dict[str, Any]) -> None:
 	"""``enable_courier_delivery_actions`` surfaces as ``feature_enabled``."""
 	case = "B.enable_courier_delivery_actions"
 	from jarz_pos.api.courier_delivery import get_stop_outcome
@@ -665,7 +665,7 @@ def _case_b_courier_delivery(ctx: RunContext, env: Dict[str, Any]) -> None:
 		)
 
 
-def _case_c_customer_tracking(ctx: RunContext, env: Dict[str, Any]) -> None:
+def _case_c_customer_tracking(ctx: RunContext, env: dict[str, Any]) -> None:
 	"""``enable_customer_tracking`` gates the public read — and only that.
 
 	Two separate claims, and conflating them is how the feature would look safe
@@ -768,7 +768,7 @@ def _case_c_customer_tracking(ctx: RunContext, env: Dict[str, Any]) -> None:
 			)
 
 
-def _case_d_courier_phone(ctx: RunContext, env: Dict[str, Any]) -> None:
+def _case_d_courier_phone(ctx: RunContext, env: dict[str, Any]) -> None:
 	"""``expose_courier_phone_to_customer`` changes the phone VALUE, not the key.
 
 	Worth stating precisely, because the feature is usually described as the key
@@ -831,7 +831,7 @@ def _case_d_courier_phone(ctx: RunContext, env: Dict[str, Any]) -> None:
 		)
 
 
-def _case_e_tracking_ttl(ctx: RunContext, env: Dict[str, Any]) -> None:
+def _case_e_tracking_ttl(ctx: RunContext, env: dict[str, Any]) -> None:
 	"""``tracking_link_ttl_hours``: unset means 24, an explicit 0 means forever.
 
 	This is the regression pin for the bug just fixed in ``services/tracking``.
@@ -873,7 +873,7 @@ def _case_e_tracking_ttl(ctx: RunContext, env: Dict[str, Any]) -> None:
 		)
 
 
-def _case_f_purchase_request_days(ctx: RunContext, env: Dict[str, Any]) -> None:
+def _case_f_purchase_request_days(ctx: RunContext, env: dict[str, Any]) -> None:
 	"""``purchase_request_schedule_days``: same unset-versus-zero shape as E."""
 	case = "F.purchase_request_schedule_days"
 	from jarz_pos.api.purchase_request import _settings_int
@@ -907,7 +907,7 @@ def _case_f_purchase_request_days(ctx: RunContext, env: Dict[str, Any]) -> None:
 		)
 
 
-def _case_g_over_production(ctx: RunContext, env: Dict[str, Any]) -> None:
+def _case_g_over_production(ctx: RunContext, env: dict[str, Any]) -> None:
 	"""``production_allow_over_production``: OFF must refuse an above-plan finish.
 
 	Only the refusal is exercised. Asserting the permissive direction would mean
@@ -978,7 +978,7 @@ def _case_g_over_production(ctx: RunContext, env: Dict[str, Any]) -> None:
 	)
 
 
-def _case_h_require_bill_no(ctx: RunContext, env: Dict[str, Any]) -> None:
+def _case_h_require_bill_no(ctx: RunContext, env: dict[str, Any]) -> None:
 	"""``purchase_require_bill_no``: ON must refuse a blank supplier bill number.
 
 	ON is exercised through the real endpoint, and safely: ``_validate_bill_no``
@@ -1067,7 +1067,7 @@ def _case_h_require_bill_no(ctx: RunContext, env: Dict[str, Any]) -> None:
 	artifacts.unwind()
 
 
-def _case_i_ofd_pin_gate(ctx: RunContext, env: Dict[str, Any]) -> None:
+def _case_i_ofd_pin_gate(ctx: RunContext, env: dict[str, Any]) -> None:
 	"""``require_delivery_pin_for_ofd``: read and report. NEVER written.
 
 	This is the one switch in the matrix that is deliberately not flipped, even
@@ -1146,7 +1146,7 @@ _CASES = [
 #: not harmless: each one is an editable control in Desk that an operator can
 #: change, save successfully, and have no effect from — which is a worse failure
 #: than a missing setting, because it looks like it worked.
-_DEAD_SETTINGS: Tuple[Tuple[str, str, str], ...] = (
+_DEAD_SETTINGS: tuple[tuple[str, str, str], ...] = (
 	(
 		"indirect_expenses_parent",
 		"Jarz POS Settings",
@@ -1233,9 +1233,9 @@ _SETTINGS_MARKERS = (
 _MARKER_LOOKBACK = 6
 
 
-def _iter_app_sources() -> List[str]:
+def _iter_app_sources() -> list[str]:
 	root = _app_root()
-	out: List[str] = []
+	out: list[str] = []
 	for dirpath, dirnames, filenames in os.walk(root):
 		dirnames[:] = [d for d in dirnames if d not in {"__pycache__", "node_modules", ".git"}]
 		for filename in filenames:
@@ -1244,17 +1244,17 @@ def _iter_app_sources() -> List[str]:
 	return out
 
 
-def _classify_hits(fieldname: str, sources: List[str]) -> Dict[str, List[str]]:
+def _classify_hits(fieldname: str, sources: list[str]) -> dict[str, list[str]]:
 	root = _app_root()
-	live: List[str] = []
-	harness: List[str] = []
-	unrelated: List[str] = []
+	live: list[str] = []
+	harness: list[str] = []
+	unrelated: list[str] = []
 	for path in sources:
 		rel = os.path.relpath(path, root).replace(os.sep, "/")
 		if rel in _SCAN_EXCLUDED:
 			continue
 		try:
-			with open(path, "r", encoding="utf-8", errors="replace") as handle:
+			with open(path, encoding="utf-8", errors="replace") as handle:
 				lines = handle.read().splitlines()
 		except Exception:
 			continue
@@ -1273,9 +1273,9 @@ def _classify_hits(fieldname: str, sources: List[str]) -> Dict[str, List[str]]:
 	return {"live": live, "harness": harness, "unrelated": unrelated}
 
 
-def _section_dead_settings(ctx: RunContext) -> Dict[str, Any]:
+def _section_dead_settings(ctx: RunContext) -> dict[str, Any]:
 	sources = _iter_app_sources()
-	report: Dict[str, Any] = {}
+	report: dict[str, Any] = {}
 	for fieldname, owner, instead in _DEAD_SETTINGS:
 		case = f"DEAD.{fieldname}"
 		if not frappe.db.exists("DocType", owner):
@@ -1313,10 +1313,10 @@ _OWNED_SETTINGS = (
 )
 
 
-def _section_permissions(ctx: RunContext) -> Dict[str, Any]:
+def _section_permissions(ctx: RunContext) -> dict[str, Any]:
 	user = frappe.session.user
 	roles = _roles()
-	report: Dict[str, Any] = {"user": user}
+	report: dict[str, Any] = {"user": user}
 
 	# The shipped permission block on Jarz POS Settings grants write to System
 	# Manager and read to POS User. Nothing else. That is why a JARZ Manager gets
@@ -1383,7 +1383,7 @@ def _section_permissions(ctx: RunContext) -> Dict[str, Any]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def run(cleanup: bool = True) -> Dict[str, Any]:
+def run(cleanup: bool = True) -> dict[str, Any]:
 	"""Run the whole matrix.
 
 	``cleanup`` governs only the document artifacts (there should be none — a
@@ -1401,7 +1401,7 @@ def run(cleanup: bool = True) -> Dict[str, Any]:
 	frappe.flags.ignore_woo_outbound = True
 
 	ctx = RunContext()
-	summary: Dict[str, Any] = {}
+	summary: dict[str, Any] = {}
 	try:
 		_section_line_anchors(ctx)
 		snapshot = _section_snapshot(ctx)

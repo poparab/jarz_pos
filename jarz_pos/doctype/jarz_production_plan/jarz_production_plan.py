@@ -80,7 +80,7 @@ class JarzProductionPlan(Document):
 			)
 
 	def _validate_lines(self) -> None:
-		seen: Dict[str, int] = {}
+		seen: dict[str, int] = {}
 		for row in self.lines or []:
 			if not row.item_code:
 				continue
@@ -119,7 +119,7 @@ class JarzProductionPlan(Document):
 	def _compute_mix_requirement(self) -> None:
 		per_unit_map = self._resolve_mix_per_unit()
 
-		demand_lines: List[Dict[str, Any]] = []
+		demand_lines: list[dict[str, Any]] = []
 		for row in self.lines or []:
 			per_unit = flt(per_unit_map.get(row.item_code, 0))
 			row.mix_qty_per_unit = per_unit
@@ -156,7 +156,7 @@ class JarzProductionPlan(Document):
 
 		self._describe_overproduction(split)
 
-	def _describe_overproduction(self, split: Dict[str, Any]) -> None:
+	def _describe_overproduction(self, split: dict[str, Any]) -> None:
 		"""Say what the rounding costs in jars, not just in batches.
 
 		"0.48 batches spare" means nothing on the floor; "about 58 medium jars
@@ -191,7 +191,7 @@ class JarzProductionPlan(Document):
 				best = (row.item_code, flt(row.jars_per_batch), cint(row.planned_qty))
 		return (best[0], best[1]) if best else None
 
-	def _resolve_mix_per_unit(self) -> Dict[str, float]:
+	def _resolve_mix_per_unit(self) -> dict[str, float]:
 		"""Mix consumed per finished unit, keyed by item code.
 
 		Read from the one-level BOM rather than the explosion, which is why the

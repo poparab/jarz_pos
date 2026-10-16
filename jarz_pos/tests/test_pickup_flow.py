@@ -8,8 +8,9 @@ This module tests the pickup invoice-specific handling:
 """
 
 import unittest
+from unittest.mock import MagicMock, patch
+
 import frappe
-from unittest.mock import patch, MagicMock
 
 
 class TestPickupInvoiceFlow(unittest.TestCase):
@@ -265,7 +266,7 @@ class TestPickupInvoiceFlow(unittest.TestCase):
 				result = _is_pickup_invoice(inv_dict)
 				# Should return a boolean, not raise
 				self.assertIsInstance(result, bool)
-			except Exception as e:
+			except Exception:
 				# Implementation has try/except to return False on any error
 				# So this shouldn't happen, but if it does, it's acceptable
 				pass
