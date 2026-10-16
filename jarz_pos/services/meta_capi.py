@@ -343,6 +343,7 @@ def _candidate_orders(settings: dict[str, Any], since: datetime) -> list[Any]:
 	excluded = (
 		f"AND IFNULL(c.{CUSTOMER_EXCLUDE_FIELD}, 0) = 0" if has("Customer", CUSTOMER_EXCLUDE_FIELD) else ""
 	)
+	# nosemgrep: frappe-sql-format-injection -- only module constants interpolated; every value is a bound parameter
 	return frappe.db.sql(
 		f"""
         SELECT si.name, si.amended_from, si.customer, si.customer_name, si.grand_total, si.creation,
@@ -517,6 +518,7 @@ def send_approved_events() -> dict[str, Any]:
 			return result
 
 		test_filter = "AND e.test_sent_at IS NULL" if settings["test_mode"] else ""
+		# nosemgrep: frappe-sql-format-injection -- only a fixed clause interpolated; every value is a bound parameter
 		rows = frappe.db.sql(
 			f"""
             SELECT e.name, e.invoice, e.event_id, e.event_time, e.order_value, e.attempts
@@ -636,7 +638,6 @@ def approve_events(names: Any) -> dict[str, Any]:
 			{"status": STATUS_APPROVED, "decided_by": frappe.session.user, "decided_at": now_datetime()},
 		)
 		done += 1
-	frappe.db.commit()
 	return {"approved": done, "skipped": skipped}
 
 
@@ -662,7 +663,6 @@ def reject_events(names: Any, reason: str | None = None) -> dict[str, Any]:
 			},
 		)
 		done += 1
-	frappe.db.commit()
 	return {"rejected": done, "skipped": skipped}
 
 
