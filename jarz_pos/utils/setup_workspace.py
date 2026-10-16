@@ -180,6 +180,14 @@ CARDS = [
         ],
     },
     {
+        "label": "Meta Chat Orders",
+        "links": [
+            {"label": "Meta CAPI Event", "link_type": "DocType", "link_to": "Meta CAPI Event"},
+            {"label": "Meta CAPI Daily", "link_type": "Report", "link_to": "Meta CAPI Daily"},
+            {"label": "Meta CAPI Settings", "link_type": "DocType", "link_to": "Meta CAPI Settings"},
+        ],
+    },
+    {
         "label": "Settings",
         "links": [
             {"label": "Jarz POS Settings", "link_type": "DocType", "link_to": "Jarz POS Settings"},
@@ -267,6 +275,14 @@ SIDEBAR_SECTIONS = [
         "links": [
             {"label": "Jarz Expense Request", "link_type": "DocType", "link_to": "Jarz Expense Request"},
             {"label": "Jarz Recurring Expense", "link_type": "DocType", "link_to": "Jarz Recurring Expense"},
+        ],
+    },
+    {
+        "label": "Meta Chat Orders",
+        "links": [
+            {"label": "Meta CAPI Event", "link_type": "DocType", "link_to": "Meta CAPI Event"},
+            {"label": "Meta CAPI Daily", "link_type": "Report", "link_to": "Meta CAPI Daily"},
+            {"label": "Meta CAPI Settings", "link_type": "DocType", "link_to": "Meta CAPI Settings"},
         ],
     },
     {

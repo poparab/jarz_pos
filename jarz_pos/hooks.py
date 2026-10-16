@@ -97,6 +97,8 @@ before_migrate = [
     # is a Link to Role — so the record has to exist before the DocType syncs,
     # which happens in the schema updates and therefore before after_migrate.
     "jarz_pos.setup.pos_staff_role.ensure_pos_staff_role",
+    # Meta CAPI Settings / Event grant "Meta CAPI Manager"; same reason as above.
+    "jarz_pos.setup.meta_capi_role.ensure_meta_capi_role",
 ]
 
 after_migrate = [
@@ -606,6 +608,13 @@ scheduler_events = {
         # enabled; idempotent per invoice; never raises. See
         # jarz_pos.services.customer_followups.
         "jarz_pos.services.customer_followups.generate_touches",
+        # Meta Conversions API: log every newly delivered chat (flutter) order as
+        # Pending Approval / Held / Approved / Skipped, then send the approved
+        # ones as Purchase. Website orders are left to the Woo pixel plugin.
+        # Off until Meta CAPI Settings is enabled; idempotent per invoice;
+        # never raise. See jarz_pos.services.meta_capi.
+        "jarz_pos.services.meta_capi.queue_delivered_orders",
+        "jarz_pos.services.meta_capi.send_approved_events",
     ],
     "cron": {
         # Task Board reminders at 09:00 site time (Africa/Cairo): due tomorrow,

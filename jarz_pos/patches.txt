@@ -55,3 +55,6 @@ jarz_pos.Patches.v1_9.seed_followup_settings
 # gets an Invoice State Log row. Without it such a row would match no column and
 # fail validation on its next full save. Idempotent.
 jarz_pos.Patches.v1_9.kanban_drop_ready_state
+# Meta CAPI Settings starts off, in test mode, with every order approved by
+# hand. Writes a field only when nothing is stored for it yet.
+jarz_pos.Patches.v1_9.seed_meta_capi_settings

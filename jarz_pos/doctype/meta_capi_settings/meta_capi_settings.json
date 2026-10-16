@@ -1,0 +1,147 @@
+{
+ "actions": [],
+ "creation": "2026-10-17 12:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "enabled",
+  "test_mode",
+  "test_event_code",
+  "column_break_a",
+  "start_date",
+  "approval_mode",
+  "hold_above",
+  "section_meta",
+  "dataset_id",
+  "api_version",
+  "column_break_b",
+  "access_token",
+  "section_filters",
+  "excluded_customer_groups"
+ ],
+ "fields": [
+  {
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "label": "Enabled",
+   "default": "0",
+   "description": "Master switch. Untick to stop queueing and sending at once."
+  },
+  {
+   "fieldname": "test_mode",
+   "fieldtype": "Check",
+   "label": "Test Mode",
+   "default": "1",
+   "description": "Send to the Test Events tab only. Rows stay Approved and go for real once this is unticked."
+  },
+  {
+   "fieldname": "test_event_code",
+   "fieldtype": "Data",
+   "label": "Test Event Code",
+   "depends_on": "eval:doc.test_mode",
+   "description": "From Events Manager > Test Events (looks like TEST12345)."
+  },
+  {
+   "fieldname": "column_break_a",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "start_date",
+   "fieldtype": "Date",
+   "label": "Start Date",
+   "description": "Only orders created on or after this date are queued (never older than 7 days)."
+  },
+  {
+   "fieldname": "approval_mode",
+   "fieldtype": "Select",
+   "label": "Approval Mode",
+   "options": "Every order\nHeld only",
+   "default": "Every order",
+   "description": "Every order: each order waits for a manager. Held only: only orders above the hold amount wait."
+  },
+  {
+   "fieldname": "hold_above",
+   "fieldtype": "Currency",
+   "label": "Hold Orders Above (EGP)",
+   "default": "2500",
+   "description": "Orders above this value are Held for a manager whatever the approval mode."
+  },
+  {
+   "fieldname": "section_meta",
+   "fieldtype": "Section Break",
+   "label": "Meta Dataset"
+  },
+  {
+   "fieldname": "dataset_id",
+   "fieldtype": "Data",
+   "label": "Dataset (Pixel) ID",
+   "default": "1296894931563065"
+  },
+  {
+   "fieldname": "api_version",
+   "fieldtype": "Data",
+   "label": "Graph API Version",
+   "default": "v23.0"
+  },
+  {
+   "fieldname": "column_break_b",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "access_token",
+   "fieldtype": "Password",
+   "label": "Access Token",
+   "permlevel": 1,
+   "description": "Conversions API token from Events Manager > Settings. Stored encrypted; only a System Manager can see or change it."
+  },
+  {
+   "fieldname": "section_filters",
+   "fieldtype": "Section Break",
+   "label": "Filters"
+  },
+  {
+   "fieldname": "excluded_customer_groups",
+   "fieldtype": "Small Text",
+   "label": "Excluded Customer Groups",
+   "default": "B2B\nEmployee\nCommercial\nDistributor\nGovernment\nNon Profit\nSample",
+   "description": "One per line. Orders from these groups are never queued. A single customer can also be excluded with Exclude from Meta on the Customer."
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-10-17 12:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "jarz pos",
+ "name": "Meta CAPI Settings",
+ "owner": "Administrator",
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1,
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "permlevel": 1,
+   "read": 1,
+   "write": 1,
+   "role": "System Manager"
+  },
+  {
+   "read": 1,
+   "write": 1,
+   "role": "Meta CAPI Manager"
+  }
+ ],
+ "issingle": 1
+}
