@@ -114,22 +114,23 @@
    "fieldname": "is_planted",
    "fieldtype": "Check",
    "label": "Is Planted",
-   "in_list_view": 1,
-   "in_standard_filter": 1,
-   "description": "Training check: this draft carries a deliberate mistake."
+   "description": "Training check: this draft carries a deliberate mistake.",
+   "permlevel": 1
   },
   {
    "fieldname": "planted_error",
    "fieldtype": "Small Text",
    "label": "Planted Error",
-   "description": "What was changed, e.g. \"price 120 to 150\"."
+   "description": "What was changed, e.g. \"price 120 to 150\".",
+   "permlevel": 1
   },
   {
    "fieldname": "real_draft",
    "fieldtype": "Link",
    "label": "Real Draft",
    "options": "Jarz Chat Draft",
-   "description": "For planted drafts: the held real one."
+   "description": "For planted drafts: the held real one.",
+   "permlevel": 1
   },
   {
    "fieldname": "planted_caught",
@@ -198,7 +199,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-10-16 12:00:00.000000",
+ "modified": "2026-10-16 21:30:00.000000",
  "modified_by": "Administrator",
  "module": "jarz pos",
  "name": "Jarz Chat Draft",
@@ -232,7 +233,23 @@
   {
    "read": 1,
    "report": 1,
-   "role": "Moderator",
+   "role": "Moderator"
+  },
+  {
+   "read": 1,
+   "report": 1,
+   "role": "JARZ line manager"
+  },
+  {
+   "permlevel": 1,
+   "read": 1,
+   "role": "System Manager",
+   "write": 1
+  },
+  {
+   "permlevel": 1,
+   "read": 1,
+   "role": "JARZ Manager",
    "write": 1
   }
  ]
