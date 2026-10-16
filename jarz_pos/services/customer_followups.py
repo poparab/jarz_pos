@@ -306,6 +306,7 @@ def _since_datetime(start_date: Any) -> _dt.datetime:
 
 
 def _cancel_pending(where: str, params: dict[str, Any], reason: str) -> None:
+	# nosemgrep: frappe-sql-format-injection -- where is a literal fragment supplied by in-module callers; all values are bound parameters
 	frappe.db.sql(
 		f"""
         UPDATE `tabJarz Follow-up Touch`
@@ -317,6 +318,7 @@ def _cancel_pending(where: str, params: dict[str, Any], reason: str) -> None:
 
 
 def _earlier_retail_orders(customer: str, inv: Any, scope: str) -> int:
+	# nosemgrep: frappe-sql-format-injection -- scope is rfm.retail_scope_sql output (constants only); all values are bound parameters
 	row = frappe.db.sql(
 		f"""
         SELECT COUNT(*) FROM `tabSales Invoice` si
@@ -369,6 +371,7 @@ def _insert_cycle(inv: Any, settings: dict[str, Any], scope: str) -> int:
 def _cancel_superseded(scope_inv_conds: list[str]) -> None:
 	"""Cancel Pending touches whose customer ordered again since the touch's order."""
 	newer = " AND ".join(scope_inv_conds)
+	# nosemgrep: frappe-sql-format-injection -- newer is built by rfm.retail_invoice_conditions (constants only, no user input)
 	frappe.db.sql(
 		f"""
         UPDATE `tabJarz Follow-up Touch` t
@@ -416,6 +419,7 @@ def generate_touches() -> dict[str, Any]:
 		)
 		woo_col = "si.woo_order_id" if frappe.db.has_column("Sales Invoice", "woo_order_id") else "0"
 
+		# nosemgrep: frappe-sql-format-injection -- woo_col, delivered_expr, scope and opt_out are fixed fragments from has_column checks and module constants; values are bound
 		invoices = frappe.db.sql(
 			f"""
             SELECT si.name, si.customer, si.grand_total, si.posting_date, si.creation,
@@ -656,6 +660,7 @@ def _touch_row(t: dict[str, Any], cust: dict[str, Any], settings: dict[str, Any]
 	phone = t.get("phone") or cust.get("mobile_no") or ""
 	customer_name = t.get("customer_name") or cust.get("customer_name") or t.get("customer")
 	order_no = t.get("woo_order_id") or t.get("invoice") or ""
+	# nosemgrep: frappe-ssti -- render_template here is this module's own str.replace placeholder filler, not Jinja
 	text = render_template(
 		settings.get("templates", {}).get(template_key(t.get("step"), t.get("channel")), ""),
 		first_name_of(customer_name),
@@ -757,6 +762,7 @@ def get_followup_stats(from_date: str | None = None, to_date: str | None = None)
 	by_status = {
 		r[0]: int(r[1])
 		for r in frappe.db.sql(
+			# nosemgrep: string-concat-in-list -- one SQL statement split over lines on purpose, not a list
 			"SELECT status, COUNT(*) FROM `tabJarz Follow-up Touch` "
 			"WHERE due_at >= %(from_d)s AND due_at < %(to_d)s GROUP BY status",
 			params,
@@ -765,6 +771,7 @@ def get_followup_stats(from_date: str | None = None, to_date: str | None = None)
 	by_outcome = {
 		r[0]: int(r[1])
 		for r in frappe.db.sql(
+			# nosemgrep: string-concat-in-list -- one SQL statement split over lines on purpose, not a list
 			"SELECT outcome, COUNT(*) FROM `tabJarz Follow-up Touch` "
 			"WHERE status = 'Done' AND IFNULL(outcome, '') != '' "
 			"AND due_at >= %(from_d)s AND due_at < %(to_d)s GROUP BY outcome",
@@ -780,6 +787,7 @@ def get_followup_stats(from_date: str | None = None, to_date: str | None = None)
 	calls_reached = int(calls[0][1] or 0) if calls else 0
 
 	newer = " AND ".join(rfm.retail_invoice_conditions(rfm.website_only_enabled(), "n"))
+	# nosemgrep: frappe-sql-format-injection -- newer is built by rfm.retail_invoice_conditions (constants only, no user input); dates are bound parameters
 	touched, reordered = frappe.db.sql(
 		f"""
         SELECT COUNT(DISTINCT t.customer),

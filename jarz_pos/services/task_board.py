@@ -882,6 +882,7 @@ def visibility_sql(viewer: Viewer, table: str = "`tabJarz Task`") -> str:
 	parts = [
 		f"{table}.`created_by` = {me}",
 		f"{table}.`assigned_to` = {me}",
+		# nosemgrep: string-concat-in-list -- one SQL EXISTS clause split over lines on purpose, not a missing comma
 		(
 			"EXISTS (SELECT 1 FROM `tabJarz Task Subtask` `jts_vis`"
 			f" WHERE `jts_vis`.`parent` = {table}.`name`"

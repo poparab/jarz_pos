@@ -8,8 +8,10 @@ and delivery charges implementation works correctly.
 import json
 
 import frappe
+from frappe.tests.utils import whitelist_for_tests
 
 
+# nosemgrep: frappe-test-whitelist-missing-protection -- read-only bundle listing run directly by scripts/smoke_test.py outside test mode
 @frappe.whitelist()
 def debug_bundle_data():
 	"""
@@ -54,7 +56,7 @@ def debug_bundle_data():
 		return {"success": False, "error": str(e)}
 
 
-@frappe.whitelist()
+@whitelist_for_tests()
 def test_bundle_processing():
 	"""
 	Test the bundle processing functionality
@@ -140,7 +142,7 @@ def test_bundle_processing():
 		return {"success": False, "error": str(e)}
 
 
-@frappe.whitelist()
+@whitelist_for_tests()
 def test_delivery_charges():
 	"""
 	Test the delivery charges functionality
@@ -200,7 +202,7 @@ def test_delivery_charges():
 		return {"success": False, "error": str(e)}
 
 
-@frappe.whitelist()
+@whitelist_for_tests()
 def test_invoice_creation_with_bundle():
 	"""
 	Test complete invoice creation with bundle items

@@ -109,7 +109,7 @@ def _assert_geo_fields() -> None:
 	try:
 		meta = frappe.get_meta("Address")
 	except Exception as exc:  # pragma: no cover - meta failure is environmental
-		frappe.throw(_("Could not read Address metadata: {0}").format(exc))
+		frappe.throw(_("Could not read Address metadata: {0}").format(str(exc)))
 
 	missing = [field for field in GEO_FIELDS if not meta.get_field(field)]
 	if missing:

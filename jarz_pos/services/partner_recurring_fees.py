@@ -348,6 +348,7 @@ def unsettled_accruals(delivery_partner: str | None = None, names: list[str] | N
 	if names is not None:
 		conds.append("a.name IN %(names)s")
 		params["names"] = tuple(names)
+	# nosemgrep: frappe-sql-format-injection -- conds holds only fixed fragments with %(name)s placeholders; values are bound
 	return frappe.db.sql(
 		f"""SELECT a.name, a.delivery_partner, a.frequency, a.amount,
                    a.period_start, a.period_end

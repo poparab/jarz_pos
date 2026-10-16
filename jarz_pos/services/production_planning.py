@@ -557,6 +557,7 @@ def _resolve_producible_rows(company: str, search: str | None = None) -> list[di
 		values["q"] = f"%{term}%"
 
 	where = " AND ".join(conditions)
+	# nosemgrep: frappe-sql-format-injection -- where joins fixed condition strings; company and search term are bound parameters
 	rows = frappe.db.sql(
 		f"""
         SELECT
