@@ -164,6 +164,7 @@ def _accounts_like(company: str | None, root_type: str, pattern: str) -> list[st
 	cond = "AND company = %(company)s" if company else ""
 	return [
 		r[0]
+		# nosemgrep: frappe-sql-format-injection -- only module constants and code-built fragments interpolated; values are bound parameters
 		for r in frappe.db.sql(
 			f"""
             SELECT name FROM `tabAccount`
@@ -203,6 +204,7 @@ def _kashier_receipts(fd: date, td: date, company: str | None) -> float:
 def _talabat_sales(fd: date, td: date, company: str | None) -> tuple[float, int]:
 	"""Net sales (returns as negatives) and order count of Talabat-partner invoices."""
 	cond = "AND company = %(company)s" if company else ""
+	# nosemgrep: frappe-sql-format-injection -- only module constants and code-built fragments interpolated; values are bound parameters
 	row = frappe.db.sql(
 		f"""
         SELECT COALESCE(SUM(base_net_total), 0),
@@ -541,6 +543,7 @@ def get_promo_performance(
 	branch_cond = "AND si.pos_profile = %(branch)s" if branch else ""
 	b2c = _B2C_COND.format(a="si.")
 
+	# nosemgrep: frappe-sql-format-injection -- only module constants and code-built fragments interpolated; values are bound parameters
 	base = frappe.db.sql(
 		f"""
         SELECT COUNT(*) AS orders, COALESCE(SUM(si.base_grand_total), 0) AS revenue
@@ -554,6 +557,7 @@ def get_promo_performance(
 		as_dict=True,
 	)[0]
 
+	# nosemgrep: frappe-sql-format-injection -- only module constants and code-built fragments interpolated; values are bound parameters
 	invoice_rows = frappe.db.sql(
 		f"""
         SELECT si.name AS invoice, si.customer, si.base_grand_total AS revenue,
@@ -737,6 +741,7 @@ def get_stock_adjustments(
 	branch = _clean_branch(branch)
 	scope, params = _adjustment_scope(fd, td, branch)
 
+	# nosemgrep: frappe-sql-format-injection -- only module constants and code-built fragments interpolated; values are bound parameters
 	totals = frappe.db.sql(
 		f"""
         SELECT COALESCE(SUM(CASE WHEN sle.stock_value_difference < 0
@@ -751,6 +756,7 @@ def get_stock_adjustments(
 		as_dict=True,
 	)[0]
 
+	# nosemgrep: frappe-sql-format-injection -- only module constants and code-built fragments interpolated; values are bound parameters
 	by_type = frappe.db.sql(
 		f"""
         SELECT {_TYPE_EXPR} AS type, COALESCE(SUM(sle.stock_value_difference), 0) AS value,
@@ -763,6 +769,7 @@ def get_stock_adjustments(
 		as_dict=True,
 	)
 
+	# nosemgrep: frappe-sql-format-injection -- only module constants and code-built fragments interpolated; values are bound parameters
 	by_wh = frappe.db.sql(
 		f"""
         SELECT sle.warehouse,
@@ -784,6 +791,7 @@ def get_stock_adjustments(
 		"LEFT JOIN `tabItem` i ON i.name = sle.item_code\n        WHERE sle.is_cancelled",
 		1,
 	)
+	# nosemgrep: frappe-sql-format-injection -- only module constants and code-built fragments interpolated; values are bound parameters
 	by_item = frappe.db.sql(
 		f"""
         SELECT sle.item_code, MAX(i.item_name) AS item_name, MAX(i.stock_uom) AS uom,
@@ -798,6 +806,7 @@ def get_stock_adjustments(
 		as_dict=True,
 	)
 
+	# nosemgrep: frappe-sql-format-injection -- only module constants and code-built fragments interpolated; values are bound parameters
 	entries = frappe.db.sql(
 		f"""
         SELECT sle.voucher_type, sle.voucher_no, sle.posting_date, sle.warehouse, sle.item_code,
@@ -1074,6 +1083,7 @@ def _salary_slip_costs(fd: date, td: date, company: str | None) -> dict[str, flo
 		if not frappe.db.table_exists("Salary Slip"):
 			return {}
 		cond = "AND company = %(company)s" if company else ""
+		# nosemgrep: frappe-sql-format-injection -- only module constants and code-built fragments interpolated; values are bound parameters
 		rows = frappe.db.sql(
 			f"""
             SELECT employee, start_date, end_date, base_gross_pay AS gross
@@ -1244,6 +1254,7 @@ def _branch_sales(fd: date, td: date, company: str | None) -> dict[str | None, f
 	cond = "AND company = %(company)s" if company else ""
 	return {
 		(r[0] or None): flt(r[1])
+		# nosemgrep: frappe-sql-format-injection -- only module constants and code-built fragments interpolated; values are bound parameters
 		for r in frappe.db.sql(
 			f"""
             SELECT pos_profile, COALESCE(SUM(base_net_total), 0)

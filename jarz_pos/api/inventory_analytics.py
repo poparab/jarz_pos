@@ -105,6 +105,7 @@ def _velocity_rows(warehouse: str | None, branch: str | None, window_days: int) 
 	}
 	wh_cond = "WHERE warehouse = %(warehouse)s" if warehouse else ""
 	br_cond = "AND si.pos_profile = %(branch)s" if branch else ""
+	# nosemgrep: frappe-sql-format-injection -- only constant fragments interpolated; values are bound parameters
 	return frappe.db.sql(
 		f"""
         SELECT
@@ -394,6 +395,7 @@ def get_inventory_analytics(
 
 	# ── Headline counts + total stock value ──────────────────────────────
 	wh_cond = "AND b.warehouse = %(warehouse)s" if warehouse else ""
+	# nosemgrep: frappe-sql-format-injection -- only constant fragments interpolated; values are bound parameters
 	stock_value_row = frappe.db.sql(
 		f"""
         -- The ledger's own value per bin, not qty x Item.valuation_rate: the
@@ -453,6 +455,7 @@ def get_inventory_analytics(
 
 	# ── Top sellers in the selected range (date-scoped) ──────────────────
 	br_cond = "AND si.pos_profile = %(branch)s" if branch else ""
+	# nosemgrep: frappe-sql-format-injection -- only constant fragments interpolated; values are bound parameters
 	top_sold_in_range = frappe.db.sql(
 		f"""
         SELECT

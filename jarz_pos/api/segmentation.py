@@ -64,7 +64,7 @@ def export_segment(segment):
 	return export_segment_csv(segment)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def set_segment_override(customer, override, manual_segment=None):
 	"""Pin or unpin a customer's segment from automatic recalculation.
 

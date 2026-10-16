@@ -379,6 +379,7 @@ def _clients(params: dict[str, str]) -> dict[str, Any]:
 	"""Client counts + per-group revenue over every B2B client (see
 	``_B2B_CLIENT_COND``), so the per-group revenue adds up to B2B revenue."""
 	binds = {**params, "purpose": _B2B_PURPOSE, "groups": _B2B_GROUPS}
+	# nosemgrep: frappe-sql-format-injection -- only module constants interpolated; every value is a bound parameter
 	total_b2b_clients = frappe.db.sql(
 		f"""
         SELECT COUNT(*) AS n
@@ -415,6 +416,7 @@ def _clients(params: dict[str, str]) -> dict[str, Any]:
 	)[0]["n"]
 
 	# Client count per group (customers without a group are "Unassigned").
+	# nosemgrep: frappe-sql-format-injection -- only module constants interpolated; every value is a bound parameter
 	count_rows = frappe.db.sql(
 		f"""
         SELECT COALESCE(NULLIF(c.customer_group, ''), 'Unassigned') AS customer_group,
@@ -464,6 +466,7 @@ def _clients(params: dict[str, str]) -> dict[str, Any]:
 def _at_risk_clients(params: dict[str, str]) -> dict[str, Any]:
 	"""B2B/Distributor customers currently flagged At Risk / Can't Lose Them,
 	with their in-range revenue."""
+	# nosemgrep: frappe-sql-format-injection -- only module constants interpolated; every value is a bound parameter
 	rows = frappe.db.sql(
 		f"""
         SELECT

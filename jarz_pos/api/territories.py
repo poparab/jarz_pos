@@ -43,7 +43,7 @@ def get_sub_territories(territory_name: str):
 	}
 
 
-@frappe.whitelist(allow_guest=False)
+@frappe.whitelist(allow_guest=False, methods=["POST"])
 def set_invoice_sub_territory(invoice_name: str, sub_territory: str):
 	"""Assign a sub-territory to a Sales Invoice.
 
