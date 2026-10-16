@@ -50,6 +50,13 @@ class TestB2BBranchInvoicePersistence(unittest.TestCase):
 
 	@staticmethod
 	def _fixture_inputs():
+		# Territory.pos_profile and Territory.delivery_income are custom fields that live with
+		# the live site's branch setup (jarz_woocommerce_integration owns pos_profile). A bare
+		# site, such as the CI site, has no such columns, and querying them raises instead of
+		# returning nothing, so treat their absence the same as "no branch data on this site".
+		territory_meta = frappe.get_meta("Territory")
+		if not (territory_meta.has_field("pos_profile") and territory_meta.has_field("delivery_income")):
+			raise unittest.SkipTest("site has no Territory.pos_profile / delivery_income fields")
 		territory = frappe.get_all(
 			"Territory",
 			filters={
