@@ -400,7 +400,7 @@ def queue_delivered_orders(backfill_days: int | None = None) -> dict[str, Any]:
 	try:
 		settings = load_settings()
 		result["enabled"] = settings["enabled"]
-		if not settings["enabled"] and not backfill_days:
+		if not settings["enabled"]:  # the kill switch; backfill only moves the start date
 			return result
 		for order in _candidate_orders(settings, _queue_since(settings, backfill_days)):
 			try:
@@ -422,24 +422,62 @@ def queue_delivered_orders(backfill_days: int | None = None) -> dict[str, Any]:
 	return result
 
 
-def _event_for_row(row: Any, tz_name: str) -> dict[str, Any] | None:
-	"""The CAPI event for a log row, rebuilt from the invoice. None if no phone."""
-	inv = frappe.db.get_value(
-		"Sales Invoice", row.invoice, ["customer", "customer_name", "contact_mobile"], as_dict=True
-	)
+def not_sendable_reason(inv: Any, has_return: bool) -> str | None:
+	"""Why a queued order no longer counts as a purchase at send time, or None.
+
+	Rows can wait days for approval; the order may be cancelled or returned
+	meanwhile, and a refunded order must not reach Meta as a Purchase.
+	"""
 	if not inv:
-		return None
+		return "Invoice no longer exists"
+	if int(_get(inv, "docstatus", 0) or 0) != 1:
+		return (
+			"Invoice is cancelled" if int(_get(inv, "docstatus", 0) or 0) == 2 else "Invoice is not submitted"
+		)
+	if int(_get(inv, "is_return", 0) or 0):
+		return "Invoice is a return"
+	state = _get(inv, "custom_sales_invoice_state")
+	if state != "Delivered":
+		return f"Order state is now {state or 'blank'}"
+	if has_return:
+		return "A return was booked against this order"
+	return None
+
+
+def _event_for_row(row: Any, tz_name: str) -> tuple[dict[str, Any] | None, str]:
+	"""(event, "") for a log row, rebuilt from the invoice, or (None, reason to skip)."""
+	inv = frappe.db.get_value(
+		"Sales Invoice",
+		row.invoice,
+		[
+			"customer",
+			"customer_name",
+			"contact_mobile",
+			"docstatus",
+			"is_return",
+			"custom_sales_invoice_state",
+		],
+		as_dict=True,
+	)
+	has_return = bool(
+		inv
+		and frappe.db.exists("Sales Invoice", {"return_against": row.invoice, "is_return": 1, "docstatus": 1})
+	)
+	reason = not_sendable_reason(inv, has_return)
+	if reason:
+		return None, reason
 	phone = normalize_eg_mobile(inv.contact_mobile) or normalize_eg_mobile(
 		frappe.db.get_value("Customer", inv.customer, "mobile_no")
 	)
 	if not phone:
-		return None
-	return build_event(
+		return None, "No valid Egyptian mobile at send time"
+	event = build_event(
 		event_id=row.event_id,
 		event_time=to_unix(row.event_time, tz_name),
 		value=row.order_value,
 		user_data=build_user_data(phone, inv.customer, inv.customer_name),
 	)
+	return event, ""
 
 
 def _mark(name: str, values: dict[str, Any]) -> None:
@@ -454,7 +492,15 @@ def send_approved_events() -> dict[str, Any]:
 	"""
 	from frappe.utils import get_datetime, get_system_timezone, now_datetime
 
-	result: dict[str, Any] = {"enabled": 0, "sent": 0, "test_sent": 0, "failed": 0, "expired": 0, "errors": 0}
+	result: dict[str, Any] = {
+		"enabled": 0,
+		"sent": 0,
+		"test_sent": 0,
+		"failed": 0,
+		"expired": 0,
+		"skipped": 0,
+		"errors": 0,
+	}
 	try:
 		settings = load_settings()
 		result["enabled"] = settings["enabled"]
@@ -497,12 +543,10 @@ def send_approved_events() -> dict[str, Any]:
 				_mark(row.name, {"status": STATUS_EXPIRED, "status_reason": "Older than Meta's 7-day limit"})
 				result["expired"] += 1
 				continue
-			event = _event_for_row(row, tz_name)
+			event, reason = _event_for_row(row, tz_name)
 			if not event:
-				_mark(
-					row.name,
-					{"status": STATUS_SKIPPED, "status_reason": "No valid Egyptian mobile at send time"},
-				)
+				_mark(row.name, {"status": STATUS_SKIPPED, "status_reason": reason})
+				result["skipped"] += 1
 				continue
 			ready.append((row, event))
 
@@ -681,6 +725,11 @@ def send_test_event() -> dict[str, Any]:
 def run_queue_now(backfill_days: int | None = None) -> dict[str, Any]:
 	"""Queue now. ``backfill_days`` (max 7) looks back past the start date."""
 	_require_manager()
+	if not load_settings()["enabled"]:
+		return {
+			"ok": False,
+			"message": _("Meta CAPI is off. Tick Enabled and save first; nothing was queued."),
+		}
 	days = min(int(backfill_days or 0), 7) or None
 	return queue_delivered_orders(backfill_days=days)
 

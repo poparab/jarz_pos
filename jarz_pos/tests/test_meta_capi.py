@@ -221,6 +221,88 @@ class ExpiryTest(unittest.TestCase):
 		self.assertTrue(m.is_expired(D(2026, 10, 12, 12, 0), now))
 
 
+def _inv(**over):
+	inv = {
+		"customer": "CUST-1",
+		"customer_name": "Sara Ali",
+		"contact_mobile": "01001234567",
+		"docstatus": 1,
+		"is_return": 0,
+		"custom_sales_invoice_state": "Delivered",
+	}
+	inv.update(over)
+	return SimpleNamespace(**inv)
+
+
+class SendTimeEligibilityTest(unittest.TestCase):
+	"""A row may wait days for approval; the order is rechecked when it is sent."""
+
+	ROW = SimpleNamespace(
+		invoice="ACC-SINV-1", event_id="ACC-SINV-1", event_time=D(2026, 10, 19, 12, 0), order_value=480
+	)
+
+	def _event(self, inv, has_return=False):
+		db = SimpleNamespace(
+			get_value=mock.Mock(return_value=inv),
+			exists=mock.Mock(return_value="ACC-SINV-RET-1" if has_return else None),
+		)
+		with mock.patch.object(m.frappe, "db", db, create=True):
+			return m._event_for_row(self.ROW, "Africa/Cairo")
+
+	def test_delivered_order_is_sent(self):
+		event, reason = self._event(_inv())
+		self.assertEqual(reason, "")
+		self.assertEqual(event["event_id"], "ACC-SINV-1")
+
+	def test_returned_state_is_skipped(self):
+		event, reason = self._event(_inv(custom_sales_invoice_state="Returned"))
+		self.assertIsNone(event)
+		self.assertEqual(reason, "Order state is now Returned")
+
+	def test_credit_note_against_the_order_is_skipped(self):
+		event, reason = self._event(_inv(), has_return=True)
+		self.assertIsNone(event)
+		self.assertEqual(reason, "A return was booked against this order")
+
+	def test_cancelled_return_and_missing_invoices_are_skipped(self):
+		self.assertEqual(m.not_sendable_reason(_inv(docstatus=2), False), "Invoice is cancelled")
+		self.assertEqual(m.not_sendable_reason(_inv(docstatus=0), False), "Invoice is not submitted")
+		self.assertEqual(m.not_sendable_reason(_inv(is_return=1), False), "Invoice is a return")
+		self.assertEqual(m.not_sendable_reason(None, False), "Invoice no longer exists")
+		self.assertIsNone(m.not_sendable_reason(_inv(), False))
+
+	def test_no_phone_is_still_skipped(self):
+		db = SimpleNamespace(
+			get_value=mock.Mock(side_effect=[_inv(contact_mobile=""), ""]),
+			exists=mock.Mock(return_value=None),
+		)
+		with mock.patch.object(m.frappe, "db", db, create=True):
+			event, reason = m._event_for_row(self.ROW, "Africa/Cairo")
+		self.assertIsNone(event)
+		self.assertEqual(reason, "No valid Egyptian mobile at send time")
+
+
+class KillSwitchTest(unittest.TestCase):
+	def test_backfill_queues_nothing_while_off(self):
+		with (
+			mock.patch.object(m, "load_settings", return_value={"enabled": 0}),
+			mock.patch.object(m, "_candidate_orders") as candidates,
+		):
+			result = m.queue_delivered_orders(backfill_days=7)
+		candidates.assert_not_called()
+		self.assertEqual(result["queued"], 0)
+
+	def test_queue_button_says_it_is_off(self):
+		with (
+			mock.patch.object(m, "_require_manager"),
+			mock.patch.object(m, "load_settings", return_value={"enabled": 0}),
+			mock.patch.object(m, "queue_delivered_orders") as queue,
+		):
+			result = m.run_queue_now(backfill_days=7)
+		queue.assert_not_called()
+		self.assertFalse(result["ok"])
+
+
 class SettingsHelpersTest(unittest.TestCase):
 	def test_groups_from_lines_or_commas(self):
 		self.assertEqual(m.parse_groups("B2B\nEmployee, Sample\n\nB2B"), ("B2B", "Employee", "Sample"))
