@@ -1,0 +1,239 @@
+{
+ "actions": [],
+ "autoname": "hash",
+ "creation": "2026-10-16 12:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "conversation",
+  "for_message",
+  "status",
+  "template_text",
+  "draft_text",
+  "final_text",
+  "upsell_item",
+  "upsell_text",
+  "intent",
+  "is_complaint",
+  "needs_human_reason",
+  "warnings",
+  "is_planted",
+  "planted_error",
+  "real_draft",
+  "planted_caught",
+  "model",
+  "input_tokens",
+  "output_tokens",
+  "cache_read_tokens",
+  "latency_ms",
+  "cost_usd",
+  "reviewed_by",
+  "reviewed_at",
+  "reject_reason",
+  "edit_distance",
+  "error"
+ ],
+ "fields": [
+  {
+   "fieldname": "conversation",
+   "fieldtype": "Link",
+   "label": "Conversation",
+   "options": "Jarz Chat Conversation",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "for_message",
+   "fieldtype": "Link",
+   "label": "For Message",
+   "options": "Jarz Chat Message",
+   "description": "Inbound message that triggered this draft."
+  },
+  {
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "label": "Status",
+   "options": "Pending\nHeld\nSent As-Is\nSent Edited\nRejected\nSuperseded\nBlocked\nFailed",
+   "in_list_view": 1,
+   "in_standard_filter": 1
+  },
+  {
+   "fieldname": "template_text",
+   "fieldtype": "Long Text",
+   "label": "Template Text",
+   "description": "Raw model output with placeholders."
+  },
+  {
+   "fieldname": "draft_text",
+   "fieldtype": "Long Text",
+   "label": "Draft Text",
+   "description": "Placeholders filled by code; what the moderator sees."
+  },
+  {
+   "fieldname": "final_text",
+   "fieldtype": "Long Text",
+   "label": "Final Text",
+   "description": "What was actually sent."
+  },
+  {
+   "fieldname": "upsell_item",
+   "fieldtype": "Link",
+   "label": "Upsell Item",
+   "options": "Item"
+  },
+  {
+   "fieldname": "upsell_text",
+   "fieldtype": "Small Text",
+   "label": "Upsell Text"
+  },
+  {
+   "fieldname": "intent",
+   "fieldtype": "Select",
+   "label": "Intent",
+   "options": "\nInquiry\nOrder\nComplaint\nOther"
+  },
+  {
+   "fieldname": "is_complaint",
+   "fieldtype": "Check",
+   "label": "Is Complaint"
+  },
+  {
+   "fieldname": "needs_human_reason",
+   "fieldtype": "Small Text",
+   "label": "Needs Human Reason"
+  },
+  {
+   "fieldname": "warnings",
+   "fieldtype": "Small Text",
+   "label": "Warnings",
+   "description": "JSON list of strings."
+  },
+  {
+   "fieldname": "is_planted",
+   "fieldtype": "Check",
+   "label": "Is Planted",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "description": "Training check: this draft carries a deliberate mistake."
+  },
+  {
+   "fieldname": "planted_error",
+   "fieldtype": "Small Text",
+   "label": "Planted Error",
+   "description": "What was changed, e.g. \"price 120 to 150\"."
+  },
+  {
+   "fieldname": "real_draft",
+   "fieldtype": "Link",
+   "label": "Real Draft",
+   "options": "Jarz Chat Draft",
+   "description": "For planted drafts: the held real one."
+  },
+  {
+   "fieldname": "planted_caught",
+   "fieldtype": "Check",
+   "label": "Planted Caught"
+  },
+  {
+   "fieldname": "model",
+   "fieldtype": "Data",
+   "label": "Model"
+  },
+  {
+   "fieldname": "input_tokens",
+   "fieldtype": "Int",
+   "label": "Input Tokens"
+  },
+  {
+   "fieldname": "output_tokens",
+   "fieldtype": "Int",
+   "label": "Output Tokens"
+  },
+  {
+   "fieldname": "cache_read_tokens",
+   "fieldtype": "Int",
+   "label": "Cache Read Tokens"
+  },
+  {
+   "fieldname": "latency_ms",
+   "fieldtype": "Int",
+   "label": "Latency (ms)"
+  },
+  {
+   "fieldname": "cost_usd",
+   "fieldtype": "Float",
+   "label": "Cost (USD)",
+   "precision": "6",
+   "description": "Approximate."
+  },
+  {
+   "fieldname": "reviewed_by",
+   "fieldtype": "Link",
+   "label": "Reviewed By",
+   "options": "User"
+  },
+  {
+   "fieldname": "reviewed_at",
+   "fieldtype": "Datetime",
+   "label": "Reviewed At"
+  },
+  {
+   "fieldname": "reject_reason",
+   "fieldtype": "Small Text",
+   "label": "Reject Reason"
+  },
+  {
+   "fieldname": "edit_distance",
+   "fieldtype": "Int",
+   "label": "Edit Distance",
+   "description": "Levenshtein distance from draft text to final text (capped at 2000 characters)."
+  },
+  {
+   "fieldname": "error",
+   "fieldtype": "Small Text",
+   "label": "Error"
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-10-16 12:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "jarz pos",
+ "name": "Jarz Chat Draft",
+ "naming_rule": "Random",
+ "owner": "Administrator",
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 0,
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "export": 1,
+   "read": 1,
+   "report": 1,
+   "role": "JARZ Manager",
+   "write": 1
+  },
+  {
+   "read": 1,
+   "report": 1,
+   "role": "Moderator",
+   "write": 1
+  }
+ ]
+}

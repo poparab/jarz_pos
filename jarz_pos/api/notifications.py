@@ -410,12 +410,17 @@ TASK_NOTIFICATION_TYPE = "task_notification"
 #: settlement is due soon / due today / overdue, or the delivery going out now
 #: should collect the previous invoice(s). A thing to act on, not an order alarm.
 SETTLEMENT_REMINDER_NOTIFICATION_TYPE = "settlement_reminder"
+#: Chat inbox: a customer has waited too long for a reply
+#: (services.chat_alerts.check_waiting). Quiet approvals channel, never the
+#: order alarm: a chat is answered within minutes, not a counter emergency.
+CHAT_WAITING_NOTIFICATION_TYPE = "chat_waiting"
 #: Push types that belong on the approvals channel.
 APPROVAL_NOTIFICATION_TYPES = (
 	EXPENSE_APPROVAL_NOTIFICATION_TYPE,
 	LABEL_STOCK_NOTIFICATION_TYPE,
 	TASK_NOTIFICATION_TYPE,
 	SETTLEMENT_REMINDER_NOTIFICATION_TYPE,
+	CHAT_WAITING_NOTIFICATION_TYPE,
 )
 
 

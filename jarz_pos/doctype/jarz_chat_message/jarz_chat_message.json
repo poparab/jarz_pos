@@ -1,0 +1,177 @@
+{
+ "actions": [],
+ "autoname": "hash",
+ "creation": "2026-10-16 12:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "conversation",
+  "direction",
+  "external_message_id",
+  "message_type",
+  "body",
+  "media_id",
+  "media_url",
+  "media_file",
+  "media_mime",
+  "sent_via",
+  "sent_by",
+  "draft",
+  "status",
+  "error",
+  "timestamp",
+  "raw_json"
+ ],
+ "fields": [
+  {
+   "fieldname": "conversation",
+   "fieldtype": "Link",
+   "label": "Conversation",
+   "options": "Jarz Chat Conversation",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "direction",
+   "fieldtype": "Select",
+   "label": "Direction",
+   "options": "Inbound\nOutbound",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "external_message_id",
+   "fieldtype": "Data",
+   "label": "External Message ID",
+   "unique": 1,
+   "description": "wamid / mid / comment id. Idempotency key."
+  },
+  {
+   "fieldname": "message_type",
+   "fieldtype": "Select",
+   "label": "Message Type",
+   "options": "text\nimage\naudio\nvideo\ndocument\nsticker\nlocation\nreaction\ntemplate\ncomment\nunsupported",
+   "in_list_view": 1,
+   "in_standard_filter": 1
+  },
+  {
+   "fieldname": "body",
+   "fieldtype": "Long Text",
+   "label": "Body",
+   "description": "Text, caption, or \"lat,lng\" for a location."
+  },
+  {
+   "fieldname": "media_id",
+   "fieldtype": "Data",
+   "label": "Media ID",
+   "description": "Meta media id (WhatsApp)."
+  },
+  {
+   "fieldname": "media_url",
+   "fieldtype": "Small Text",
+   "label": "Media URL",
+   "description": "Meta CDN url (Instagram / Messenger) before download."
+  },
+  {
+   "fieldname": "media_file",
+   "fieldtype": "Attach",
+   "label": "Media File",
+   "description": "Private file after download."
+  },
+  {
+   "fieldname": "media_mime",
+   "fieldtype": "Data",
+   "label": "Media MIME"
+  },
+  {
+   "fieldname": "sent_via",
+   "fieldtype": "Select",
+   "label": "Sent Via",
+   "options": "\nApp\nPhone\nSystem",
+   "description": "Phone = coexistence echo from the WhatsApp Business app."
+  },
+  {
+   "fieldname": "sent_by",
+   "fieldtype": "Link",
+   "label": "Sent By",
+   "options": "User",
+   "description": "Moderator who tapped send."
+  },
+  {
+   "fieldname": "draft",
+   "fieldtype": "Link",
+   "label": "Draft",
+   "options": "Jarz Chat Draft"
+  },
+  {
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "label": "Status",
+   "options": "received\nqueued\nsent\ndelivered\nread\nfailed",
+   "in_standard_filter": 1
+  },
+  {
+   "fieldname": "error",
+   "fieldtype": "Small Text",
+   "label": "Error"
+  },
+  {
+   "fieldname": "timestamp",
+   "fieldtype": "Datetime",
+   "label": "Timestamp",
+   "in_list_view": 1,
+   "reqd": 1,
+   "description": "Meta timestamp converted to the site time zone."
+  },
+  {
+   "fieldname": "raw_json",
+   "fieldtype": "Long Text",
+   "label": "Raw JSON",
+   "hidden": 1,
+   "description": "Only kept for unsupported messages."
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-10-16 12:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "jarz pos",
+ "name": "Jarz Chat Message",
+ "naming_rule": "Random",
+ "owner": "Administrator",
+ "sort_field": "timestamp",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 0,
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "export": 1,
+   "read": 1,
+   "report": 1,
+   "role": "JARZ Manager",
+   "write": 1
+  },
+  {
+   "read": 1,
+   "report": 1,
+   "role": "Moderator",
+   "write": 1
+  }
+ ]
+}
