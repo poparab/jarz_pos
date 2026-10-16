@@ -731,6 +731,10 @@ jobs:
             # then nothing and never raises, and that the pin gate is off by
             # default, refuses a centroid and exempts Woo/pickup/branch orders.
             test_courier_launch
+            # Meta CAPI chat orders. Pure functions only (no site): phone and
+            # name normalisation, hashing, the amendment-free event id, the
+            # hold / approve / skip decision, the 7-day expiry and the payload.
+            test_meta_capi
             # Chat inbox (feature chat-inbox). Pure, no chat table
             # needed, so they pass before migrate. Pins Meta's HMAC check and
             # handshake and the WhatsApp/Messenger/Instagram/comment parsing

@@ -154,6 +154,46 @@ SHORTCUTS = [
 	},
 ]
 
+# Live counts for the Meta chat-order queue, rendered under their own header.
+# Each tile counts Meta CAPI Event rows matching ``stats_filter`` (Frappe's
+# 4-element [doctype, field, op, value] form) and opens the matching list.
+META_EVENT = "Meta CAPI Event"
+META_SHORTCUTS = [
+	{
+		"label": "Meta: Waiting Approval",
+		"stats_filter": [[META_EVENT, "status", "=", "Pending Approval"]],
+		"format": "{} Waiting",
+		"color": "Orange",
+		"icon": "inbox",
+	},
+	{
+		"label": "Meta: Held",
+		"stats_filter": [[META_EVENT, "status", "=", "Held"]],
+		"format": "{} Held",
+		"color": "Red",
+		"icon": "lock",
+	},
+	{
+		"label": "Meta: Failed",
+		"stats_filter": [[META_EVENT, "status", "=", "Failed"]],
+		"format": "{} Failed",
+		"color": "Red",
+		"icon": "alert",
+	},
+	{
+		"label": "Meta: Sent This Week",
+		"stats_filter": [
+			[META_EVENT, "status", "=", "Sent"],
+			[META_EVENT, "sent_at", "Timespan", "this week"],
+		],
+		"format": "{} Sent",
+		"color": "Green",
+		"icon": "check",
+	},
+]
+for _sc in META_SHORTCUTS:
+	_sc.update({"type": "DocType", "link_to": META_EVENT, "doc_view": "List"})
+
 # Card sections rendered under a "Reports & Masters" header, three to a row.
 # ``link_type`` is DocType | Page | Report.
 #
@@ -265,6 +305,14 @@ CARDS = [
 		"links": [
 			{"label": "Jarz Expense Request", "link_type": "DocType", "link_to": "Jarz Expense Request"},
 			{"label": "Jarz Recurring Expense", "link_type": "DocType", "link_to": "Jarz Recurring Expense"},
+		],
+	},
+	{
+		"label": "Meta Chat Orders",
+		"links": [
+			{"label": "Meta CAPI Event", "link_type": "DocType", "link_to": "Meta CAPI Event"},
+			{"label": "Meta CAPI Daily", "link_type": "Report", "link_to": "Meta CAPI Daily"},
+			{"label": "Meta CAPI Settings", "link_type": "DocType", "link_to": "Meta CAPI Settings"},
 		],
 	},
 	{
@@ -382,6 +430,14 @@ SIDEBAR_SECTIONS = [
 		],
 	},
 	{
+		"label": "Meta Chat Orders",
+		"links": [
+			{"label": "Meta CAPI Event", "link_type": "DocType", "link_to": "Meta CAPI Event"},
+			{"label": "Meta CAPI Daily", "link_type": "Report", "link_to": "Meta CAPI Daily"},
+			{"label": "Meta CAPI Settings", "link_type": "DocType", "link_to": "Meta CAPI Settings"},
+		],
+	},
+	{
 		"label": "Settings",
 		"links": [
 			{"label": "Jarz POS Settings", "link_type": "DocType", "link_to": "Jarz POS Settings"},
@@ -434,6 +490,7 @@ def ensure_jarz_workspace():
 	"""Create or rebuild the JARZ POS workspace. Called from ``after_migrate``."""
 	try:
 		shortcuts = [s for s in SHORTCUTS if _target_exists(s["type"], s["link_to"])]
+		meta_shortcuts = [s for s in META_SHORTCUTS if _target_exists(s["type"], s["link_to"])]
 		cards = _resolve_cards()
 
 		if not shortcuts and not cards:
@@ -453,7 +510,7 @@ def ensure_jarz_workspace():
 		ws.sequence_id = WORKSPACE_SEQUENCE
 
 		ws.set("shortcuts", [])
-		for sc in shortcuts:
+		for sc in shortcuts + meta_shortcuts:
 			ws.append(
 				"shortcuts",
 				{
@@ -462,6 +519,9 @@ def ensure_jarz_workspace():
 					"link_to": sc["link_to"],
 					"color": sc.get("color"),
 					"icon": sc.get("icon"),
+					"doc_view": sc.get("doc_view"),
+					"stats_filter": json.dumps(sc["stats_filter"]) if sc.get("stats_filter") else None,
+					"format": sc.get("format"),
 				},
 			)
 
@@ -492,7 +552,7 @@ def ensure_jarz_workspace():
 					},
 				)
 
-		ws.content = json.dumps(_content_blocks(shortcuts, cards))
+		ws.content = json.dumps(_content_blocks(shortcuts, cards, meta_shortcuts))
 		ws.flags.ignore_mandatory = True
 		ws.flags.ignore_permissions = True
 		ws.flags.ignore_links = True
@@ -779,7 +839,7 @@ def _resolve_cards():
 	return resolved
 
 
-def _content_blocks(shortcuts, cards):
+def _content_blocks(shortcuts, cards, meta_shortcuts=()):
 	blocks = [
 		{
 			"id": "jarz_hdr",
@@ -795,6 +855,22 @@ def _content_blocks(shortcuts, cards):
 				"data": {"shortcut_name": sc["label"], "col": 3},
 			}
 		)
+	if meta_shortcuts:
+		blocks.append(
+			{
+				"id": "jarz_hdr_meta",
+				"type": "header",
+				"data": {"text": '<span class="h4"><b>Meta Chat Orders</b></span>', "col": 12},
+			}
+		)
+		for i, sc in enumerate(meta_shortcuts):
+			blocks.append(
+				{
+					"id": f"jarz_meta_{i:02d}",
+					"type": "shortcut",
+					"data": {"shortcut_name": sc["label"], "col": 3},
+				}
+			)
 	if cards:
 		blocks.append(
 			{
