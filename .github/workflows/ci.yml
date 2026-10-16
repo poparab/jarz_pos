@@ -76,6 +76,8 @@ jobs:
           bench get-app --skip-assets jarz_pos $GITHUB_WORKSPACE
           bench setup requirements --dev
           bench new-site --db-root-password root --admin-password admin --install-app erpnext test_site
+          # Jarz POS Settings defaults name Jarz's "- J" accounts; create them before the install saves it.
+          (cd sites && ../env/bin/python "$GITHUB_WORKSPACE/.github/helper/seed_ci_site.py" test_site)
           bench --site test_site install-app jarz_pos
         env:
           CI: 'Yes'
