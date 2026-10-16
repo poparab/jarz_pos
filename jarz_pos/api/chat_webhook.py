@@ -80,6 +80,10 @@ def meta_webhook():
 		return _response("Payload Too Large", 413)
 
 	body = request.get_data(cache=True) or b""
+	if len(body) > chat_ingest.MAX_BODY_BYTES:
+		# A chunked request carries no Content-Length, so check what was read.
+		_log_rejection("body_too_large", bool(request.headers.get("X-Hub-Signature-256")), len(body))
+		return _response("Payload Too Large", 413)
 	header = request.headers.get("X-Hub-Signature-256")
 	if not chat_ingest.verify_signature(body, header, settings.get("meta_app_secret")):
 		reason = "no_secret" if not settings.get("meta_app_secret") else "bad_signature"
