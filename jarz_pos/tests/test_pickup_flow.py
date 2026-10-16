@@ -37,7 +37,7 @@ class TestPickupInvoiceFlow(unittest.TestCase):
 				return 1  # True
 			return default
 
-		with patch('builtins.getattr', side_effect=mock_getattr):
+		with patch("builtins.getattr", side_effect=mock_getattr):
 			# Can't directly test due to complex logic, but validate structure
 			pass
 
@@ -96,11 +96,7 @@ class TestPickupInvoiceFlow(unittest.TestCase):
 		"""Test pickup detection returns False when no pickup indicators."""
 		from jarz_pos.api.kanban import _is_pickup_invoice
 
-		inv_dict = {
-			"custom_is_pickup": 0,
-			"is_pickup": False,
-			"remarks": "Normal delivery order"
-		}
+		inv_dict = {"custom_is_pickup": 0, "is_pickup": False, "remarks": "Normal delivery order"}
 		result = _is_pickup_invoice(inv_dict)
 		self.assertFalse(result, "Should return False when no pickup indicators")
 
@@ -155,10 +151,7 @@ class TestPickupInvoiceFlow(unittest.TestCase):
 		for field in field_candidates:
 			inv_dict = {field: 1}
 			result = _is_pickup_invoice(inv_dict)
-			self.assertTrue(
-				result,
-				f"Field {field} should trigger pickup detection"
-			)
+			self.assertTrue(result, f"Field {field} should trigger pickup detection")
 
 	def test_pickup_coerce_bool_logic(self):
 		"""Test various truthy/falsy values for pickup fields."""

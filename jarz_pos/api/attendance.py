@@ -34,130 +34,124 @@ from jarz_pos.services import attendance as attendance_service
 
 
 def _ensure_access() -> None:
-    attendance_service.ensure_attendance_access()
+	attendance_service.ensure_attendance_access()
 
 
 def _clean(value: Any) -> Optional[str]:
-    text = str(value or "").strip()
-    return text or None
+	text = str(value or "").strip()
+	return text or None
 
 
 def _coerce_date(value: Any, label: str = "date") -> Optional[str]:
-    """``None`` stays ``None`` (the service applies the default); junk throws."""
-    if not value:
-        return None
-    try:
-        return str(getdate(value))
-    except Exception:
-        frappe.throw(_("{0} is not a valid date: {1}").format(label, value))
+	"""``None`` stays ``None`` (the service applies the default); junk throws."""
+	if not value:
+		return None
+	try:
+		return str(getdate(value))
+	except Exception:
+		frappe.throw(_("{0} is not a valid date: {1}").format(label, value))
 
 
 def _coerce_month(value: Any) -> Optional[str]:
-    """Validate ``YYYY-MM`` here so the error names the month, not the first.
+	"""Validate ``YYYY-MM`` here so the error names the month, not the first.
 
-    ``month_bounds`` builds ``f"{month}-01"`` and lets ``getdate`` fail, which
-    surfaces to the client as a complaint about a date string it never sent.
-    """
-    month = _clean(value)
-    if not month:
-        return None
-    try:
-        year, part = month.split("-")
-        if len(year) != 4 or not (1 <= int(part) <= 12):
-            raise ValueError(month)
-        int(year)
-    except Exception:
-        frappe.throw(_("Month must look like YYYY-MM, not {0}.").format(month))
-    return month
+	``month_bounds`` builds ``f"{month}-01"`` and lets ``getdate`` fail, which
+	surfaces to the client as a complaint about a date string it never sent.
+	"""
+	month = _clean(value)
+	if not month:
+		return None
+	try:
+		year, part = month.split("-")
+		if len(year) != 4 or not (1 <= int(part) <= 12):
+			raise ValueError(month)
+		int(year)
+	except Exception:
+		frappe.throw(_("Month must look like YYYY-MM, not {0}.").format(month))
+	return month
 
 
 @frappe.whitelist()
 def get_bootstrap() -> Dict[str, Any]:
-    """Branches, scope, grace and the status vocabulary, in one call.
+	"""Branches, scope, grace and the status vocabulary, in one call.
 
-    The status list is served rather than hard-coded in the client so that a
-    status added here cannot silently render as a blank chip on an app nobody
-    has updated.
-    """
-    _ensure_access()
-    data = attendance_service.bootstrap()
-    data["success"] = True
-    return data
+	The status list is served rather than hard-coded in the client so that a
+	status added here cannot silently render as a blank chip on an app nobody
+	has updated.
+	"""
+	_ensure_access()
+	data = attendance_service.bootstrap()
+	data["success"] = True
+	return data
 
 
 @frappe.whitelist()
-def get_month(
-    month: Optional[str] = None, shift_location: Optional[str] = None
-) -> Dict[str, Any]:
-    """The attendance calendar for a month: one row per employee."""
-    _ensure_access()
-    data = attendance_service.get_month(
-        month=_coerce_month(month), shift_location=_clean(shift_location)
-    )
-    data["success"] = True
-    return data
+def get_month(month: Optional[str] = None, shift_location: Optional[str] = None) -> Dict[str, Any]:
+	"""The attendance calendar for a month: one row per employee."""
+	_ensure_access()
+	data = attendance_service.get_month(month=_coerce_month(month), shift_location=_clean(shift_location))
+	data["success"] = True
+	return data
 
 
 @frappe.whitelist()
 def get_day(date: Optional[str] = None, shift_location: Optional[str] = None) -> Dict[str, Any]:
-    """One day, grouped by branch, worst rows first."""
-    _ensure_access()
-    data = attendance_service.get_day(
-        date=_coerce_date(date, _("Date")), shift_location=_clean(shift_location)
-    )
-    data["success"] = True
-    return data
+	"""One day, grouped by branch, worst rows first."""
+	_ensure_access()
+	data = attendance_service.get_day(
+		date=_coerce_date(date, _("Date")), shift_location=_clean(shift_location)
+	)
+	data["success"] = True
+	return data
 
 
 @frappe.whitelist()
 def get_employee(
-    employee: str,
-    from_date: Optional[str] = None,
-    to_date: Optional[str] = None,
+	employee: str,
+	from_date: Optional[str] = None,
+	to_date: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """One person's attendance over a range, with their raw check-ins.
+	"""One person's attendance over a range, with their raw check-ins.
 
-    The scope re-check is not redundant with the one inside the service: the
-    list endpoints filter a set the server chose, while this endpoint answers
-    about an employee id the caller supplied.
-    """
-    _ensure_access()
-    employee = _clean(employee)
-    if not employee:
-        frappe.throw(_("Employee is required."))
+	The scope re-check is not redundant with the one inside the service: the
+	list endpoints filter a set the server chose, while this endpoint answers
+	about an employee id the caller supplied.
+	"""
+	_ensure_access()
+	employee = _clean(employee)
+	if not employee:
+		frappe.throw(_("Employee is required."))
 
-    # Scope BEFORE existence, with the same message for both: checking existence
-    # first answered "No such employee" for a bad id and "not at your branch"
-    # for a real one, which let any line manager enumerate employee ids.
-    attendance_service.ensure_employee_in_scope(employee)
-    if not frappe.db.exists("Employee", employee):
-        frappe.throw(
-            attendance_service.NOT_AVAILABLE_MESSAGE(), frappe.PermissionError
-        )
+	# Scope BEFORE existence, with the same message for both: checking existence
+	# first answered "No such employee" for a bad id and "not at your branch"
+	# for a real one, which let any line manager enumerate employee ids.
+	attendance_service.ensure_employee_in_scope(employee)
+	if not frappe.db.exists("Employee", employee):
+		frappe.throw(attendance_service.NOT_AVAILABLE_MESSAGE(), frappe.PermissionError)
 
-    data = attendance_service.get_employee(
-        employee=employee,
-        from_date=_coerce_date(from_date, _("From date")),
-        to_date=_coerce_date(to_date, _("To date")),
-    )
-    data["success"] = True
-    return data
+	data = attendance_service.get_employee(
+		employee=employee,
+		from_date=_coerce_date(from_date, _("From date")),
+		to_date=_coerce_date(to_date, _("To date")),
+	)
+	data["success"] = True
+	return data
 
 
 @frappe.whitelist()
 def get_summary(
-    from_date: Optional[str] = None,
-    to_date: Optional[str] = None,
-    group_by: str = "branch",
-    shift_location: Optional[str] = None,
+	from_date: Optional[str] = None,
+	to_date: Optional[str] = None,
+	group_by: str = "branch",
+	shift_location: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Totals rolled up by branch, by employee or by day."""
-    _ensure_access()
-    data = attendance_service.get_summary(
-        from_date=_coerce_date(from_date, _("From date")),
-        to_date=_coerce_date(to_date, _("To date")),
-        group_by=_clean(group_by) or "branch",
-        shift_location=_clean(shift_location),
-    )
-    data["success"] = True
-    return data
+	"""Totals rolled up by branch, by employee or by day."""
+	_ensure_access()
+	data = attendance_service.get_summary(
+		from_date=_coerce_date(from_date, _("From date")),
+		to_date=_coerce_date(to_date, _("To date")),
+		group_by=_clean(group_by) or "branch",
+		shift_location=_clean(shift_location),
+	)
+	data["success"] = True
+	return data

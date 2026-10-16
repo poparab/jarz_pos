@@ -7,17 +7,17 @@ from frappe.utils import flt
 from frappe.model.document import Document
 
 from jarz_pos.utils.customer_address_utils import (
-    ADDRESS_PHONE_FIELDS,
-    _address_phone,
-    ensure_shipping_address,
-    find_matching_customer_address,
-    format_address_text,
-    get_customer_shipping_addresses as _get_customer_shipping_addresses,
-    get_linked_customer_addresses,
-    get_linked_customer_address_names,
-    link_shipping_address_to_invoice,
-    resolve_customer_shipping_address,
-    set_customer_primary_shipping_address,
+	ADDRESS_PHONE_FIELDS,
+	_address_phone,
+	ensure_shipping_address,
+	find_matching_customer_address,
+	format_address_text,
+	get_customer_shipping_addresses as _get_customer_shipping_addresses,
+	get_linked_customer_addresses,
+	get_linked_customer_address_names,
+	link_shipping_address_to_invoice,
+	resolve_customer_shipping_address,
+	set_customer_primary_shipping_address,
 )
 from jarz_pos.utils.invoice_utils import resolve_address_territory
 from jarz_pos.utils.phone import phone_search_terms, phone_variants
@@ -28,1841 +28,1875 @@ from jarz_pos.utils.phone import phone_search_terms, phone_variants
 
 
 def _apply_address_geo(
-    address_name: str,
-    *,
-    location_link=None,
-    latitude=None,
-    longitude=None,
-    geo_source=None,
+	address_name: str,
+	*,
+	location_link=None,
+	latitude=None,
+	longitude=None,
+	geo_source=None,
 ) -> dict:
-    """Persist a POS-captured door pin onto *address_name*. Never raises.
+	"""Persist a POS-captured door pin onto *address_name*. Never raises.
 
-    Why this helper exists at all, and why it is wired into **both** customer
-    write endpoints:
+	Why this helper exists at all, and why it is wired into **both** customer
+	write endpoints:
 
-    Frappe binds request form keys to whitelisted-function parameter *names* and
-    silently discards every key the signature does not declare. So an endpoint
-    that omits ``latitude``/``longitude`` does not reject a pin — it accepts the
-    request, returns 200, and drops the coordinates on the floor. The POS shows a
-    saved address, the operator believes the pin is stored, and nothing is ever
-    logged. That is the most expensive failure mode this feature has, because it
-    is indistinguishable from success until somebody tries to navigate to a
-    delivery months of data later.
+	Frappe binds request form keys to whitelisted-function parameter *names* and
+	silently discards every key the signature does not declare. So an endpoint
+	that omits ``latitude``/``longitude`` does not reject a pin — it accepts the
+	request, returns 200, and drops the coordinates on the floor. The POS shows a
+	saved address, the operator believes the pin is stored, and nothing is ever
+	logged. That is the most expensive failure mode this feature has, because it
+	is indistinguishable from success until somebody tries to navigate to a
+	delivery months of data later.
 
-    Rules this helper enforces:
+	Rules this helper enforces:
 
-    * **Every write goes through ``services.geo_resolution``.** Writing the geo
-      fields straight from here would bypass the never-downgrade ladder, and a
-      POS re-save (``pos_link``, rank 20) would clobber a pin the customer set at
-      checkout (``customer_pin``, rank 30) or a courier verified at the door
-      (rank 40). The ladder already refuses that; the only way to get it wrong is
-      to go around it.
-    * **Coordinates win over the link.** If the client already resolved a pin,
-      that is the pin. The link is parsed server-side only when coordinates are
-      absent, which also makes the endpoint correct for any caller that never ran
-      the preview.
-    * **``address_line2`` is never touched.** It carries the legacy
-      ``"Location: <url>"`` text and sits in both the WooCommerce address-dedup
-      signature and the Woo outbound-push trigger set. Rewriting it forks
-      duplicate Addresses and fans a customer+invoice sync out to WooCommerce per
-      record.
+	* **Every write goes through ``services.geo_resolution``.** Writing the geo
+	  fields straight from here would bypass the never-downgrade ladder, and a
+	  POS re-save (``pos_link``, rank 20) would clobber a pin the customer set at
+	  checkout (``customer_pin``, rank 30) or a courier verified at the door
+	  (rank 40). The ladder already refuses that; the only way to get it wrong is
+	  to go around it.
+	* **Coordinates win over the link.** If the client already resolved a pin,
+	  that is the pin. The link is parsed server-side only when coordinates are
+	  absent, which also makes the endpoint correct for any caller that never ran
+	  the preview.
+	* **``address_line2`` is never touched.** It carries the legacy
+	  ``"Location: <url>"`` text and sits in both the WooCommerce address-dedup
+	  signature and the Woo outbound-push trigger set. Rewriting it forks
+	  duplicate Addresses and fans a customer+invoice sync out to WooCommerce per
+	  record.
 
-    Returns a result dict which the caller MUST surface in its response. A geo
-    failure must never abort saving the address — the address is the primary
-    thing being saved — but it must never be silent either.
-    """
-    from jarz_pos.services import geo_resolution
-    from jarz_pos.utils import geo as geo_utils
+	Returns a result dict which the caller MUST surface in its response. A geo
+	failure must never abort saving the address — the address is the primary
+	thing being saved — but it must never be silent either.
+	"""
+	from jarz_pos.services import geo_resolution
+	from jarz_pos.utils import geo as geo_utils
 
-    name = str(address_name or "").strip()
-    link = str(location_link or "").strip()
-    source = str(geo_source or "").strip().lower() or geo_utils.SOURCE_POS_LINK
+	name = str(address_name or "").strip()
+	link = str(location_link or "").strip()
+	source = str(geo_source or "").strip().lower() or geo_utils.SOURCE_POS_LINK
 
-    has_coords = latitude not in (None, "") and longitude not in (None, "")
-    if not name or (not has_coords and not link):
-        return {"applied": False, "reason": "no_geo_supplied"}
+	has_coords = latitude not in (None, "") and longitude not in (None, "")
+	if not name or (not has_coords and not link):
+		return {"applied": False, "reason": "no_geo_supplied"}
 
-    if not geo_utils.normalize_source(source):
-        # An unrecognised label cannot be ranked, so the ladder cannot protect
-        # what it writes. Refuse loudly in the payload rather than silently
-        # storing an unrankable pin.
-        return {"applied": False, "reason": "unknown_geo_source", "geo_source": source}
+	if not geo_utils.normalize_source(source):
+		# An unrecognised label cannot be ranked, so the ladder cannot protect
+		# what it writes. Refuse loudly in the payload rather than silently
+		# storing an unrankable pin.
+		return {"applied": False, "reason": "unknown_geo_source", "geo_source": source}
 
-    try:
-        if has_coords:
-            result = geo_resolution.set_address_pin(
-                name,
-                latitude=latitude,
-                longitude=longitude,
-                source=source,
-            )
-        else:
-            result = geo_resolution.resolve_address_from_link(name, link, source=source)
+	try:
+		if has_coords:
+			result = geo_resolution.set_address_pin(
+				name,
+				latitude=latitude,
+				longitude=longitude,
+				source=source,
+			)
+		else:
+			result = geo_resolution.resolve_address_from_link(name, link, source=source)
 
-        return {"applied": bool(result.get("accepted")), **result}
-    except frappe.PermissionError:
-        raise
-    except Exception as exc:
-        # Loud, but non-fatal: the address itself saved fine.
-        frappe.log_error(
-            frappe.get_traceback(), f"_apply_address_geo failed for {name}"
-        )
-        return {"applied": False, "reason": "error", "error": str(exc)}
+		return {"applied": bool(result.get("accepted")), **result}
+	except frappe.PermissionError:
+		raise
+	except Exception as exc:
+		# Loud, but non-fatal: the address itself saved fine.
+		frappe.log_error(frappe.get_traceback(), f"_apply_address_geo failed for {name}")
+		return {"applied": False, "reason": "error", "error": str(exc)}
 
 
 # ---------------------------------------------------------------------------
 # Helper
 # ---------------------------------------------------------------------------
 
+
 def _augment_customer_with_territory(cust_row: dict[str, any]):
-    """Populate *delivery_income* and *delivery_expense* on a
-    Customer row using the customer's Territory information.
+	"""Populate *delivery_income* and *delivery_expense* on a
+	Customer row using the customer's Territory information.
 
-    Safe – all look-ups are wrapped in try/except and will silently continue
-    if anything is missing so the caller does not need extra guards.
-    """
-    try:
-        territory = cust_row.get("territory")
-        if not territory:
-            return  # nothing to augment
+	Safe – all look-ups are wrapped in try/except and will silently continue
+	if anything is missing so the caller does not need extra guards.
+	"""
+	try:
+		territory = cust_row.get("territory")
+		if not territory:
+			return  # nothing to augment
 
-        if frappe.db.exists("Territory", territory):
-            # Get custom fields from Territory
-            territory_doc = frappe.get_doc("Territory", territory)
-            
-            # Check if custom fields exist (these should be added via fixtures)
-            if hasattr(territory_doc, 'delivery_income'):
-                cust_row["delivery_income"] = flt(territory_doc.delivery_income)
-            else:
-                cust_row["delivery_income"] = 0.0
-                
-            if hasattr(territory_doc, 'delivery_expense'):
-                cust_row["delivery_expense"] = flt(territory_doc.delivery_expense)
-            else:
-                cust_row["delivery_expense"] = 0.0
-                
-            cust_row["territory_name"] = _(territory_doc.territory_name)
-            cust_row["territory_name_ar"] = getattr(territory_doc, 'custom_territory_name_ar', '') or ''
-        else:
-            # Territory doesn't exist - set defaults
-            cust_row["delivery_income"] = 0.0
-            cust_row["delivery_expense"] = 0.0
-            cust_row["territory_name"] = _(territory)
-    except Exception as _err:
-        # Swallow – augmentation is best-effort; log for debugging
-        frappe.logger().warning(f"Territory augmentation failed for customer {cust_row.get('name')}: {_err}")
-        cust_row["delivery_income"] = 0.0
-        cust_row["delivery_expense"] = 0.0
+		if frappe.db.exists("Territory", territory):
+			# Get custom fields from Territory
+			territory_doc = frappe.get_doc("Territory", territory)
+
+			# Check if custom fields exist (these should be added via fixtures)
+			if hasattr(territory_doc, "delivery_income"):
+				cust_row["delivery_income"] = flt(territory_doc.delivery_income)
+			else:
+				cust_row["delivery_income"] = 0.0
+
+			if hasattr(territory_doc, "delivery_expense"):
+				cust_row["delivery_expense"] = flt(territory_doc.delivery_expense)
+			else:
+				cust_row["delivery_expense"] = 0.0
+
+			cust_row["territory_name"] = _(territory_doc.territory_name)
+			cust_row["territory_name_ar"] = getattr(territory_doc, "custom_territory_name_ar", "") or ""
+		else:
+			# Territory doesn't exist - set defaults
+			cust_row["delivery_income"] = 0.0
+			cust_row["delivery_expense"] = 0.0
+			cust_row["territory_name"] = _(territory)
+	except Exception as _err:
+		# Swallow – augmentation is best-effort; log for debugging
+		frappe.logger().warning(f"Territory augmentation failed for customer {cust_row.get('name')}: {_err}")
+		cust_row["delivery_income"] = 0.0
+		cust_row["delivery_expense"] = 0.0
 
 
 def _customer_phone(customer_doc: Document, selected_address: dict | None = None) -> str:
-    if selected_address:
-        phone = _address_phone(selected_address)
-        if phone:
-            return phone
+	if selected_address:
+		phone = _address_phone(selected_address)
+		if phone:
+			return phone
 
-    for fieldname in ("mobile_no", "phone"):
-        value = str(getattr(customer_doc, fieldname, "") or "").strip()
-        if value:
-            return value
+	for fieldname in ("mobile_no", "phone"):
+		value = str(getattr(customer_doc, fieldname, "") or "").strip()
+		if value:
+			return value
 
-    if customer_doc.customer_primary_contact and frappe.db.exists("Contact", customer_doc.customer_primary_contact):
-        contact_doc = frappe.get_doc("Contact", customer_doc.customer_primary_contact)
-        for fieldname in ("mobile_no", "phone"):
-            value = str(getattr(contact_doc, fieldname, "") or "").strip()
-            if value:
-                return value
+	if customer_doc.customer_primary_contact and frappe.db.exists(
+		"Contact", customer_doc.customer_primary_contact
+	):
+		contact_doc = frappe.get_doc("Contact", customer_doc.customer_primary_contact)
+		for fieldname in ("mobile_no", "phone"):
+			value = str(getattr(contact_doc, fieldname, "") or "").strip()
+			if value:
+				return value
 
-    return ""
+	return ""
 
 
 def _build_customer_shipping_address_book(customer: str, invoice: str | None = None) -> dict:
-    customer_doc = frappe.get_doc("Customer", customer)
-    preferred_address_name = ""
-    if invoice and frappe.db.exists("Sales Invoice", invoice):
-        preferred_address_name = str(
-            frappe.db.get_value("Sales Invoice", invoice, "shipping_address_name")
-            or frappe.db.get_value("Sales Invoice", invoice, "customer_address")
-            or ""
-        ).strip()
+	customer_doc = frappe.get_doc("Customer", customer)
+	preferred_address_name = ""
+	if invoice and frappe.db.exists("Sales Invoice", invoice):
+		preferred_address_name = str(
+			frappe.db.get_value("Sales Invoice", invoice, "shipping_address_name")
+			or frappe.db.get_value("Sales Invoice", invoice, "customer_address")
+			or ""
+		).strip()
 
-    addresses = _get_customer_shipping_addresses(customer)
-    branch_options = _build_customer_branch_options(customer_doc, get_linked_customer_addresses(customer))
-    selected_address = resolve_customer_shipping_address(
-        customer,
-        preferred_address_name=preferred_address_name or customer_doc.customer_primary_address,
-    )
-    selected_address_name = str(selected_address.get("name") or "").strip() if selected_address else ""
+	addresses = _get_customer_shipping_addresses(customer)
+	branch_options = _build_customer_branch_options(customer_doc, get_linked_customer_addresses(customer))
+	selected_address = resolve_customer_shipping_address(
+		customer,
+		preferred_address_name=preferred_address_name or customer_doc.customer_primary_address,
+	)
+	selected_address_name = str(selected_address.get("name") or "").strip() if selected_address else ""
 
-    return {
-        "customer": customer_doc.name,
-        "customer_name": customer_doc.customer_name,
-        "addresses": addresses,
-        "branch_options": branch_options,
-        "selected_address_name": selected_address_name,
-        "selected_address": dict(selected_address) if selected_address else None,
-        "default_phone": _customer_phone(customer_doc, selected_address),
-    }
+	return {
+		"customer": customer_doc.name,
+		"customer_name": customer_doc.customer_name,
+		"addresses": addresses,
+		"branch_options": branch_options,
+		"selected_address_name": selected_address_name,
+		"selected_address": dict(selected_address) if selected_address else None,
+		"default_phone": _customer_phone(customer_doc, selected_address),
+	}
 
 
 def _physical_branch_key(address_row: dict) -> str:
-    """Deterministic grouping key for legacy duplicate Address rows.
+	"""Deterministic grouping key for legacy duplicate Address rows.
 
-    The physical key uses street lines because live duplicate rows for one door
-    disagree on old city spelling. Territory is applied as a second partition in
-    ``_build_customer_branch_options`` so equal street text in distinct delivery
-    territories can never collapse into one selectable branch. Address line 2
-    remains included so two suites/floors at one street also stay separate.
-    """
-    parts = [
-        "".join(
-            char.lower()
-            for char in str(address_row.get(field) or "")
-            if char.isalnum()
-        )
-        for field in ("address_line1", "address_line2")
-    ]
-    if any(parts):
-        return "|".join(parts)
-    return f"name:{str(address_row.get('name') or '').strip().lower()}"
+	The physical key uses street lines because live duplicate rows for one door
+	disagree on old city spelling. Territory is applied as a second partition in
+	``_build_customer_branch_options`` so equal street text in distinct delivery
+	territories can never collapse into one selectable branch. Address line 2
+	remains included so two suites/floors at one street also stay separate.
+	"""
+	parts = [
+		"".join(char.lower() for char in str(address_row.get(field) or "") if char.isalnum())
+		for field in ("address_line1", "address_line2")
+	]
+	if any(parts):
+		return "|".join(parts)
+	return f"name:{str(address_row.get('name') or '').strip().lower()}"
 
 
 def _build_customer_branch_options(customer_doc: Document, raw_addresses: list[dict]) -> list[dict]:
-    """Group legacy address rows into selectable physical delivery branches.
+	"""Group legacy address rows into selectable physical delivery branches.
 
-    This is a read model only. Every historical Address remains untouched and is
-    listed in ``member_address_names``; ``address_name`` is a real, deterministic
-    canonical member that the invoice endpoint can persist.
-    """
-    from jarz_pos.utils.invoice_utils import (
-        _territory_from_address_row,
-        resolve_pos_profile_for_territory,
-    )
+	This is a read model only. Every historical Address remains untouched and is
+	listed in ``member_address_names``; ``address_name`` is a real, deterministic
+	canonical member that the invoice endpoint can persist.
+	"""
+	from jarz_pos.utils.invoice_utils import (
+		_territory_from_address_row,
+		resolve_pos_profile_for_territory,
+	)
 
-    def rank(row):
-        return (
-            1 if row.get("_address_territory") else 0,
-            1 if row.get("is_shipping_address") else 0,
-            1 if row.get("is_primary_address") else 0,
-            str(row.get("modified") or ""),
-            str(row.get("name") or ""),
-        )
+	def rank(row):
+		return (
+			1 if row.get("_address_territory") else 0,
+			1 if row.get("is_shipping_address") else 0,
+			1 if row.get("is_primary_address") else 0,
+			str(row.get("modified") or ""),
+			str(row.get("name") or ""),
+		)
 
-    physical_groups = {}
-    for row in raw_addresses or []:
-        mapped = dict(row)
-        mapped["_address_territory"] = _territory_from_address_row(mapped)
-        physical_groups.setdefault(_physical_branch_key(mapped), []).append(mapped)
+	physical_groups = {}
+	for row in raw_addresses or []:
+		mapped = dict(row)
+		mapped["_address_territory"] = _territory_from_address_row(mapped)
+		physical_groups.setdefault(_physical_branch_key(mapped), []).append(mapped)
 
-    # A text-identical street in two resolved territories is ambiguous and must
-    # stay as two choices. Unresolved legacy copies may join the physical group
-    # only when the other members establish exactly one territory; that is what
-    # safely folds ILO's "Unknown" copies into its Madinaty branch.
-    grouped = {}
-    for physical_key, rows in physical_groups.items():
-        territories = {
-            row.get("_address_territory")
-            for row in rows
-            if row.get("_address_territory")
-        }
-        if not territories:
-            grouped[(physical_key, None)] = rows
-            continue
-        if len(territories) == 1:
-            only_territory = next(iter(territories))
-            known = [row for row in rows if row.get("_address_territory")]
-            representative = known[0]
+	# A text-identical street in two resolved territories is ambiguous and must
+	# stay as two choices. Unresolved legacy copies may join the physical group
+	# only when the other members establish exactly one territory; that is what
+	# safely folds ILO's "Unknown" copies into its Madinaty branch.
+	grouped = {}
+	for physical_key, rows in physical_groups.items():
+		territories = {row.get("_address_territory") for row in rows if row.get("_address_territory")}
+		if not territories:
+			grouped[(physical_key, None)] = rows
+			continue
+		if len(territories) == 1:
+			only_territory = next(iter(territories))
+			known = [row for row in rows if row.get("_address_territory")]
+			representative = known[0]
 
-            def compatible_with_known(row):
-                if row.get("_address_territory"):
-                    return True
-                country = "".join(
-                    char.lower() for char in str(row.get("country") or "") if char.isalnum()
-                )
-                known_country = "".join(
-                    char.lower()
-                    for char in str(representative.get("country") or "")
-                    if char.isalnum()
-                )
-                if country and known_country and country != known_country:
-                    return False
-                state = "".join(
-                    char.lower() for char in str(row.get("state") or "") if char.isalnum()
-                )
-                known_state = "".join(
-                    char.lower()
-                    for char in str(representative.get("state") or "")
-                    if char.isalnum()
-                )
-                return not state or state == "unknown" or not known_state or state == known_state
+			def compatible_with_known(row):
+				if row.get("_address_territory"):
+					return True
+				country = "".join(char.lower() for char in str(row.get("country") or "") if char.isalnum())
+				known_country = "".join(
+					char.lower() for char in str(representative.get("country") or "") if char.isalnum()
+				)
+				if country and known_country and country != known_country:
+					return False
+				state = "".join(char.lower() for char in str(row.get("state") or "") if char.isalnum())
+				known_state = "".join(
+					char.lower() for char in str(representative.get("state") or "") if char.isalnum()
+				)
+				return not state or state == "unknown" or not known_state or state == known_state
 
-            compatible = [row for row in rows if compatible_with_known(row)]
-            grouped[(physical_key, only_territory)] = compatible
-            for row in rows:
-                if row not in compatible:
-                    grouped[(physical_key, f"unresolved:{row.get('name')}")] = [row]
-            continue
+			compatible = [row for row in rows if compatible_with_known(row)]
+			grouped[(physical_key, only_territory)] = compatible
+			for row in rows:
+				if row not in compatible:
+					grouped[(physical_key, f"unresolved:{row.get('name')}")] = [row]
+			continue
 
-        for row in rows:
-            territory = row.get("_address_territory")
-            if territory:
-                grouped.setdefault((physical_key, territory), []).append(row)
-            else:
-                # No evidence says which conflicting territory this row belongs
-                # to, so preserve it as its own selectable option.
-                grouped[(physical_key, f"unresolved:{row.get('name')}")] = [row]
+		for row in rows:
+			territory = row.get("_address_territory")
+			if territory:
+				grouped.setdefault((physical_key, territory), []).append(row)
+			else:
+				# No evidence says which conflicting territory this row belongs
+				# to, so preserve it as its own selectable option.
+				grouped[(physical_key, f"unresolved:{row.get('name')}")] = [row]
 
-    options = []
-    customer_title = " ".join(str(customer_doc.customer_name or "").split()).lower()
-    for key in sorted(grouped, key=lambda value: str(value)):
-        members = sorted(grouped[key], key=rank, reverse=True)
-        canonical = members[0]
-        stored_title = " ".join(str(canonical.get("address_title") or "").split())
-        generic_numbered_title = bool(
-            customer_title
-            and re.fullmatch(re.escape(customer_title) + r"-\d+", stored_title.lower())
-        )
-        if not stored_title or stored_title.lower() == customer_title or generic_numbered_title:
-            branch_name = (
-                str(canonical.get("address_line1") or "").strip()
-                or str(canonical.get("city") or "").strip()
-                or str(canonical.get("name") or "").strip()
-            )
-        else:
-            branch_name = stored_title
-        address_territory = canonical.get("_address_territory")
-        # Branch selection must be driven by the branch Address itself. Falling
-        # back to Customer.territory here would recreate the exact historical
-        # ILO bug: All Seasons was selected but the invoice inherited Heliopolis.
-        territory = address_territory
-        options.append(
-            {
-                "address_name": canonical.get("name"),
-                "branch_name": branch_name,
-                "address_title": canonical.get("address_title"),
-                "full_address": canonical.get("full_address"),
-                "address_line1": canonical.get("address_line1"),
-                "address_line2": canonical.get("address_line2"),
-                "city": canonical.get("city"),
-                "state": canonical.get("state"),
-                "phone": canonical.get("phone"),
-                "effective_territory": territory,
-                "address_territory": address_territory,
-                "territory_pos_profile": resolve_pos_profile_for_territory(territory),
-                "territory_missing": not bool(territory),
-                "is_primary_address": bool(canonical.get("is_primary_address")),
-                "duplicate_count": max(0, len(members) - 1),
-                "member_address_names": [row.get("name") for row in members],
-                "member_addresses": [
-                    {
-                        "name": row.get("name"),
-                        "city": row.get("city"),
-                        "state": row.get("state"),
-                        "address_territory": row.get("_address_territory"),
-                        "is_shipping_address": bool(row.get("is_shipping_address")),
-                        "is_primary_address": bool(row.get("is_primary_address")),
-                    }
-                    for row in members
-                ],
-            }
-        )
-    return options
+	options = []
+	customer_title = " ".join(str(customer_doc.customer_name or "").split()).lower()
+	for key in sorted(grouped, key=lambda value: str(value)):
+		members = sorted(grouped[key], key=rank, reverse=True)
+		canonical = members[0]
+		stored_title = " ".join(str(canonical.get("address_title") or "").split())
+		generic_numbered_title = bool(
+			customer_title and re.fullmatch(re.escape(customer_title) + r"-\d+", stored_title.lower())
+		)
+		if not stored_title or stored_title.lower() == customer_title or generic_numbered_title:
+			branch_name = (
+				str(canonical.get("address_line1") or "").strip()
+				or str(canonical.get("city") or "").strip()
+				or str(canonical.get("name") or "").strip()
+			)
+		else:
+			branch_name = stored_title
+		address_territory = canonical.get("_address_territory")
+		# Branch selection must be driven by the branch Address itself. Falling
+		# back to Customer.territory here would recreate the exact historical
+		# ILO bug: All Seasons was selected but the invoice inherited Heliopolis.
+		territory = address_territory
+		options.append(
+			{
+				"address_name": canonical.get("name"),
+				"branch_name": branch_name,
+				"address_title": canonical.get("address_title"),
+				"full_address": canonical.get("full_address"),
+				"address_line1": canonical.get("address_line1"),
+				"address_line2": canonical.get("address_line2"),
+				"city": canonical.get("city"),
+				"state": canonical.get("state"),
+				"phone": canonical.get("phone"),
+				"effective_territory": territory,
+				"address_territory": address_territory,
+				"territory_pos_profile": resolve_pos_profile_for_territory(territory),
+				"territory_missing": not bool(territory),
+				"is_primary_address": bool(canonical.get("is_primary_address")),
+				"duplicate_count": max(0, len(members) - 1),
+				"member_address_names": [row.get("name") for row in members],
+				"member_addresses": [
+					{
+						"name": row.get("name"),
+						"city": row.get("city"),
+						"state": row.get("state"),
+						"address_territory": row.get("_address_territory"),
+						"is_shipping_address": bool(row.get("is_shipping_address")),
+						"is_primary_address": bool(row.get("is_primary_address")),
+					}
+					for row in members
+				],
+			}
+		)
+	return options
 
 
 def _apply_phone_to_contact(contact_doc: Document, phone: str) -> None:
-    """Write *phone* onto a Contact so it survives ``Contact.validate()``.
+	"""Write *phone* onto a Contact so it survives ``Contact.validate()``.
 
-    ``Contact.set_primary()`` rebuilds ``mobile_no``/``phone`` from the ``phone_nos``
-    child table on every save, so assigning those fields directly is silently blanked
-    back to "" — which is how the customer phone kept disappearing on address save.
-    """
-    phone = str(phone or "").strip()
-    if not phone:
-        return
+	``Contact.set_primary()`` rebuilds ``mobile_no``/``phone`` from the ``phone_nos``
+	child table on every save, so assigning those fields directly is silently blanked
+	back to "" — which is how the customer phone kept disappearing on address save.
+	"""
+	phone = str(phone or "").strip()
+	if not phone:
+		return
 
-    primary_row = None
-    for row in contact_doc.get("phone_nos") or []:
-        if primary_row is None and str(row.phone or "").strip() == phone:
-            primary_row = row
-    if primary_row is None:
-        primary_row = contact_doc.append("phone_nos", {"phone": phone})
+	primary_row = None
+	for row in contact_doc.get("phone_nos") or []:
+		if primary_row is None and str(row.phone or "").strip() == phone:
+			primary_row = row
+	if primary_row is None:
+		primary_row = contact_doc.append("phone_nos", {"phone": phone})
 
-    # Exactly one row may be primary, or Contact.set_primary() throws.
-    for row in contact_doc.get("phone_nos") or []:
-        is_primary = 1 if row is primary_row else 0
-        row.is_primary_phone = is_primary
-        row.is_primary_mobile_no = is_primary
+	# Exactly one row may be primary, or Contact.set_primary() throws.
+	for row in contact_doc.get("phone_nos") or []:
+		is_primary = 1 if row is primary_row else 0
+		row.is_primary_phone = is_primary
+		row.is_primary_mobile_no = is_primary
 
-    contact_doc.mobile_no = phone
-    contact_doc.phone = phone
+	contact_doc.mobile_no = phone
+	contact_doc.phone = phone
 
 
 def _sync_customer_contact(customer_doc: Document, phone: str) -> str | None:
-    """Push *phone* onto the customer's primary Contact, creating one when missing.
+	"""Push *phone* onto the customer's primary Contact, creating one when missing.
 
-    Returns the Contact name so the caller can stamp ``customer_primary_contact``
-    during its own — later, freshly read — Customer write.
-    """
-    phone = str(phone or "").strip()
-    if not phone:
-        return None
+	Returns the Contact name so the caller can stamp ``customer_primary_contact``
+	during its own — later, freshly read — Customer write.
+	"""
+	phone = str(phone or "").strip()
+	if not phone:
+		return None
 
-    primary_contact = customer_doc.customer_primary_contact
-    if primary_contact and frappe.db.exists("Contact", primary_contact):
-        contact_doc = frappe.get_doc("Contact", primary_contact)
-        _apply_phone_to_contact(contact_doc, phone)
-        contact_doc.save(ignore_permissions=True)
-        return contact_doc.name
+	primary_contact = customer_doc.customer_primary_contact
+	if primary_contact and frappe.db.exists("Contact", primary_contact):
+		contact_doc = frappe.get_doc("Contact", primary_contact)
+		_apply_phone_to_contact(contact_doc, phone)
+		contact_doc.save(ignore_permissions=True)
+		return contact_doc.name
 
-    contact_doc = frappe.get_doc({
-        "doctype": "Contact",
-        "first_name": customer_doc.customer_name,
-        "is_primary_contact": 1,
-        "links": [{
-            "link_doctype": "Customer",
-            "link_name": customer_doc.name,
-        }],
-    })
-    _apply_phone_to_contact(contact_doc, phone)
-    contact_doc.insert(ignore_permissions=True)
-    return contact_doc.name
+	contact_doc = frappe.get_doc(
+		{
+			"doctype": "Contact",
+			"first_name": customer_doc.customer_name,
+			"is_primary_contact": 1,
+			"links": [
+				{
+					"link_doctype": "Customer",
+					"link_name": customer_doc.name,
+				}
+			],
+		}
+	)
+	_apply_phone_to_contact(contact_doc, phone)
+	contact_doc.insert(ignore_permissions=True)
+	return contact_doc.name
 
 
 def _save_customer_fields(customer: str, apply_changes) -> Document:
-    """Apply *apply_changes* to a freshly read Customer, then save it.
+	"""Apply *apply_changes* to a freshly read Customer, then save it.
 
-    Saving an Address or a Contact moves ``Customer.modified`` out from under any
-    Customer document loaded earlier in the request, and Frappe's optimistic-lock
-    check then aborts the whole save with ``TimestampMismatchError``. Read the row
-    immediately before writing it, and retry when a concurrent writer still wins.
-    """
-    last_error: Exception | None = None
-    for _attempt in range(3):
-        customer_doc = frappe.get_doc("Customer", customer)
-        apply_changes(customer_doc)
-        try:
-            customer_doc.save(ignore_permissions=True)
-            return customer_doc
-        except frappe.TimestampMismatchError as exc:
-            # check_if_latest() raises before writing anything, so retrying is safe.
-            # Drop the msgprint it queued, or the client shows it even when we win.
-            last_error = exc
-            frappe.clear_last_message()
+	Saving an Address or a Contact moves ``Customer.modified`` out from under any
+	Customer document loaded earlier in the request, and Frappe's optimistic-lock
+	check then aborts the whole save with ``TimestampMismatchError``. Read the row
+	immediately before writing it, and retry when a concurrent writer still wins.
+	"""
+	last_error: Exception | None = None
+	for _attempt in range(3):
+		customer_doc = frappe.get_doc("Customer", customer)
+		apply_changes(customer_doc)
+		try:
+			customer_doc.save(ignore_permissions=True)
+			return customer_doc
+		except frappe.TimestampMismatchError as exc:
+			# check_if_latest() raises before writing anything, so retrying is safe.
+			# Drop the msgprint it queued, or the client shows it even when we win.
+			last_error = exc
+			frappe.clear_last_message()
 
-    frappe.log_error(
-        f"_save_customer_fields: giving up on {customer} after 3 timestamp conflicts",
-        frappe.get_traceback(),
-    )
-    raise last_error
+	frappe.log_error(
+		f"_save_customer_fields: giving up on {customer} after 3 timestamp conflicts",
+		frappe.get_traceback(),
+	)
+	raise last_error
 
 
 def _apply_phone_to_address(address_doc: Document, phone: str) -> None:
-    phone = str(phone or "").strip()
-    if not phone:
-        return
+	phone = str(phone or "").strip()
+	if not phone:
+		return
 
-    for fieldname in ADDRESS_PHONE_FIELDS:
-        if frappe.db.has_column("Address", fieldname):
-            address_doc.set(fieldname, phone)
+	for fieldname in ADDRESS_PHONE_FIELDS:
+		if frappe.db.has_column("Address", fieldname):
+			address_doc.set(fieldname, phone)
 
 
 @frappe.whitelist()
 def get_customer_shipping_addresses(customer, invoice=None):
-    """Return the linked customer shipping-address book and currently selected address."""
-    try:
-        if not customer or not frappe.db.exists("Customer", customer):
-            frappe.throw(_("Customer not found."))
+	"""Return the linked customer shipping-address book and currently selected address."""
+	try:
+		if not customer or not frappe.db.exists("Customer", customer):
+			frappe.throw(_("Customer not found."))
 
-        return _build_customer_shipping_address_book(customer, invoice=invoice)
-    except Exception as e:
-        frappe.log_error(f"get_customer_shipping_addresses: {str(e)}", frappe.get_traceback())
-        frappe.throw(_("Failed to fetch customer shipping addresses."))
+		return _build_customer_shipping_address_book(customer, invoice=invoice)
+	except Exception as e:
+		frappe.log_error(f"get_customer_shipping_addresses: {str(e)}", frappe.get_traceback())
+		frappe.throw(_("Failed to fetch customer shipping addresses."))
 
 
 @frappe.whitelist()
 def save_customer_shipping_address(
-    customer,
-    phone=None,
-    invoice=None,
-    address_name=None,
-    address=None,
-    territory=None,
-    set_as_primary=1,
-    location_link=None,
-    latitude=None,
-    longitude=None,
-    geo_source=None,
-    branch_name=None,
+	customer,
+	phone=None,
+	invoice=None,
+	address_name=None,
+	address=None,
+	territory=None,
+	set_as_primary=1,
+	location_link=None,
+	latitude=None,
+	longitude=None,
+	geo_source=None,
+	branch_name=None,
 ):
-    """Select an existing shipping address or create a new one for a customer.
+	"""Select an existing shipping address or create a new one for a customer.
 
-    The four geo parameters are optional and carry the door pin (COURIER_CONTRACTS
-    §10a). They MUST be declared here even though this function does not use them
-    directly: Frappe binds request form keys to parameter names and silently drops
-    every key the signature does not declare, so omitting them makes the POS appear
-    to save a pin that is never stored.
-    """
-    try:
-        if not customer or not frappe.db.exists("Customer", customer):
-            frappe.throw(_("Customer not found."))
+	The four geo parameters are optional and carry the door pin (COURIER_CONTRACTS
+	§10a). They MUST be declared here even though this function does not use them
+	directly: Frappe binds request form keys to parameter names and silently drops
+	every key the signature does not declare, so omitting them makes the POS appear
+	to save a pin that is never stored.
+	"""
+	try:
+		if not customer or not frappe.db.exists("Customer", customer):
+			frappe.throw(_("Customer not found."))
 
-        customer_doc = frappe.get_doc("Customer", customer)
-        normalized_address_name = str(address_name or "").strip()
-        normalized_address = str(address or "").strip()
-        normalized_territory = str(territory or "").strip()
-        phone_value = str(phone or "").strip()
-        normalized_branch_name = (
-            str(branch_name).strip() if branch_name is not None else None
-        )
-        if branch_name is not None and not normalized_branch_name:
-            frappe.throw(_("Branch name cannot be empty."))
-        # Preserve an explicit integer/bool false. ``set_as_primary or "1"``
-        # turned 0 into the default and silently replaced the Customer's primary
-        # billing address whenever the B2B branch dialog added a second branch.
-        primary_flag = "1" if set_as_primary is None else set_as_primary
-        use_as_primary = str(primary_flag).strip().lower() not in {
-            "0", "false", "no", "off",
-        }
-        reused_address = False
+		customer_doc = frappe.get_doc("Customer", customer)
+		normalized_address_name = str(address_name or "").strip()
+		normalized_address = str(address or "").strip()
+		normalized_territory = str(territory or "").strip()
+		phone_value = str(phone or "").strip()
+		normalized_branch_name = str(branch_name).strip() if branch_name is not None else None
+		if branch_name is not None and not normalized_branch_name:
+			frappe.throw(_("Branch name cannot be empty."))
+		# Preserve an explicit integer/bool false. ``set_as_primary or "1"``
+		# turned 0 into the default and silently replaced the Customer's primary
+		# billing address whenever the B2B branch dialog added a second branch.
+		primary_flag = "1" if set_as_primary is None else set_as_primary
+		use_as_primary = str(primary_flag).strip().lower() not in {
+			"0",
+			"false",
+			"no",
+			"off",
+		}
+		reused_address = False
 
-        if normalized_address_name:
-            linked_names = set(get_linked_customer_address_names(customer))
-            if normalized_address_name not in linked_names:
-                frappe.throw(_("Selected address does not belong to this customer."))
-            if not frappe.db.exists("Address", normalized_address_name):
-                frappe.throw(_("Selected address was not found."))
-            reused_address = True
-            address_doc = (
-                ensure_shipping_address(normalized_address_name)
-                if use_as_primary
-                else frappe.get_doc("Address", normalized_address_name)
-            )
-        else:
-            if not normalized_address:
-                frappe.throw(_("Address is required."))
+		if normalized_address_name:
+			linked_names = set(get_linked_customer_address_names(customer))
+			if normalized_address_name not in linked_names:
+				frappe.throw(_("Selected address does not belong to this customer."))
+			if not frappe.db.exists("Address", normalized_address_name):
+				frappe.throw(_("Selected address was not found."))
+			reused_address = True
+			address_doc = (
+				ensure_shipping_address(normalized_address_name)
+				if use_as_primary
+				else frappe.get_doc("Address", normalized_address_name)
+			)
+		else:
+			if not normalized_address:
+				frappe.throw(_("Address is required."))
 
-            matching_address = find_matching_customer_address(customer_doc.name, normalized_address)
-            if matching_address:
-                matching_address_name = str(matching_address.get("name") or "")
-                if not frappe.db.exists("Address", matching_address_name):
-                    frappe.throw(_("Matching customer address was not found."))
-                reused_address = True
-                address_doc = (
-                    ensure_shipping_address(matching_address_name)
-                    if use_as_primary
-                    else frappe.get_doc("Address", matching_address_name)
-                )
-            else:
-                address_payload = {
-                    "doctype": "Address",
-                    "address_title": normalized_branch_name or customer_doc.customer_name,
-                    "address_type": "Shipping",
-                    "address_line1": normalized_address,
-                    "city": normalized_territory or customer_doc.territory or "Unknown",
-                    "is_primary_address": 1 if use_as_primary else 0,
-                    "is_shipping_address": 1,
-                    "links": [{
-                        "link_doctype": "Customer",
-                        "link_name": customer_doc.name,
-                    }],
-                }
-                for fieldname in ADDRESS_PHONE_FIELDS:
-                    if frappe.db.has_column("Address", fieldname) and str(phone or "").strip():
-                        address_payload[fieldname] = str(phone).strip()
+			matching_address = find_matching_customer_address(customer_doc.name, normalized_address)
+			if matching_address:
+				matching_address_name = str(matching_address.get("name") or "")
+				if not frappe.db.exists("Address", matching_address_name):
+					frappe.throw(_("Matching customer address was not found."))
+				reused_address = True
+				address_doc = (
+					ensure_shipping_address(matching_address_name)
+					if use_as_primary
+					else frappe.get_doc("Address", matching_address_name)
+				)
+			else:
+				address_payload = {
+					"doctype": "Address",
+					"address_title": normalized_branch_name or customer_doc.customer_name,
+					"address_type": "Shipping",
+					"address_line1": normalized_address,
+					"city": normalized_territory or customer_doc.territory or "Unknown",
+					"is_primary_address": 1 if use_as_primary else 0,
+					"is_shipping_address": 1,
+					"links": [
+						{
+							"link_doctype": "Customer",
+							"link_name": customer_doc.name,
+						}
+					],
+				}
+				for fieldname in ADDRESS_PHONE_FIELDS:
+					if frappe.db.has_column("Address", fieldname) and str(phone or "").strip():
+						address_payload[fieldname] = str(phone).strip()
 
-                address_doc = frappe.get_doc(address_payload)
-                address_doc.insert(ignore_permissions=True)
+				address_doc = frappe.get_doc(address_payload)
+				address_doc.insert(ignore_permissions=True)
 
-        if normalized_branch_name:
-            address_doc.address_title = normalized_branch_name
+		if normalized_branch_name:
+			address_doc.address_title = normalized_branch_name
 
-        _apply_phone_to_address(address_doc, phone_value)
-        address_doc.save(ignore_permissions=True)
+		_apply_phone_to_address(address_doc, phone_value)
+		address_doc.save(ignore_permissions=True)
 
-        if use_as_primary or not reused_address:
-            ensure_shipping_address(address_doc.name)
-        if use_as_primary:
-            set_customer_primary_shipping_address(customer_doc.name, address_doc.name)
+		if use_as_primary or not reused_address:
+			ensure_shipping_address(address_doc.name)
+		if use_as_primary:
+			set_customer_primary_shipping_address(customer_doc.name, address_doc.name)
 
-        # Door pin. Runs after the Address exists and is saved, and never aborts the
-        # save: the address is the primary thing being written here. The result is
-        # surfaced in the response so a rejected pin is visible rather than silent.
-        geo_result = _apply_address_geo(
-            address_doc.name,
-            location_link=location_link,
-            latitude=latitude,
-            longitude=longitude,
-            geo_source=geo_source,
-        )
+		# Door pin. Runs after the Address exists and is saved, and never aborts the
+		# save: the address is the primary thing being written here. The result is
+		# surfaced in the response so a rejected pin is visible rather than silent.
+		geo_result = _apply_address_geo(
+			address_doc.name,
+			location_link=location_link,
+			latitude=latitude,
+			longitude=longitude,
+			geo_source=geo_source,
+		)
 
-        if use_as_primary:
-            # Every write above moves Customer.modified, so finish the Contact side
-            # first and only then read + save the Customer, inside one short window.
-            contact_name = _sync_customer_contact(customer_doc, phone_value)
+		if use_as_primary:
+			# Every write above moves Customer.modified, so finish the Contact side
+			# first and only then read + save the Customer, inside one short window.
+			contact_name = _sync_customer_contact(customer_doc, phone_value)
 
-            def _apply_customer_changes(doc: Document) -> None:
-                doc.customer_primary_address = address_doc.name
-                if contact_name:
-                    doc.customer_primary_contact = contact_name
-                if phone_value:
-                    if frappe.db.has_column("Customer", "mobile_no"):
-                        doc.mobile_no = phone_value
-                    if frappe.db.has_column("Customer", "phone"):
-                        doc.phone = phone_value
+			def _apply_customer_changes(doc: Document) -> None:
+				doc.customer_primary_address = address_doc.name
+				if contact_name:
+					doc.customer_primary_contact = contact_name
+				if phone_value:
+					if frappe.db.has_column("Customer", "mobile_no"):
+						doc.mobile_no = phone_value
+					if frappe.db.has_column("Customer", "phone"):
+						doc.phone = phone_value
 
-            customer_doc = _save_customer_fields(customer_doc.name, _apply_customer_changes)
-        else:
-            # A B2B delivery branch belongs to the shared Customer account without
-            # becoming its billing/primary identity.  In particular, do not run the
-            # Customer update hooks: ERPNext re-saves the primary Contact there, and
-            # a B2B-only rep correctly has no broad Contact write permission.
-            customer_doc = frappe.get_doc("Customer", customer_doc.name)
+			customer_doc = _save_customer_fields(customer_doc.name, _apply_customer_changes)
+		else:
+			# A B2B delivery branch belongs to the shared Customer account without
+			# becoming its billing/primary identity.  In particular, do not run the
+			# Customer update hooks: ERPNext re-saves the primary Contact there, and
+			# a B2B-only rep correctly has no broad Contact write permission.
+			customer_doc = frappe.get_doc("Customer", customer_doc.name)
 
-        if invoice:
-            link_shipping_address_to_invoice(invoice, address_doc.name)
+		if invoice:
+			link_shipping_address_to_invoice(invoice, address_doc.name)
 
-        frappe.db.commit()
-        return {
-            "success": True,
-            "message": "Customer shipping address updated successfully",
-            "selected_address_name": address_doc.name,
-            "selected_address": {
-                "name": address_doc.name,
-                "address_title": str(address_doc.address_title or "").strip(),
-                "branch_name": str(address_doc.address_title or "").strip(),
-                "city": str(address_doc.city or "").strip(),
-                "full_address": format_address_text(address_doc.as_dict()),
-                "phone": _address_phone(address_doc.as_dict(), phone_value),
-            },
-            "address_book": _build_customer_shipping_address_book(customer_doc.name, invoice=invoice),
-            "geo": geo_result,
-        }
-    except frappe.ValidationError:
-        # Frappe's own message already names the real reason — masking it behind a
-        # generic string is what hid this bug from the POS floor for weeks.
-        raise
-    except Exception as e:
-        frappe.log_error(f"save_customer_shipping_address: {str(e)}", frappe.get_traceback())
-        frappe.throw(_("Failed to save customer shipping address: {0}").format(str(e)))
+		frappe.db.commit()
+		return {
+			"success": True,
+			"message": "Customer shipping address updated successfully",
+			"selected_address_name": address_doc.name,
+			"selected_address": {
+				"name": address_doc.name,
+				"address_title": str(address_doc.address_title or "").strip(),
+				"branch_name": str(address_doc.address_title or "").strip(),
+				"city": str(address_doc.city or "").strip(),
+				"full_address": format_address_text(address_doc.as_dict()),
+				"phone": _address_phone(address_doc.as_dict(), phone_value),
+			},
+			"address_book": _build_customer_shipping_address_book(customer_doc.name, invoice=invoice),
+			"geo": geo_result,
+		}
+	except frappe.ValidationError:
+		# Frappe's own message already names the real reason — masking it behind a
+		# generic string is what hid this bug from the POS floor for weeks.
+		raise
+	except Exception as e:
+		frappe.log_error(f"save_customer_shipping_address: {str(e)}", frappe.get_traceback())
+		frappe.throw(_("Failed to save customer shipping address: {0}").format(str(e)))
+
 
 @frappe.whitelist()
 def get_customers(search=None):
-    """Get customers for POS with optional search"""
-    try:
-        filters = {}
-        if search:
-            filters["customer_name"] = ["like", f"%{search}%"]
-            # Also search by mobile number
-            mobile_filter = {"mobile_no": ["like", f"%{search}%"]}
-            
-        fields = [
-            "name",
-            "customer_name", 
-            "mobile_no",
-            "customer_primary_address",
-            "customer_primary_contact",
-            "territory",
-            "customer_group"
-        ]
-        
-        if search:
-            # Search by name or mobile
-            customers = frappe.get_all(
-                "Customer",
-                fields=fields,
-                or_filters=[
-                    {"customer_name": ["like", f"%{search}%"]},
-                    {"mobile_no": ["like", f"%{search}%"]}
-                ],
-                limit=20
-            )
-        else:
-            customers = frappe.get_all(
-                "Customer", 
-                fields=fields,
-                limit=50
-            )
-            
-        # Augment each customer with territory info
-        for c in customers:
-            _augment_customer_with_territory(c)
+	"""Get customers for POS with optional search"""
+	try:
+		filters = {}
+		if search:
+			filters["customer_name"] = ["like", f"%{search}%"]
+			# Also search by mobile number
+			mobile_filter = {"mobile_no": ["like", f"%{search}%"]}
 
-        return customers
-        
-    except Exception as e:
-        frappe.log_error(f"Error fetching customers: {str(e)}")
-        return []
+		fields = [
+			"name",
+			"customer_name",
+			"mobile_no",
+			"customer_primary_address",
+			"customer_primary_contact",
+			"territory",
+			"customer_group",
+		]
+
+		if search:
+			# Search by name or mobile
+			customers = frappe.get_all(
+				"Customer",
+				fields=fields,
+				or_filters=[
+					{"customer_name": ["like", f"%{search}%"]},
+					{"mobile_no": ["like", f"%{search}%"]},
+				],
+				limit=20,
+			)
+		else:
+			customers = frappe.get_all("Customer", fields=fields, limit=50)
+
+		# Augment each customer with territory info
+		for c in customers:
+			_augment_customer_with_territory(c)
+
+		return customers
+
+	except Exception as e:
+		frappe.log_error(f"Error fetching customers: {str(e)}")
+		return []
+
 
 @frappe.whitelist()
 def get_recent_customers(limit=10):
-    """Get recently created/modified customers for quick access"""
-    try:
-        fields = [
-            "name",
-            "customer_name", 
-            "mobile_no",
-            "customer_primary_address",
-            "customer_primary_contact",
-            "territory",
-            "customer_group",
-            "modified"
-        ]
-        
-        customers = frappe.get_all(
-            "Customer",
-            fields=fields,
-            order_by="modified desc",
-            limit=int(limit)
-        )
-        
-        # Augment with territory info
-        for c in customers:
-            _augment_customer_with_territory(c)
-            
-        return customers
-        
-    except Exception as e:
-        frappe.log_error(f"Error fetching recent customers: {str(e)}")
-        return []
+	"""Get recently created/modified customers for quick access"""
+	try:
+		fields = [
+			"name",
+			"customer_name",
+			"mobile_no",
+			"customer_primary_address",
+			"customer_primary_contact",
+			"territory",
+			"customer_group",
+			"modified",
+		]
+
+		customers = frappe.get_all("Customer", fields=fields, order_by="modified desc", limit=int(limit))
+
+		# Augment with territory info
+		for c in customers:
+			_augment_customer_with_territory(c)
+
+		return customers
+
+	except Exception as e:
+		frappe.log_error(f"Error fetching recent customers: {str(e)}")
+		return []
+
 
 @frappe.whitelist()
 def search_customers(name=None, phone=None, customer_type=None):
-    """Enhanced search for customers by name or phone using direct SQL.
+	"""Enhanced search for customers by name or phone using direct SQL.
 
-    Optional ``customer_type`` ("Individual" | "Company") restricts results to that
-    customer type — used to keep Company customers in the B2B flow and out of B2C.
-    Default None leaves results unchanged (all types).
+	Optional ``customer_type`` ("Individual" | "Company") restricts results to that
+	customer type — used to keep Company customers in the B2B flow and out of B2C.
+	Default None leaves results unchanged (all types).
 
-    The type filter applies to the **name** match only. A phone number identifies
-    one subscriber, and ``create_customer`` blocks a duplicate mobile across every
-    customer_type; filtering a phone search by type therefore hid the very record
-    the create-guard rejects on (a staff "Employee"/Company account holding that
-    number), leaving the operator with an unexplainable error and no way to find
-    the record. Name browsing keeps the filter so Company/B2B accounts stay out of
-    the B2C name lists.
+	The type filter applies to the **name** match only. A phone number identifies
+	one subscriber, and ``create_customer`` blocks a duplicate mobile across every
+	customer_type; filtering a phone search by type therefore hid the very record
+	the create-guard rejects on (a staff "Employee"/Company account holding that
+	number), leaving the operator with an unexplainable error and no way to find
+	the record. Name browsing keeps the filter so Company/B2B accounts stay out of
+	the B2C name lists.
 
-    When both ``name`` and ``phone`` are supplied the two match groups are ORed —
-    previously ``phone`` was silently ignored whenever a name was also passed.
-    """
+	When both ``name`` and ``phone`` are supplied the two match groups are ORed —
+	previously ``phone`` was silently ignored whenever a name was also passed.
+	"""
 
-    if not name and not phone:
-        return []
+	if not name and not phone:
+		return []
 
-    # Base fields available on the Customer doctype
-    fields_to_select = [
-        "`name`", "`customer_name`", "`mobile_no`",
-        "`customer_primary_address`", "`customer_primary_contact`",
-        "`territory`", "`customer_group`"
-    ]
+	# Base fields available on the Customer doctype
+	fields_to_select = [
+		"`name`",
+		"`customer_name`",
+		"`mobile_no`",
+		"`customer_primary_address`",
+		"`customer_primary_contact`",
+		"`territory`",
+		"`customer_group`",
+	]
 
-    # Conditionally add the 'phone' field to avoid errors if it doesn't exist
-    if frappe.db.has_column("Customer", "phone"):
-        fields_to_select.append("`phone`")
+	# Conditionally add the 'phone' field to avoid errors if it doesn't exist
+	if frappe.db.has_column("Customer", "phone"):
+		fields_to_select.append("`phone`")
 
-    # Credit permission, so the POS can badge shops that may order on account and
-    # offer the Credit button without a second round trip. Probed, not assumed:
-    # the column is seeded by setup/credit_terms.py at after_migrate, so on a
-    # bench that has not migrated yet the SELECT would fail and take the WHOLE
-    # customer search down with it — which is exactly the class of outage this
-    # search must never cause.
-    has_credit_column = frappe.db.has_column("Customer", "custom_credit_allowed")
-    if has_credit_column:
-        fields_to_select.append("`custom_credit_allowed`")
+	# Credit permission, so the POS can badge shops that may order on account and
+	# offer the Credit button without a second round trip. Probed, not assumed:
+	# the column is seeded by setup/credit_terms.py at after_migrate, so on a
+	# bench that has not migrated yet the SELECT would fail and take the WHOLE
+	# customer search down with it — which is exactly the class of outage this
+	# search must never cause.
+	has_credit_column = frappe.db.has_column("Customer", "custom_credit_allowed")
+	if has_credit_column:
+		fields_to_select.append("`custom_credit_allowed`")
 
-    query = f"SELECT {', '.join(fields_to_select)} FROM `tabCustomer` WHERE "
+	query = f"SELECT {', '.join(fields_to_select)} FROM `tabCustomer` WHERE "
 
-    params = {}
-    name_condition = None
-    phone_condition = None
+	params = {}
+	name_condition = None
+	phone_condition = None
 
-    if name:
-        name_condition = "(`customer_name` LIKE %(search_term)s OR `name` LIKE %(search_term)s)"
-        params['search_term'] = f"%{name}%"
-        frappe.logger().info(f"Searching customers by name: {name}")
+	if name:
+		name_condition = "(`customer_name` LIKE %(search_term)s OR `name` LIKE %(search_term)s)"
+		params["search_term"] = f"%{name}%"
+		frappe.logger().info(f"Searching customers by name: {name}")
 
-    if phone:
-        # Match every stored spelling of the number. A search for 01111034268 has
-        # to surface a record stored as +201111034268 — otherwise the operator
-        # cannot see the customer they already have and creates a second one.
-        phone_fields = ["mobile_no"]
-        if frappe.db.has_column("Customer", "phone"):
-            phone_fields.append("phone")
-        phone_conditions = []
-        for term_index, term in enumerate(phone_search_terms(phone) or [phone]):
-            param_key = f"phone_term_{term_index}"
-            params[param_key] = f"%{term}%"
-            for fieldname in phone_fields:
-                phone_conditions.append(f"`{fieldname}` LIKE %({param_key})s")
-        phone_condition = f"({' OR '.join(phone_conditions)})"
-        frappe.logger().info(f"Searching customers by phone: {phone}")
+	if phone:
+		# Match every stored spelling of the number. A search for 01111034268 has
+		# to surface a record stored as +201111034268 — otherwise the operator
+		# cannot see the customer they already have and creates a second one.
+		phone_fields = ["mobile_no"]
+		if frappe.db.has_column("Customer", "phone"):
+			phone_fields.append("phone")
+		phone_conditions = []
+		for term_index, term in enumerate(phone_search_terms(phone) or [phone]):
+			param_key = f"phone_term_{term_index}"
+			params[param_key] = f"%{term}%"
+			for fieldname in phone_fields:
+				phone_conditions.append(f"`{fieldname}` LIKE %({param_key})s")
+		phone_condition = f"({' OR '.join(phone_conditions)})"
+		frappe.logger().info(f"Searching customers by phone: {phone}")
 
-    # Optional customer_type filter (parameterized). Validated for BOTH search
-    # paths so an invalid value is still rejected, but only ANDed onto the *name*
-    # match — see the docstring: a phone search must return the record whatever
-    # its customer_type, because that is exactly what create_customer blocks on.
-    resolved_type = (customer_type or "").strip()
-    type_condition = None
-    if resolved_type:
-        if resolved_type not in ("Individual", "Company"):
-            frappe.throw("customer_type must be 'Individual' or 'Company'")
-        if frappe.db.has_column("Customer", "customer_type"):
-            type_condition = "`customer_type` = %(customer_type)s"
+	# Optional customer_type filter (parameterized). Validated for BOTH search
+	# paths so an invalid value is still rejected, but only ANDed onto the *name*
+	# match — see the docstring: a phone search must return the record whatever
+	# its customer_type, because that is exactly what create_customer blocks on.
+	resolved_type = (customer_type or "").strip()
+	type_condition = None
+	if resolved_type:
+		if resolved_type not in ("Individual", "Company"):
+			frappe.throw("customer_type must be 'Individual' or 'Company'")
+		if frappe.db.has_column("Customer", "customer_type"):
+			type_condition = "`customer_type` = %(customer_type)s"
 
-    # Each supplied criterion becomes one match group; the groups are ORed so that
-    # passing both name and phone widens the search instead of dropping the phone.
-    # The customer_type value is bound only when its placeholder is actually in the
-    # query, so a phone-only search never carries an unused parameter.
-    match_groups = []
-    if name_condition:
-        if type_condition:
-            params['customer_type'] = resolved_type
-            match_groups.append(f"({name_condition} AND {type_condition})")
-        else:
-            match_groups.append(name_condition)
-    if phone_condition:
-        match_groups.append(phone_condition)
+	# Each supplied criterion becomes one match group; the groups are ORed so that
+	# passing both name and phone widens the search instead of dropping the phone.
+	# The customer_type value is bound only when its placeholder is actually in the
+	# query, so a phone-only search never carries an unused parameter.
+	match_groups = []
+	if name_condition:
+		if type_condition:
+			params["customer_type"] = resolved_type
+			match_groups.append(f"({name_condition} AND {type_condition})")
+		else:
+			match_groups.append(name_condition)
+	if phone_condition:
+		match_groups.append(phone_condition)
 
-    if not match_groups:
-        return []
+	if not match_groups:
+		return []
 
-    query += "(" + " OR ".join(match_groups) + ")"
+	query += "(" + " OR ".join(match_groups) + ")"
 
-    query += " ORDER BY `customer_name` ASC LIMIT 20"
-    
-    try:
-        customers = frappe.db.sql(query, params, as_dict=1)
+	query += " ORDER BY `customer_name` ASC LIMIT 20"
 
-        for c in customers:
-            _augment_customer_with_territory(c)
-            # Normalised to a real bool under a stable key. The raw column is an
-            # Int (0/1) and is absent entirely on an un-migrated bench; a client
-            # badge must not have to tell `0`, `None` and "key missing" apart, and
-            # the safe answer for all three is False.
-            c["credit_allowed"] = bool(int(c.get("custom_credit_allowed") or 0)) if has_credit_column else False
+	try:
+		customers = frappe.db.sql(query, params, as_dict=1)
 
-        frappe.logger().info(f"Found {len(customers)} customers via SQL")
-        return customers
+		for c in customers:
+			_augment_customer_with_territory(c)
+			# Normalised to a real bool under a stable key. The raw column is an
+			# Int (0/1) and is absent entirely on an un-migrated bench; a client
+			# badge must not have to tell `0`, `None` and "key missing" apart, and
+			# the safe answer for all three is False.
+			c["credit_allowed"] = (
+				bool(int(c.get("custom_credit_allowed") or 0)) if has_credit_column else False
+			)
 
-    except Exception as e:
-        frappe.log_error(f"Error in SQL customer search: {e}", frappe.get_traceback())
-        return []
+		frappe.logger().info(f"Found {len(customers)} customers via SQL")
+		return customers
+
+	except Exception as e:
+		frappe.log_error(f"Error in SQL customer search: {e}", frappe.get_traceback())
+		return []
 
 
 @frappe.whitelist()
 def get_territories(search=None):
-    """Selectable delivery areas — only those carrying a WooCommerce area code.
+	"""Selectable delivery areas — only those carrying a WooCommerce area code.
 
-    Every territory an order can actually ship to is synced from WooCommerce and
-    carries a Woo code (``custom_woo_code``, or the legacy ``woo_code``). What is
-    left over is never a valid choice: the structural nodes ("All Territories",
-    "Egypt", "Rest Of The World"), the delivery sub-zones that live *under* a
-    coded parent and are picked through ``get_sub_territories`` instead, and test
-    fixtures. Listing those let an operator attach an order to an area with no
-    Woo mapping and no delivery rate, so they are filtered out here — at the one
-    endpoint every picker in the app reads.
+	Every territory an order can actually ship to is synced from WooCommerce and
+	carries a Woo code (``custom_woo_code``, or the legacy ``woo_code``). What is
+	left over is never a valid choice: the structural nodes ("All Territories",
+	"Egypt", "Rest Of The World"), the delivery sub-zones that live *under* a
+	coded parent and are picked through ``get_sub_territories`` instead, and test
+	fixtures. Listing those let an operator attach an order to an area with no
+	Woo mapping and no delivery rate, so they are filtered out here — at the one
+	endpoint every picker in the app reads.
 
-    Territories are *named* by their Woo code ("EGNASRCITY"), and on production
-    ``territory_name`` equals that code on most records, so ``territory_name_ar``
-    is the only human label. It is always returned; clients must prefer it.
+	Territories are *named* by their Woo code ("EGNASRCITY"), and on production
+	``territory_name`` equals that code on most records, so ``territory_name_ar``
+	is the only human label. It is always returned; clients must prefer it.
 
-    Args:
-        search: Optional free text matched against the Arabic name, the title,
-            the record name and the Woo code.
+	Args:
+	    search: Optional free text matched against the Arabic name, the title,
+	        the record name and the Woo code.
 
-    Returns:
-        list[dict]: territory rows with ``territory_name_ar``, ``woo_code`` and
-        delivery income/expense.
-    """
-    try:
-        from jarz_pos.utils.invoice_utils import _territory_has_column
+	Returns:
+	    list[dict]: territory rows with ``territory_name_ar``, ``woo_code`` and
+	    delivery income/expense.
+	"""
+	try:
+		from jarz_pos.utils.invoice_utils import _territory_has_column
 
-        code_fields = [f for f in ("custom_woo_code", "woo_code") if _territory_has_column(f)]
-        optional_fields = [
-            f
-            for f in ("custom_territory_name_ar", "delivery_income", "delivery_expense")
-            if _territory_has_column(f)
-        ]
+		code_fields = [f for f in ("custom_woo_code", "woo_code") if _territory_has_column(f)]
+		optional_fields = [
+			f
+			for f in ("custom_territory_name_ar", "delivery_income", "delivery_expense")
+			if _territory_has_column(f)
+		]
 
-        rows = frappe.get_all(
-            "Territory",
-            fields=["name", "territory_name"] + code_fields + optional_fields,
-            order_by="territory_name ASC",
-            limit=0,
-        )
+		rows = frappe.get_all(
+			"Territory",
+			fields=["name", "territory_name"] + code_fields + optional_fields,
+			order_by="territory_name ASC",
+			limit=0,
+		)
 
-        def _woo_code(row):
-            for fieldname in code_fields:
-                value = str(row.get(fieldname) or "").strip()
-                if value:
-                    return value
-            return ""
+		def _woo_code(row):
+			for fieldname in code_fields:
+				value = str(row.get(fieldname) or "").strip()
+				if value:
+					return value
+			return ""
 
-        # Only filter when the site actually has a Woo code column — a site
-        # without the WooCommerce app installed would otherwise get an empty
-        # picker instead of an unfiltered one.
-        if code_fields:
-            rows = [r for r in rows if _woo_code(r)]
+		# Only filter when the site actually has a Woo code column — a site
+		# without the WooCommerce app installed would otherwise get an empty
+		# picker instead of an unfiltered one.
+		if code_fields:
+			rows = [r for r in rows if _woo_code(r)]
 
-        needle = str(search or "").strip().casefold()
+		needle = str(search or "").strip().casefold()
 
-        territories = []
-        for row in rows:
-            name_ar = str(row.get("custom_territory_name_ar") or "").strip()
-            title = _(row.get("territory_name") or row.get("name") or "")
-            code = _woo_code(row)
+		territories = []
+		for row in rows:
+			name_ar = str(row.get("custom_territory_name_ar") or "").strip()
+			title = _(row.get("territory_name") or row.get("name") or "")
+			code = _woo_code(row)
 
-            if needle and not any(
-                needle in str(candidate or "").casefold()
-                for candidate in (name_ar, title, row.get("name"), code)
-            ):
-                continue
+			if needle and not any(
+				needle in str(candidate or "").casefold()
+				for candidate in (name_ar, title, row.get("name"), code)
+			):
+				continue
 
-            territories.append(
-                {
-                    "name": row.get("name"),
-                    "territory_name": title,
-                    "territory_name_ar": name_ar,
-                    "woo_code": code,
-                    "delivery_income": flt(row.get("delivery_income")),
-                    "delivery_expense": flt(row.get("delivery_expense")),
-                }
-            )
+			territories.append(
+				{
+					"name": row.get("name"),
+					"territory_name": title,
+					"territory_name_ar": name_ar,
+					"woo_code": code,
+					"delivery_income": flt(row.get("delivery_income")),
+					"delivery_expense": flt(row.get("delivery_expense")),
+				}
+			)
 
-        return territories
+		return territories
 
-    except Exception as e:
-        frappe.log_error(f"Error fetching territories: {str(e)}")
-        return []
+	except Exception as e:
+		frappe.log_error(f"Error fetching territories: {str(e)}")
+		return []
 
 
 def _contacts_block_lead_conversion(mobile_no, source_lead):
-    """Return True if existing Contacts with ``mobile_no`` should block creating a
-    Customer while converting ``source_lead`` (Lead -> Customer).
+	"""Return True if existing Contacts with ``mobile_no`` should block creating a
+	Customer while converting ``source_lead`` (Lead -> Customer).
 
-    When Frappe auto-creates a Contact for a Lead, that Contact carries the lead's
-    mobile. Converting that Lead to a Customer must NOT be blocked by its own
-    auto-created Contact. We only block when a *conflicting* third-party/customer
-    Contact shares the mobile.
+	When Frappe auto-creates a Contact for a Lead, that Contact carries the lead's
+	mobile. Converting that Lead to a Customer must NOT be blocked by its own
+	auto-created Contact. We only block when a *conflicting* third-party/customer
+	Contact shares the mobile.
 
-    A conflicting Contact is "OK to ignore" only if it is linked to ``source_lead``
-    AND is not linked to any existing Customer. If every conflicting Contact is
-    OK-to-ignore -> not blocked (return False). If any is a real third-party /
-    Customer contact -> blocked (return True).
+	A conflicting Contact is "OK to ignore" only if it is linked to ``source_lead``
+	AND is not linked to any existing Customer. If every conflicting Contact is
+	OK-to-ignore -> not blocked (return False). If any is a real third-party /
+	Customer contact -> blocked (return True).
 
-    On ANY error we fall back to the conservative behavior: a Contact with that
-    mobile exists -> treat as blocked, so we never accidentally create duplicates.
-    """
-    try:
-        contacts = frappe.get_all(
-            "Contact",
-            filters={"mobile_no": ["in", phone_variants(mobile_no) or [mobile_no]]},
-            pluck="name",
-        )
-        if not contacts:
-            return False
+	On ANY error we fall back to the conservative behavior: a Contact with that
+	mobile exists -> treat as blocked, so we never accidentally create duplicates.
+	"""
+	try:
+		contacts = frappe.get_all(
+			"Contact",
+			filters={"mobile_no": ["in", phone_variants(mobile_no) or [mobile_no]]},
+			pluck="name",
+		)
+		if not contacts:
+			return False
 
-        for contact_name in contacts:
-            linked_to_lead = frappe.get_all(
-                "Dynamic Link",
-                filters={
-                    "parenttype": "Contact",
-                    "parent": contact_name,
-                    "link_doctype": "Lead",
-                    "link_name": source_lead,
-                },
-                limit=1,
-            )
-            if not linked_to_lead:
-                # Contact belongs to some other party -> real conflict.
-                return True
+		for contact_name in contacts:
+			linked_to_lead = frappe.get_all(
+				"Dynamic Link",
+				filters={
+					"parenttype": "Contact",
+					"parent": contact_name,
+					"link_doctype": "Lead",
+					"link_name": source_lead,
+				},
+				limit=1,
+			)
+			if not linked_to_lead:
+				# Contact belongs to some other party -> real conflict.
+				return True
 
-            linked_to_customer = frappe.get_all(
-                "Dynamic Link",
-                filters={
-                    "parenttype": "Contact",
-                    "parent": contact_name,
-                    "link_doctype": "Customer",
-                },
-                limit=1,
-            )
-            if linked_to_customer:
-                # Already tied to a Customer -> real conflict.
-                return True
+			linked_to_customer = frappe.get_all(
+				"Dynamic Link",
+				filters={
+					"parenttype": "Contact",
+					"parent": contact_name,
+					"link_doctype": "Customer",
+				},
+				limit=1,
+			)
+			if linked_to_customer:
+				# Already tied to a Customer -> real conflict.
+				return True
 
-        # Every conflicting contact belongs only to source_lead -> safe to ignore.
-        return False
-    except Exception:
-        # Conservative fallback: a Contact with this mobile exists -> block.
-        return True
+		# Every conflicting contact belongs only to source_lead -> safe to ignore.
+		return False
+	except Exception:
+		# Conservative fallback: a Contact with this mobile exists -> block.
+		return True
 
 
 def _customer_conflict_label(customer_row) -> str:
-    """Human label for the Customer that blocks a create: "'Eman Elsayd' (Employee)".
+	"""Human label for the Customer that blocks a create: "'Eman Elsayd' (Employee)".
 
-    The qualifier is what makes the message actionable. The record holding the
-    number is usually one the operator cannot see from the B2C flow — a staff
-    "Employee" account, or a Company/B2B customer — so naming only the phone
-    number reads as a phantom conflict and the operator just retries. Emitted
-    only when a group/type is actually set, so the message never trails "()".
-    """
-    label = (customer_row.get("customer_name") or customer_row.get("name") or "").strip()
-    qualifier = (customer_row.get("customer_group") or "").strip() or (
-        customer_row.get("customer_type") or ""
-    ).strip()
-    return f"'{label}' ({qualifier})" if qualifier else f"'{label}'"
+	The qualifier is what makes the message actionable. The record holding the
+	number is usually one the operator cannot see from the B2C flow — a staff
+	"Employee" account, or a Company/B2B customer — so naming only the phone
+	number reads as a phantom conflict and the operator just retries. Emitted
+	only when a group/type is actually set, so the message never trails "()".
+	"""
+	label = (customer_row.get("customer_name") or customer_row.get("name") or "").strip()
+	qualifier = (customer_row.get("customer_group") or "").strip() or (
+		customer_row.get("customer_type") or ""
+	).strip()
+	return f"'{label}' ({qualifier})" if qualifier else f"'{label}'"
 
 
 def _customer_conflict_text(mobile_no, customer_row) -> str:
-    """Single-line throw text naming the customer that already owns *mobile_no*."""
-    return (
-        f"Mobile number '{mobile_no}' already belongs to customer "
-        f"{_customer_conflict_label(customer_row)}. "
-        f"Search for that customer instead of creating a new one."
-    )
+	"""Single-line throw text naming the customer that already owns *mobile_no*."""
+	return (
+		f"Mobile number '{mobile_no}' already belongs to customer "
+		f"{_customer_conflict_label(customer_row)}. "
+		f"Search for that customer instead of creating a new one."
+	)
 
 
 def _customer_linked_to_contact(contact_name):
-    """The Customer a Contact points at via Dynamic Link, or None. Never raises."""
-    try:
-        link_names = frappe.get_all(
-            "Dynamic Link",
-            filters={
-                "parenttype": "Contact",
-                "parent": contact_name,
-                "link_doctype": "Customer",
-            },
-            pluck="link_name",
-            limit=1,
-        )
-        if not link_names:
-            return None
-        rows = frappe.get_all(
-            "Customer",
-            filters={"name": link_names[0]},
-            fields=["name", "customer_name", "customer_group", "customer_type"],
-            limit=1,
-        )
-        return rows[0] if rows else None
-    except Exception:
-        return None
+	"""The Customer a Contact points at via Dynamic Link, or None. Never raises."""
+	try:
+		link_names = frappe.get_all(
+			"Dynamic Link",
+			filters={
+				"parenttype": "Contact",
+				"parent": contact_name,
+				"link_doctype": "Customer",
+			},
+			pluck="link_name",
+			limit=1,
+		)
+		if not link_names:
+			return None
+		rows = frappe.get_all(
+			"Customer",
+			filters={"name": link_names[0]},
+			fields=["name", "customer_name", "customer_group", "customer_type"],
+			limit=1,
+		)
+		return rows[0] if rows else None
+	except Exception:
+		return None
 
 
 def _contact_belongs_to_lead(contact_name, source_lead) -> bool:
-    """True when *contact_name* is linked to *source_lead*. Never raises."""
-    try:
-        return bool(
-            frappe.get_all(
-                "Dynamic Link",
-                filters={
-                    "parenttype": "Contact",
-                    "parent": contact_name,
-                    "link_doctype": "Lead",
-                    "link_name": source_lead,
-                },
-                limit=1,
-            )
-        )
-    except Exception:
-        return False
+	"""True when *contact_name* is linked to *source_lead*. Never raises."""
+	try:
+		return bool(
+			frappe.get_all(
+				"Dynamic Link",
+				filters={
+					"parenttype": "Contact",
+					"parent": contact_name,
+					"link_doctype": "Lead",
+					"link_name": source_lead,
+				},
+				limit=1,
+			)
+		)
+	except Exception:
+		return False
 
 
 def _contact_conflict_text(mobile_no, phone_forms, source_lead=None) -> str:
-    """Throw text for the Contact guards in ``create_customer``.
+	"""Throw text for the Contact guards in ``create_customer``.
 
-    A Contact — not a Customer — blocked the create here, so the old message
-    ("Customer with mobile number ... already exists") sent the operator hunting
-    for a customer that may not exist at all. Resolve the Contact's linked
-    Customer when there is one and name it; otherwise say plainly that a contact
-    record holds the number, and name that contact so it is at least findable.
+	A Contact — not a Customer — blocked the create here, so the old message
+	("Customer with mobile number ... already exists") sent the operator hunting
+	for a customer that may not exist at all. Resolve the Contact's linked
+	Customer when there is one and name it; otherwise say plainly that a contact
+	record holds the number, and name that contact so it is at least findable.
 
-    ``source_lead`` mirrors ``_contacts_block_lead_conversion``: the Lead's own
-    auto-created Contact is never the blocker, so it must not be the one named.
-    """
-    try:
-        contacts = frappe.get_all(
-            "Contact", filters={"mobile_no": ["in", phone_forms]}, pluck="name"
-        ) or []
-    except Exception:
-        contacts = []
+	``source_lead`` mirrors ``_contacts_block_lead_conversion``: the Lead's own
+	auto-created Contact is never the blocker, so it must not be the one named.
+	"""
+	try:
+		contacts = frappe.get_all("Contact", filters={"mobile_no": ["in", phone_forms]}, pluck="name") or []
+	except Exception:
+		contacts = []
 
-    unlinked = []
-    for contact_name in contacts:
-        customer_row = _customer_linked_to_contact(contact_name)
-        if customer_row:
-            return _customer_conflict_text(mobile_no, customer_row)
-        if source_lead and _contact_belongs_to_lead(contact_name, source_lead):
-            continue  # the lead's own contact — ignorable, never the blocker
-        unlinked.append(contact_name)
+	unlinked = []
+	for contact_name in contacts:
+		customer_row = _customer_linked_to_contact(contact_name)
+		if customer_row:
+			return _customer_conflict_text(mobile_no, customer_row)
+		if source_lead and _contact_belongs_to_lead(contact_name, source_lead):
+			continue  # the lead's own contact — ignorable, never the blocker
+		unlinked.append(contact_name)
 
-    if unlinked:
-        return (
-            f"Mobile number '{mobile_no}' is already held by contact '{unlinked[0]}', "
-            f"which is not linked to any customer yet. "
-            f"Open that contact or ask a manager to release the number before creating a customer."
-        )
-    return (
-        f"Mobile number '{mobile_no}' is already held by an existing contact record. "
-        f"Ask a manager to check that contact before creating a customer."
-    )
+	if unlinked:
+		return (
+			f"Mobile number '{mobile_no}' is already held by contact '{unlinked[0]}', "
+			f"which is not linked to any customer yet. "
+			f"Open that contact or ask a manager to release the number before creating a customer."
+		)
+	return (
+		f"Mobile number '{mobile_no}' is already held by an existing contact record. "
+		f"Ask a manager to check that contact before creating a customer."
+	)
 
 
 @frappe.whitelist()
-def create_customer(customer_name, mobile_no, customer_primary_address, territory_id, location_link=None, secondary_mobile=None, customer_type=None, customer_group=None, source_lead=None, latitude=None, longitude=None, geo_source=None):
-    """Create a new customer quickly from POS with Territory integration.
+def create_customer(
+	customer_name,
+	mobile_no,
+	customer_primary_address,
+	territory_id,
+	location_link=None,
+	secondary_mobile=None,
+	customer_type=None,
+	customer_group=None,
+	source_lead=None,
+	latitude=None,
+	longitude=None,
+	geo_source=None,
+):
+	"""Create a new customer quickly from POS with Territory integration.
 
-    customer_type/customer_group default to "Individual" (unchanged retail behavior).
-    Pass customer_type="Company" with a B2B/Distributor/Employee customer_group to
-    create a business customer for the B2B sales flow.
+	customer_type/customer_group default to "Individual" (unchanged retail behavior).
+	Pass customer_type="Company" with a B2B/Distributor/Employee customer_group to
+	create a business customer for the B2B sales flow.
 
-    source_lead (optional): when converting a Lead -> Customer (B2B flow), pass the
-    Lead name so the Contact-mobile guard ignores the Lead's own auto-created Contact.
-    B2C retail callers omit this and get the unchanged strict guard.
-    """
-    try:
-        # Debug: Log the received parameters
-        frappe.logger().info(f"create_customer called with: customer_name={customer_name}, mobile_no={mobile_no}, territory_id={territory_id}, address={customer_primary_address}, location_link={location_link}")
-        
-        # Validate required parameters
-        if not customer_name or not mobile_no or not customer_primary_address or not territory_id:
-            frappe.throw("Missing required parameters: customer_name, mobile_no, customer_primary_address, territory_id")
+	source_lead (optional): when converting a Lead -> Customer (B2B flow), pass the
+	Lead name so the Contact-mobile guard ignores the Lead's own auto-created Contact.
+	B2C retail callers omit this and get the unchanged strict guard.
+	"""
+	try:
+		# Debug: Log the received parameters
+		frappe.logger().info(
+			f"create_customer called with: customer_name={customer_name}, mobile_no={mobile_no}, territory_id={territory_id}, address={customer_primary_address}, location_link={location_link}"
+		)
 
-        valid_source_lead = False
-        existing_source_address_name = None
-        if source_lead:
-            source_lead = str(source_lead).strip()
-            if not frappe.db.exists("Lead", source_lead):
-                frappe.throw(f"Lead '{source_lead}' not found.")
-            from jarz_pos.api.crm import (
-                _ensure_b2b_access,
-                _lock_relationship_row,
-                _require_doc_permission,
-                _resolve_lead_customer,
-            )
+		# Validate required parameters
+		if not customer_name or not mobile_no or not customer_primary_address or not territory_id:
+			frappe.throw(
+				"Missing required parameters: customer_name, mobile_no, customer_primary_address, territory_id"
+			)
 
-            _ensure_b2b_access()
-            _require_doc_permission("Lead", source_lead, "write")
-            _lock_relationship_row("Lead", source_lead)
-            linked_customer = _resolve_lead_customer(source_lead)
-            if linked_customer:
-                frappe.throw(
-                    f"Lead '{source_lead}' is already linked to Customer "
-                    f"'{linked_customer}'. Use that existing customer instead."
-                )
-            valid_source_lead = True
+		valid_source_lead = False
+		existing_source_address_name = None
+		if source_lead:
+			source_lead = str(source_lead).strip()
+			if not frappe.db.exists("Lead", source_lead):
+				frappe.throw(f"Lead '{source_lead}' not found.")
+			from jarz_pos.api.crm import (
+				_ensure_b2b_access,
+				_lock_relationship_row,
+				_require_doc_permission,
+				_resolve_lead_customer,
+			)
 
-            candidate_address = str(customer_primary_address or "").strip()
-            if candidate_address and frappe.db.exists("Address", candidate_address):
-                lead_link = frappe.db.exists(
-                    "Dynamic Link",
-                    {
-                        "parenttype": "Address",
-                        "parent": candidate_address,
-                        "link_doctype": "Lead",
-                        "link_name": source_lead,
-                    },
-                )
-                if not lead_link:
-                    frappe.throw(
-                        "Selected address does not belong to the source Lead."
-                    )
-                customer_links = frappe.get_all(
-                    "Dynamic Link",
-                    filters={
-                        "parenttype": "Address",
-                        "parent": candidate_address,
-                        "link_doctype": "Customer",
-                    },
-                    pluck="link_name",
-                    limit_page_length=2,
-                ) or []
-                if customer_links:
-                    frappe.throw(
-                        "Selected Lead address already belongs to another Customer. "
-                        "Choose or create a separate delivery address."
-                    )
-                existing_source_address_name = candidate_address
-        
-        # Allow duplicate names but block duplicate phone numbers to avoid merges/confusion.
-        # Matched across every stored spelling of the number: production holds the
-        # same subscriber as 01111034268 and +201111034268, and an exact-string
-        # check lets a second record through whenever the two forms disagree.
-        # The guard blocks on ANY customer_type by design, but the B2C client
-        # searches with customer_type="Individual", so the blocking record is often
-        # invisible to the operator (staff/Employee and Company accounts). Fetch the
-        # record rather than a boolean and name it in the error, otherwise the only
-        # available response is to retry the same create.
-        phone_forms = phone_variants(mobile_no) or [mobile_no]
-        existing_customer = frappe.get_all(
-            "Customer",
-            filters={"mobile_no": ["in", phone_forms]},
-            fields=["name", "customer_name", "customer_group", "customer_type"],
-            limit=1,
-        )
-        if existing_customer:
-            frappe.throw(_customer_conflict_text(mobile_no, existing_customer[0]))
-        # Also guard against existing contacts with the same mobile.
-        # Lead-aware: when converting a Lead -> Customer, ignore the Lead's own
-        # auto-created Contact; otherwise keep the strict B2C behavior.
-        # These two sites are blocked by a *Contact*, so the message resolves that
-        # contact's linked Customer (when any) instead of asserting a Customer exists.
-        if valid_source_lead:
-            if _contacts_block_lead_conversion(mobile_no, source_lead):
-                frappe.throw(_contact_conflict_text(mobile_no, phone_forms, source_lead))
-        elif frappe.db.exists("Contact", {"mobile_no": ["in", phone_forms]}):
-            frappe.throw(_contact_conflict_text(mobile_no, phone_forms))
-        
-        # Validate territory exists
-        if not frappe.db.exists("Territory", territory_id):
-            frappe.throw(f"Territory with ID '{territory_id}' does not exist")
-            
-        territory_doc = frappe.get_doc("Territory", territory_id)
-        territory_name = territory_doc.territory_name
+			_ensure_b2b_access()
+			_require_doc_permission("Lead", source_lead, "write")
+			_lock_relationship_row("Lead", source_lead)
+			linked_customer = _resolve_lead_customer(source_lead)
+			if linked_customer:
+				frappe.throw(
+					f"Lead '{source_lead}' is already linked to Customer "
+					f"'{linked_customer}'. Use that existing customer instead."
+				)
+			valid_source_lead = True
 
-        # Resolve customer type/group. Defaults preserve retail behavior; validate any
-        # caller-supplied overrides so an invalid value can't silently mis-classify.
-        resolved_type = (customer_type or "").strip() or "Individual"
-        if resolved_type not in ("Individual", "Company"):
-            frappe.throw("customer_type must be 'Individual' or 'Company'")
-        resolved_group = (customer_group or "").strip() or "Individual"
-        if not frappe.db.exists("Customer Group", resolved_group):
-            frappe.throw(f"Customer Group '{resolved_group}' does not exist")
+			candidate_address = str(customer_primary_address or "").strip()
+			if candidate_address and frappe.db.exists("Address", candidate_address):
+				lead_link = frappe.db.exists(
+					"Dynamic Link",
+					{
+						"parenttype": "Address",
+						"parent": candidate_address,
+						"link_doctype": "Lead",
+						"link_name": source_lead,
+					},
+				)
+				if not lead_link:
+					frappe.throw("Selected address does not belong to the source Lead.")
+				customer_links = (
+					frappe.get_all(
+						"Dynamic Link",
+						filters={
+							"parenttype": "Address",
+							"parent": candidate_address,
+							"link_doctype": "Customer",
+						},
+						pluck="link_name",
+						limit_page_length=2,
+					)
+					or []
+				)
+				if customer_links:
+					frappe.throw(
+						"Selected Lead address already belongs to another Customer. "
+						"Choose or create a separate delivery address."
+					)
+				existing_source_address_name = candidate_address
 
-        # Create customer document with only essential fields
-        customer_payload = {
-            "doctype": "Customer",
-            "customer_name": customer_name,
-            "customer_type": resolved_type,
-            "customer_group": resolved_group,
-            "territory": territory_name,
-        }
-        if valid_source_lead:
-            # Standard ERPNext conversion relationship. This is what makes a
-            # second B2B order resolve the same Customer instead of asking to
-            # create another one after the first conversion succeeded.
-            customer_payload["lead_name"] = source_lead
-        # Store phone on the Customer itself when the field exists
-        if frappe.db.has_column("Customer", "mobile_no"):
-            customer_payload["mobile_no"] = mobile_no
-        if frappe.db.has_column("Customer", "phone"):
-            customer_payload["phone"] = mobile_no
+		# Allow duplicate names but block duplicate phone numbers to avoid merges/confusion.
+		# Matched across every stored spelling of the number: production holds the
+		# same subscriber as 01111034268 and +201111034268, and an exact-string
+		# check lets a second record through whenever the two forms disagree.
+		# The guard blocks on ANY customer_type by design, but the B2C client
+		# searches with customer_type="Individual", so the blocking record is often
+		# invisible to the operator (staff/Employee and Company accounts). Fetch the
+		# record rather than a boolean and name it in the error, otherwise the only
+		# available response is to retry the same create.
+		phone_forms = phone_variants(mobile_no) or [mobile_no]
+		existing_customer = frappe.get_all(
+			"Customer",
+			filters={"mobile_no": ["in", phone_forms]},
+			fields=["name", "customer_name", "customer_group", "customer_type"],
+			limit=1,
+		)
+		if existing_customer:
+			frappe.throw(_customer_conflict_text(mobile_no, existing_customer[0]))
+		# Also guard against existing contacts with the same mobile.
+		# Lead-aware: when converting a Lead -> Customer, ignore the Lead's own
+		# auto-created Contact; otherwise keep the strict B2C behavior.
+		# These two sites are blocked by a *Contact*, so the message resolves that
+		# contact's linked Customer (when any) instead of asserting a Customer exists.
+		if valid_source_lead:
+			if _contacts_block_lead_conversion(mobile_no, source_lead):
+				frappe.throw(_contact_conflict_text(mobile_no, phone_forms, source_lead))
+		elif frappe.db.exists("Contact", {"mobile_no": ["in", phone_forms]}):
+			frappe.throw(_contact_conflict_text(mobile_no, phone_forms))
 
-        customer_doc = frappe.get_doc(customer_payload)
-        
-        frappe.logger().info(f"Creating customer with basic data")
-        customer_doc.insert(ignore_permissions=True)
-        frappe.logger().info(f"Customer created successfully: {customer_doc.name}")
-        
-        # Address handling.
-        # If customer_primary_address is an EXISTING Address docname (e.g. a Lead's primary
-        # Address passed by request_sample), LINK that address to the new customer instead
-        # of duplicating it as free text. Any other (free-text) value keeps the original
-        # create-new behavior unchanged for standard retail.
-        existing_address_name = (
-            existing_source_address_name
-            or str(customer_primary_address or "").strip()
-        )
-        if existing_address_name and frappe.db.exists("Address", existing_address_name):
-            address_doc = frappe.get_doc("Address", existing_address_name)
-            already_linked = any(
-                (
-                    getattr(link, "link_doctype", None) == "Customer"
-                    and getattr(link, "link_name", None) == customer_doc.name
-                )
-                for link in (address_doc.get("links") or [])
-            )
-            if not already_linked:
-                address_doc.append(
-                    "links",
-                    {"link_doctype": "Customer", "link_name": customer_doc.name},
-                )
-                address_doc.flags.ignore_permissions = True
-                address_doc.save(ignore_permissions=True)
-            frappe.logger().info(
-                f"Linked existing address {address_doc.name} to customer {customer_doc.name}"
-            )
-        else:
-            # Create address (free-text address line)
-            address_payload = {
-                "doctype": "Address",
-                "address_title": customer_name,
-                "address_type": "Shipping",
-                "address_line1": customer_primary_address,
-                "city": territory_name,  # Use territory name as city
-                "is_primary_address": 1,
-                "is_shipping_address": 1,
-                "links": [{
-                    "link_doctype": "Customer",
-                    "link_name": customer_doc.name
-                }]
-            }
+		# Validate territory exists
+		if not frappe.db.exists("Territory", territory_id):
+			frappe.throw(f"Territory with ID '{territory_id}' does not exist")
 
-            # Store phone on Address if the field exists
-            if frappe.db.has_column("Address", "phone"):
-                address_payload["phone"] = mobile_no
-            if frappe.db.has_column("Address", "phone_number"):
-                address_payload["phone_number"] = mobile_no
-            if frappe.db.has_column("Address", "phone_no"):
-                address_payload["phone_no"] = mobile_no
-            if frappe.db.has_column("Address", "mobile_no"):
-                address_payload["mobile_no"] = mobile_no
+		territory_doc = frappe.get_doc("Territory", territory_id)
+		territory_name = territory_doc.territory_name
 
-            address_doc = frappe.get_doc(address_payload)
+		# Resolve customer type/group. Defaults preserve retail behavior; validate any
+		# caller-supplied overrides so an invalid value can't silently mis-classify.
+		resolved_type = (customer_type or "").strip() or "Individual"
+		if resolved_type not in ("Individual", "Company"):
+			frappe.throw("customer_type must be 'Individual' or 'Company'")
+		resolved_group = (customer_group or "").strip() or "Individual"
+		if not frappe.db.exists("Customer Group", resolved_group):
+			frappe.throw(f"Customer Group '{resolved_group}' does not exist")
 
-            if location_link:
-                address_doc.address_line2 = f"Location: {location_link}"
+		# Create customer document with only essential fields
+		customer_payload = {
+			"doctype": "Customer",
+			"customer_name": customer_name,
+			"customer_type": resolved_type,
+			"customer_group": resolved_group,
+			"territory": territory_name,
+		}
+		if valid_source_lead:
+			# Standard ERPNext conversion relationship. This is what makes a
+			# second B2B order resolve the same Customer instead of asking to
+			# create another one after the first conversion succeeded.
+			customer_payload["lead_name"] = source_lead
+		# Store phone on the Customer itself when the field exists
+		if frappe.db.has_column("Customer", "mobile_no"):
+			customer_payload["mobile_no"] = mobile_no
+		if frappe.db.has_column("Customer", "phone"):
+			customer_payload["phone"] = mobile_no
 
-            frappe.logger().info(f"Creating address")
-            address_doc.insert(ignore_permissions=True)
-            frappe.logger().info(f"Address created successfully: {address_doc.name}")
+		customer_doc = frappe.get_doc(customer_payload)
 
-        # Door pin (COURIER_CONTRACTS §10a). Placed after the whole address block so
-        # it covers both the reuse and the create branch. address_line2 above keeps
-        # its legacy "Location: <url>" text untouched — that string is part of the
-        # WooCommerce dedup signature, and the structured fields written here are
-        # the real store from now on.
-        geo_result = _apply_address_geo(
-            address_doc.name,
-            location_link=location_link,
-            latitude=latitude,
-            longitude=longitude,
-            geo_source=geo_source,
-        )
+		frappe.logger().info(f"Creating customer with basic data")
+		customer_doc.insert(ignore_permissions=True)
+		frappe.logger().info(f"Customer created successfully: {customer_doc.name}")
 
-        # ERPNext's Customer.lead_name conversion hook may already have linked
-        # the Lead's Contact. Reuse it instead of creating a duplicate person.
-        linked_contacts = frappe.get_all(
-            "Dynamic Link",
-            filters={
-                "parenttype": "Contact",
-                "link_doctype": "Customer",
-                "link_name": customer_doc.name,
-            },
-            pluck="parent",
-            limit_page_length=1,
-        ) or []
-        if valid_source_lead and linked_contacts:
-            contact_doc = frappe.get_doc("Contact", linked_contacts[0])
-        else:
-            contact_payload = {
-                "doctype": "Contact",
-                "first_name": customer_name,
-                "mobile_no": mobile_no,
-                "is_primary_contact": 1,
-                "links": [{
-                    "link_doctype": "Customer",
-                    "link_name": customer_doc.name
-                }]
-            }
-            if secondary_mobile:
-                contact_payload["phone"] = secondary_mobile
-            contact_doc = frappe.get_doc(contact_payload)
+		# Address handling.
+		# If customer_primary_address is an EXISTING Address docname (e.g. a Lead's primary
+		# Address passed by request_sample), LINK that address to the new customer instead
+		# of duplicating it as free text. Any other (free-text) value keeps the original
+		# create-new behavior unchanged for standard retail.
+		existing_address_name = existing_source_address_name or str(customer_primary_address or "").strip()
+		if existing_address_name and frappe.db.exists("Address", existing_address_name):
+			address_doc = frappe.get_doc("Address", existing_address_name)
+			already_linked = any(
+				(
+					getattr(link, "link_doctype", None) == "Customer"
+					and getattr(link, "link_name", None) == customer_doc.name
+				)
+				for link in (address_doc.get("links") or [])
+			)
+			if not already_linked:
+				address_doc.append(
+					"links",
+					{"link_doctype": "Customer", "link_name": customer_doc.name},
+				)
+				address_doc.flags.ignore_permissions = True
+				address_doc.save(ignore_permissions=True)
+			frappe.logger().info(
+				f"Linked existing address {address_doc.name} to customer {customer_doc.name}"
+			)
+		else:
+			# Create address (free-text address line)
+			address_payload = {
+				"doctype": "Address",
+				"address_title": customer_name,
+				"address_type": "Shipping",
+				"address_line1": customer_primary_address,
+				"city": territory_name,  # Use territory name as city
+				"is_primary_address": 1,
+				"is_shipping_address": 1,
+				"links": [{"link_doctype": "Customer", "link_name": customer_doc.name}],
+			}
 
-            frappe.logger().info("Creating contact")
-            contact_doc.insert(ignore_permissions=True)
-            frappe.logger().info(f"Contact created successfully: {contact_doc.name}")
-        
-        # Update customer with primary address, contact, and phone
-        customer_doc.customer_primary_address = address_doc.name
-        customer_doc.customer_primary_contact = contact_doc.name
-        if frappe.db.has_column("Customer", "mobile_no"):
-            customer_doc.mobile_no = mobile_no
-        if frappe.db.has_column("Customer", "phone"):
-            customer_doc.phone = mobile_no
-        customer_doc.save(ignore_permissions=True)
-        
-        frappe.logger().info(f"Customer updated with address and contact")
-        
-        # Return the created customer data with territory info
-        result = {
-            "name": customer_doc.name,
-            "customer_name": customer_doc.customer_name,
-            "mobile_no": mobile_no,
-            "customer_primary_address": customer_doc.customer_primary_address,
-            "customer_primary_contact": customer_doc.customer_primary_contact,
-            "territory": customer_doc.territory,
-            "customer_group": customer_doc.customer_group,
-            "geo": geo_result,
-        }
+			# Store phone on Address if the field exists
+			if frappe.db.has_column("Address", "phone"):
+				address_payload["phone"] = mobile_no
+			if frappe.db.has_column("Address", "phone_number"):
+				address_payload["phone_number"] = mobile_no
+			if frappe.db.has_column("Address", "phone_no"):
+				address_payload["phone_no"] = mobile_no
+			if frappe.db.has_column("Address", "mobile_no"):
+				address_payload["mobile_no"] = mobile_no
 
-        # Add territory delivery info
-        _augment_customer_with_territory(result)
-        return result
-        
-    except Exception as e:
-        frappe.log_error(f"Error creating customer: {str(e)}")
-        frappe.throw(f"Failed to create customer: {str(e)}")
+			address_doc = frappe.get_doc(address_payload)
+
+			if location_link:
+				address_doc.address_line2 = f"Location: {location_link}"
+
+			frappe.logger().info(f"Creating address")
+			address_doc.insert(ignore_permissions=True)
+			frappe.logger().info(f"Address created successfully: {address_doc.name}")
+
+		# Door pin (COURIER_CONTRACTS §10a). Placed after the whole address block so
+		# it covers both the reuse and the create branch. address_line2 above keeps
+		# its legacy "Location: <url>" text untouched — that string is part of the
+		# WooCommerce dedup signature, and the structured fields written here are
+		# the real store from now on.
+		geo_result = _apply_address_geo(
+			address_doc.name,
+			location_link=location_link,
+			latitude=latitude,
+			longitude=longitude,
+			geo_source=geo_source,
+		)
+
+		# ERPNext's Customer.lead_name conversion hook may already have linked
+		# the Lead's Contact. Reuse it instead of creating a duplicate person.
+		linked_contacts = (
+			frappe.get_all(
+				"Dynamic Link",
+				filters={
+					"parenttype": "Contact",
+					"link_doctype": "Customer",
+					"link_name": customer_doc.name,
+				},
+				pluck="parent",
+				limit_page_length=1,
+			)
+			or []
+		)
+		if valid_source_lead and linked_contacts:
+			contact_doc = frappe.get_doc("Contact", linked_contacts[0])
+		else:
+			contact_payload = {
+				"doctype": "Contact",
+				"first_name": customer_name,
+				"mobile_no": mobile_no,
+				"is_primary_contact": 1,
+				"links": [{"link_doctype": "Customer", "link_name": customer_doc.name}],
+			}
+			if secondary_mobile:
+				contact_payload["phone"] = secondary_mobile
+			contact_doc = frappe.get_doc(contact_payload)
+
+			frappe.logger().info("Creating contact")
+			contact_doc.insert(ignore_permissions=True)
+			frappe.logger().info(f"Contact created successfully: {contact_doc.name}")
+
+		# Update customer with primary address, contact, and phone
+		customer_doc.customer_primary_address = address_doc.name
+		customer_doc.customer_primary_contact = contact_doc.name
+		if frappe.db.has_column("Customer", "mobile_no"):
+			customer_doc.mobile_no = mobile_no
+		if frappe.db.has_column("Customer", "phone"):
+			customer_doc.phone = mobile_no
+		customer_doc.save(ignore_permissions=True)
+
+		frappe.logger().info(f"Customer updated with address and contact")
+
+		# Return the created customer data with territory info
+		result = {
+			"name": customer_doc.name,
+			"customer_name": customer_doc.customer_name,
+			"mobile_no": mobile_no,
+			"customer_primary_address": customer_doc.customer_primary_address,
+			"customer_primary_contact": customer_doc.customer_primary_contact,
+			"territory": customer_doc.territory,
+			"customer_group": customer_doc.customer_group,
+			"geo": geo_result,
+		}
+
+		# Add territory delivery info
+		_augment_customer_with_territory(result)
+		return result
+
+	except Exception as e:
+		frappe.log_error(f"Error creating customer: {str(e)}")
+		frappe.throw(f"Failed to create customer: {str(e)}")
 
 
 # ---------------------------------------------------------------------------
 # Territory details endpoint (mobile app convenience)
 # ---------------------------------------------------------------------------
 
+
 @frappe.whitelist()
 def get_territory(territory_id: str | None = None):
-    """Return **Territory** doc fields needed by the mobile app.
+	"""Return **Territory** doc fields needed by the mobile app.
 
-    Args:
-        territory_id: Name / ID of the *Territory* DocType.
+	Args:
+	    territory_id: Name / ID of the *Territory* DocType.
 
-    Returns:
-        dict | None: ``{"id": name, "name": territory_name, "delivery_income": x, "delivery_expense": y}``
-    """
+	Returns:
+	    dict | None: ``{"id": name, "name": territory_name, "delivery_income": x, "delivery_expense": y}``
+	"""
 
-    if not territory_id:
-        frappe.throw("territory_id parameter required")
+	if not territory_id:
+		frappe.throw("territory_id parameter required")
 
-    if not frappe.db.exists("Territory", territory_id):
-        frappe.throw(f"Territory '{territory_id}' not found")
+	if not frappe.db.exists("Territory", territory_id):
+		frappe.throw(f"Territory '{territory_id}' not found")
 
-    territory_doc = frappe.get_doc("Territory", territory_id)
-    result = {
-        "id": territory_doc.name,
-        "name": _(territory_doc.territory_name),
-        "territory_name_ar": getattr(territory_doc, 'custom_territory_name_ar', '') or '',
-        "delivery_income": 0.0,
-        "delivery_expense": 0.0,
-    }
-    
-    # Add custom fields if they exist
-    if hasattr(territory_doc, 'delivery_income'):
-        result["delivery_income"] = flt(territory_doc.delivery_income)
-    if hasattr(territory_doc, 'delivery_expense'):
-        result["delivery_expense"] = flt(territory_doc.delivery_expense)
-    
-    return result
+	territory_doc = frappe.get_doc("Territory", territory_id)
+	result = {
+		"id": territory_doc.name,
+		"name": _(territory_doc.territory_name),
+		"territory_name_ar": getattr(territory_doc, "custom_territory_name_ar", "") or "",
+		"delivery_income": 0.0,
+		"delivery_expense": 0.0,
+	}
+
+	# Add custom fields if they exist
+	if hasattr(territory_doc, "delivery_income"):
+		result["delivery_income"] = flt(territory_doc.delivery_income)
+	if hasattr(territory_doc, "delivery_expense"):
+		result["delivery_expense"] = flt(territory_doc.delivery_expense)
+
+	return result
 
 
 @frappe.whitelist()
 def update_default_address(customer, address, phone, invoice=None):
-    """Update customer's default address and phone number.
-    
-    Creates or updates the customer's primary address and contact.
-    Sets the address as the default billing and shipping address.
-    When an invoice is provided, also updates that Sales Invoice's linked
-    address so the kanban board reflects the change immediately.
-    
-    Args:
-        customer: Customer ID/name
-        address: New address text
-        phone: New phone number
-        invoice: (optional) Sales Invoice name to update directly
-        
-    Returns:
-        dict: {"success": True, "message": "Customer address updated successfully"}
-    """
-    try:
-        # Validate customer exists
-        if not frappe.db.exists("Customer", customer):
-            frappe.throw(f"Customer '{customer}' not found")
-            
-        customer_doc = frappe.get_doc("Customer", customer)
+	"""Update customer's default address and phone number.
 
-        result = save_customer_shipping_address(
-            customer=customer,
-            phone=phone,
-            invoice=invoice,
-            address=address,
-            set_as_primary=1,
-        )
-        result["message"] = "Customer address updated successfully"
-        return result
-        
-    except Exception as e:
-        frappe.log_error(f"Error updating customer address: {str(e)}", frappe.get_traceback())
-        frappe.throw(f"Failed to update customer address: {str(e)}")
+	Creates or updates the customer's primary address and contact.
+	Sets the address as the default billing and shipping address.
+	When an invoice is provided, also updates that Sales Invoice's linked
+	address so the kanban board reflects the change immediately.
+
+	Args:
+	    customer: Customer ID/name
+	    address: New address text
+	    phone: New phone number
+	    invoice: (optional) Sales Invoice name to update directly
+
+	Returns:
+	    dict: {"success": True, "message": "Customer address updated successfully"}
+	"""
+	try:
+		# Validate customer exists
+		if not frappe.db.exists("Customer", customer):
+			frappe.throw(f"Customer '{customer}' not found")
+
+		customer_doc = frappe.get_doc("Customer", customer)
+
+		result = save_customer_shipping_address(
+			customer=customer,
+			phone=phone,
+			invoice=invoice,
+			address=address,
+			set_as_primary=1,
+		)
+		result["message"] = "Customer address updated successfully"
+		return result
+
+	except Exception as e:
+		frappe.log_error(f"Error updating customer address: {str(e)}", frappe.get_traceback())
+		frappe.throw(f"Failed to update customer address: {str(e)}")
 
 
 # ---------------------------------------------------------------------------
 # Address management — edit, delete, change on invoice
 # ---------------------------------------------------------------------------
 
+
 @frappe.whitelist()
 def update_customer_shipping_address(
-    customer,
-    address_name,
-    address_line1=None,
-    address_line2=None,
-    city=None,
-    phone=None,
-    pincode=None,
-    branch_name=None,
+	customer,
+	address_name,
+	address_line1=None,
+	address_line2=None,
+	city=None,
+	phone=None,
+	pincode=None,
+	branch_name=None,
 ):
-    """Edit fields on an existing shipping address owned by this customer.
+	"""Edit fields on an existing shipping address owned by this customer.
 
-    Args:
-        customer: Customer ID.
-        address_name: Name of the Address doc to update.
-        address_line1: New first line (optional).
-        address_line2: New second line (optional).
-        city: Territory/city name (optional; used to resolve shipping costs).
-        phone: New phone (optional).
-        pincode: Postal code (optional).
-        branch_name: User-facing branch label stored as Address.address_title.
+	Args:
+	    customer: Customer ID.
+	    address_name: Name of the Address doc to update.
+	    address_line1: New first line (optional).
+	    address_line2: New second line (optional).
+	    city: Territory/city name (optional; used to resolve shipping costs).
+	    phone: New phone (optional).
+	    pincode: Postal code (optional).
+	    branch_name: User-facing branch label stored as Address.address_title.
 
-    Returns:
-        dict: Updated address-book payload identical to
-              ``get_customer_shipping_addresses``.
-    """
-    try:
-        if not customer or not frappe.db.exists("Customer", customer):
-            frappe.throw(_("Customer not found."))
+	Returns:
+	    dict: Updated address-book payload identical to
+	          ``get_customer_shipping_addresses``.
+	"""
+	try:
+		if not customer or not frappe.db.exists("Customer", customer):
+			frappe.throw(_("Customer not found."))
 
-        linked_names = set(get_linked_customer_address_names(customer))
-        if address_name not in linked_names:
-            frappe.throw(_("Address does not belong to this customer."))
+		linked_names = set(get_linked_customer_address_names(customer))
+		if address_name not in linked_names:
+			frappe.throw(_("Address does not belong to this customer."))
 
-        if not frappe.db.exists("Address", address_name):
-            frappe.throw(_("Address not found."))
+		if not frappe.db.exists("Address", address_name):
+			frappe.throw(_("Address not found."))
 
-        address_doc = frappe.get_doc("Address", address_name)
+		address_doc = frappe.get_doc("Address", address_name)
 
-        if branch_name is not None:
-            normalized_branch_name = str(branch_name).strip()
-            if not normalized_branch_name:
-                frappe.throw(_("Branch name cannot be empty."))
-            address_doc.address_title = normalized_branch_name
+		if branch_name is not None:
+			normalized_branch_name = str(branch_name).strip()
+			if not normalized_branch_name:
+				frappe.throw(_("Branch name cannot be empty."))
+			address_doc.address_title = normalized_branch_name
 
-        if str(address_line1 or "").strip():
-            address_doc.address_line1 = str(address_line1).strip()
-        if address_line2 is not None:
-            address_doc.address_line2 = str(address_line2).strip()
-        if str(city or "").strip():
-            address_doc.city = str(city).strip()
-        if str(pincode or "").strip():
-            address_doc.pincode = str(pincode).strip()
+		if str(address_line1 or "").strip():
+			address_doc.address_line1 = str(address_line1).strip()
+		if address_line2 is not None:
+			address_doc.address_line2 = str(address_line2).strip()
+		if str(city or "").strip():
+			address_doc.city = str(city).strip()
+		if str(pincode or "").strip():
+			address_doc.pincode = str(pincode).strip()
 
-        _apply_phone_to_address(address_doc, str(phone or "").strip())
+		_apply_phone_to_address(address_doc, str(phone or "").strip())
 
-        address_doc.address_type = "Shipping"
-        address_doc.is_shipping_address = 1
-        address_doc.save(ignore_permissions=True)
-        frappe.db.commit()
+		address_doc.address_type = "Shipping"
+		address_doc.is_shipping_address = 1
+		address_doc.save(ignore_permissions=True)
+		frappe.db.commit()
 
-        return _build_customer_shipping_address_book(customer)
-    except frappe.ValidationError:
-        raise
-    except Exception as e:
-        frappe.log_error(f"update_customer_shipping_address: {str(e)}", frappe.get_traceback())
-        frappe.throw(_("Failed to update address: {0}").format(str(e)))
+		return _build_customer_shipping_address_book(customer)
+	except frappe.ValidationError:
+		raise
+	except Exception as e:
+		frappe.log_error(f"update_customer_shipping_address: {str(e)}", frappe.get_traceback())
+		frappe.throw(_("Failed to update address: {0}").format(str(e)))
 
 
 @frappe.whitelist()
 def delete_customer_shipping_address(customer, address_name):
-    """Delete a shipping address that belongs to this customer.
+	"""Delete a shipping address that belongs to this customer.
 
-    Refuses deletion if any non-cancelled Sales Invoice still references the
-    address (via ``shipping_address_name`` or ``customer_address``).
+	Refuses deletion if any non-cancelled Sales Invoice still references the
+	address (via ``shipping_address_name`` or ``customer_address``).
 
-    Args:
-        customer: Customer ID.
-        address_name: Name of the Address doc to delete.
+	Args:
+	    customer: Customer ID.
+	    address_name: Name of the Address doc to delete.
 
-    Returns:
-        dict: ``{"success": True}`` on success or raises with an error that
-              includes an ``invoices`` key listing blocking invoice names.
-    """
-    try:
-        if not customer or not frappe.db.exists("Customer", customer):
-            frappe.throw(_("Customer not found."))
+	Returns:
+	    dict: ``{"success": True}`` on success or raises with an error that
+	          includes an ``invoices`` key listing blocking invoice names.
+	"""
+	try:
+		if not customer or not frappe.db.exists("Customer", customer):
+			frappe.throw(_("Customer not found."))
 
-        linked_names = set(get_linked_customer_address_names(customer))
-        if address_name not in linked_names:
-            frappe.throw(_("Address does not belong to this customer."))
+		linked_names = set(get_linked_customer_address_names(customer))
+		if address_name not in linked_names:
+			frappe.throw(_("Address does not belong to this customer."))
 
-        if not frappe.db.exists("Address", address_name):
-            frappe.throw(_("Address not found."))
+		if not frappe.db.exists("Address", address_name):
+			frappe.throw(_("Address not found."))
 
-        # Check if any non-cancelled invoices reference this address.
-        blocking_invoices = frappe.get_all(
-            "Sales Invoice",
-            filters=[
-                ["docstatus", "!=", 2],
-                ["shipping_address_name", "=", address_name],
-            ],
-            fields=["name"],
-            limit=20,
-        ) or []
-        also_blocking = frappe.get_all(
-            "Sales Invoice",
-            filters=[
-                ["docstatus", "!=", 2],
-                ["customer_address", "=", address_name],
-                ["shipping_address_name", "!=", address_name],
-            ],
-            fields=["name"],
-            limit=20,
-        ) or []
-        blocking = list({r["name"] for r in blocking_invoices + also_blocking})
+		# Check if any non-cancelled invoices reference this address.
+		blocking_invoices = (
+			frappe.get_all(
+				"Sales Invoice",
+				filters=[
+					["docstatus", "!=", 2],
+					["shipping_address_name", "=", address_name],
+				],
+				fields=["name"],
+				limit=20,
+			)
+			or []
+		)
+		also_blocking = (
+			frappe.get_all(
+				"Sales Invoice",
+				filters=[
+					["docstatus", "!=", 2],
+					["customer_address", "=", address_name],
+					["shipping_address_name", "!=", address_name],
+				],
+				fields=["name"],
+				limit=20,
+			)
+			or []
+		)
+		blocking = list({r["name"] for r in blocking_invoices + also_blocking})
 
-        if blocking:
-            frappe.throw(
-                _("Cannot delete address: it is referenced by {0} invoice(s). "
-                  "Reassign the address on these invoices first: {1}").format(
-                    len(blocking), ", ".join(blocking[:10])
-                )
-            )
+		if blocking:
+			frappe.throw(
+				_(
+					"Cannot delete address: it is referenced by {0} invoice(s). "
+					"Reassign the address on these invoices first: {1}"
+				).format(len(blocking), ", ".join(blocking[:10]))
+			)
 
-        # Clear customer_primary_address if it pointed to this address.
-        customer_doc = frappe.get_doc("Customer", customer)
-        if customer_doc.customer_primary_address == address_name:
-            remaining = [n for n in linked_names if n != address_name]
-            customer_doc.customer_primary_address = remaining[0] if remaining else ""
-            customer_doc.save(ignore_permissions=True)
+		# Clear customer_primary_address if it pointed to this address.
+		customer_doc = frappe.get_doc("Customer", customer)
+		if customer_doc.customer_primary_address == address_name:
+			remaining = [n for n in linked_names if n != address_name]
+			customer_doc.customer_primary_address = remaining[0] if remaining else ""
+			customer_doc.save(ignore_permissions=True)
 
-        frappe.delete_doc("Address", address_name, ignore_permissions=True, force=True)
-        # A Google Maps branch paired with this door goes back to unpaired.
-        if frappe.db.has_column("Jarz Lead Branch", "linked_address"):
-            frappe.db.sql(
-                "UPDATE `tabJarz Lead Branch` SET linked_address = NULL WHERE linked_address = %s",
-                (address_name,),
-            )
-        frappe.db.commit()
+		frappe.delete_doc("Address", address_name, ignore_permissions=True, force=True)
+		# A Google Maps branch paired with this door goes back to unpaired.
+		if frappe.db.has_column("Jarz Lead Branch", "linked_address"):
+			frappe.db.sql(
+				"UPDATE `tabJarz Lead Branch` SET linked_address = NULL WHERE linked_address = %s",
+				(address_name,),
+			)
+		frappe.db.commit()
 
-        return {"success": True, "address_book": _build_customer_shipping_address_book(customer)}
-    except Exception as e:
-        frappe.log_error(f"delete_customer_shipping_address: {str(e)}", frappe.get_traceback())
-        frappe.throw(_("Failed to delete address."))
+		return {"success": True, "address_book": _build_customer_shipping_address_book(customer)}
+	except Exception as e:
+		frappe.log_error(f"delete_customer_shipping_address: {str(e)}", frappe.get_traceback())
+		frappe.throw(_("Failed to delete address."))
 
 
 def _booked_shipping_income(inv) -> tuple:
-    """Return ``(has_row, amount)`` for the Shipping Income tax rows on an invoice doc.
+	"""Return ``(has_row, amount)`` for the Shipping Income tax rows on an invoice doc.
 
-    Same predicate the rebuild block below uses, so the guard and the rewrite
-    agree on which rows count.
-    """
-    rows = [
-        t for t in (inv.get("taxes") or [])
-        if str(t.description or "").lower().startswith("shipping income")
-    ]
-    return bool(rows), sum(flt(t.tax_amount) for t in rows)
+	Same predicate the rebuild block below uses, so the guard and the rewrite
+	agree on which rows count.
+	"""
+	rows = [
+		t for t in (inv.get("taxes") or []) if str(t.description or "").lower().startswith("shipping income")
+	]
+	return bool(rows), sum(flt(t.tax_amount) for t in rows)
 
 
 def _assert_submitted_invoice_fee_unchanged(inv, new_territory: str, new_income: float) -> None:
-    """Refuse a territory change that would re-rate delivery on a SUBMITTED invoice.
+	"""Refuse a territory change that would re-rate delivery on a SUBMITTED invoice.
 
-    The Shipping Income row is part of ``grand_total``. Rewriting it after submit
-    (``save`` with ``ignore_validate_update_after_submit``) updates the document
-    but ERPNext's ``on_update_after_submit`` reposts the ledger only when an
-    account head changes -- the row keeps the same account, so the receivable
-    stayed at the old total and every later Payment Entry failed validation.
-    A draft may still be re-rated; an invoice with no Shipping Income row is
-    left alone by the rebuild block anyway, so nothing to refuse there.
-    """
-    if int(inv.get("docstatus") or 0) != 1:
-        return
-    has_row, booked = _booked_shipping_income(inv)
-    if not has_row:
-        return
-    if abs(flt(new_income) - flt(booked)) <= 0.005:
-        return
-    frappe.throw(
-        _(
-            "Order {0} is already submitted and {1} bills a different delivery fee "
-            "({2} -> {3}). Changing the address now would alter the invoice total "
-            "after it was posted. Cancel and amend the order to change this address."
-        ).format(inv.name, new_territory, flt(booked), flt(new_income)),
-        title=_("Address change refused"),
-    )
+	The Shipping Income row is part of ``grand_total``. Rewriting it after submit
+	(``save`` with ``ignore_validate_update_after_submit``) updates the document
+	but ERPNext's ``on_update_after_submit`` reposts the ledger only when an
+	account head changes -- the row keeps the same account, so the receivable
+	stayed at the old total and every later Payment Entry failed validation.
+	A draft may still be re-rated; an invoice with no Shipping Income row is
+	left alone by the rebuild block anyway, so nothing to refuse there.
+	"""
+	if int(inv.get("docstatus") or 0) != 1:
+		return
+	has_row, booked = _booked_shipping_income(inv)
+	if not has_row:
+		return
+	if abs(flt(new_income) - flt(booked)) <= 0.005:
+		return
+	frappe.throw(
+		_(
+			"Order {0} is already submitted and {1} bills a different delivery fee "
+			"({2} -> {3}). Changing the address now would alter the invoice total "
+			"after it was posted. Cancel and amend the order to change this address."
+		).format(inv.name, new_territory, flt(booked), flt(new_income)),
+		title=_("Address change refused"),
+	)
 
 
 @frappe.whitelist()
 def change_invoice_shipping_address(invoice_name, address_name):
-    """Re-link a Sales Invoice to a different shipping address and optionally
-    recompute shipping income / expense when the territory changes.
+	"""Re-link a Sales Invoice to a different shipping address and optionally
+	recompute shipping income / expense when the territory changes.
 
-    Only allowed when the invoice has **not** yet gone Out for Delivery and
-    has no downstream settlement artifacts (Courier Transaction, Sales Partner
-    Transaction, Journal Entry from Settle Later).  Payment-only (paid but
-    pre-OFD) invoices are explicitly allowed.
+	Only allowed when the invoice has **not** yet gone Out for Delivery and
+	has no downstream settlement artifacts (Courier Transaction, Sales Partner
+	Transaction, Journal Entry from Settle Later).  Payment-only (paid but
+	pre-OFD) invoices are explicitly allowed.
 
-    On a SUBMITTED invoice the change is refused when the new territory bills a
-    different delivery fee than the one already on the invoice.  Rewriting the
-    Shipping Income row after submit changes ``grand_total`` on the document but
-    ERPNext only reposts the ledger when an account head changes, so the
-    receivable stayed at the old total and every later Payment Entry was
-    rejected with "Allocated Amount cannot be greater than outstanding amount"
-    (ACC-SINV-2026-18096 / Woo 17176, 685 booked vs 700 on the document).  A fee
-    change on a posted order is a financial amendment: cancel and amend instead.
+	On a SUBMITTED invoice the change is refused when the new territory bills a
+	different delivery fee than the one already on the invoice.  Rewriting the
+	Shipping Income row after submit changes ``grand_total`` on the document but
+	ERPNext only reposts the ledger when an account head changes, so the
+	receivable stayed at the old total and every later Payment Entry was
+	rejected with "Allocated Amount cannot be greater than outstanding amount"
+	(ACC-SINV-2026-18096 / Woo 17176, 685 booked vs 700 on the document).  A fee
+	change on a posted order is a financial amendment: cancel and amend instead.
 
-    Args:
-        invoice_name: Name of the Sales Invoice.
-        address_name: Name of the Address doc to link.
+	Args:
+	    invoice_name: Name of the Sales Invoice.
+	    address_name: Name of the Address doc to link.
 
-    Returns:
-        dict with keys: success, territory_changed, old_territory, new_territory,
-        old_expense, new_expense, old_income, new_income.
-    """
-    try:
-        if not frappe.db.exists("Sales Invoice", invoice_name):
-            frappe.throw(_("Sales Invoice not found."))
-        if not frappe.db.exists("Address", address_name):
-            frappe.throw(_("Address not found."))
+	Returns:
+	    dict with keys: success, territory_changed, old_territory, new_territory,
+	    old_expense, new_expense, old_income, new_income.
+	"""
+	try:
+		if not frappe.db.exists("Sales Invoice", invoice_name):
+			frappe.throw(_("Sales Invoice not found."))
+		if not frappe.db.exists("Address", address_name):
+			frappe.throw(_("Address not found."))
 
-        inv = frappe.get_doc("Sales Invoice", invoice_name)
+		inv = frappe.get_doc("Sales Invoice", invoice_name)
 
-        # Gate: check for settlement artifacts (OFD Delivery Note, trip, courier, partner, JE).
-        try:
-            from jarz_pos.api.manager import get_invoice_hard_mutation_blocker
-            blocker = get_invoice_hard_mutation_blocker(inv)
-            if blocker:
-                frappe.throw(
-                    blocker.get("mutation_block_reason")
-                    or _("This invoice cannot have its address changed at this stage.")
-                )
-        except ImportError:
-            pass
+		# Gate: check for settlement artifacts (OFD Delivery Note, trip, courier, partner, JE).
+		try:
+			from jarz_pos.api.manager import get_invoice_hard_mutation_blocker
 
-        old_territory = str(inv.territory or "").strip()
-        address_doc = frappe.get_doc("Address", address_name)
+			blocker = get_invoice_hard_mutation_blocker(inv)
+			if blocker:
+				frappe.throw(
+					blocker.get("mutation_block_reason")
+					or _("This invoice cannot have its address changed at this stage.")
+				)
+		except ImportError:
+			pass
 
-        # Resolve through the SAME helper order creation uses. Address.city only
-        # literally equals a Territory name when the POS wrote it; WooCommerce
-        # stores a free-text label ("Nasr City - مدينه نصر"), and the old
-        # `db.exists("Territory", city)` check failed on every one of those and
-        # silently kept the original territory — so the courier settled against
-        # the old address's rate after an address change.
-        resolved_territory = resolve_address_territory(address_name)
-        territory_resolved = bool(resolved_territory)
-        raw_city = str(address_doc.city or "").strip()
+		old_territory = str(inv.territory or "").strip()
+		address_doc = frappe.get_doc("Address", address_name)
 
-        if territory_resolved:
-            new_territory = resolved_territory
-        else:
-            # Never silently pretend the territory is still right: keep the old
-            # value but tell the caller so the operator can fix the address.
-            new_territory = old_territory
-            # Error Log, not frappe.logger(): the default log level off a dev
-            # server is ERROR, so .warning() would never be seen.
-            frappe.log_error(
-                f"Invoice {invoice_name}: address {address_name} has city "
-                f"{raw_city!r}, which maps to no Territory. Kept "
-                f"{old_territory!r} and did NOT recompute shipping.",
-                "Address Territory Unresolved",
-            )
+		# Resolve through the SAME helper order creation uses. Address.city only
+		# literally equals a Territory name when the POS wrote it; WooCommerce
+		# stores a free-text label ("Nasr City - مدينه نصر"), and the old
+		# `db.exists("Territory", city)` check failed on every one of those and
+		# silently kept the original territory — so the courier settled against
+		# the old address's rate after an address change.
+		resolved_territory = resolve_address_territory(address_name)
+		territory_resolved = bool(resolved_territory)
+		raw_city = str(address_doc.city or "").strip()
 
-        territory_changed = bool(new_territory and new_territory != old_territory)
+		if territory_resolved:
+			new_territory = resolved_territory
+		else:
+			# Never silently pretend the territory is still right: keep the old
+			# value but tell the caller so the operator can fix the address.
+			new_territory = old_territory
+			# Error Log, not frappe.logger(): the default log level off a dev
+			# server is ERROR, so .warning() would never be seen.
+			frappe.log_error(
+				f"Invoice {invoice_name}: address {address_name} has city "
+				f"{raw_city!r}, which maps to no Territory. Kept "
+				f"{old_territory!r} and did NOT recompute shipping.",
+				"Address Territory Unresolved",
+			)
 
-        # Helper to read shipping values from Territory.
-        def _territory_values(territory: str):
-            if not territory or not frappe.db.exists("Territory", territory):
-                return 0.0, 0.0
-            try:
-                terr = frappe.get_doc("Territory", territory)
-                income = flt(getattr(terr, "delivery_income", 0) or 0)
-                expense = flt(getattr(terr, "delivery_expense", 0) or 0)
-                return income, expense
-            except Exception:
-                return 0.0, 0.0
+		territory_changed = bool(new_territory and new_territory != old_territory)
 
-        old_income, old_expense = _territory_values(old_territory)
-        new_income = old_income
-        new_expense = old_expense
-        if territory_changed:
-            new_income, new_expense = _territory_values(new_territory)
+		# Helper to read shipping values from Territory.
+		def _territory_values(territory: str):
+			if not territory or not frappe.db.exists("Territory", territory):
+				return 0.0, 0.0
+			try:
+				terr = frappe.get_doc("Territory", territory)
+				income = flt(getattr(terr, "delivery_income", 0) or 0)
+				expense = flt(getattr(terr, "delivery_expense", 0) or 0)
+				return income, expense
+			except Exception:
+				return 0.0, 0.0
 
-        # Everything above is a read. Decide BEFORE the first write whether this
-        # change is allowed at all, so a refusal leaves the invoice untouched.
-        if territory_changed:
-            _assert_submitted_invoice_fee_unchanged(inv, new_territory, new_income)
+		old_income, old_expense = _territory_values(old_territory)
+		new_income = old_income
+		new_expense = old_expense
+		if territory_changed:
+			new_income, new_expense = _territory_values(new_territory)
 
-        # Re-link address fields on the SI (works on Submitted via ignore_validate_update_after_submit).
-        link_shipping_address_to_invoice(invoice_name, address_name)
+		# Everything above is a read. Decide BEFORE the first write whether this
+		# change is allowed at all, so a refusal leaves the invoice untouched.
+		if territory_changed:
+			_assert_submitted_invoice_fee_unchanged(inv, new_territory, new_income)
 
-        if territory_changed:
-            # Update territory on invoice.
-            frappe.db.set_value(
-                "Sales Invoice", invoice_name, "territory", new_territory, update_modified=False
-            )
+		# Re-link address fields on the SI (works on Submitted via ignore_validate_update_after_submit).
+		link_shipping_address_to_invoice(invoice_name, address_name)
 
-            # Recompute custom_shipping_expense unless an Approved override is in place.
-            override_status = str(
-                frappe.db.get_value("Sales Invoice", invoice_name, "custom_shipping_override_status") or ""
-            ).strip()
-            if override_status != "Approved":
-                # Check sub-territory override.
-                sub_terr = str(
-                    frappe.db.get_value("Sales Invoice", invoice_name, "custom_sub_territory") or ""
-                ).strip()
-                if sub_terr and frappe.db.exists("Territory", sub_terr):
-                    sub_expense = flt(frappe.db.get_value("Territory", sub_terr, "delivery_expense") or 0)
-                    if sub_expense > 0:
-                        new_expense = sub_expense
-                frappe.db.set_value(
-                    "Sales Invoice", invoice_name, "custom_shipping_expense", new_expense, update_modified=False
-                )
-                # Clear sub-territory since territory changed; user must re-select.
-                frappe.db.set_value(
-                    "Sales Invoice", invoice_name, "custom_sub_territory", "", update_modified=False
-                )
+		if territory_changed:
+			# Update territory on invoice.
+			frappe.db.set_value(
+				"Sales Invoice", invoice_name, "territory", new_territory, update_modified=False
+			)
 
-            # Rebuild shipping income tax row to match new territory rate.
-            # Reload first to pick up all db.set_value changes above.
-            inv.reload()
-            had_shipping_income_row = any(
-                str(t.description or "").lower().startswith("shipping income")
-                for t in (inv.get("taxes") or [])
-            )
-            if had_shipping_income_row:
-                # Keep the account the row is already posted to: an invoice
-                # submitted before 2026-09 credits Freight, and re-resolving it
-                # to Shipping Income would repost this invoice's ledger.
-                posted_account = next(
-                    (
-                        t.account_head for t in (inv.get("taxes") or [])
-                        if str(t.description or "").lower().startswith("shipping income") and t.account_head
-                    ),
-                    None,
-                ) if int(inv.docstatus or 0) == 1 else None
-                inv.set("taxes", [
-                    t for t in (inv.get("taxes") or [])
-                    if not str(t.description or "").lower().startswith("shipping income")
-                ])
-                if new_income > 0:
-                    from jarz_pos.utils.delivery_utils import add_delivery_charges_to_taxes
-                    add_delivery_charges_to_taxes(
-                        inv,
-                        new_income,
-                        delivery_description=f"Shipping Income ({new_territory})",
-                        account_head=posted_account,
-                    )
-                inv.calculate_taxes_and_totals()
-                inv.flags.ignore_validate_update_after_submit = True
-                inv.save(ignore_permissions=True)
+			# Recompute custom_shipping_expense unless an Approved override is in place.
+			override_status = str(
+				frappe.db.get_value("Sales Invoice", invoice_name, "custom_shipping_override_status") or ""
+			).strip()
+			if override_status != "Approved":
+				# Check sub-territory override.
+				sub_terr = str(
+					frappe.db.get_value("Sales Invoice", invoice_name, "custom_sub_territory") or ""
+				).strip()
+				if sub_terr and frappe.db.exists("Territory", sub_terr):
+					sub_expense = flt(frappe.db.get_value("Territory", sub_terr, "delivery_expense") or 0)
+					if sub_expense > 0:
+						new_expense = sub_expense
+				frappe.db.set_value(
+					"Sales Invoice",
+					invoice_name,
+					"custom_shipping_expense",
+					new_expense,
+					update_modified=False,
+				)
+				# Clear sub-territory since territory changed; user must re-select.
+				frappe.db.set_value(
+					"Sales Invoice", invoice_name, "custom_sub_territory", "", update_modified=False
+				)
 
-            # Append a comment on the SI for audit trail.
-            try:
-                frappe.get_doc({
-                    "doctype": "Comment",
-                    "comment_type": "Info",
-                    "reference_doctype": "Sales Invoice",
-                    "reference_name": invoice_name,
-                    "content": _(
-                        "Shipping address changed to {0}. Territory updated from {1} to {2}. "
-                        "Shipping expense: {3} → {4}. Shipping income: {5} → {6}."
-                    ).format(address_name, old_territory, new_territory, old_expense, new_expense, old_income, new_income),
-                }).insert(ignore_permissions=True)
-            except Exception:
-                pass
+			# Rebuild shipping income tax row to match new territory rate.
+			# Reload first to pick up all db.set_value changes above.
+			inv.reload()
+			had_shipping_income_row = any(
+				str(t.description or "").lower().startswith("shipping income")
+				for t in (inv.get("taxes") or [])
+			)
+			if had_shipping_income_row:
+				# Keep the account the row is already posted to: an invoice
+				# submitted before 2026-09 credits Freight, and re-resolving it
+				# to Shipping Income would repost this invoice's ledger.
+				posted_account = (
+					next(
+						(
+							t.account_head
+							for t in (inv.get("taxes") or [])
+							if str(t.description or "").lower().startswith("shipping income")
+							and t.account_head
+						),
+						None,
+					)
+					if int(inv.docstatus or 0) == 1
+					else None
+				)
+				inv.set(
+					"taxes",
+					[
+						t
+						for t in (inv.get("taxes") or [])
+						if not str(t.description or "").lower().startswith("shipping income")
+					],
+				)
+				if new_income > 0:
+					from jarz_pos.utils.delivery_utils import add_delivery_charges_to_taxes
 
-        frappe.db.commit()
+					add_delivery_charges_to_taxes(
+						inv,
+						new_income,
+						delivery_description=f"Shipping Income ({new_territory})",
+						account_head=posted_account,
+					)
+				inv.calculate_taxes_and_totals()
+				inv.flags.ignore_validate_update_after_submit = True
+				inv.save(ignore_permissions=True)
 
-        return {
-            "success": True,
-            "territory_changed": territory_changed,
-            "territory_resolved": territory_resolved,
-            "unresolved_city": "" if territory_resolved else raw_city,
-            "old_territory": old_territory,
-            "new_territory": new_territory if territory_changed else old_territory,
-            "old_expense": old_expense,
-            "new_expense": new_expense,
-            "old_income": old_income,
-            "new_income": new_income,
-        }
-    except frappe.ValidationError:
-        # Deliberate refusals (hard-mutation blocker, fee guard, not-found) carry
-        # their own message. Wrapping them in the generic one below hid the
-        # reason from the app, which showed "Failed to change invoice address".
-        raise
-    except Exception as e:
-        frappe.log_error(f"change_invoice_shipping_address: {str(e)}", frappe.get_traceback())
-        frappe.throw(_("Failed to change invoice shipping address."))
+			# Append a comment on the SI for audit trail.
+			try:
+				frappe.get_doc(
+					{
+						"doctype": "Comment",
+						"comment_type": "Info",
+						"reference_doctype": "Sales Invoice",
+						"reference_name": invoice_name,
+						"content": _(
+							"Shipping address changed to {0}. Territory updated from {1} to {2}. "
+							"Shipping expense: {3} → {4}. Shipping income: {5} → {6}."
+						).format(
+							address_name,
+							old_territory,
+							new_territory,
+							old_expense,
+							new_expense,
+							old_income,
+							new_income,
+						),
+					}
+				).insert(ignore_permissions=True)
+			except Exception:
+				pass
+
+		frappe.db.commit()
+
+		return {
+			"success": True,
+			"territory_changed": territory_changed,
+			"territory_resolved": territory_resolved,
+			"unresolved_city": "" if territory_resolved else raw_city,
+			"old_territory": old_territory,
+			"new_territory": new_territory if territory_changed else old_territory,
+			"old_expense": old_expense,
+			"new_expense": new_expense,
+			"old_income": old_income,
+			"new_income": new_income,
+		}
+	except frappe.ValidationError:
+		# Deliberate refusals (hard-mutation blocker, fee guard, not-found) carry
+		# their own message. Wrapping them in the generic one below hid the
+		# reason from the app, which showed "Failed to change invoice address".
+		raise
+	except Exception as e:
+		frappe.log_error(f"change_invoice_shipping_address: {str(e)}", frappe.get_traceback())
+		frappe.throw(_("Failed to change invoice shipping address."))

@@ -10,861 +10,917 @@ from frappe.utils import flt
 from jarz_pos.constants import WS_EVENTS
 from jarz_pos.services import ofd_pin_gate
 from jarz_pos.services.delivery_handling import (
-    mark_courier_outstanding,
-    ensure_delivery_note_for_invoice,
-    _get_delivery_expense_amount,
-    _create_shipping_expense_to_creditors_je,
-    build_ofd_shortage_field_values,
-    get_ofd_shortage_preview,
-    get_creditors_account,
-    update_submitted_sales_invoice_fields,
+	mark_courier_outstanding,
+	ensure_delivery_note_for_invoice,
+	_get_delivery_expense_amount,
+	_create_shipping_expense_to_creditors_je,
+	build_ofd_shortage_field_values,
+	get_ofd_shortage_preview,
+	get_creditors_account,
+	update_submitted_sales_invoice_fields,
 )
 from jarz_pos.utils.courier_visibility import (
-    assert_courier_matches_pos_profile,
-    assert_invoices_share_pos_profile,
+	assert_courier_matches_pos_profile,
+	assert_invoices_share_pos_profile,
 )
 from jarz_pos.utils.invoice_utils import normalize_woo_order_id
 
 
 def _publish_trip_event(event: str, payload: dict, trip, *, pos_profile: str | None = None) -> None:
-    """Notify the branches a trip belongs to instead of the whole site.
+	"""Notify the branches a trip belongs to instead of the whole site.
 
-    Delivery Trip carries no POS Profile of its own, so the branches are derived
-    from the orders on the trip (normally one, but a trip is not structurally
-    prevented from spanning branches).
-    """
-    from jarz_pos.utils.realtime import publish_to_branches
+	Delivery Trip carries no POS Profile of its own, so the branches are derived
+	from the orders on the trip (normally one, but a trip is not structurally
+	prevented from spanning branches).
+	"""
+	from jarz_pos.utils.realtime import publish_to_branches
 
-    profiles: set[str] = set()
-    if pos_profile:
-        profiles.add(str(pos_profile).strip())
+	profiles: set[str] = set()
+	if pos_profile:
+		profiles.add(str(pos_profile).strip())
 
-    try:
-        names = [
-            r.invoice for r in (getattr(trip, "invoices", None) or []) if getattr(r, "invoice", None)
-        ]
-        if names:
-            rows = frappe.get_all(
-                "Sales Invoice",
-                filters={"name": ["in", names]},
-                fields=["custom_kanban_profile", "pos_profile"],
-            ) or []
-            for row in rows:
-                branch = str(row.get("custom_kanban_profile") or row.get("pos_profile") or "").strip()
-                if branch:
-                    profiles.add(branch)
-    except Exception:
-        frappe.log_error(
-            frappe.get_traceback(),
-            f"Failed to resolve trip branches for realtime event {event}",
-        )
+	try:
+		names = [r.invoice for r in (getattr(trip, "invoices", None) or []) if getattr(r, "invoice", None)]
+		if names:
+			rows = (
+				frappe.get_all(
+					"Sales Invoice",
+					filters={"name": ["in", names]},
+					fields=["custom_kanban_profile", "pos_profile"],
+				)
+				or []
+			)
+			for row in rows:
+				branch = str(row.get("custom_kanban_profile") or row.get("pos_profile") or "").strip()
+				if branch:
+					profiles.add(branch)
+	except Exception:
+		frappe.log_error(
+			frappe.get_traceback(),
+			f"Failed to resolve trip branches for realtime event {event}",
+		)
 
-    publish_to_branches(event, payload, sorted(p for p in profiles if p))
+	publish_to_branches(event, payload, sorted(p for p in profiles if p))
 
 
 # ---------------------------------------------------------------------------
 # Trip creation
 # ---------------------------------------------------------------------------
 
+
 @frappe.whitelist(allow_guest=False)
 def create_delivery_trip(invoice_names, party_type: str, party: str, pos_profile: str | None = None):
-    """Create a Delivery Trip grouping the given invoices.
+	"""Create a Delivery Trip grouping the given invoices.
 
-    Args:
-        invoice_names: list of Sales Invoice names (JSON string or list)
-        party_type: "Employee" or "Supplier"
-        party: Party name (Employee or Supplier)
+	Args:
+	    invoice_names: list of Sales Invoice names (JSON string or list)
+	    party_type: "Employee" or "Supplier"
+	    party: Party name (Employee or Supplier)
 
-    Returns:
-        dict with trip details
-    """
-    frappe.has_permission("Delivery Trip", ptype="create", throw=True)
+	Returns:
+	    dict with trip details
+	"""
+	frappe.has_permission("Delivery Trip", ptype="create", throw=True)
 
-    if isinstance(invoice_names, str):
-        invoice_names = frappe.parse_json(invoice_names)
-    if not invoice_names:
-        frappe.throw(_("At least one invoice is required to create a trip"))
-    if party_type not in ("Employee", "Supplier"):
-        frappe.throw(_("Courier party type must be Employee or Supplier"))
-    if not frappe.db.exists(party_type, party):
-        frappe.throw(_("{0} '{1}' not found").format(party_type, party))
+	if isinstance(invoice_names, str):
+		invoice_names = frappe.parse_json(invoice_names)
+	if not invoice_names:
+		frappe.throw(_("At least one invoice is required to create a trip"))
+	if party_type not in ("Employee", "Supplier"):
+		frappe.throw(_("Courier party type must be Employee or Supplier"))
+	if not frappe.db.exists(party_type, party):
+		frappe.throw(_("{0} '{1}' not found").format(party_type, party))
 
-    # Validate all invoices
-    invoice_docs = []
-    for inv_name in invoice_names:
-        inv = frappe.get_doc("Sales Invoice", inv_name)
-        invoice_docs.append(inv)
-        if inv.docstatus != 1:
-            frappe.throw(_("Invoice {0} is not submitted").format(inv_name))
+	# Validate all invoices
+	invoice_docs = []
+	for inv_name in invoice_names:
+		inv = frappe.get_doc("Sales Invoice", inv_name)
+		invoice_docs.append(inv)
+		if inv.docstatus != 1:
+			frappe.throw(_("Invoice {0} is not submitted").format(inv_name))
 
-        state = (
-            inv.get("custom_sales_invoice_state")
-            or inv.get("sales_invoice_state")
-            or ""
-        ).strip().lower()
-        if state in ("out for delivery", "out_for_delivery", "delivered", "cancelled"):
-            frappe.throw(_("Invoice {0} is in state '{1}' and cannot be added to a trip").format(
-                inv_name, state
-            ))
+		state = (
+			(inv.get("custom_sales_invoice_state") or inv.get("sales_invoice_state") or "").strip().lower()
+		)
+		if state in ("out for delivery", "out_for_delivery", "delivered", "cancelled"):
+			frappe.throw(
+				_("Invoice {0} is in state '{1}' and cannot be added to a trip").format(inv_name, state)
+			)
 
-        is_pickup = bool(getattr(inv, "custom_is_pickup", 0))
-        if is_pickup:
-            frappe.throw(_("Pickup invoice {0} cannot be added to a delivery trip").format(inv_name))
+		is_pickup = bool(getattr(inv, "custom_is_pickup", 0))
+		if is_pickup:
+			frappe.throw(_("Pickup invoice {0} cannot be added to a delivery trip").format(inv_name))
 
-        existing_trip = (
-            getattr(inv, "custom_delivery_trip", None)
-            or frappe.db.get_value("Sales Invoice", inv_name, "custom_delivery_trip")
-            or ""
-        )
-        if existing_trip:
-            # Check if the existing trip is still active
-            trip_status = frappe.db.get_value("Delivery Trip", existing_trip, "status")
-            if trip_status and trip_status != "Completed":
-                frappe.throw(
-                    _("Invoice {0} is already in active trip {1}").format(inv_name, existing_trip)
-                )
+		existing_trip = (
+			getattr(inv, "custom_delivery_trip", None)
+			or frappe.db.get_value("Sales Invoice", inv_name, "custom_delivery_trip")
+			or ""
+		)
+		if existing_trip:
+			# Check if the existing trip is still active
+			trip_status = frappe.db.get_value("Delivery Trip", existing_trip, "status")
+			if trip_status and trip_status != "Completed":
+				frappe.throw(_("Invoice {0} is already in active trip {1}").format(inv_name, existing_trip))
 
-        # Check sub-territory requirement
-        from jarz_pos.api.territories import territory_has_children
-        inv_territory = (inv.territory or "").strip()
-        inv_sub = (getattr(inv, "custom_sub_territory", None) or "").strip()
-        if inv_territory and territory_has_children(inv_territory) and not inv_sub:
-            frappe.throw(
-                _("Invoice {0}: please select a sub-territory for '{1}' before adding to trip").format(
-                    inv_name, inv_territory
-                )
-            )
+		# Check sub-territory requirement
+		from jarz_pos.api.territories import territory_has_children
 
-    resolved_pos_profile = assert_invoices_share_pos_profile(
-        invoice_docs,
-        requested_pos_profile=pos_profile,
-    )
-    courier_details = assert_courier_matches_pos_profile(party_type, party, resolved_pos_profile)
+		inv_territory = (inv.territory or "").strip()
+		inv_sub = (getattr(inv, "custom_sub_territory", None) or "").strip()
+		if inv_territory and territory_has_children(inv_territory) and not inv_sub:
+			frappe.throw(
+				_("Invoice {0}: please select a sub-territory for '{1}' before adding to trip").format(
+					inv_name, inv_territory
+				)
+			)
 
-    # Create Delivery Trip document
-    trip = frappe.new_doc("Delivery Trip")
-    trip.trip_date = frappe.utils.today()
-    trip.courier_party_type = party_type
-    trip.courier_party = party
-    trip.status = "Created"
+	resolved_pos_profile = assert_invoices_share_pos_profile(
+		invoice_docs,
+		requested_pos_profile=pos_profile,
+	)
+	courier_details = assert_courier_matches_pos_profile(party_type, party, resolved_pos_profile)
 
-    for inv in invoice_docs:
-        inv_name = inv.name
-        # Prefer persisted SI value, fall back to territory computation
-        shipping_exp = float(getattr(inv, "custom_shipping_expense", 0) or 0)
-        if shipping_exp <= 0:
-            shipping_exp = _get_delivery_expense_amount(inv) or 0.0
-            if shipping_exp > 0:
-                try:
-                    inv.db_set("custom_shipping_expense", shipping_exp, update_modified=False)
-                except Exception:
-                    pass
-        _terr = inv.territory or ""
-        _sub = getattr(inv, "custom_sub_territory", None) or ""
-        trip.append("invoices", {
-            "invoice": inv_name,
-            "customer_name": inv.customer_name,
-            "territory": _terr,
-            "sub_territory": _sub,
-            "grand_total": float(inv.grand_total or 0),
-            "shipping_expense": shipping_exp,
-            "invoice_status": (
-                inv.get("custom_sales_invoice_state")
-                or inv.get("sales_invoice_state")
-                or "In Progress"
-            ),
-        })
+	# Create Delivery Trip document
+	trip = frappe.new_doc("Delivery Trip")
+	trip.trip_date = frappe.utils.today()
+	trip.courier_party_type = party_type
+	trip.courier_party = party
+	trip.status = "Created"
 
-    trip.insert(ignore_permissions=True)
+	for inv in invoice_docs:
+		inv_name = inv.name
+		# Prefer persisted SI value, fall back to territory computation
+		shipping_exp = float(getattr(inv, "custom_shipping_expense", 0) or 0)
+		if shipping_exp <= 0:
+			shipping_exp = _get_delivery_expense_amount(inv) or 0.0
+			if shipping_exp > 0:
+				try:
+					inv.db_set("custom_shipping_expense", shipping_exp, update_modified=False)
+				except Exception:
+					pass
+		_terr = inv.territory or ""
+		_sub = getattr(inv, "custom_sub_territory", None) or ""
+		trip.append(
+			"invoices",
+			{
+				"invoice": inv_name,
+				"customer_name": inv.customer_name,
+				"territory": _terr,
+				"sub_territory": _sub,
+				"grand_total": float(inv.grand_total or 0),
+				"shipping_expense": shipping_exp,
+				"invoice_status": (
+					inv.get("custom_sales_invoice_state") or inv.get("sales_invoice_state") or "In Progress"
+				),
+			},
+		)
 
-    # Link trip back to each Sales Invoice
-    for inv in invoice_docs:
-        update_submitted_sales_invoice_fields(
-            inv,
-            {
-                "custom_delivery_trip": trip.name,
-                "custom_courier_party_type": party_type,
-                "custom_courier_party": party,
-                "custom_delivery_partner": courier_details.get("delivery_partner") or None,
-            },
-        )
+	trip.insert(ignore_permissions=True)
 
-    frappe.db.commit()
+	# Link trip back to each Sales Invoice
+	for inv in invoice_docs:
+		update_submitted_sales_invoice_fields(
+			inv,
+			{
+				"custom_delivery_trip": trip.name,
+				"custom_courier_party_type": party_type,
+				"custom_courier_party": party,
+				"custom_delivery_partner": courier_details.get("delivery_partner") or None,
+			},
+		)
 
-    # Publish realtime event
-    _publish_trip_event(WS_EVENTS.TRIP_CREATED, {
-        "trip": trip.name,
-        "status": trip.status,
-        "courier_party_type": trip.courier_party_type,
-        "courier_party": trip.courier_party,
-        "courier_display_name": trip.courier_display_name,
-        "pos_profile": resolved_pos_profile,
-        "total_orders": trip.total_orders,
-        "total_amount": float(trip.total_amount or 0),
-        "total_shipping_expense": float(trip.total_shipping_expense or 0),
-        "is_double_shipping": bool(trip.is_double_shipping),
-        "invoices": [r.invoice for r in trip.invoices],
-    }, trip, pos_profile=resolved_pos_profile)
+	frappe.db.commit()
 
-    return {
-        "success": True,
-        "name": trip.name,
-        "trip": trip.name,
-        "trip_date": str(trip.trip_date),
-        "status": trip.status,
-        "courier_party_type": trip.courier_party_type,
-        "courier_party": trip.courier_party,
-        "courier_display_name": trip.courier_display_name,
-        "pos_profile": resolved_pos_profile,
-        "total_orders": trip.total_orders,
-        "total_amount": float(trip.total_amount or 0),
-        "total_shipping_expense": float(trip.total_shipping_expense or 0),
-        "is_double_shipping": bool(trip.is_double_shipping),
-        "double_shipping_territory": trip.double_shipping_territory,
-    }
+	# Publish realtime event
+	_publish_trip_event(
+		WS_EVENTS.TRIP_CREATED,
+		{
+			"trip": trip.name,
+			"status": trip.status,
+			"courier_party_type": trip.courier_party_type,
+			"courier_party": trip.courier_party,
+			"courier_display_name": trip.courier_display_name,
+			"pos_profile": resolved_pos_profile,
+			"total_orders": trip.total_orders,
+			"total_amount": float(trip.total_amount or 0),
+			"total_shipping_expense": float(trip.total_shipping_expense or 0),
+			"is_double_shipping": bool(trip.is_double_shipping),
+			"invoices": [r.invoice for r in trip.invoices],
+		},
+		trip,
+		pos_profile=resolved_pos_profile,
+	)
+
+	return {
+		"success": True,
+		"name": trip.name,
+		"trip": trip.name,
+		"trip_date": str(trip.trip_date),
+		"status": trip.status,
+		"courier_party_type": trip.courier_party_type,
+		"courier_party": trip.courier_party,
+		"courier_display_name": trip.courier_display_name,
+		"pos_profile": resolved_pos_profile,
+		"total_orders": trip.total_orders,
+		"total_amount": float(trip.total_amount or 0),
+		"total_shipping_expense": float(trip.total_shipping_expense or 0),
+		"is_double_shipping": bool(trip.is_double_shipping),
+		"double_shipping_territory": trip.double_shipping_territory,
+	}
 
 
 # ---------------------------------------------------------------------------
 # Send trip for delivery (bulk OFD)
 # ---------------------------------------------------------------------------
 
+
 def _coerce_bool(value) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return float(value) != 0.0
-    return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+	if isinstance(value, bool):
+		return value
+	if isinstance(value, (int, float)):
+		return float(value) != 0.0
+	return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
 def _format_qty(value) -> str:
-    qty = flt(value)
-    if abs(qty - round(qty)) < 0.0001:
-        return str(int(round(qty)))
-    return f"{qty:.3f}".rstrip("0").rstrip(".")
+	qty = flt(value)
+	if abs(qty - round(qty)) < 0.0001:
+		return str(int(round(qty)))
+	return f"{qty:.3f}".rstrip("0").rstrip(".")
 
 
 def _collect_trip_ofd_candidates(trip):
-    from jarz_pos.api.territories import territory_has_children
+	from jarz_pos.api.territories import territory_has_children
 
-    blocking_errors = []
-    to_process = []
+	blocking_errors = []
+	to_process = []
 
-    for row in trip.invoices:
-        inv = frappe.get_doc("Sales Invoice", row.invoice)
-        current_state = (
-            inv.get("custom_sales_invoice_state")
-            or inv.get("sales_invoice_state")
-            or ""
-        ).strip().lower()
+	for row in trip.invoices:
+		inv = frappe.get_doc("Sales Invoice", row.invoice)
+		current_state = (
+			(inv.get("custom_sales_invoice_state") or inv.get("sales_invoice_state") or "").strip().lower()
+		)
 
-        if current_state in ("out for delivery", "out_for_delivery", "delivered"):
-            continue
+		if current_state in ("out for delivery", "out_for_delivery", "delivered"):
+			continue
 
-        inv_territory = (inv.territory or "").strip()
-        inv_sub = (getattr(inv, "custom_sub_territory", None) or "").strip()
-        if inv_territory and territory_has_children(inv_territory) and not inv_sub:
-            blocking_errors.append(
-                _("Invoice {0}: please select a sub-territory for '{1}' before sending").format(
-                    row.invoice, inv_territory
-                )
-            )
+		inv_territory = (inv.territory or "").strip()
+		inv_sub = (getattr(inv, "custom_sub_territory", None) or "").strip()
+		if inv_territory and territory_has_children(inv_territory) and not inv_sub:
+			blocking_errors.append(
+				_("Invoice {0}: please select a sub-territory for '{1}' before sending").format(
+					row.invoice, inv_territory
+				)
+			)
 
-        override_status = (
-            getattr(inv, "custom_shipping_override_status", None)
-            or frappe.db.get_value("Sales Invoice", row.invoice, "custom_shipping_override_status")
-            or ""
-        )
-        if str(override_status).strip() == "Pending":
-            blocking_errors.append(
-                _("Invoice {0}: custom shipping request is pending approval").format(row.invoice)
-            )
+		override_status = (
+			getattr(inv, "custom_shipping_override_status", None)
+			or frappe.db.get_value("Sales Invoice", row.invoice, "custom_shipping_override_status")
+			or ""
+		)
+		if str(override_status).strip() == "Pending":
+			blocking_errors.append(
+				_("Invoice {0}: custom shipping request is pending approval").format(row.invoice)
+			)
 
-        to_process.append(row)
+		to_process.append(row)
 
-    return blocking_errors, to_process
+	return blocking_errors, to_process
 
 
 def _build_ofd_preview_errors(preview: dict) -> list[str]:
-    errors = list(preview.get("validation_errors") or [])
+	errors = list(preview.get("validation_errors") or [])
 
-    for mismatch in preview.get("warehouse_mismatches") or []:
-        errors.append(
-            _(
-                "Invoice {0}: item {1} still points to warehouse {2} instead of {3}."
-            ).format(
-                mismatch.get("invoice_name") or "?",
-                mismatch.get("item_code") or "?",
-                mismatch.get("warehouse") or _("blank"),
-                mismatch.get("expected_warehouse") or "?",
-            )
-        )
+	for mismatch in preview.get("warehouse_mismatches") or []:
+		errors.append(
+			_("Invoice {0}: item {1} still points to warehouse {2} instead of {3}.").format(
+				mismatch.get("invoice_name") or "?",
+				mismatch.get("item_code") or "?",
+				mismatch.get("warehouse") or _("blank"),
+				mismatch.get("expected_warehouse") or "?",
+			)
+		)
 
-    for shortage in preview.get("blocking_shortages") or []:
-        errors.append(
-            _(
-                "Invoice(s) {0}: item {1} needs {2} in {3}, only {4} available, and negative stock is disabled."
-            ).format(
-                ", ".join(shortage.get("invoice_names") or []) or "?",
-                shortage.get("item_code") or "?",
-                _format_qty(shortage.get("required_qty")),
-                shortage.get("warehouse") or "?",
-                _format_qty(shortage.get("available_qty")),
-            )
-        )
+	for shortage in preview.get("blocking_shortages") or []:
+		errors.append(
+			_(
+				"Invoice(s) {0}: item {1} needs {2} in {3}, only {4} available, and negative stock is disabled."
+			).format(
+				", ".join(shortage.get("invoice_names") or []) or "?",
+				shortage.get("item_code") or "?",
+				_format_qty(shortage.get("required_qty")),
+				shortage.get("warehouse") or "?",
+				_format_qty(shortage.get("available_qty")),
+			)
+		)
 
-    # A6 — the Out-for-Delivery pin gate. THE SAME LINE EXISTS IN
-    # api/kanban.py::_build_ofd_preview_errors and both are required: this
-    # function is duplicated, so a rule added there alone leaves THIS path — the
-    # bulk trip send — dispatching pinless orders. The rule itself lives in
-    # services/ofd_pin_gate so the two call sites cannot drift apart, and it
-    # returns [] unless Jarz POS Settings.require_delivery_pin_for_ofd is on.
-    errors.extend(ofd_pin_gate.build_missing_pin_errors(preview))
+	# A6 — the Out-for-Delivery pin gate. THE SAME LINE EXISTS IN
+	# api/kanban.py::_build_ofd_preview_errors and both are required: this
+	# function is duplicated, so a rule added there alone leaves THIS path — the
+	# bulk trip send — dispatching pinless orders. The rule itself lives in
+	# services/ofd_pin_gate so the two call sites cannot drift apart, and it
+	# returns [] unless Jarz POS Settings.require_delivery_pin_for_ofd is on.
+	errors.extend(ofd_pin_gate.build_missing_pin_errors(preview))
 
-    return errors
+	return errors
 
 
 @frappe.whitelist(allow_guest=False)
 def preview_trip_for_delivery(trip_name: str):
-    """Return OFD blockers and shortage preview for a delivery trip without mutating data."""
-    frappe.has_permission("Delivery Trip", ptype="read", throw=True)
+	"""Return OFD blockers and shortage preview for a delivery trip without mutating data."""
+	frappe.has_permission("Delivery Trip", ptype="read", throw=True)
 
-    trip = frappe.get_doc("Delivery Trip", trip_name)
-    if trip.status == "Completed":
-        frappe.throw(_("Trip {0} is already completed").format(trip_name))
+	trip = frappe.get_doc("Delivery Trip", trip_name)
+	if trip.status == "Completed":
+		frappe.throw(_("Trip {0} is already completed").format(trip_name))
 
-    if trip.status == "Out for Delivery":
-        return {
-            "success": True,
-            "trip": trip.name,
-            "status": trip.status,
-            "preview": get_ofd_shortage_preview([]),
-            "blocking_errors": [],
-            "requires_shortage_reason": False,
-            "already_ofd": True,
-        }
+	if trip.status == "Out for Delivery":
+		return {
+			"success": True,
+			"trip": trip.name,
+			"status": trip.status,
+			"preview": get_ofd_shortage_preview([]),
+			"blocking_errors": [],
+			"requires_shortage_reason": False,
+			"already_ofd": True,
+		}
 
-    blocking_errors, to_process = _collect_trip_ofd_candidates(trip)
-    preview = get_ofd_shortage_preview([row.invoice for row in to_process])
-    blocking_errors.extend(_build_ofd_preview_errors(preview))
+	blocking_errors, to_process = _collect_trip_ofd_candidates(trip)
+	preview = get_ofd_shortage_preview([row.invoice for row in to_process])
+	blocking_errors.extend(_build_ofd_preview_errors(preview))
 
-    return {
-        "success": True,
-        "trip": trip.name,
-        "status": trip.status,
-        "preview": preview,
-        "blocking_errors": blocking_errors,
-        "requires_shortage_reason": bool(preview.get("requires_reason")) and not bool(preview.get("blocking")),
-        "already_ofd": False,
-    }
+	return {
+		"success": True,
+		"trip": trip.name,
+		"status": trip.status,
+		"preview": preview,
+		"blocking_errors": blocking_errors,
+		"requires_shortage_reason": bool(preview.get("requires_reason"))
+		and not bool(preview.get("blocking")),
+		"already_ofd": False,
+	}
+
 
 @frappe.whitelist(allow_guest=False)
 def send_trip_for_delivery(
-    trip_name: str,
-    shortage_approved: bool | int = False,
-    shortage_reason: str | None = None,
+	trip_name: str,
+	shortage_approved: bool | int = False,
+	shortage_reason: str | None = None,
 ):
-    """Bulk OFD transition for all invoices in a trip.
+	"""Bulk OFD transition for all invoices in a trip.
 
-    Atomic: ALL invoices must succeed or NONE are transitioned.  A validation
-    pass runs first so the user sees every blocking issue upfront.  If
-    validation passes the actual OFD processing runs inside a single
-    savepoint that is rolled back on any failure.
+	Atomic: ALL invoices must succeed or NONE are transitioned.  A validation
+	pass runs first so the user sees every blocking issue upfront.  If
+	validation passes the actual OFD processing runs inside a single
+	savepoint that is rolled back on any failure.
 
-    Idempotent: if the trip is already Out for Delivery it returns the current
-    state without raising an error.
+	Idempotent: if the trip is already Out for Delivery it returns the current
+	state without raising an error.
 
-    Returns:
-        dict with processed invoices and trip status
-    """
-    frappe.has_permission("Delivery Trip", ptype="write", throw=True)
+	Returns:
+	    dict with processed invoices and trip status
+	"""
+	frappe.has_permission("Delivery Trip", ptype="write", throw=True)
 
-    trip = frappe.get_doc("Delivery Trip", trip_name)
-    if trip.status == "Completed":
-        frappe.throw(_("Trip {0} is already completed").format(trip_name))
+	trip = frappe.get_doc("Delivery Trip", trip_name)
+	if trip.status == "Completed":
+		frappe.throw(_("Trip {0} is already completed").format(trip_name))
 
-    shortage_approved = _coerce_bool(shortage_approved)
-    shortage_reason = str(shortage_reason or "").strip() or None
+	shortage_approved = _coerce_bool(shortage_approved)
+	shortage_reason = str(shortage_reason or "").strip() or None
 
-    # Idempotent: already OFD → return current state
-    if trip.status == "Out for Delivery":
-        return {
-            "success": True,
-            "trip": trip.name,
-            "status": trip.status,
-            "processed": [],
-            "is_double_shipping": bool(trip.is_double_shipping),
-            "already_ofd": True,
-        }
+	# Idempotent: already OFD → return current state
+	if trip.status == "Out for Delivery":
+		return {
+			"success": True,
+			"trip": trip.name,
+			"status": trip.status,
+			"processed": [],
+			"is_double_shipping": bool(trip.is_double_shipping),
+			"already_ofd": True,
+		}
 
-    # ── Phase 1: Pre-validate ALL invoices ───────────────────────────────
-    blocking_errors, to_process = _collect_trip_ofd_candidates(trip)
-    preview = get_ofd_shortage_preview([row.invoice for row in to_process])
-    blocking_errors.extend(_build_ofd_preview_errors(preview))
+	# ── Phase 1: Pre-validate ALL invoices ───────────────────────────────
+	blocking_errors, to_process = _collect_trip_ofd_candidates(trip)
+	preview = get_ofd_shortage_preview([row.invoice for row in to_process])
+	blocking_errors.extend(_build_ofd_preview_errors(preview))
 
-    if blocking_errors:
-        frappe.throw("<br>".join(blocking_errors), title=_("Cannot send trip for delivery"))
+	if blocking_errors:
+		frappe.throw("<br>".join(blocking_errors), title=_("Cannot send trip for delivery"))
 
-    if preview.get("requires_reason") and (not shortage_approved or not shortage_reason):
-        frappe.throw(
-            _("Stock shortage approval reason is required before sending this trip Out for Delivery."),
-            title=_("Shortage approval required"),
-        )
+	if preview.get("requires_reason") and (not shortage_approved or not shortage_reason):
+		frappe.throw(
+			_("Stock shortage approval reason is required before sending this trip Out for Delivery."),
+			title=_("Shortage approval required"),
+		)
 
-    if not to_process:
-        # All invoices were already OFD
-        trip.status = "Out for Delivery"
-        trip.save(ignore_permissions=True)
-        frappe.db.commit()
-        return {
-            "success": True,
-            "trip": trip.name,
-            "status": trip.status,
-            "processed": [],
-            "is_double_shipping": bool(trip.is_double_shipping),
-            "already_ofd": True,
-        }
+	if not to_process:
+		# All invoices were already OFD
+		trip.status = "Out for Delivery"
+		trip.save(ignore_permissions=True)
+		frappe.db.commit()
+		return {
+			"success": True,
+			"trip": trip.name,
+			"status": trip.status,
+			"processed": [],
+			"is_double_shipping": bool(trip.is_double_shipping),
+			"already_ofd": True,
+		}
 
-    # ── Phase 2: Process ALL invoices atomically ─────────────────────────
-    sp_name = f"trip_ofd_{trip_name.replace('-', '_')}"
-    frappe.db.savepoint(sp_name)
-    processed = []
-    invoice_previews = preview.get("invoice_previews") or {}
+	# ── Phase 2: Process ALL invoices atomically ─────────────────────────
+	sp_name = f"trip_ofd_{trip_name.replace('-', '_')}"
+	frappe.db.savepoint(sp_name)
+	processed = []
+	invoice_previews = preview.get("invoice_previews") or {}
 
-    try:
-        for row in to_process:
-            inv = frappe.get_doc("Sales Invoice", row.invoice)
+	try:
+		for row in to_process:
+			inv = frappe.get_doc("Sales Invoice", row.invoice)
 
-            # Compute shipping expense (with double shipping multiplier)
-            shipping_exp = float(getattr(inv, "custom_shipping_expense", 0) or 0)
-            if shipping_exp <= 0:
-                shipping_exp = _get_delivery_expense_amount(inv) or 0.0
-                if shipping_exp > 0:
-                    inv.db_set("custom_shipping_expense", shipping_exp, update_modified=False)
-            if trip.is_double_shipping:
-                shipping_exp = shipping_exp * 2
+			# Compute shipping expense (with double shipping multiplier)
+			shipping_exp = float(getattr(inv, "custom_shipping_expense", 0) or 0)
+			if shipping_exp <= 0:
+				shipping_exp = _get_delivery_expense_amount(inv) or 0.0
+				if shipping_exp > 0:
+					inv.db_set("custom_shipping_expense", shipping_exp, update_modified=False)
+			if trip.is_double_shipping:
+				shipping_exp = shipping_exp * 2
 
-            # Ensure Delivery Note exists
-            dn_result = ensure_delivery_note_for_invoice(row.invoice)
-            if dn_result.get("error"):
-                raise Exception(
-                    _("Invoice {0}: Delivery Note error — {1}").format(
-                        row.invoice, dn_result["error"]
-                    )
-                )
+			# Ensure Delivery Note exists
+			dn_result = ensure_delivery_note_for_invoice(row.invoice)
+			if dn_result.get("error"):
+				raise Exception(
+					_("Invoice {0}: Delivery Note error — {1}").format(row.invoice, dn_result["error"])
+				)
 
-            # Process accounting based on paid/unpaid status (same as individual settle-later flow)
-            outstanding = flt(frappe.db.get_value("Sales Invoice", row.invoice, "outstanding_amount"))
-            if outstanding > 0.0001:
-                # UNPAID: mark_courier_outstanding creates PE + CT + shipping JE + DN + state
-                mark_courier_outstanding(
-                    row.invoice,
-                    party_type=trip.courier_party_type,
-                    party=trip.courier_party,
-                    delivery_trip=trip.name,
-                    shipping_override=shipping_exp if trip.is_double_shipping else None,
-                )
-            else:
-                # PAID: create shipping JE (DR Freight / CR Creditors) + Unsettled CT
-                # Same accounting as handle_paid_settle_later in settlement_strategies
-                if shipping_exp > 0:
-                    creditors_acc = get_creditors_account(inv.company)
-                    _create_shipping_expense_to_creditors_je(
-                        inv, shipping_exp, creditors_acc,
-                        trip.courier_party_type, trip.courier_party,
-                    )
+			# Process accounting based on paid/unpaid status (same as individual settle-later flow)
+			outstanding = flt(frappe.db.get_value("Sales Invoice", row.invoice, "outstanding_amount"))
+			if outstanding > 0.0001:
+				# UNPAID: mark_courier_outstanding creates PE + CT + shipping JE + DN + state
+				mark_courier_outstanding(
+					row.invoice,
+					party_type=trip.courier_party_type,
+					party=trip.courier_party,
+					delivery_trip=trip.name,
+					shipping_override=shipping_exp if trip.is_double_shipping else None,
+				)
+			else:
+				# PAID: create shipping JE (DR Freight / CR Creditors) + Unsettled CT
+				# Same accounting as handle_paid_settle_later in settlement_strategies
+				if shipping_exp > 0:
+					creditors_acc = get_creditors_account(inv.company)
+					_create_shipping_expense_to_creditors_je(
+						inv,
+						shipping_exp,
+						creditors_acc,
+						trip.courier_party_type,
+						trip.courier_party,
+					)
 
-                # Create Courier Transaction for tracking
-                ct = frappe.new_doc("Courier Transaction")
-                ct.party_type = trip.courier_party_type
-                ct.party = trip.courier_party
-                ct.date = frappe.utils.now_datetime()
-                ct.reference_invoice = inv.name
-                ct.amount = 0
-                ct.shipping_amount = float(shipping_exp or 0)
-                ct.status = "Unsettled"
-                ct.payment_mode = "later"
-                ct.notes = "Out For Delivery transition - courier expense settlement"
-                ct.delivery_trip = trip.name
-                ct.insert(ignore_permissions=True)
+				# Create Courier Transaction for tracking
+				ct = frappe.new_doc("Courier Transaction")
+				ct.party_type = trip.courier_party_type
+				ct.party = trip.courier_party
+				ct.date = frappe.utils.now_datetime()
+				ct.reference_invoice = inv.name
+				ct.amount = 0
+				ct.shipping_amount = float(shipping_exp or 0)
+				ct.status = "Unsettled"
+				ct.payment_mode = "later"
+				ct.notes = "Out For Delivery transition - courier expense settlement"
+				ct.delivery_trip = trip.name
+				ct.insert(ignore_permissions=True)
 
-            # Persist submitted SI state via save() so update-after-submit hooks can observe the OFD move.
-            update_submitted_sales_invoice_fields(
-                inv,
-                {
-                    "custom_sales_invoice_state": "Out for Delivery",
-                    "sales_invoice_state": "Out for Delivery",
-                    **build_ofd_shortage_field_values(
-                        invoice_previews.get(row.invoice),
-                        shortage_reason=shortage_reason,
-                        shortage_approved=shortage_approved,
-                    ),
-                },
-                source="trip_dispatch",
-            )
+			# Persist submitted SI state via save() so update-after-submit hooks can observe the OFD move.
+			update_submitted_sales_invoice_fields(
+				inv,
+				{
+					"custom_sales_invoice_state": "Out for Delivery",
+					"sales_invoice_state": "Out for Delivery",
+					**build_ofd_shortage_field_values(
+						invoice_previews.get(row.invoice),
+						shortage_reason=shortage_reason,
+						shortage_approved=shortage_approved,
+					),
+				},
+				source="trip_dispatch",
+			)
 
-            # Persist child row changes
-            frappe.db.set_value(
-                "Delivery Trip Invoice", row.name,
-                {"invoice_status": "Out for Delivery", "shipping_expense": shipping_exp},
-                update_modified=False,
-            )
+			# Persist child row changes
+			frappe.db.set_value(
+				"Delivery Trip Invoice",
+				row.name,
+				{"invoice_status": "Out for Delivery", "shipping_expense": shipping_exp},
+				update_modified=False,
+			)
 
-            processed.append({
-                "invoice": row.invoice,
-                "status": "processed",
-                "shipping_expense": shipping_exp,
-                "delivery_note": dn_result.get("delivery_note"),
-            })
+			processed.append(
+				{
+					"invoice": row.invoice,
+					"status": "processed",
+					"shipping_expense": shipping_exp,
+					"delivery_note": dn_result.get("delivery_note"),
+				}
+			)
 
-        # All invoices succeeded — update trip status and commit
-        trip.status = "Out for Delivery"
-        trip.save(ignore_permissions=True)
-        frappe.db.commit()
+		# All invoices succeeded — update trip status and commit
+		trip.status = "Out for Delivery"
+		trip.save(ignore_permissions=True)
+		frappe.db.commit()
 
-    except Exception:
-        frappe.db.rollback(save_point=sp_name)
-        frappe.log_error(
-            frappe.get_traceback(),
-            f"jarz_pos.trips.send_trip_for_delivery.{trip_name}",
-        )
-        raise
+	except Exception:
+		frappe.db.rollback(save_point=sp_name)
+		frappe.log_error(
+			frappe.get_traceback(),
+			f"jarz_pos.trips.send_trip_for_delivery.{trip_name}",
+		)
+		raise
 
-    _publish_trip_event(WS_EVENTS.TRIP_OFD, {
-        "trip": trip.name,
-        "status": trip.status,
-        "processed": processed,
-        "is_double_shipping": bool(trip.is_double_shipping),
-    }, trip)
+	_publish_trip_event(
+		WS_EVENTS.TRIP_OFD,
+		{
+			"trip": trip.name,
+			"status": trip.status,
+			"processed": processed,
+			"is_double_shipping": bool(trip.is_double_shipping),
+		},
+		trip,
+	)
 
-    return {
-        "success": True,
-        "trip": trip.name,
-        "status": trip.status,
-        "processed": processed,
-        "is_double_shipping": bool(trip.is_double_shipping),
-    }
+	return {
+		"success": True,
+		"trip": trip.name,
+		"status": trip.status,
+		"processed": processed,
+		"is_double_shipping": bool(trip.is_double_shipping),
+	}
 
 
 # ---------------------------------------------------------------------------
 # Mark trip as delivered (bulk Delivered transition)
 # ---------------------------------------------------------------------------
 
+
 @frappe.whitelist(allow_guest=False)
 def mark_trip_as_delivered(trip_name: str):
-    """Mark all invoices in a trip as Delivered and set trip status to Completed.
+	"""Mark all invoices in a trip as Delivered and set trip status to Completed.
 
-    Idempotent: if the trip is already Completed it returns success without
-    raising an error.  Uses a savepoint so partial failures can be rolled back.
+	Idempotent: if the trip is already Completed it returns success without
+	raising an error.  Uses a savepoint so partial failures can be rolled back.
 
-    Args:
-        trip_name: Delivery Trip name
+	Args:
+	    trip_name: Delivery Trip name
 
-    Returns:
-        dict with updated trip and per-invoice results
-    """
-    trip = frappe.get_doc("Delivery Trip", trip_name)
+	Returns:
+	    dict with updated trip and per-invoice results
+	"""
+	trip = frappe.get_doc("Delivery Trip", trip_name)
 
-    # Idempotent: already completed → return current state
-    if trip.status == "Completed":
-        return {
-            "success": True,
-            "trip": trip.name,
-            "status": trip.status,
-            "results": [{"invoice": r.invoice, "status": "already_delivered"} for r in trip.invoices],
-            "already_completed": True,
-        }
+	# Idempotent: already completed → return current state
+	if trip.status == "Completed":
+		return {
+			"success": True,
+			"trip": trip.name,
+			"status": trip.status,
+			"results": [{"invoice": r.invoice, "status": "already_delivered"} for r in trip.invoices],
+			"already_completed": True,
+		}
 
-    if trip.status == "Created":
-        frappe.throw(_("Trip {0} must be Out for Delivery before marking as delivered").format(trip_name))
+	if trip.status == "Created":
+		frappe.throw(_("Trip {0} must be Out for Delivery before marking as delivered").format(trip_name))
 
-    meta = frappe.get_meta("Sales Invoice")
-    results = []
+	meta = frappe.get_meta("Sales Invoice")
+	results = []
 
-    sp_name = f"trip_delivered_{trip_name.replace('-', '_')}"
-    frappe.db.savepoint(sp_name)
-    try:
-        for row in trip.invoices:
-            inv = frappe.get_doc("Sales Invoice", row.invoice)
-            current_state = (
-                (inv.get("custom_sales_invoice_state") or inv.get("sales_invoice_state") or "")
-            ).strip().lower()
+	sp_name = f"trip_delivered_{trip_name.replace('-', '_')}"
+	frappe.db.savepoint(sp_name)
+	try:
+		for row in trip.invoices:
+			inv = frappe.get_doc("Sales Invoice", row.invoice)
+			current_state = (
+				(inv.get("custom_sales_invoice_state") or inv.get("sales_invoice_state") or "")
+				.strip()
+				.lower()
+			)
 
-            # Skip if already delivered
-            if current_state == "delivered":
-                results.append({"invoice": row.invoice, "status": "already_delivered"})
-                continue
+			# Skip if already delivered
+			if current_state == "delivered":
+				results.append({"invoice": row.invoice, "status": "already_delivered"})
+				continue
 
-            fields_updated = False
-            for field_name in ["custom_sales_invoice_state", "sales_invoice_state"]:
-                if meta.get_field(field_name):
-                    inv.set(field_name, "Delivered")
-                    fields_updated = True
+			fields_updated = False
+			for field_name in ["custom_sales_invoice_state", "sales_invoice_state"]:
+				if meta.get_field(field_name):
+					inv.set(field_name, "Delivered")
+					fields_updated = True
 
-            if fields_updated:
-                inv.flags.ignore_validate_update_after_submit = True
-                # Read by the on_update_after_submit hook (Invoice State Log).
-                inv.flags.jarz_state_source = "trip_delivered"
-                inv.save(ignore_permissions=True, ignore_version=True)
+			if fields_updated:
+				inv.flags.ignore_validate_update_after_submit = True
+				# Read by the on_update_after_submit hook (Invoice State Log).
+				inv.flags.jarz_state_source = "trip_delivered"
+				inv.save(ignore_permissions=True, ignore_version=True)
 
-            # Persist child row status
-            frappe.db.set_value(
-                "Delivery Trip Invoice", row.name,
-                "invoice_status", "Delivered",
-                update_modified=False,
-            )
-            results.append({"invoice": row.invoice, "status": "delivered"})
+			# Persist child row status
+			frappe.db.set_value(
+				"Delivery Trip Invoice",
+				row.name,
+				"invoice_status",
+				"Delivered",
+				update_modified=False,
+			)
+			results.append({"invoice": row.invoice, "status": "delivered"})
 
-        trip.status = "Completed"
-        trip.save(ignore_permissions=True)
-        frappe.db.commit()
-    except Exception:
-        frappe.db.rollback(save_point=sp_name)
-        frappe.log_error(
-            frappe.get_traceback(),
-            f"jarz_pos.trips.mark_trip_as_delivered.{trip_name}",
-        )
-        raise
+		trip.status = "Completed"
+		trip.save(ignore_permissions=True)
+		frappe.db.commit()
+	except Exception:
+		frappe.db.rollback(save_point=sp_name)
+		frappe.log_error(
+			frappe.get_traceback(),
+			f"jarz_pos.trips.mark_trip_as_delivered.{trip_name}",
+		)
+		raise
 
-    _publish_trip_event(WS_EVENTS.TRIP_COMPLETED, {
-        "trip": trip.name,
-        "status": trip.status,
-        "invoices": [r.invoice for r in trip.invoices],
-    }, trip)
+	_publish_trip_event(
+		WS_EVENTS.TRIP_COMPLETED,
+		{
+			"trip": trip.name,
+			"status": trip.status,
+			"invoices": [r.invoice for r in trip.invoices],
+		},
+		trip,
+	)
 
-    return {
-        "success": True,
-        "trip": trip.name,
-        "status": trip.status,
-        "results": results,
-    }
+	return {
+		"success": True,
+		"trip": trip.name,
+		"status": trip.status,
+		"results": results,
+	}
 
 
 # ---------------------------------------------------------------------------
 # Trip listing & details
 # ---------------------------------------------------------------------------
 
+
 @frappe.whitelist(allow_guest=False)
-def get_delivery_trips(status=None, courier_party=None, date_from=None, date_to=None,
-                       pos_profile=None, limit=50, offset=0):
-    """List delivery trips with optional filters.
+def get_delivery_trips(
+	status=None, courier_party=None, date_from=None, date_to=None, pos_profile=None, limit=50, offset=0
+):
+	"""List delivery trips with optional filters.
 
-    Args:
-        status: Filter by trip status
-        courier_party: Filter by courier party name
-        date_from: Filter trips from this date
-        date_to: Filter trips up to this date
-        pos_profile: Filter by POS profile (via invoice territory)
-        limit: Max results
-        offset: Pagination offset
+	Args:
+	    status: Filter by trip status
+	    courier_party: Filter by courier party name
+	    date_from: Filter trips from this date
+	    date_to: Filter trips up to this date
+	    pos_profile: Filter by POS profile (via invoice territory)
+	    limit: Max results
+	    offset: Pagination offset
 
-    Returns:
-        dict with trips list
-    """
-    filters = {}
-    if status:
-        filters["status"] = status
-    if courier_party:
-        filters["courier_party"] = courier_party
-    if date_from:
-        filters["trip_date"] = [">=", date_from]
-    if date_to:
-        if "trip_date" in filters:
-            filters["trip_date"] = ["between", [date_from, date_to]]
-        else:
-            filters["trip_date"] = ["<=", date_to]
+	Returns:
+	    dict with trips list
+	"""
+	filters = {}
+	if status:
+		filters["status"] = status
+	if courier_party:
+		filters["courier_party"] = courier_party
+	if date_from:
+		filters["trip_date"] = [">=", date_from]
+	if date_to:
+		if "trip_date" in filters:
+			filters["trip_date"] = ["between", [date_from, date_to]]
+		else:
+			filters["trip_date"] = ["<=", date_to]
 
-    trips = frappe.get_all(
-        "Delivery Trip",
-        filters=filters,
-        fields=[
-            "name", "trip_date", "courier_party_type", "courier_party",
-            "courier_display_name", "status", "is_double_shipping",
-            "double_shipping_territory", "total_orders", "total_amount",
-            "total_shipping_expense",
-        ],
-        order_by="creation desc",
-        limit_page_length=int(limit),
-        limit_start=int(offset),
-    )
+	trips = frappe.get_all(
+		"Delivery Trip",
+		filters=filters,
+		fields=[
+			"name",
+			"trip_date",
+			"courier_party_type",
+			"courier_party",
+			"courier_display_name",
+			"status",
+			"is_double_shipping",
+			"double_shipping_territory",
+			"total_orders",
+			"total_amount",
+			"total_shipping_expense",
+		],
+		order_by="creation desc",
+		limit_page_length=int(limit),
+		limit_start=int(offset),
+	)
 
-    return {
-        "success": True,
-        "data": trips,
-        "count": len(trips),
-    }
+	return {
+		"success": True,
+		"data": trips,
+		"count": len(trips),
+	}
 
 
 @frappe.whitelist(allow_guest=False)
 def get_trip_details(trip_name: str):
-    """Get full details of a delivery trip including all invoices.
+	"""Get full details of a delivery trip including all invoices.
 
-    Args:
-        trip_name: Delivery Trip name
+	Args:
+	    trip_name: Delivery Trip name
 
-    Returns:
-        dict with full trip details
-    """
-    if not frappe.db.exists("Delivery Trip", trip_name):
-        frappe.throw(_("Delivery Trip '{0}' not found").format(trip_name))
+	Returns:
+	    dict with full trip details
+	"""
+	if not frappe.db.exists("Delivery Trip", trip_name):
+		frappe.throw(_("Delivery Trip '{0}' not found").format(trip_name))
 
-    trip = frappe.get_doc("Delivery Trip", trip_name)
+	trip = frappe.get_doc("Delivery Trip", trip_name)
 
-    invoices = []
-    for row in trip.invoices:
-        # Get fresh data from Sales Invoice for rich detail display
-        si_fields = [
-            "custom_sales_invoice_state", "customer", "customer_name",
-            "territory", "outstanding_amount", "status",
-            "shipping_address_name", "customer_address",
-            "custom_payment_method", "custom_delivery_date",
-            "custom_delivery_time_from", "custom_delivery_duration",
-            "custom_delivery_slot_label", "woo_order_id",
-        ]
-        si_data = frappe.db.get_value(
-            "Sales Invoice", row.invoice, si_fields, as_dict=True
-        ) or {}
+	invoices = []
+	for row in trip.invoices:
+		# Get fresh data from Sales Invoice for rich detail display
+		si_fields = [
+			"custom_sales_invoice_state",
+			"customer",
+			"customer_name",
+			"territory",
+			"outstanding_amount",
+			"status",
+			"shipping_address_name",
+			"customer_address",
+			"custom_payment_method",
+			"custom_delivery_date",
+			"custom_delivery_time_from",
+			"custom_delivery_duration",
+			"custom_delivery_slot_label",
+			"woo_order_id",
+		]
+		si_data = frappe.db.get_value("Sales Invoice", row.invoice, si_fields, as_dict=True) or {}
 
-        inv_state = si_data.get("custom_sales_invoice_state") or row.invoice_status
+		inv_state = si_data.get("custom_sales_invoice_state") or row.invoice_status
 
-        # Resolve address
-        address = ""
-        addr_name = si_data.get("shipping_address_name") or si_data.get("customer_address")
-        if addr_name:
-            try:
-                addr_doc = frappe.get_doc("Address", addr_name)
-                address = f"{addr_doc.address_line1 or ''}, {addr_doc.city or ''}".strip(", ")
-            except Exception:
-                pass
+		# Resolve address
+		address = ""
+		addr_name = si_data.get("shipping_address_name") or si_data.get("customer_address")
+		if addr_name:
+			try:
+				addr_doc = frappe.get_doc("Address", addr_name)
+				address = f"{addr_doc.address_line1 or ''}, {addr_doc.city or ''}".strip(", ")
+			except Exception:
+				pass
 
-        # Resolve customer phone
-        customer_phone = ""
-        customer = si_data.get("customer") or ""
-        if customer:
-            try:
-                from jarz_pos.api.kanban import _resolve_customer_phone
-                customer_phone = _resolve_customer_phone(customer)
-            except Exception:
-                pass
+		# Resolve customer phone
+		customer_phone = ""
+		customer = si_data.get("customer") or ""
+		if customer:
+			try:
+				from jarz_pos.api.kanban import _resolve_customer_phone
 
-        # Fetch items
-        items = []
-        try:
-            items_rows = frappe.get_all(
-                "Sales Invoice Item",
-                filters={"parent": row.invoice},
-                fields=["item_code", "item_name", "qty", "rate", "amount"],
-                order_by="idx asc",
-            )
-            items = [
-                {
-                    "item_code": r.get("item_code"),
-                    "item_name": r.get("item_name"),
-                    "qty": float(r.get("qty") or 0),
-                    "rate": float(r.get("rate") or 0),
-                    "amount": float(r.get("amount") or 0),
-                }
-                for r in items_rows
-            ]
-        except Exception:
-            pass
+				customer_phone = _resolve_customer_phone(customer)
+			except Exception:
+				pass
 
-        _t_vals = frappe.db.get_value("Territory", row.territory, ["territory_name", "custom_territory_name_ar"], as_dict=True) if row.territory else {}
-        _t_name = (_t_vals or {}).get("territory_name") or row.territory or ""
-        _t_name_ar = (_t_vals or {}).get("custom_territory_name_ar") or ""
-        _st_vals = frappe.db.get_value("Territory", row.sub_territory, ["territory_name", "custom_territory_name_ar"], as_dict=True) if row.sub_territory else {}
-        _st_name = (_st_vals or {}).get("territory_name") or row.sub_territory or ""
-        _st_name_ar = (_st_vals or {}).get("custom_territory_name_ar") or ""
-        invoices.append({
-            "invoice": row.invoice,
-            "woo_order_id": normalize_woo_order_id(si_data.get("woo_order_id")),
-            "customer_name": row.customer_name,
-            "territory": row.territory,
-            "sub_territory": row.sub_territory,
-            "territory_display": _(_t_name),
-            "sub_territory_display": _(_st_name),
-            "territory_name_ar": _t_name_ar,
-            "sub_territory_name_ar": _st_name_ar,
-            "grand_total": float(row.grand_total or 0),
-            "shipping_expense": float(row.shipping_expense or 0),
-            "invoice_status": inv_state,
-            "outstanding_amount": float(si_data.get("outstanding_amount") or 0),
-            "payment_status": str(si_data.get("status") or ""),
-            "payment_method": si_data.get("custom_payment_method") or "",
-            "address": address,
-            "customer_phone": customer_phone,
-            "items": items,
-            "delivery_date": str(si_data.get("custom_delivery_date") or ""),
-            "delivery_time_from": str(si_data.get("custom_delivery_time_from") or ""),
-            "delivery_duration": si_data.get("custom_delivery_duration"),
-            "delivery_slot_label": str(si_data.get("custom_delivery_slot_label") or ""),
-        })
+		# Fetch items
+		items = []
+		try:
+			items_rows = frappe.get_all(
+				"Sales Invoice Item",
+				filters={"parent": row.invoice},
+				fields=["item_code", "item_name", "qty", "rate", "amount"],
+				order_by="idx asc",
+			)
+			items = [
+				{
+					"item_code": r.get("item_code"),
+					"item_name": r.get("item_name"),
+					"qty": float(r.get("qty") or 0),
+					"rate": float(r.get("rate") or 0),
+					"amount": float(r.get("amount") or 0),
+				}
+				for r in items_rows
+			]
+		except Exception:
+			pass
 
-    return {
-        "success": True,
-        "trip": {
-            "name": trip.name,
-            "trip_date": str(trip.trip_date),
-            "courier_party_type": trip.courier_party_type,
-            "courier_party": trip.courier_party,
-            "courier_display_name": trip.courier_display_name,
-            "status": trip.status,
-            "is_double_shipping": bool(trip.is_double_shipping),
-            "double_shipping_territory": trip.double_shipping_territory,
-            "total_orders": trip.total_orders,
-            "total_amount": float(trip.total_amount or 0),
-            "total_shipping_expense": float(trip.total_shipping_expense or 0),
-            "notes": trip.notes,
-            "invoices": invoices,
-        },
-    }
+		_t_vals = (
+			frappe.db.get_value(
+				"Territory", row.territory, ["territory_name", "custom_territory_name_ar"], as_dict=True
+			)
+			if row.territory
+			else {}
+		)
+		_t_name = (_t_vals or {}).get("territory_name") or row.territory or ""
+		_t_name_ar = (_t_vals or {}).get("custom_territory_name_ar") or ""
+		_st_vals = (
+			frappe.db.get_value(
+				"Territory", row.sub_territory, ["territory_name", "custom_territory_name_ar"], as_dict=True
+			)
+			if row.sub_territory
+			else {}
+		)
+		_st_name = (_st_vals or {}).get("territory_name") or row.sub_territory or ""
+		_st_name_ar = (_st_vals or {}).get("custom_territory_name_ar") or ""
+		invoices.append(
+			{
+				"invoice": row.invoice,
+				"woo_order_id": normalize_woo_order_id(si_data.get("woo_order_id")),
+				"customer_name": row.customer_name,
+				"territory": row.territory,
+				"sub_territory": row.sub_territory,
+				"territory_display": _(_t_name),
+				"sub_territory_display": _(_st_name),
+				"territory_name_ar": _t_name_ar,
+				"sub_territory_name_ar": _st_name_ar,
+				"grand_total": float(row.grand_total or 0),
+				"shipping_expense": float(row.shipping_expense or 0),
+				"invoice_status": inv_state,
+				"outstanding_amount": float(si_data.get("outstanding_amount") or 0),
+				"payment_status": str(si_data.get("status") or ""),
+				"payment_method": si_data.get("custom_payment_method") or "",
+				"address": address,
+				"customer_phone": customer_phone,
+				"items": items,
+				"delivery_date": str(si_data.get("custom_delivery_date") or ""),
+				"delivery_time_from": str(si_data.get("custom_delivery_time_from") or ""),
+				"delivery_duration": si_data.get("custom_delivery_duration"),
+				"delivery_slot_label": str(si_data.get("custom_delivery_slot_label") or ""),
+			}
+		)
+
+	return {
+		"success": True,
+		"trip": {
+			"name": trip.name,
+			"trip_date": str(trip.trip_date),
+			"courier_party_type": trip.courier_party_type,
+			"courier_party": trip.courier_party,
+			"courier_display_name": trip.courier_display_name,
+			"status": trip.status,
+			"is_double_shipping": bool(trip.is_double_shipping),
+			"double_shipping_territory": trip.double_shipping_territory,
+			"total_orders": trip.total_orders,
+			"total_amount": float(trip.total_amount or 0),
+			"total_shipping_expense": float(trip.total_shipping_expense or 0),
+			"notes": trip.notes,
+			"invoices": invoices,
+		},
+	}
 
 
 # ---------------------------------------------------------------------------
 # Trip status sync helper
 # ---------------------------------------------------------------------------
 
+
 def sync_trip_status(invoice_name: str):
-    """Recompute and update trip status when an invoice's state changes.
+	"""Recompute and update trip status when an invoice's state changes.
 
-    Called from update_invoice_state or doc_events when a linked invoice
-    changes state (OFD → Delivered, etc.).
+	Called from update_invoice_state or doc_events when a linked invoice
+	changes state (OFD → Delivered, etc.).
 
-    Args:
-        invoice_name: Sales Invoice name that changed state
-    """
-    trip_name = frappe.db.get_value(
-        "Sales Invoice", invoice_name, "custom_delivery_trip"
-    )
-    if not trip_name:
-        return
+	Args:
+	    invoice_name: Sales Invoice name that changed state
+	"""
+	trip_name = frappe.db.get_value("Sales Invoice", invoice_name, "custom_delivery_trip")
+	if not trip_name:
+		return
 
-    trip = frappe.get_doc("Delivery Trip", trip_name)
-    states = set()
-    for row in trip.invoices:
-        st = (
-            frappe.db.get_value("Sales Invoice", row.invoice, "custom_sales_invoice_state")
-            or "In Progress"
-        ).strip().lower()
-        states.add(st)
-        # Update child row status
-        row.invoice_status = frappe.db.get_value(
-            "Sales Invoice", row.invoice, "custom_sales_invoice_state"
-        ) or row.invoice_status
+	trip = frappe.get_doc("Delivery Trip", trip_name)
+	states = set()
+	for row in trip.invoices:
+		st = (
+			(frappe.db.get_value("Sales Invoice", row.invoice, "custom_sales_invoice_state") or "In Progress")
+			.strip()
+			.lower()
+		)
+		states.add(st)
+		# Update child row status
+		row.invoice_status = (
+			frappe.db.get_value("Sales Invoice", row.invoice, "custom_sales_invoice_state")
+			or row.invoice_status
+		)
 
-    old_status = trip.status
+	old_status = trip.status
 
-    # Derive status: all delivered → Completed; any OFD → Out for Delivery; else Created
-    if states and all(s in ("delivered",) for s in states):
-        trip.status = "Completed"
-    elif any(s in ("out for delivery", "out_for_delivery") for s in states):
-        trip.status = "Out for Delivery"
-    else:
-        trip.status = "Created"
+	# Derive status: all delivered → Completed; any OFD → Out for Delivery; else Created
+	if states and all(s in ("delivered",) for s in states):
+		trip.status = "Completed"
+	elif any(s in ("out for delivery", "out_for_delivery") for s in states):
+		trip.status = "Out for Delivery"
+	else:
+		trip.status = "Created"
 
-    if trip.status != old_status:
-        trip.save(ignore_permissions=True)
-        if trip.status == "Completed":
-            _publish_trip_event(WS_EVENTS.TRIP_COMPLETED, {
-                "trip": trip.name,
-                "status": trip.status,
-            }, trip)
+	if trip.status != old_status:
+		trip.save(ignore_permissions=True)
+		if trip.status == "Completed":
+			_publish_trip_event(
+				WS_EVENTS.TRIP_COMPLETED,
+				{
+					"trip": trip.name,
+					"status": trip.status,
+				},
+				trip,
+			)

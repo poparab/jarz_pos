@@ -27,15 +27,15 @@ from jarz_pos.utils.invoice_utils import get_area_label
 
 # Canonical display order for the 8 RFM segments + fallbacks.
 SEGMENT_ORDER = [
-    "Champion",
-    "Loyal",
-    "Potential Loyalist",
-    "New Customer",
-    "At Risk",
-    "Can't Lose Them",
-    "Lost",
-    "One-Time",
-    "Unclassified",
+	"Champion",
+	"Loyal",
+	"Potential Loyalist",
+	"New Customer",
+	"At Risk",
+	"Can't Lose Them",
+	"Lost",
+	"One-Time",
+	"Unclassified",
 ]
 
 # Segments surfaced in the "needs attention" list.
@@ -43,88 +43,88 @@ AT_RISK_SEGMENTS = ["At Risk", "Can't Lose Them"]
 
 
 def _ensure_jarz_manager() -> None:
-    roles = set(frappe.get_roles(frappe.session.user))
-    if ROLES.JARZ_MANAGER not in roles and ROLES.ADMINISTRATOR not in roles:
-        frappe.throw(_("Only JARZ Manager can access customer analytics"), frappe.PermissionError)
+	roles = set(frappe.get_roles(frappe.session.user))
+	if ROLES.JARZ_MANAGER not in roles and ROLES.ADMINISTRATOR not in roles:
+		frappe.throw(_("Only JARZ Manager can access customer analytics"), frappe.PermissionError)
 
 
 def _default_dates() -> tuple[str, str]:
-    today = date.today()
-    return (today - timedelta(days=29)).isoformat(), today.isoformat()
+	today = date.today()
+	return (today - timedelta(days=29)).isoformat(), today.isoformat()
 
 
 def _segment_sort_key(segment: str) -> int:
-    try:
-        return SEGMENT_ORDER.index(segment)
-    except ValueError:
-        return len(SEGMENT_ORDER)
+	try:
+		return SEGMENT_ORDER.index(segment)
+	except ValueError:
+		return len(SEGMENT_ORDER)
 
 
 @frappe.whitelist()
 def get_customer_analytics(
-    date_from: Optional[str] = None,
-    date_to: Optional[str] = None,
-    branch: Optional[str] = None,
+	date_from: Optional[str] = None,
+	date_to: Optional[str] = None,
+	branch: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Aggregated customer / RFM analytics for the given date range.
+	"""Aggregated customer / RFM analytics for the given date range.
 
-    ``branch`` (optional POS Profile name) scopes every invoice-based figure to
-    that branch's invoices (``si.pos_profile``). The current-state RFM snapshot
-    and the needs-attention list keep the stored company-wide RFM metrics, but
-    only for customers who have ever ordered at that branch; "new customers"
-    become customers whose first order *at that branch* falls in the range.
+	``branch`` (optional POS Profile name) scopes every invoice-based figure to
+	that branch's invoices (``si.pos_profile``). The current-state RFM snapshot
+	and the needs-attention list keep the stored company-wide RFM metrics, but
+	only for customers who have ever ordered at that branch; "new customers"
+	become customers whose first order *at that branch* falls in the range.
 
-    Additive keys: ``segments_summary`` (exactly what
-    ``segmentation.get_segment_summary`` returns: company-wide counts per
-    segment plus the overlapping ``Regular`` pseudo-row) and ``filters``.
+	Additive keys: ``segments_summary`` (exactly what
+	``segmentation.get_segment_summary`` returns: company-wide counts per
+	segment plus the overlapping ``Regular`` pseudo-row) and ``filters``.
 
-    Response shape:
-    {
-      "period": {"date_from": str, "date_to": str},
-      "summary": {
-        "total_customers": int, "active_in_period": int, "new_customers": int,
-        "returning_customers": int, "repeat_rate": float,
-        "champions": int, "at_risk": int, "lost": int,
-        "period_revenue": float, "period_orders": int, "avg_order_value": float
-      },
-      "segment_distribution": [{"segment": str, "count": int}],
-      "segment_table": [{"segment", "customers", "active_customers",
-                         "orders", "revenue", "avg_recency",
-                         "avg_frequency", "avg_aov"}],
-      "top_customers": [{"customer", "customer_name", "segment",
-                         "recency_days", "orders", "revenue"}],
-      "at_risk_customers": [{"customer", "customer_name", "segment",
-                             "recency_days", "frequency", "avg_aov", "territory"}],
-      "acquisition_trend": [{"date": str, "new_customers": int}]
-    }
-    """
-    _ensure_jarz_manager()
+	Response shape:
+	{
+	  "period": {"date_from": str, "date_to": str},
+	  "summary": {
+	    "total_customers": int, "active_in_period": int, "new_customers": int,
+	    "returning_customers": int, "repeat_rate": float,
+	    "champions": int, "at_risk": int, "lost": int,
+	    "period_revenue": float, "period_orders": int, "avg_order_value": float
+	  },
+	  "segment_distribution": [{"segment": str, "count": int}],
+	  "segment_table": [{"segment", "customers", "active_customers",
+	                     "orders", "revenue", "avg_recency",
+	                     "avg_frequency", "avg_aov"}],
+	  "top_customers": [{"customer", "customer_name", "segment",
+	                     "recency_days", "orders", "revenue"}],
+	  "at_risk_customers": [{"customer", "customer_name", "segment",
+	                         "recency_days", "frequency", "avg_aov", "territory"}],
+	  "acquisition_trend": [{"date": str, "new_customers": int}]
+	}
+	"""
+	_ensure_jarz_manager()
 
-    if not date_from or not date_to:
-        date_from, date_to = _default_dates()
+	if not date_from or not date_to:
+		date_from, date_to = _default_dates()
 
-    branch = (branch or "").strip() or None
-    params = {"fd": date_from, "td": date_to, "branch": branch, "segs": tuple(AT_RISK_SEGMENTS)}
+	branch = (branch or "").strip() or None
+	params = {"fd": date_from, "td": date_to, "branch": branch, "segs": tuple(AT_RISK_SEGMENTS)}
 
-    # Branch conditions ("" without a branch, so the queries are unchanged).
-    si_branch = "AND si.pos_profile = %(branch)s" if branch else ""
-    plain_branch = "AND pos_profile = %(branch)s" if branch else ""
-    # Customers of a branch = customers with at least one submitted invoice there.
-    customer_branch = (
-        """AND EXISTS (
+	# Branch conditions ("" without a branch, so the queries are unchanged).
+	si_branch = "AND si.pos_profile = %(branch)s" if branch else ""
+	plain_branch = "AND pos_profile = %(branch)s" if branch else ""
+	# Customers of a branch = customers with at least one submitted invoice there.
+	customer_branch = (
+		"""AND EXISTS (
             SELECT 1 FROM `tabSales Invoice` bx
             WHERE bx.customer = c.name
               AND bx.docstatus = 1
               AND bx.is_return = 0
               AND bx.pos_profile = %(branch)s
         )"""
-        if branch
-        else ""
-    )
+		if branch
+		else ""
+	)
 
-    # ── Snapshot: customer count + avg RFM metrics per segment ───────────
-    snapshot_rows = frappe.db.sql(
-        f"""
+	# ── Snapshot: customer count + avg RFM metrics per segment ───────────
+	snapshot_rows = frappe.db.sql(
+		f"""
         SELECT
             COALESCE(c.customer_segment, 'Unclassified') AS segment,
             COUNT(*)                       AS customers,
@@ -136,14 +136,14 @@ def get_customer_analytics(
           {customer_branch}
         GROUP BY segment
         """,
-        params,
-        as_dict=True,
-    )
-    snapshot_map = {r["segment"]: r for r in snapshot_rows}
+		params,
+		as_dict=True,
+	)
+	snapshot_map = {r["segment"]: r for r in snapshot_rows}
 
-    # ── Date-scoped revenue per segment ──────────────────────────────────
-    revenue_rows = frappe.db.sql(
-        f"""
+	# ── Date-scoped revenue per segment ──────────────────────────────────
+	revenue_rows = frappe.db.sql(
+		f"""
         SELECT
             COALESCE(c.customer_segment, 'Unclassified') AS segment,
             COUNT(*)                        AS orders,
@@ -157,36 +157,37 @@ def get_customer_analytics(
           {si_branch}
         GROUP BY segment
         """,
-        params,
-        as_dict=True,
-    )
-    revenue_map = {r["segment"]: r for r in revenue_rows}
+		params,
+		as_dict=True,
+	)
+	revenue_map = {r["segment"]: r for r in revenue_rows}
 
-    # ── Merge snapshot + revenue into one ordered segment table ──────────
-    all_segments = set(snapshot_map) | set(revenue_map)
-    segment_table = []
-    for seg in sorted(all_segments, key=_segment_sort_key):
-        snap = snapshot_map.get(seg, {})
-        rev = revenue_map.get(seg, {})
-        segment_table.append({
-            "segment": seg,
-            "customers": int(snap.get("customers") or 0),
-            "active_customers": int(rev.get("active_customers") or 0),
-            "orders": int(rev.get("orders") or 0),
-            "revenue": round(float(rev.get("revenue") or 0), 2),
-            "avg_recency": round(float(snap.get("avg_recency") or 0), 1),
-            "avg_frequency": round(float(snap.get("avg_frequency") or 0), 1),
-            "avg_aov": round(float(snap.get("avg_aov") or 0), 2),
-        })
+	# ── Merge snapshot + revenue into one ordered segment table ──────────
+	all_segments = set(snapshot_map) | set(revenue_map)
+	segment_table = []
+	for seg in sorted(all_segments, key=_segment_sort_key):
+		snap = snapshot_map.get(seg, {})
+		rev = revenue_map.get(seg, {})
+		segment_table.append(
+			{
+				"segment": seg,
+				"customers": int(snap.get("customers") or 0),
+				"active_customers": int(rev.get("active_customers") or 0),
+				"orders": int(rev.get("orders") or 0),
+				"revenue": round(float(rev.get("revenue") or 0), 2),
+				"avg_recency": round(float(snap.get("avg_recency") or 0), 1),
+				"avg_frequency": round(float(snap.get("avg_frequency") or 0), 1),
+				"avg_aov": round(float(snap.get("avg_aov") or 0), 2),
+			}
+		)
 
-    segment_distribution = [
-        {"segment": s["segment"], "count": s["customers"]}
-        for s in segment_table if s["customers"] > 0
-    ]
+	segment_distribution = [
+		{"segment": s["segment"], "count": s["customers"]} for s in segment_table if s["customers"] > 0
+	]
 
-    # ── Top customers by revenue in range ────────────────────────────────
-    top_customers = frappe.db.sql(
-        f"""
+	# ── Top customers by revenue in range ────────────────────────────────
+	top_customers = frappe.db.sql(
+		f"""
         SELECT
             si.customer,
             c.customer_name,
@@ -204,17 +205,17 @@ def get_customer_analytics(
         ORDER BY revenue DESC
         LIMIT 20
         """,
-        params,
-        as_dict=True,
-    )
-    for r in top_customers:
-        r["revenue"] = round(float(r["revenue"] or 0), 2)
-        r["orders"] = int(r["orders"] or 0)
-        r["recency_days"] = int(r["recency_days"] or 0)
+		params,
+		as_dict=True,
+	)
+	for r in top_customers:
+		r["revenue"] = round(float(r["revenue"] or 0), 2)
+		r["orders"] = int(r["orders"] or 0)
+		r["recency_days"] = int(r["recency_days"] or 0)
 
-    # ── Customers needing attention (current snapshot) ───────────────────
-    at_risk_customers = frappe.db.sql(
-        f"""
+	# ── Customers needing attention (current snapshot) ───────────────────
+	at_risk_customers = frappe.db.sql(
+		f"""
         SELECT
             c.name                AS customer,
             c.customer_name,
@@ -230,19 +231,19 @@ def get_customer_analytics(
         ORDER BY c.rfm_avg_order_value DESC
         LIMIT 50
         """,
-        params,
-        as_dict=True,
-    )
-    for r in at_risk_customers:
-        # Territories are *named* by their Woo area code; show the Arabic name.
-        r["territory"] = get_area_label(r.get("territory"))
-        r["recency_days"] = int(r["recency_days"] or 0)
-        r["frequency"] = int(r["frequency"] or 0)
-        r["avg_aov"] = round(float(r["avg_aov"] or 0), 2)
+		params,
+		as_dict=True,
+	)
+	for r in at_risk_customers:
+		# Territories are *named* by their Woo area code; show the Arabic name.
+		r["territory"] = get_area_label(r.get("territory"))
+		r["recency_days"] = int(r["recency_days"] or 0)
+		r["frequency"] = int(r["frequency"] or 0)
+		r["avg_aov"] = round(float(r["avg_aov"] or 0), 2)
 
-    # ── New-customer acquisition in range (first-ever order in window) ────
-    acquisition_trend = frappe.db.sql(
-        f"""
+	# ── New-customer acquisition in range (first-ever order in window) ────
+	acquisition_trend = frappe.db.sql(
+		f"""
         SELECT f.first_date AS date, COUNT(*) AS new_customers
         FROM (
             SELECT customer, MIN(posting_date) AS first_date
@@ -255,18 +256,18 @@ def get_customer_analytics(
         GROUP BY f.first_date
         ORDER BY f.first_date
         """,
-        params,
-        as_dict=True,
-    )
-    for r in acquisition_trend:
-        r["date"] = str(r["date"])
-        r["new_customers"] = int(r["new_customers"] or 0)
+		params,
+		as_dict=True,
+	)
+	for r in acquisition_trend:
+		r["date"] = str(r["date"])
+		r["new_customers"] = int(r["new_customers"] or 0)
 
-    new_customers = sum(r["new_customers"] for r in acquisition_trend)
+	new_customers = sum(r["new_customers"] for r in acquisition_trend)
 
-    # ── Period totals ────────────────────────────────────────────────────
-    totals = frappe.db.sql(
-        f"""
+	# ── Period totals ────────────────────────────────────────────────────
+	totals = frappe.db.sql(
+		f"""
         SELECT
             COUNT(*)                        AS orders,
             COALESCE(SUM(grand_total), 0)    AS revenue,
@@ -277,60 +278,60 @@ def get_customer_analytics(
           AND posting_date BETWEEN %(fd)s AND %(td)s
           {plain_branch}
         """,
-        params,
-        as_dict=True,
-    )[0]
+		params,
+		as_dict=True,
+	)[0]
 
-    period_orders = int(totals["orders"] or 0)
-    period_revenue = round(float(totals["revenue"] or 0), 2)
-    active_in_period = int(totals["active"] or 0)
-    avg_order_value = round(period_revenue / period_orders, 2) if period_orders else 0.0
-    returning_customers = max(0, active_in_period - new_customers)
-    repeat_rate = round(returning_customers / active_in_period * 100, 1) if active_in_period else 0.0
+	period_orders = int(totals["orders"] or 0)
+	period_revenue = round(float(totals["revenue"] or 0), 2)
+	active_in_period = int(totals["active"] or 0)
+	avg_order_value = round(period_revenue / period_orders, 2) if period_orders else 0.0
+	returning_customers = max(0, active_in_period - new_customers)
+	repeat_rate = round(returning_customers / active_in_period * 100, 1) if active_in_period else 0.0
 
-    def _seg_count(seg: str) -> int:
-        return int(snapshot_map.get(seg, {}).get("customers") or 0)
+	def _seg_count(seg: str) -> int:
+		return int(snapshot_map.get(seg, {}).get("customers") or 0)
 
-    total_customers = sum(int(r.get("customers") or 0) for r in snapshot_rows)
+	total_customers = sum(int(r.get("customers") or 0) for r in snapshot_rows)
 
-    summary = {
-        "total_customers": total_customers,
-        "active_in_period": active_in_period,
-        "new_customers": new_customers,
-        "returning_customers": returning_customers,
-        "repeat_rate": repeat_rate,
-        "champions": _seg_count("Champion"),
-        "at_risk": _seg_count("At Risk") + _seg_count("Can't Lose Them"),
-        "lost": _seg_count("Lost"),
-        "period_revenue": period_revenue,
-        "period_orders": period_orders,
-        "avg_order_value": avg_order_value,
-    }
+	summary = {
+		"total_customers": total_customers,
+		"active_in_period": active_in_period,
+		"new_customers": new_customers,
+		"returning_customers": returning_customers,
+		"repeat_rate": repeat_rate,
+		"champions": _seg_count("Champion"),
+		"at_risk": _seg_count("At Risk") + _seg_count("Can't Lose Them"),
+		"lost": _seg_count("Lost"),
+		"period_revenue": period_revenue,
+		"period_orders": period_orders,
+		"avg_order_value": avg_order_value,
+	}
 
-    return {
-        "period": {"date_from": date_from, "date_to": date_to},
-        "summary": summary,
-        "segment_distribution": segment_distribution,
-        "segment_table": segment_table,
-        "top_customers": top_customers,
-        "at_risk_customers": at_risk_customers,
-        "acquisition_trend": acquisition_trend,
-        "segments_summary": _segments_summary(),
-        "filters": {"date_from": date_from, "date_to": date_to, "branch": branch},
-    }
+	return {
+		"period": {"date_from": date_from, "date_to": date_to},
+		"summary": summary,
+		"segment_distribution": segment_distribution,
+		"segment_table": segment_table,
+		"top_customers": top_customers,
+		"at_risk_customers": at_risk_customers,
+		"acquisition_trend": acquisition_trend,
+		"segments_summary": _segments_summary(),
+		"filters": {"date_from": date_from, "date_to": date_to, "branch": branch},
+	}
 
 
 def _segments_summary():
-    """What ``segmentation.get_segment_summary`` returns, so one call feeds the
-    merged customers + segments screen. A failure leaves the rest of the report
-    intact and returns an empty list."""
-    try:
-        from jarz_pos.services.rfm_segmentation import get_segment_summary
+	"""What ``segmentation.get_segment_summary`` returns, so one call feeds the
+	merged customers + segments screen. A failure leaves the rest of the report
+	intact and returns an empty list."""
+	try:
+		from jarz_pos.services.rfm_segmentation import get_segment_summary
 
-        return get_segment_summary()
-    except Exception:
-        try:
-            frappe.log_error(frappe.get_traceback(), "customer_analytics: segment summary failed")
-        except Exception:
-            pass
-        return []
+		return get_segment_summary()
+	except Exception:
+		try:
+			frappe.log_error(frappe.get_traceback(), "customer_analytics: segment summary failed")
+		except Exception:
+			pass
+		return []

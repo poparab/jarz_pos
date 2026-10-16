@@ -4,443 +4,455 @@ from unittest.mock import MagicMock, patch
 
 
 class TestTripsNewFeatures(unittest.TestCase):
+	@patch("jarz_pos.api.trips.frappe")
+	def test_get_delivery_trips_returns_data(self, mock_frappe):
+		from jarz_pos.api.trips import get_delivery_trips
 
-    @patch('jarz_pos.api.trips.frappe')
-    def test_get_delivery_trips_returns_data(self, mock_frappe):
-        from jarz_pos.api.trips import get_delivery_trips
+		mock_frappe.get_all.return_value = [
+			{
+				"name": "TRIP-1",
+				"status": "Created",
+				"total_orders": 2,
+				"total_amount": 200,
+			}
+		]
 
-        mock_frappe.get_all.return_value = [
-            {
-                'name': 'TRIP-1',
-                'status': 'Created',
-                'total_orders': 2,
-                'total_amount': 200,
-            }
-        ]
+		result = get_delivery_trips(status="Created", limit=10, offset=0)
+		self.assertTrue(result["success"])
+		self.assertEqual(result["count"], 1)
+		self.assertEqual(result["data"][0]["name"], "TRIP-1")
 
-        result = get_delivery_trips(status='Created', limit=10, offset=0)
-        self.assertTrue(result['success'])
-        self.assertEqual(result['count'], 1)
-        self.assertEqual(result['data'][0]['name'], 'TRIP-1')
+	@patch("jarz_pos.api.trips.frappe")
+	def test_get_trip_details_maps_invoice_state(self, mock_frappe):
+		from jarz_pos.api.trips import get_trip_details
 
-    @patch('jarz_pos.api.trips.frappe')
-    def test_get_trip_details_maps_invoice_state(self, mock_frappe):
-        from jarz_pos.api.trips import get_trip_details
+		trip = MagicMock()
+		trip.name = "TRIP-2"
+		trip.trip_date = "2026-03-24"
+		trip.courier_party_type = "Employee"
+		trip.courier_party = "EMP-1"
+		trip.courier_display_name = "Courier A"
+		trip.status = "Created"
+		trip.is_double_shipping = 0
+		trip.double_shipping_territory = None
+		trip.total_orders = 1
+		trip.total_amount = 80
+		trip.total_shipping_expense = 20
+		trip.notes = ""
+		trip.invoices = [
+			SimpleNamespace(
+				invoice="SINV-1",
+				customer_name="Customer A",
+				territory="Main",
+				sub_territory="Sub A",
+				grand_total=80,
+				shipping_expense=20,
+				invoice_status="In Progress",
+			)
+		]
 
-        trip = MagicMock()
-        trip.name = 'TRIP-2'
-        trip.trip_date = '2026-03-24'
-        trip.courier_party_type = 'Employee'
-        trip.courier_party = 'EMP-1'
-        trip.courier_display_name = 'Courier A'
-        trip.status = 'Created'
-        trip.is_double_shipping = 0
-        trip.double_shipping_territory = None
-        trip.total_orders = 1
-        trip.total_amount = 80
-        trip.total_shipping_expense = 20
-        trip.notes = ''
-        trip.invoices = [
-            SimpleNamespace(
-                invoice='SINV-1',
-                customer_name='Customer A',
-                territory='Main',
-                sub_territory='Sub A',
-                grand_total=80,
-                shipping_expense=20,
-                invoice_status='In Progress',
-            )
-        ]
+		mock_frappe.db.exists.return_value = True
+		mock_frappe.get_doc.return_value = trip
 
-        mock_frappe.db.exists.return_value = True
-        mock_frappe.get_doc.return_value = trip
+		def fake_db_get_value(doctype, name, field=None, as_dict=False):
+			if doctype == "Sales Invoice" and as_dict:
+				return {"custom_sales_invoice_state": "In Progress"}
+			if doctype == "Territory" and as_dict:
+				return {"territory_name": "Main", "custom_territory_name_ar": None}
+			return "In Progress"
 
-        def fake_db_get_value(doctype, name, field=None, as_dict=False):
-            if doctype == 'Sales Invoice' and as_dict:
-                return {'custom_sales_invoice_state': 'In Progress'}
-            if doctype == 'Territory' and as_dict:
-                return {'territory_name': 'Main', 'custom_territory_name_ar': None}
-            return 'In Progress'
+		mock_frappe.db.get_value.side_effect = fake_db_get_value
 
-        mock_frappe.db.get_value.side_effect = fake_db_get_value
+		result = get_trip_details("TRIP-2")
+		self.assertTrue(result["success"])
+		self.assertEqual(result["trip"]["name"], "TRIP-2")
+		self.assertEqual(result["trip"]["invoices"][0]["invoice"], "SINV-1")
 
-        result = get_trip_details('TRIP-2')
-        self.assertTrue(result['success'])
-        self.assertEqual(result['trip']['name'], 'TRIP-2')
-        self.assertEqual(result['trip']['invoices'][0]['invoice'], 'SINV-1')
+	@patch("jarz_pos.api.trips.frappe")
+	def test_sync_trip_status_marks_completed(self, mock_frappe):
+		from jarz_pos.api.trips import sync_trip_status
 
-    @patch('jarz_pos.api.trips.frappe')
-    def test_sync_trip_status_marks_completed(self, mock_frappe):
-        from jarz_pos.api.trips import sync_trip_status
+		trip = MagicMock()
+		trip.name = "TRIP-3"
+		trip.status = "Out for Delivery"
+		trip.invoices = [
+			SimpleNamespace(invoice="SINV-1", invoice_status="Out for Delivery"),
+			SimpleNamespace(invoice="SINV-2", invoice_status="Out for Delivery"),
+		]
 
-        trip = MagicMock()
-        trip.name = 'TRIP-3'
-        trip.status = 'Out for Delivery'
-        trip.invoices = [
-            SimpleNamespace(invoice='SINV-1', invoice_status='Out for Delivery'),
-            SimpleNamespace(invoice='SINV-2', invoice_status='Out for Delivery'),
-        ]
+		# first call gets delivery trip link, then per-row state calls
+		mock_frappe.db.get_value.side_effect = [
+			"TRIP-3",
+			"Delivered",
+			"Delivered",
+			"Delivered",
+			"Delivered",
+		]
+		mock_frappe.get_doc.return_value = trip
 
-        # first call gets delivery trip link, then per-row state calls
-        mock_frappe.db.get_value.side_effect = [
-            'TRIP-3',
-            'Delivered', 'Delivered',
-            'Delivered', 'Delivered',
-        ]
-        mock_frappe.get_doc.return_value = trip
+		sync_trip_status("SINV-1")
 
-        sync_trip_status('SINV-1')
+		self.assertEqual(trip.status, "Completed")
+		trip.save.assert_called_once()
 
-        self.assertEqual(trip.status, 'Completed')
-        trip.save.assert_called_once()
+	@patch("jarz_pos.api.trips.frappe")
+	def test_sync_trip_status_no_trip_link_is_noop(self, mock_frappe):
+		from jarz_pos.api.trips import sync_trip_status
 
-    @patch('jarz_pos.api.trips.frappe')
-    def test_sync_trip_status_no_trip_link_is_noop(self, mock_frappe):
-        from jarz_pos.api.trips import sync_trip_status
+		mock_frappe.db.get_value.return_value = None
+		sync_trip_status("SINV-X")
 
-        mock_frappe.db.get_value.return_value = None
-        sync_trip_status('SINV-X')
+		mock_frappe.get_doc.assert_not_called()
 
-        mock_frappe.get_doc.assert_not_called()
+	@patch("jarz_pos.api.trips.frappe")
+	def test_mark_trip_as_delivered_saves_invoice_to_fire_hooks(self, mock_frappe):
+		from jarz_pos.api.trips import mark_trip_as_delivered
 
-    @patch('jarz_pos.api.trips.frappe')
-    def test_mark_trip_as_delivered_saves_invoice_to_fire_hooks(self, mock_frappe):
-        from jarz_pos.api.trips import mark_trip_as_delivered
+		trip = MagicMock()
+		trip.name = "TRIP-4"
+		trip.status = "Out for Delivery"
+		trip.invoices = [SimpleNamespace(invoice="SINV-10", name="TRIPINV-10")]
 
-        trip = MagicMock()
-        trip.name = 'TRIP-4'
-        trip.status = 'Out for Delivery'
-        trip.invoices = [
-            SimpleNamespace(invoice='SINV-10', name='TRIPINV-10')
-        ]
+		invoice = MagicMock()
+		invoice.flags = SimpleNamespace()
+		invoice.get.side_effect = lambda field: {
+			"custom_sales_invoice_state": "Out for Delivery",
+			"sales_invoice_state": "Out for Delivery",
+		}.get(field)
 
-        invoice = MagicMock()
-        invoice.flags = SimpleNamespace()
-        invoice.get.side_effect = lambda field: {
-            'custom_sales_invoice_state': 'Out for Delivery',
-            'sales_invoice_state': 'Out for Delivery',
-        }.get(field)
+		mock_meta = MagicMock()
+		mock_meta.get_field.side_effect = (
+			lambda name: MagicMock()
+			if name in {"custom_sales_invoice_state", "sales_invoice_state"}
+			else None
+		)
 
-        mock_meta = MagicMock()
-        mock_meta.get_field.side_effect = lambda name: MagicMock() if name in {'custom_sales_invoice_state', 'sales_invoice_state'} else None
+		def fake_get_doc(doctype, name):
+			if doctype == "Delivery Trip":
+				return trip
+			if doctype == "Sales Invoice":
+				return invoice
+			raise AssertionError(f"Unexpected doctype: {doctype}")
 
-        def fake_get_doc(doctype, name):
-            if doctype == 'Delivery Trip':
-                return trip
-            if doctype == 'Sales Invoice':
-                return invoice
-            raise AssertionError(f'Unexpected doctype: {doctype}')
+		mock_frappe.get_doc.side_effect = fake_get_doc
+		mock_frappe.get_meta.return_value = mock_meta
 
-        mock_frappe.get_doc.side_effect = fake_get_doc
-        mock_frappe.get_meta.return_value = mock_meta
+		result = mark_trip_as_delivered("TRIP-4")
 
-        result = mark_trip_as_delivered('TRIP-4')
+		self.assertTrue(result["success"])
+		self.assertTrue(invoice.flags.ignore_validate_update_after_submit)
+		invoice.save.assert_called_once_with(ignore_permissions=True, ignore_version=True)
+		mock_frappe.db.set_value.assert_any_call(
+			"Delivery Trip Invoice", "TRIPINV-10", "invoice_status", "Delivered", update_modified=False
+		)
+		trip.save.assert_called_once_with(ignore_permissions=True)
 
-        self.assertTrue(result['success'])
-        self.assertTrue(invoice.flags.ignore_validate_update_after_submit)
-        invoice.save.assert_called_once_with(ignore_permissions=True, ignore_version=True)
-        mock_frappe.db.set_value.assert_any_call(
-            'Delivery Trip Invoice', 'TRIPINV-10', 'invoice_status', 'Delivered', update_modified=False
-        )
-        trip.save.assert_called_once_with(ignore_permissions=True)
+	@patch("jarz_pos.api.territories.territory_has_children", return_value=False)
+	@patch("jarz_pos.api.trips.update_submitted_sales_invoice_fields")
+	@patch("jarz_pos.api.trips.get_ofd_shortage_preview")
+	@patch("jarz_pos.api.trips._get_delivery_expense_amount", return_value=0.0)
+	@patch("jarz_pos.api.trips.ensure_delivery_note_for_invoice")
+	@patch("jarz_pos.api.trips.frappe")
+	def test_send_trip_for_delivery_updates_state_via_helper(
+		self,
+		mock_frappe,
+		mock_dn,
+		mock_shipping,
+		mock_preview,
+		mock_update_fields,
+		mock_has_children,
+	):
+		from jarz_pos.api.trips import send_trip_for_delivery
 
-    @patch('jarz_pos.api.territories.territory_has_children', return_value=False)
-    @patch('jarz_pos.api.trips.update_submitted_sales_invoice_fields')
-    @patch('jarz_pos.api.trips.get_ofd_shortage_preview')
-    @patch('jarz_pos.api.trips._get_delivery_expense_amount', return_value=0.0)
-    @patch('jarz_pos.api.trips.ensure_delivery_note_for_invoice')
-    @patch('jarz_pos.api.trips.frappe')
-    def test_send_trip_for_delivery_updates_state_via_helper(
-        self,
-        mock_frappe,
-        mock_dn,
-        mock_shipping,
-        mock_preview,
-        mock_update_fields,
-        mock_has_children,
-    ):
-        from jarz_pos.api.trips import send_trip_for_delivery
+		trip = MagicMock()
+		trip.name = "TRIP-5"
+		trip.status = "Created"
+		trip.is_double_shipping = 0
+		trip.courier_party_type = "Employee"
+		trip.courier_party = "EMP-1"
+		trip.invoices = [SimpleNamespace(invoice="SINV-20", name="TRIPINV-20")]
 
-        trip = MagicMock()
-        trip.name = 'TRIP-5'
-        trip.status = 'Created'
-        trip.is_double_shipping = 0
-        trip.courier_party_type = 'Employee'
-        trip.courier_party = 'EMP-1'
-        trip.invoices = [
-            SimpleNamespace(invoice='SINV-20', name='TRIPINV-20')
-        ]
+		invoice = MagicMock()
+		invoice.name = "SINV-20"
+		invoice.company = "Test Co"
+		invoice.territory = ""
+		invoice.custom_sub_territory = ""
+		invoice.custom_shipping_expense = 0
+		invoice.get.side_effect = lambda field: {
+			"custom_sales_invoice_state": "In Progress",
+			"sales_invoice_state": "In Progress",
+		}.get(field)
 
-        invoice = MagicMock()
-        invoice.name = 'SINV-20'
-        invoice.company = 'Test Co'
-        invoice.territory = ''
-        invoice.custom_sub_territory = ''
-        invoice.custom_shipping_expense = 0
-        invoice.get.side_effect = lambda field: {
-            'custom_sales_invoice_state': 'In Progress',
-            'sales_invoice_state': 'In Progress',
-        }.get(field)
+		courier_txn = MagicMock()
 
-        courier_txn = MagicMock()
+		def fake_get_doc(doctype, name):
+			if doctype == "Delivery Trip":
+				return trip
+			if doctype == "Sales Invoice":
+				return invoice
+			raise AssertionError(f"Unexpected doctype: {doctype}")
 
-        def fake_get_doc(doctype, name):
-            if doctype == 'Delivery Trip':
-                return trip
-            if doctype == 'Sales Invoice':
-                return invoice
-            raise AssertionError(f'Unexpected doctype: {doctype}')
+		def fake_db_get_value(doctype, name, field=None):
+			if doctype == "Sales Invoice" and field == "outstanding_amount":
+				return 0
+			if doctype == "Sales Invoice" and field == "custom_shipping_override_status":
+				return None
+			return None
 
-        def fake_db_get_value(doctype, name, field=None):
-            if doctype == 'Sales Invoice' and field == 'outstanding_amount':
-                return 0
-            if doctype == 'Sales Invoice' and field == 'custom_shipping_override_status':
-                return None
-            return None
+		mock_frappe.get_doc.side_effect = fake_get_doc
+		mock_frappe.get_all.return_value = []
+		mock_frappe.new_doc.return_value = courier_txn
+		mock_frappe.utils.now_datetime.return_value = "2026-05-03 12:00:00"
+		mock_frappe.db.get_value.side_effect = fake_db_get_value
+		mock_frappe.db.savepoint.return_value = None
+		mock_frappe.db.commit.return_value = None
+		mock_frappe.db.set_value.return_value = None
+		mock_frappe.publish_realtime.return_value = None
+		mock_dn.return_value = {"delivery_note": "DN-020"}
+		mock_preview.return_value = {
+			"blocking": False,
+			"requires_reason": False,
+			"invoice_previews": {
+				"SINV-20": {
+					"shortages": [],
+				},
+			},
+		}
 
-        mock_frappe.get_doc.side_effect = fake_get_doc
-        mock_frappe.get_all.return_value = []
-        mock_frappe.new_doc.return_value = courier_txn
-        mock_frappe.utils.now_datetime.return_value = '2026-05-03 12:00:00'
-        mock_frappe.db.get_value.side_effect = fake_db_get_value
-        mock_frappe.db.savepoint.return_value = None
-        mock_frappe.db.commit.return_value = None
-        mock_frappe.db.set_value.return_value = None
-        mock_frappe.publish_realtime.return_value = None
-        mock_dn.return_value = {'delivery_note': 'DN-020'}
-        mock_preview.return_value = {
-            'blocking': False,
-            'requires_reason': False,
-            'invoice_previews': {
-                'SINV-20': {
-                    'shortages': [],
-                },
-            },
-        }
+		result = send_trip_for_delivery("TRIP-5")
 
-        result = send_trip_for_delivery('TRIP-5')
+		self.assertTrue(result["success"])
+		mock_update_fields.assert_called_once()
+		self.assertEqual(
+			mock_update_fields.call_args.args[1]["custom_sales_invoice_state"],
+			"Out for Delivery",
+		)
+		self.assertEqual(
+			mock_update_fields.call_args.args[1]["sales_invoice_state"],
+			"Out for Delivery",
+		)
+		self.assertEqual(
+			mock_update_fields.call_args.args[1]["custom_ofd_shortage_approved"],
+			0,
+		)
+		self.assertIsNone(
+			mock_update_fields.call_args.args[1]["custom_ofd_shortage_reason"],
+		)
+		courier_txn.insert.assert_called_once_with(ignore_permissions=True)
+		trip.save.assert_called_once_with(ignore_permissions=True)
 
-        self.assertTrue(result['success'])
-        mock_update_fields.assert_called_once()
-        self.assertEqual(
-            mock_update_fields.call_args.args[1]['custom_sales_invoice_state'],
-            'Out for Delivery',
-        )
-        self.assertEqual(
-            mock_update_fields.call_args.args[1]['sales_invoice_state'],
-            'Out for Delivery',
-        )
-        self.assertEqual(
-            mock_update_fields.call_args.args[1]['custom_ofd_shortage_approved'],
-            0,
-        )
-        self.assertIsNone(
-            mock_update_fields.call_args.args[1]['custom_ofd_shortage_reason'],
-        )
-        courier_txn.insert.assert_called_once_with(ignore_permissions=True)
-        trip.save.assert_called_once_with(ignore_permissions=True)
+	@patch("jarz_pos.api.territories.territory_has_children", return_value=False)
+	@patch("jarz_pos.api.trips.get_ofd_shortage_preview")
+	@patch("jarz_pos.api.trips.ensure_delivery_note_for_invoice")
+	@patch("jarz_pos.api.trips.frappe")
+	def test_send_trip_for_delivery_requires_shortage_reason(
+		self,
+		mock_frappe,
+		mock_dn,
+		mock_preview,
+		mock_has_children,
+	):
+		from jarz_pos.api.trips import send_trip_for_delivery
 
-    @patch('jarz_pos.api.territories.territory_has_children', return_value=False)
-    @patch('jarz_pos.api.trips.get_ofd_shortage_preview')
-    @patch('jarz_pos.api.trips.ensure_delivery_note_for_invoice')
-    @patch('jarz_pos.api.trips.frappe')
-    def test_send_trip_for_delivery_requires_shortage_reason(
-        self,
-        mock_frappe,
-        mock_dn,
-        mock_preview,
-        mock_has_children,
-    ):
-        from jarz_pos.api.trips import send_trip_for_delivery
+		trip = MagicMock()
+		trip.name = "TRIP-6"
+		trip.status = "Created"
+		trip.is_double_shipping = 0
+		trip.invoices = [SimpleNamespace(invoice="SINV-21", name="TRIPINV-21")]
 
-        trip = MagicMock()
-        trip.name = 'TRIP-6'
-        trip.status = 'Created'
-        trip.is_double_shipping = 0
-        trip.invoices = [SimpleNamespace(invoice='SINV-21', name='TRIPINV-21')]
+		invoice = MagicMock()
+		invoice.name = "SINV-21"
+		invoice.company = "Test Co"
+		invoice.territory = ""
+		invoice.custom_sub_territory = ""
+		invoice.custom_shipping_expense = 0
+		invoice.get.side_effect = lambda field: {
+			"custom_sales_invoice_state": "In Progress",
+			"sales_invoice_state": "In Progress",
+		}.get(field)
 
-        invoice = MagicMock()
-        invoice.name = 'SINV-21'
-        invoice.company = 'Test Co'
-        invoice.territory = ''
-        invoice.custom_sub_territory = ''
-        invoice.custom_shipping_expense = 0
-        invoice.get.side_effect = lambda field: {
-            'custom_sales_invoice_state': 'In Progress',
-            'sales_invoice_state': 'In Progress',
-        }.get(field)
+		mock_frappe.get_doc.side_effect = (
+			lambda doctype, name: trip if doctype == "Delivery Trip" else invoice
+		)
+		mock_frappe.db.get_value.side_effect = (
+			lambda doctype, name, field=None: 0 if field == "outstanding_amount" else None
+		)
+		mock_frappe.throw.side_effect = Exception("Shortage approval required")
+		mock_preview.return_value = {
+			"blocking": False,
+			"requires_reason": True,
+			"invoice_previews": {
+				"SINV-21": {
+					"shortages": [
+						{
+							"item_code": "ITEM-001",
+							"required_qty": 2,
+							"available_qty": 0,
+							"warehouse": "Main WH",
+						}
+					],
+				},
+			},
+		}
 
-        mock_frappe.get_doc.side_effect = lambda doctype, name: trip if doctype == 'Delivery Trip' else invoice
-        mock_frappe.db.get_value.side_effect = lambda doctype, name, field=None: 0 if field == 'outstanding_amount' else None
-        mock_frappe.throw.side_effect = Exception('Shortage approval required')
-        mock_preview.return_value = {
-            'blocking': False,
-            'requires_reason': True,
-            'invoice_previews': {
-                'SINV-21': {
-                    'shortages': [
-                        {
-                            'item_code': 'ITEM-001',
-                            'required_qty': 2,
-                            'available_qty': 0,
-                            'warehouse': 'Main WH',
-                        }
-                    ],
-                },
-            },
-        }
+		with self.assertRaises(Exception):
+			send_trip_for_delivery("TRIP-6")
 
-        with self.assertRaises(Exception):
-            send_trip_for_delivery('TRIP-6')
+		mock_dn.assert_not_called()
 
-        mock_dn.assert_not_called()
+	@patch("jarz_pos.api.territories.territory_has_children", return_value=False)
+	@patch("jarz_pos.api.trips.update_submitted_sales_invoice_fields")
+	@patch("jarz_pos.api.trips.get_ofd_shortage_preview")
+	@patch("jarz_pos.api.trips._get_delivery_expense_amount", return_value=0.0)
+	@patch("jarz_pos.api.trips.ensure_delivery_note_for_invoice")
+	@patch("jarz_pos.api.trips.frappe")
+	def test_send_trip_for_delivery_persists_shortage_audit_fields(
+		self,
+		mock_frappe,
+		mock_dn,
+		mock_shipping,
+		mock_preview,
+		mock_update_fields,
+		mock_has_children,
+	):
+		from jarz_pos.api.trips import send_trip_for_delivery
 
-    @patch('jarz_pos.api.territories.territory_has_children', return_value=False)
-    @patch('jarz_pos.api.trips.update_submitted_sales_invoice_fields')
-    @patch('jarz_pos.api.trips.get_ofd_shortage_preview')
-    @patch('jarz_pos.api.trips._get_delivery_expense_amount', return_value=0.0)
-    @patch('jarz_pos.api.trips.ensure_delivery_note_for_invoice')
-    @patch('jarz_pos.api.trips.frappe')
-    def test_send_trip_for_delivery_persists_shortage_audit_fields(
-        self,
-        mock_frappe,
-        mock_dn,
-        mock_shipping,
-        mock_preview,
-        mock_update_fields,
-        mock_has_children,
-    ):
-        from jarz_pos.api.trips import send_trip_for_delivery
+		trip = MagicMock()
+		trip.name = "TRIP-7"
+		trip.status = "Created"
+		trip.is_double_shipping = 0
+		trip.courier_party_type = "Employee"
+		trip.courier_party = "EMP-1"
+		trip.invoices = [SimpleNamespace(invoice="SINV-22", name="TRIPINV-22")]
 
-        trip = MagicMock()
-        trip.name = 'TRIP-7'
-        trip.status = 'Created'
-        trip.is_double_shipping = 0
-        trip.courier_party_type = 'Employee'
-        trip.courier_party = 'EMP-1'
-        trip.invoices = [SimpleNamespace(invoice='SINV-22', name='TRIPINV-22')]
+		invoice = MagicMock()
+		invoice.name = "SINV-22"
+		invoice.company = "Test Co"
+		invoice.territory = ""
+		invoice.custom_sub_territory = ""
+		invoice.custom_shipping_expense = 0
+		invoice.get.side_effect = lambda field: {
+			"custom_sales_invoice_state": "In Progress",
+			"sales_invoice_state": "In Progress",
+		}.get(field)
 
-        invoice = MagicMock()
-        invoice.name = 'SINV-22'
-        invoice.company = 'Test Co'
-        invoice.territory = ''
-        invoice.custom_sub_territory = ''
-        invoice.custom_shipping_expense = 0
-        invoice.get.side_effect = lambda field: {
-            'custom_sales_invoice_state': 'In Progress',
-            'sales_invoice_state': 'In Progress',
-        }.get(field)
+		courier_txn = MagicMock()
+		mock_frappe.get_doc.side_effect = (
+			lambda doctype, name: trip if doctype == "Delivery Trip" else invoice
+		)
+		mock_frappe.db.get_value.side_effect = (
+			lambda doctype, name, field=None: 0 if field == "outstanding_amount" else None
+		)
+		mock_frappe.new_doc.return_value = courier_txn
+		mock_frappe.db.savepoint.return_value = None
+		mock_frappe.db.commit.return_value = None
+		mock_frappe.db.set_value.return_value = None
+		mock_frappe.publish_realtime.return_value = None
+		mock_dn.return_value = {"delivery_note": "DN-022"}
+		mock_preview.return_value = {
+			"blocking": False,
+			"requires_reason": True,
+			"invoice_previews": {
+				"SINV-22": {
+					"shortages": [
+						{
+							"item_code": "ITEM-001",
+							"required_qty": 2,
+							"available_qty": 0,
+							"shortage_qty": 2,
+							"warehouse": "Main WH",
+							"invoice_names": ["SINV-22"],
+						}
+					],
+				},
+			},
+		}
 
-        courier_txn = MagicMock()
-        mock_frappe.get_doc.side_effect = lambda doctype, name: trip if doctype == 'Delivery Trip' else invoice
-        mock_frappe.db.get_value.side_effect = lambda doctype, name, field=None: 0 if field == 'outstanding_amount' else None
-        mock_frappe.new_doc.return_value = courier_txn
-        mock_frappe.db.savepoint.return_value = None
-        mock_frappe.db.commit.return_value = None
-        mock_frappe.db.set_value.return_value = None
-        mock_frappe.publish_realtime.return_value = None
-        mock_dn.return_value = {'delivery_note': 'DN-022'}
-        mock_preview.return_value = {
-            'blocking': False,
-            'requires_reason': True,
-            'invoice_previews': {
-                'SINV-22': {
-                    'shortages': [
-                        {
-                            'item_code': 'ITEM-001',
-                            'required_qty': 2,
-                            'available_qty': 0,
-                            'shortage_qty': 2,
-                            'warehouse': 'Main WH',
-                            'invoice_names': ['SINV-22'],
-                        }
-                    ],
-                },
-            },
-        }
+		result = send_trip_for_delivery(
+			"TRIP-7",
+			shortage_approved=1,
+			shortage_reason="Stock is being transferred from production",
+		)
 
-        result = send_trip_for_delivery(
-            'TRIP-7',
-            shortage_approved=1,
-            shortage_reason='Stock is being transferred from production',
-        )
+		self.assertTrue(result["success"])
+		self.assertEqual(
+			mock_update_fields.call_args.args[1]["custom_ofd_shortage_approved"],
+			1,
+		)
+		self.assertEqual(
+			mock_update_fields.call_args.args[1]["custom_ofd_shortage_reason"],
+			"Stock is being transferred from production",
+		)
+		self.assertIn(
+			"ITEM-001",
+			mock_update_fields.call_args.args[1]["custom_ofd_shortage_details"],
+		)
+		courier_txn.insert.assert_called_once_with(ignore_permissions=True)
+		trip.save.assert_called_once_with(ignore_permissions=True)
 
-        self.assertTrue(result['success'])
-        self.assertEqual(
-            mock_update_fields.call_args.args[1]['custom_ofd_shortage_approved'],
-            1,
-        )
-        self.assertEqual(
-            mock_update_fields.call_args.args[1]['custom_ofd_shortage_reason'],
-            'Stock is being transferred from production',
-        )
-        self.assertIn(
-            'ITEM-001',
-            mock_update_fields.call_args.args[1]['custom_ofd_shortage_details'],
-        )
-        courier_txn.insert.assert_called_once_with(ignore_permissions=True)
-        trip.save.assert_called_once_with(ignore_permissions=True)
+	@patch("jarz_pos.api.territories.territory_has_children", return_value=False)
+	@patch("jarz_pos.api.trips.update_submitted_sales_invoice_fields")
+	@patch(
+		"jarz_pos.api.trips.assert_courier_matches_pos_profile",
+		return_value={"branch": "POS-001", "delivery_partner": "DP-001"},
+	)
+	@patch("jarz_pos.api.trips.assert_invoices_share_pos_profile", return_value="POS-001")
+	@patch("jarz_pos.api.trips.frappe")
+	def test_create_delivery_trip_persists_assignment_fields(
+		self,
+		mock_frappe,
+		mock_trip_profile,
+		mock_courier_guard,
+		mock_update_invoice_fields,
+		mock_has_children,
+	):
+		from jarz_pos.api.trips import create_delivery_trip
 
-    @patch('jarz_pos.api.territories.territory_has_children', return_value=False)
-    @patch('jarz_pos.api.trips.update_submitted_sales_invoice_fields')
-    @patch('jarz_pos.api.trips.assert_courier_matches_pos_profile', return_value={'branch': 'POS-001', 'delivery_partner': 'DP-001'})
-    @patch('jarz_pos.api.trips.assert_invoices_share_pos_profile', return_value='POS-001')
-    @patch('jarz_pos.api.trips.frappe')
-    def test_create_delivery_trip_persists_assignment_fields(
-        self,
-        mock_frappe,
-        mock_trip_profile,
-        mock_courier_guard,
-        mock_update_invoice_fields,
-        mock_has_children,
-    ):
-        from jarz_pos.api.trips import create_delivery_trip
+		invoice = MagicMock()
+		invoice.name = "SINV-30"
+		invoice.docstatus = 1
+		invoice.customer_name = "Customer A"
+		invoice.territory = "Main"
+		invoice.custom_sub_territory = "Sub A"
+		invoice.grand_total = 80
+		invoice.custom_shipping_expense = 0
+		invoice.get.side_effect = lambda field: {
+			"custom_sales_invoice_state": "In Progress",
+			"sales_invoice_state": "In Progress",
+		}.get(field)
 
-        invoice = MagicMock()
-        invoice.name = 'SINV-30'
-        invoice.docstatus = 1
-        invoice.customer_name = 'Customer A'
-        invoice.territory = 'Main'
-        invoice.custom_sub_territory = 'Sub A'
-        invoice.grand_total = 80
-        invoice.custom_shipping_expense = 0
-        invoice.get.side_effect = lambda field: {
-            'custom_sales_invoice_state': 'In Progress',
-            'sales_invoice_state': 'In Progress',
-        }.get(field)
+		trip = MagicMock()
+		trip.name = "TRIP-30"
+		trip.status = "Created"
+		trip.courier_party_type = "Employee"
+		trip.courier_party = "EMP-1"
+		trip.courier_display_name = "Courier A"
+		trip.total_orders = 1
+		trip.total_amount = 80
+		trip.total_shipping_expense = 0
+		trip.is_double_shipping = 0
+		trip.double_shipping_territory = None
 
-        trip = MagicMock()
-        trip.name = 'TRIP-30'
-        trip.status = 'Created'
-        trip.courier_party_type = 'Employee'
-        trip.courier_party = 'EMP-1'
-        trip.courier_display_name = 'Courier A'
-        trip.total_orders = 1
-        trip.total_amount = 80
-        trip.total_shipping_expense = 0
-        trip.is_double_shipping = 0
-        trip.double_shipping_territory = None
+		mock_frappe.has_permission.return_value = True
+		mock_frappe.db.exists.return_value = True
+		mock_frappe.utils.today.return_value = "2026-05-05"
+		mock_frappe.new_doc.return_value = trip
+		mock_frappe.get_doc.return_value = invoice
+		mock_frappe.db.get_value.return_value = None
+		mock_frappe.db.commit.return_value = None
+		mock_frappe.publish_realtime.return_value = None
 
-        mock_frappe.has_permission.return_value = True
-        mock_frappe.db.exists.return_value = True
-        mock_frappe.utils.today.return_value = '2026-05-05'
-        mock_frappe.new_doc.return_value = trip
-        mock_frappe.get_doc.return_value = invoice
-        mock_frappe.db.get_value.return_value = None
-        mock_frappe.db.commit.return_value = None
-        mock_frappe.publish_realtime.return_value = None
+		result = create_delivery_trip(["SINV-30"], "Employee", "EMP-1", pos_profile="POS-001")
 
-        result = create_delivery_trip(['SINV-30'], 'Employee', 'EMP-1', pos_profile='POS-001')
-
-        self.assertTrue(result['success'])
-        mock_trip_profile.assert_called_once_with([invoice], requested_pos_profile='POS-001')
-        mock_courier_guard.assert_called_once_with('Employee', 'EMP-1', 'POS-001')
-        mock_update_invoice_fields.assert_called_once_with(
-            invoice,
-            {
-                'custom_delivery_trip': 'TRIP-30',
-                'custom_courier_party_type': 'Employee',
-                'custom_courier_party': 'EMP-1',
-                'custom_delivery_partner': 'DP-001',
-            },
-        )
+		self.assertTrue(result["success"])
+		mock_trip_profile.assert_called_once_with([invoice], requested_pos_profile="POS-001")
+		mock_courier_guard.assert_called_once_with("Employee", "EMP-1", "POS-001")
+		mock_update_invoice_fields.assert_called_once_with(
+			invoice,
+			{
+				"custom_delivery_trip": "TRIP-30",
+				"custom_courier_party_type": "Employee",
+				"custom_courier_party": "EMP-1",
+				"custom_delivery_partner": "DP-001",
+			},
+		)

@@ -92,9 +92,10 @@ class _Site:
 			]
 		if doctype == "Item Price":
 			# The module only ever asks for GENERIC rows (customer in [None, ""]).
-			assert filters.get("customer") == ["in", [None, ""]], (
-				"the seeder must never read a customer-scoped Item Price"
-			)
+			assert filters.get("customer") == [
+				"in",
+				[None, ""],
+			], "the seeder must never read a customer-scoped Item Price"
 			return [
 				dict(r)
 				for r in self.item_prices
@@ -130,19 +131,11 @@ def _run(site, **kwargs):
 
 
 def _inserted_item_prices(site):
-	return {
-		r["item_code"]: r["price_list_rate"]
-		for r in site.inserts
-		if r["doctype"] == "Item Price"
-	}
+	return {r["item_code"]: r["price_list_rate"] for r in site.inserts if r["doctype"] == "Item Price"}
 
 
 def _inserted_category_rates(site):
-	return {
-		r["item_group"]: r["rate"]
-		for r in site.inserts
-		if r["doctype"] == _CATEGORY_DOCTYPE
-	}
+	return {r["item_group"]: r["rate"] for r in site.inserts if r["doctype"] == _CATEGORY_DOCTYPE}
 
 
 class TestSeedsBothLayers(unittest.TestCase):
@@ -150,9 +143,7 @@ class TestSeedsBothLayers(unittest.TestCase):
 		site = _Site(items={"Large": ["JAR-L1", "JAR-L2"], "Medium": ["JAR-M1"]})
 		log = _run(site)
 
-		self.assertEqual(
-			_inserted_category_rates(site), {"Large": 92.0, "Medium": 77.0}
-		)
+		self.assertEqual(_inserted_category_rates(site), {"Large": 92.0, "Medium": 77.0})
 		self.assertEqual(
 			_inserted_item_prices(site),
 			{"JAR-L1": 92.0, "JAR-L2": 92.0, "JAR-M1": 77.0},
@@ -191,9 +182,7 @@ class TestSeedsBothLayers(unittest.TestCase):
 		)
 		log = _run(site)
 
-		self.assertEqual(
-			_inserted_category_rates(site), {"Large": 92.0, "Medium": 77.0, "Small": 30.0}
-		)
+		self.assertEqual(_inserted_category_rates(site), {"Large": 92.0, "Medium": 77.0, "Small": 30.0})
 		self.assertEqual(
 			_inserted_item_prices(site),
 			{"JAR-L1": 92.0, "JAR-M1": 77.0, "Molten Small": 30.0, "Lotus Small": 30.0},

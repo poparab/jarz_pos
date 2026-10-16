@@ -40,13 +40,13 @@ class TestKanbanOperations(unittest.TestCase):
 		from jarz_pos.api.kanban import get_kanban_columns
 
 		# Mock frappe methods
-		with patch('jarz_pos.api.kanban._get_state_field_options') as mock_options:
+		with patch("jarz_pos.api.kanban._get_state_field_options") as mock_options:
 			mock_options.return_value = [
 				"Received",
 				"Processing",
 				"Preparing",
 				"Out for delivery",
-				"Completed"
+				"Completed",
 			]
 
 			result = get_kanban_columns()
@@ -66,7 +66,7 @@ class TestKanbanOperations(unittest.TestCase):
 		"""Test kanban columns have appropriate colors."""
 		from jarz_pos.api.kanban import get_kanban_columns
 
-		with patch('jarz_pos.api.kanban._get_state_field_options') as mock_options:
+		with patch("jarz_pos.api.kanban._get_state_field_options") as mock_options:
 			mock_options.return_value = ["Received", "Completed"]
 
 			result = get_kanban_columns()
@@ -79,7 +79,7 @@ class TestKanbanOperations(unittest.TestCase):
 			self.assertIsNotNone(received_col["color"])
 			self.assertIsNotNone(completed_col["color"])
 
-	@patch('jarz_pos.api.kanban.frappe')
+	@patch("jarz_pos.api.kanban.frappe")
 	def test_update_invoice_state_field_candidates(self, mock_frappe):
 		"""Test update_invoice_state checks multiple field candidates."""
 		from jarz_pos.api.kanban import update_invoice_state
@@ -93,24 +93,21 @@ class TestKanbanOperations(unittest.TestCase):
 		mock_meta = MagicMock()
 		mock_field = MagicMock()
 		mock_field.fieldname = "custom_sales_invoice_state"
-		mock_meta.get_field.side_effect = lambda name: mock_field if name == "custom_sales_invoice_state" else None
+		mock_meta.get_field.side_effect = (
+			lambda name: mock_field if name == "custom_sales_invoice_state" else None
+		)
 
 		mock_frappe.get_doc.return_value = mock_inv
 		mock_frappe.get_meta.return_value = mock_meta
 
 		# Field candidates checked in order
-		field_candidates = [
-			"custom_sales_invoice_state",
-			"sales_invoice_state",
-			"custom_state",
-			"state"
-		]
+		field_candidates = ["custom_sales_invoice_state", "sales_invoice_state", "custom_state", "state"]
 
 		# Validate the pattern exists
 		for field in field_candidates:
 			self.assertIsNotNone(field)
 
-	@patch('jarz_pos.api.kanban.frappe')
+	@patch("jarz_pos.api.kanban.frappe")
 	def test_update_invoice_state_requires_submitted(self, mock_frappe):
 		"""Test update_invoice_state requires submitted invoice."""
 		from jarz_pos.api.kanban import update_invoice_state
@@ -127,40 +124,42 @@ class TestKanbanOperations(unittest.TestCase):
 		# Should return error for draft invoice
 		self.assertFalse(result.get("success", True))
 
-	@patch('jarz_pos.api.kanban.get_invoice_hard_mutation_blocker')
-	@patch('jarz_pos.api.kanban.frappe')
+	@patch("jarz_pos.api.kanban.get_invoice_hard_mutation_blocker")
+	@patch("jarz_pos.api.kanban.frappe")
 	def test_cancel_invoice_rejects_hard_mutation_blockers(self, mock_frappe, mock_blocker):
 		"""Cancel flow should reuse the shared hard-blocker guardrail."""
 		from jarz_pos.api.kanban import cancel_invoice
 
 		mock_invoice = MagicMock()
-		mock_invoice.name = 'INV-001'
+		mock_invoice.name = "INV-001"
 		mock_invoice.docstatus = 1
 		mock_invoice.is_return = 0
 		mock_invoice.get.side_effect = lambda fieldname: {
-			'custom_sales_invoice_state': 'In Progress',
-			'sales_invoice_state': 'In Progress',
+			"custom_sales_invoice_state": "In Progress",
+			"sales_invoice_state": "In Progress",
 		}.get(fieldname)
 
-		mock_frappe.session.user = 'manager@example.com'
-		mock_frappe.get_roles.return_value = ['JARZ line manager']
+		mock_frappe.session.user = "manager@example.com"
+		mock_frappe.get_roles.return_value = ["JARZ line manager"]
 		mock_frappe.get_doc.return_value = mock_invoice
 		mock_blocker.return_value = {
-			'mutation_block_code': 'journal_entry_exists',
-			'mutation_block_reason': 'This invoice already has settlement journal entries and cannot be changed from this workflow.',
+			"mutation_block_code": "journal_entry_exists",
+			"mutation_block_reason": "This invoice already has settlement journal entries and cannot be changed from this workflow.",
 		}
 
-		result = cancel_invoice('INV-001', 'Customer requested')
+		result = cancel_invoice("INV-001", "Customer requested")
 
-		self.assertFalse(result.get('success'))
-		self.assertIn('journal', result.get('error', '').lower())
+		self.assertFalse(result.get("success"))
+		self.assertIn("journal", result.get("error", "").lower())
 		# Cancellation reads the blocker with unsettled partner transactions ignored:
 		# a pending partner fee is not a settlement artifact (kanban cycle audit, 2026-09-05).
 		mock_blocker.assert_called_once_with(mock_invoice, ignore_unsettled_partner_transactions=True)
 
-	@patch('jarz_pos.api.kanban._get_allowed_states')
-	@patch('jarz_pos.api.kanban.frappe')
-	def test_update_invoice_state_saves_submitted_invoice_to_fire_hooks(self, mock_frappe, mock_allowed_states):
+	@patch("jarz_pos.api.kanban._get_allowed_states")
+	@patch("jarz_pos.api.kanban.frappe")
+	def test_update_invoice_state_saves_submitted_invoice_to_fire_hooks(
+		self, mock_frappe, mock_allowed_states
+	):
 		"""Submitted invoice state changes should use save(), not db_set(), so hooks can run."""
 		from jarz_pos.api.kanban import update_invoice_state
 
@@ -178,7 +177,11 @@ class TestKanbanOperations(unittest.TestCase):
 		}.get(fieldname)
 
 		mock_meta = MagicMock()
-		mock_meta.get_field.side_effect = lambda name: MagicMock() if name in {"custom_sales_invoice_state", "sales_invoice_state"} else None
+		mock_meta.get_field.side_effect = (
+			lambda name: MagicMock()
+			if name in {"custom_sales_invoice_state", "sales_invoice_state"}
+			else None
+		)
 
 		mock_frappe.get_doc.return_value = mock_inv
 		mock_frappe.get_meta.return_value = mock_meta
@@ -196,8 +199,8 @@ class TestKanbanOperations(unittest.TestCase):
 		mock_inv.set.assert_any_call("custom_sales_invoice_state", "Delivered")
 		mock_inv.set.assert_any_call("sales_invoice_state", "Delivered")
 
-	@patch('jarz_pos.services.delivery_handling.is_negative_stock_allowed', return_value=False)
-	@patch('jarz_pos.services.delivery_handling.frappe')
+	@patch("jarz_pos.services.delivery_handling.is_negative_stock_allowed", return_value=False)
+	@patch("jarz_pos.services.delivery_handling.frappe")
 	def test_get_ofd_shortage_preview_reports_blocking_shortage(self, mock_frappe, mock_allow_negative):
 		"""OFD shortage preview should report stock shortages separately from warehouse mismatch checks."""
 		from jarz_pos.services.delivery_handling import get_ofd_shortage_preview
@@ -254,12 +257,14 @@ class TestKanbanOperations(unittest.TestCase):
 		self.assertEqual(len(preview["shortages"]), 1)
 		self.assertEqual(preview["shortages"][0]["item_code"], "ITEM-001")
 		self.assertEqual(preview["shortages"][0]["shortage_qty"], 2.0)
-		self.assertEqual(preview["invoice_previews"]["INV-100"]["blocking_shortages"][0]["item_code"], "ITEM-001")
+		self.assertEqual(
+			preview["invoice_previews"]["INV-100"]["blocking_shortages"][0]["item_code"], "ITEM-001"
+		)
 
-	@patch('jarz_pos.api.kanban._get_allowed_states')
-	@patch('jarz_pos.api.kanban.get_ofd_shortage_preview')
-	@patch('jarz_pos.api.kanban.ensure_delivery_note_for_invoice')
-	@patch('jarz_pos.api.kanban.frappe')
+	@patch("jarz_pos.api.kanban._get_allowed_states")
+	@patch("jarz_pos.api.kanban.get_ofd_shortage_preview")
+	@patch("jarz_pos.api.kanban.ensure_delivery_note_for_invoice")
+	@patch("jarz_pos.api.kanban.frappe")
 	def test_update_invoice_state_requires_shortage_reason_before_ofd(
 		self,
 		mock_frappe,
@@ -287,7 +292,11 @@ class TestKanbanOperations(unittest.TestCase):
 		}.get(fieldname)
 
 		mock_meta = MagicMock()
-		mock_meta.get_field.side_effect = lambda name: MagicMock() if name in {"custom_sales_invoice_state", "sales_invoice_state"} else None
+		mock_meta.get_field.side_effect = (
+			lambda name: MagicMock()
+			if name in {"custom_sales_invoice_state", "sales_invoice_state"}
+			else None
+		)
 
 		mock_frappe.get_doc.return_value = mock_inv
 		mock_frappe.get_meta.return_value = mock_meta
@@ -319,10 +328,10 @@ class TestKanbanOperations(unittest.TestCase):
 		self.assertIn("ofd_preview", result)
 		mock_ensure_dn.assert_not_called()
 
-	@patch('jarz_pos.api.kanban._get_allowed_states')
-	@patch('jarz_pos.api.kanban.get_ofd_shortage_preview')
-	@patch('jarz_pos.api.kanban.ensure_delivery_note_for_invoice')
-	@patch('jarz_pos.api.kanban.frappe')
+	@patch("jarz_pos.api.kanban._get_allowed_states")
+	@patch("jarz_pos.api.kanban.get_ofd_shortage_preview")
+	@patch("jarz_pos.api.kanban.ensure_delivery_note_for_invoice")
+	@patch("jarz_pos.api.kanban.frappe")
 	def test_update_invoice_state_uses_shared_dn_helper_and_captures_shortage_audit(
 		self,
 		mock_frappe,
@@ -399,7 +408,11 @@ class TestKanbanOperations(unittest.TestCase):
 		mock_ensure_dn.assert_called_once_with("INV-201")
 		mock_inv.set.assert_any_call("custom_ofd_shortage_approved", 1)
 		mock_inv.set.assert_any_call("custom_ofd_shortage_reason", "Stock transfer in progress")
-		detail_calls = [call.args[1] for call in mock_inv.set.call_args_list if call.args[0] == "custom_ofd_shortage_details"]
+		detail_calls = [
+			call.args[1]
+			for call in mock_inv.set.call_args_list
+			if call.args[0] == "custom_ofd_shortage_details"
+		]
 		self.assertTrue(detail_calls)
 		self.assertIn("ITEM-001", detail_calls[0])
 
@@ -414,17 +427,17 @@ class TestKanbanOperations(unittest.TestCase):
 		]
 
 		for state in normalized_states_that_create_dn:
-			normalized = state.strip().lower().replace(' ', '_')
+			normalized = state.strip().lower().replace(" ", "_")
 			create_dn = normalized in {"out for delivery", "out_for_delivery"}
 			self.assertTrue(create_dn, f"State '{state}' should trigger DN creation")
 
-	@patch('jarz_pos.api.kanban.frappe')
+	@patch("jarz_pos.api.kanban.frappe")
 	def test_delivery_note_idempotency_via_remarks(self, mock_frappe):
 		"""Test DN reuse when remarks contains invoice name."""
 		# Logic in _create_delivery_note_from_invoice checks remarks for invoice name
 
 		invoice_name = "INV-12345"
-		
+
 		# Mock existing DN with invoice in remarks
 		mock_dn = MagicMock()
 		mock_dn.name = "DN-001"
@@ -434,7 +447,7 @@ class TestKanbanOperations(unittest.TestCase):
 		# The function should find and reuse this DN instead of creating new
 		self.assertIn(invoice_name, mock_dn.remarks)
 
-	@patch('jarz_pos.api.kanban.frappe')
+	@patch("jarz_pos.api.kanban.frappe")
 	def test_delivery_note_items_copy_from_invoice(self, mock_frappe):
 		"""Test DN items are copied from invoice items."""
 		# Mock invoice items
@@ -465,7 +478,7 @@ class TestKanbanOperations(unittest.TestCase):
 		for field in expected_fields:
 			self.assertIsNotNone(field)
 
-	@patch('jarz_pos.api.kanban.frappe')
+	@patch("jarz_pos.api.kanban.frappe")
 	def test_delivery_note_completed_status(self, mock_frappe):
 		"""Test DN is marked as completed after creation."""
 		# After DN submission, per_billed should be 100 and status "Completed"
@@ -495,7 +508,7 @@ class TestKanbanOperations(unittest.TestCase):
 		self.assertIsNotNone(DN_LOGIC_VERSION)
 		self.assertIsInstance(DN_LOGIC_VERSION, str)
 
-	@patch('jarz_pos.services.delivery_handling.frappe')
+	@patch("jarz_pos.services.delivery_handling.frappe")
 	def test_delivery_note_allows_disabled_historical_invoice_items(self, mock_frappe):
 		"""Auto-created DNs should still work for submitted invoices whose items were later disabled."""
 		from jarz_pos.services.delivery_handling import ensure_delivery_note_for_invoice
@@ -545,33 +558,37 @@ class TestKanbanOperations(unittest.TestCase):
 		mock_meta = MagicMock()
 		mock_meta.get_field.return_value = None
 
-		mock_frappe.get_doc.side_effect = lambda doctype, name=None: mock_invoice if doctype == "Sales Invoice" else MagicMock()
+		mock_frappe.get_doc.side_effect = (
+			lambda doctype, name=None: mock_invoice if doctype == "Sales Invoice" else MagicMock()
+		)
 		mock_frappe.get_meta.return_value = mock_meta
 		mock_frappe.get_all.return_value = []
 		mock_frappe.new_doc.return_value = mock_dn
 		mock_frappe.logger.return_value = MagicMock()
 		mock_frappe.ValidationError = Exception
 		mock_frappe.db.exists.side_effect = lambda doctype, name: True
-		mock_frappe.db.get_value.side_effect = (
-			lambda doctype, name, field: {
-				("POS Profile", "Nasr city", "warehouse"): "Main WH",
-				("Warehouse", "Main WH", "company"): "Jarz",
-				("Item", "ITEM-001", "is_stock_item"): 1,
-			}.get((doctype, name, field))
-		)
+		mock_frappe.db.get_value.side_effect = lambda doctype, name, field: {
+			("POS Profile", "Nasr city", "warehouse"): "Main WH",
+			("Warehouse", "Main WH", "company"): "Jarz",
+			("Item", "ITEM-001", "is_stock_item"): 1,
+		}.get((doctype, name, field))
 		mock_frappe.utils.getdate.return_value = "2026-05-02"
 		mock_frappe.utils.nowtime.return_value = "12:00:00"
 		mock_frappe.utils.today.return_value = "2026-05-02"
 		mock_frappe.utils.add_days.return_value = "2026-04-29"
 
-		with patch.object(stock_get_item_details, 'validate_end_of_life', side_effect=strict_validate, create=True) as stock_validate, \
-			 patch.object(item_module, 'validate_end_of_life', side_effect=strict_validate) as item_validate:
+		with (
+			patch.object(
+				stock_get_item_details, "validate_end_of_life", side_effect=strict_validate, create=True
+			) as stock_validate,
+			patch.object(item_module, "validate_end_of_life", side_effect=strict_validate) as item_validate,
+		):
 			result = ensure_delivery_note_for_invoice("INV-001")
 
 		self.assertIsNone(result["error"])
 		self.assertEqual(result["delivery_note"], "DN-001")
 
-	@patch('jarz_pos.services.delivery_handling.frappe')
+	@patch("jarz_pos.services.delivery_handling.frappe")
 	def test_delivery_note_rejects_branch_warehouse_mismatch(self, mock_frappe):
 		"""Auto-created DNs must fail fast when invoice rows still point to the old branch warehouse."""
 		from jarz_pos.services.delivery_handling import ensure_delivery_note_for_invoice
@@ -595,20 +612,20 @@ class TestKanbanOperations(unittest.TestCase):
 		mock_meta = MagicMock()
 		mock_meta.get_field.return_value = None
 
-		mock_frappe.get_doc.side_effect = lambda doctype, name=None: mock_invoice if doctype == "Sales Invoice" else MagicMock()
+		mock_frappe.get_doc.side_effect = (
+			lambda doctype, name=None: mock_invoice if doctype == "Sales Invoice" else MagicMock()
+		)
 		mock_frappe.get_meta.return_value = mock_meta
 		mock_frappe.get_all.return_value = []
 		mock_frappe.new_doc.return_value = MagicMock()
 		mock_frappe.logger.return_value = MagicMock()
 		mock_frappe.ValidationError = Exception
 		mock_frappe.db.exists.side_effect = lambda doctype, name: True
-		mock_frappe.db.get_value.side_effect = (
-			lambda doctype, name, field: {
-				("POS Profile", "Nasr city", "warehouse"): "Stores - Nasr city",
-				("Warehouse", "Stores - Nasr city", "company"): "Jarz",
-				("Item", "ITEM-001", "is_stock_item"): 1,
-			}.get((doctype, name, field))
-		)
+		mock_frappe.db.get_value.side_effect = lambda doctype, name, field: {
+			("POS Profile", "Nasr city", "warehouse"): "Stores - Nasr city",
+			("Warehouse", "Stores - Nasr city", "company"): "Jarz",
+			("Item", "ITEM-001", "is_stock_item"): 1,
+		}.get((doctype, name, field))
 		mock_frappe.utils.today.return_value = "2026-05-02"
 		mock_frappe.utils.add_days.return_value = "2026-04-29"
 
@@ -618,7 +635,7 @@ class TestKanbanOperations(unittest.TestCase):
 		self.assertIn("warehouses do not match operational branch warehouse", result["error"])
 		mock_frappe.new_doc.assert_not_called()
 
-	@patch('jarz_pos.api.kanban.frappe')
+	@patch("jarz_pos.api.kanban.frappe")
 	def test_kanban_publishes_realtime_events(self, mock_frappe):
 		"""Test that state updates publish realtime events."""
 		# update_invoice_state should publish events for live updates
@@ -652,7 +669,7 @@ class TestKanbanOperations(unittest.TestCase):
 		for field in expected_fields:
 			self.assertIsNotNone(field)
 
-	@patch('jarz_pos.services.delivery_handling.frappe')
+	@patch("jarz_pos.services.delivery_handling.frappe")
 	def test_settle_single_invoice_paid_logic(self, mock_frappe):
 		"""Test settle_single_invoice_paid function structure."""
 		from jarz_pos.services.delivery_handling import settle_single_invoice_paid
@@ -662,13 +679,14 @@ class TestKanbanOperations(unittest.TestCase):
 
 		# Should accept invoice_name, pos_profile, party_type, party
 		import inspect
+
 		sig = inspect.signature(settle_single_invoice_paid)
 		params = list(sig.parameters.keys())
 
 		self.assertIn("invoice_name", params)
 		self.assertIn("pos_profile", params)
 
-	@patch('jarz_pos.services.delivery_handling.frappe')
+	@patch("jarz_pos.services.delivery_handling.frappe")
 	def test_settle_courier_collected_payment_logic(self, mock_frappe):
 		"""Test settle_courier_collected_payment function structure."""
 		from jarz_pos.services.delivery_handling import settle_courier_collected_payment
@@ -678,6 +696,7 @@ class TestKanbanOperations(unittest.TestCase):
 
 		# Should accept invoice_name, pos_profile, party_type, party
 		import inspect
+
 		sig = inspect.signature(settle_courier_collected_payment)
 		params = list(sig.parameters.keys())
 
@@ -700,7 +719,7 @@ class TestKanbanOperations(unittest.TestCase):
 		# Function should exist
 		self.assertTrue(callable(_get_delivery_expense_amount))
 
-	@patch('jarz_pos.services.delivery_handling.frappe')
+	@patch("jarz_pos.services.delivery_handling.frappe")
 	def test_settle_later_journal_entry_creation(self, mock_frappe):
 		"""Test settle later settlement creates appropriate journal entries."""
 		# When settling a "settle later" invoice, should create JE based on amount comparison
@@ -725,12 +744,12 @@ class TestKanbanOperations(unittest.TestCase):
 		# Functions should check for existing JE by title before creating new
 
 		title = "Courier Outstanding Settlement – INV-001"
-		
+
 		# Should use _existing_je helper to check for existing journal entry
 		# If found, skip creation
 		self.assertIsNotNone(title)
 
-	@patch('jarz_pos.api.kanban.frappe')
+	@patch("jarz_pos.api.kanban.frappe")
 	def test_kanban_branch_propagation(self, mock_frappe):
 		"""Test custom_kanban_profile is propagated to DN and PE."""
 		# When creating DN and PE, should copy custom_kanban_profile from invoice
@@ -755,7 +774,6 @@ class TestKanbanOperations(unittest.TestCase):
 
 		# Should return success, customers list, states list
 
-
 	def test_get_invoice_details_structure(self):
 		"""Test get_invoice_details returns full invoice data."""
 		from jarz_pos.api.kanban import get_invoice_details
@@ -765,6 +783,7 @@ class TestKanbanOperations(unittest.TestCase):
 
 		# Should accept invoice_id parameter
 		import inspect
+
 		sig = inspect.signature(get_invoice_details)
 		params = list(sig.parameters.keys())
 		self.assertIn("invoice_id", params)
@@ -787,18 +806,18 @@ class TestSettleLaterOperations(unittest.TestCase):
 		# Should call handle_out_for_delivery_paid with settlement="later"
 		self.assertTrue(callable(handle_paid_settle_later))
 
-	@patch('jarz_pos.services.delivery_handling.frappe')
+	@patch("jarz_pos.services.delivery_handling.frappe")
 	def test_courier_transaction_status_lifecycle(self, mock_frappe):
 		"""Test courier transaction status changes from Unsettled to Settled."""
 		# Initial creation: status = "Unsettled"
 		# After settlement: status = "Settled"
 
 		statuses = ["Unsettled", "Settled"]
-		
+
 		for status in statuses:
 			self.assertIn(status, ["Unsettled", "Settled"])
 
-	@patch('jarz_pos.services.delivery_handling.frappe')
+	@patch("jarz_pos.services.delivery_handling.frappe")
 	def test_settle_later_amount_tracking(self, mock_frappe):
 		"""Test courier transaction tracks both order amount and shipping amount."""
 		# CT should have:

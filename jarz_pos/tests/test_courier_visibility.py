@@ -4,7 +4,6 @@ from unittest.mock import patch
 
 
 class TestCourierVisibilityHelpers(unittest.TestCase):
-
 	@patch("jarz_pos.utils.courier_visibility.frappe")
 	def test_assert_courier_matches_pos_profile_rejects_cross_branch_assignment(self, mock_frappe):
 		from jarz_pos.utils.courier_visibility import assert_courier_matches_pos_profile

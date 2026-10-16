@@ -36,11 +36,11 @@ class TestInvoiceCasesIntegration(unittest.TestCase):
 	# CASE 1: PAID + SETTLE NOW
 	# =========================================================================
 
-	@patch('jarz_pos.services.settlement_strategies.frappe')
-	@patch('jarz_pos.services.delivery_handling.frappe')
+	@patch("jarz_pos.services.settlement_strategies.frappe")
+	@patch("jarz_pos.services.delivery_handling.frappe")
 	def test_case1_paid_settle_now_flow(self, mock_delivery_frappe, mock_strategy_frappe):
 		"""Test Case 1: Paid invoice with immediate settlement.
-		
+
 		Flow:
 		1. Customer pays online/POS (invoice already paid, outstanding=0)
 		2. Move to "Out for Delivery" (settle now)
@@ -59,7 +59,7 @@ class TestInvoiceCasesIntegration(unittest.TestCase):
 		mock_inv.grand_total = 500.0
 
 		# Call handler
-		with patch('jarz_pos.services.settlement_strategies.handle_out_for_delivery_paid') as mock_ofd:
+		with patch("jarz_pos.services.settlement_strategies.handle_out_for_delivery_paid") as mock_ofd:
 			mock_ofd.return_value = {
 				"success": True,
 				"delivery_note": "DN-001",
@@ -72,7 +72,7 @@ class TestInvoiceCasesIntegration(unittest.TestCase):
 				pos_profile="POS-001",
 				payment_type="cash",
 				party_type="Courier",
-				party="Courier-001"
+				party="Courier-001",
 			)
 
 			# Verify result
@@ -90,11 +90,11 @@ class TestInvoiceCasesIntegration(unittest.TestCase):
 	# CASE 2: PAID + SETTLE LATER
 	# =========================================================================
 
-	@patch('jarz_pos.services.settlement_strategies.frappe')
-	@patch('jarz_pos.services.delivery_handling.frappe')
+	@patch("jarz_pos.services.settlement_strategies.frappe")
+	@patch("jarz_pos.services.delivery_handling.frappe")
 	def test_case2_paid_settle_later_flow(self, mock_delivery_frappe, mock_strategy_frappe):
 		"""Test Case 2: Paid invoice with deferred settlement.
-		
+
 		Flow:
 		1. Customer pays online/POS (invoice already paid)
 		2. Move to "Out for Delivery" (settle later)
@@ -111,7 +111,7 @@ class TestInvoiceCasesIntegration(unittest.TestCase):
 		mock_inv.company = "Test Company"
 		mock_inv.outstanding_amount = 0.0
 
-		with patch('jarz_pos.services.settlement_strategies.handle_out_for_delivery_paid') as mock_ofd:
+		with patch("jarz_pos.services.settlement_strategies.handle_out_for_delivery_paid") as mock_ofd:
 			mock_ofd.return_value = {
 				"success": True,
 				"delivery_note": "DN-002",
@@ -120,11 +120,7 @@ class TestInvoiceCasesIntegration(unittest.TestCase):
 			}
 
 			result = handle_paid_settle_later(
-				mock_inv,
-				pos_profile="POS-001",
-				payment_type=None,
-				party_type="Courier",
-				party="Courier-001"
+				mock_inv, pos_profile="POS-001", payment_type=None, party_type="Courier", party="Courier-001"
 			)
 
 			# Verify result
@@ -139,11 +135,11 @@ class TestInvoiceCasesIntegration(unittest.TestCase):
 	# CASE 3: UNPAID + SETTLE NOW
 	# =========================================================================
 
-	@patch('jarz_pos.services.settlement_strategies.frappe')
-	@patch('jarz_pos.services.delivery_handling.frappe')
+	@patch("jarz_pos.services.settlement_strategies.frappe")
+	@patch("jarz_pos.services.delivery_handling.frappe")
 	def test_case3_unpaid_settle_now_flow(self, mock_delivery_frappe, mock_strategy_frappe):
 		"""Test Case 3: Unpaid invoice with immediate settlement.
-		
+
 		Flow:
 		1. Customer hasn't paid yet (outstanding > 0)
 		2. Create PE to record payment (DR Cash / CR Receivable)
@@ -164,13 +160,13 @@ class TestInvoiceCasesIntegration(unittest.TestCase):
 		mock_strategy_frappe.db.get_value.return_value = 500.0
 
 		# Mock _create_payment_entry
-		with patch('jarz_pos.services.settlement_strategies._create_payment_entry') as mock_pe:
+		with patch("jarz_pos.services.settlement_strategies._create_payment_entry") as mock_pe:
 			mock_pe_doc = MagicMock()
 			mock_pe_doc.name = "PE-001"
 			mock_pe.return_value = mock_pe_doc
 
 			# Mock _ofd_paid
-			with patch('jarz_pos.services.settlement_strategies.handle_out_for_delivery_paid') as mock_ofd:
+			with patch("jarz_pos.services.settlement_strategies.handle_out_for_delivery_paid") as mock_ofd:
 				mock_ofd.return_value = {
 					"success": True,
 					"delivery_note": "DN-003",
@@ -183,7 +179,7 @@ class TestInvoiceCasesIntegration(unittest.TestCase):
 					pos_profile="POS-001",
 					payment_type="cash",
 					party_type="Courier",
-					party="Courier-001"
+					party="Courier-001",
 				)
 
 				# Verify result includes both PE and OFD artifacts
@@ -196,10 +192,10 @@ class TestInvoiceCasesIntegration(unittest.TestCase):
 	# CASE 4: UNPAID + SETTLE LATER
 	# =========================================================================
 
-	@patch('jarz_pos.services.settlement_strategies.frappe')
+	@patch("jarz_pos.services.settlement_strategies.frappe")
 	def test_case4_unpaid_settle_later_flow(self, mock_frappe):
 		"""Test Case 4: Unpaid invoice with deferred settlement.
-		
+
 		Flow:
 		1. Customer hasn't paid yet (COD scenario)
 		2. Move to "Out for Delivery" (settle later)
@@ -214,7 +210,7 @@ class TestInvoiceCasesIntegration(unittest.TestCase):
 		mock_inv = MagicMock()
 		mock_inv.name = "INV-UNPAID-LATER-001"
 
-		with patch('jarz_pos.services.settlement_strategies.mark_courier_outstanding') as mock_mark:
+		with patch("jarz_pos.services.settlement_strategies.mark_courier_outstanding") as mock_mark:
 			mock_mark.return_value = {
 				"success": True,
 				"courier_transaction": "CT-004",
@@ -222,11 +218,7 @@ class TestInvoiceCasesIntegration(unittest.TestCase):
 			}
 
 			result = handle_unpaid_settle_later(
-				mock_inv,
-				pos_profile="POS-001",
-				payment_type=None,
-				party_type="Courier",
-				party="Courier-001"
+				mock_inv, pos_profile="POS-001", payment_type=None, party_type="Courier", party="Courier-001"
 			)
 
 			# Verify result
@@ -238,12 +230,12 @@ class TestInvoiceCasesIntegration(unittest.TestCase):
 	# CASE 5: SALES PARTNER - CASH
 	# =========================================================================
 
-	@patch('jarz_pos.api.kanban.frappe')
-	@patch('jarz_pos.api.kanban.get_pos_cash_account')
-	@patch('jarz_pos.api.kanban.get_company_receivable_account')
+	@patch("jarz_pos.api.kanban.frappe")
+	@patch("jarz_pos.api.kanban.get_pos_cash_account")
+	@patch("jarz_pos.api.kanban.get_company_receivable_account")
 	def test_case5_sales_partner_cash_flow(self, mock_receivable, mock_cash, mock_frappe):
 		"""Test Case 5a: Sales partner invoice with cash payment.
-		
+
 		Flow:
 		1. Invoice has sales_partner field set
 		2. Customer pays cash (outstanding > 0 initially)
@@ -289,10 +281,10 @@ class TestInvoiceCasesIntegration(unittest.TestCase):
 	# CASE 5: SALES PARTNER - ONLINE
 	# =========================================================================
 
-	@patch('jarz_pos.services.settlement_strategies.resolve_online_partner_paid_to')
+	@patch("jarz_pos.services.settlement_strategies.resolve_online_partner_paid_to")
 	def test_case5_sales_partner_online_flow(self, mock_resolve):
 		"""Test Case 5b: Sales partner invoice with online payment.
-		
+
 		Flow:
 		1. Invoice has sales_partner field set
 		2. Customer pays online (outstanding = 0)
@@ -314,7 +306,7 @@ class TestInvoiceCasesIntegration(unittest.TestCase):
 		self.assertEqual(result, "Partner Sub Receivable - TC")
 		mock_resolve.assert_called_once_with("Test Company", "Partner-001")
 
-	@patch('jarz_pos.services.delivery_handling.frappe')
+	@patch("jarz_pos.services.delivery_handling.frappe")
 	def test_sales_partner_fees_with_vat(self, mock_frappe):
 		"""Test sales partner fees calculation includes VAT."""
 		from jarz_pos.services.delivery_handling import _compute_sales_partner_fees, PARTNER_FEES_VAT_RATE
@@ -348,7 +340,7 @@ class TestInvoiceCasesIntegration(unittest.TestCase):
 
 	def test_case6_pickup_paid_settle_now(self):
 		"""Test Case 6a: Pickup + Paid + Settle Now.
-		
+
 		Flow:
 		1. Invoice marked as pickup (is_pickup=True)
 		2. Shipping amounts = 0 (no delivery charges)
@@ -363,7 +355,7 @@ class TestInvoiceCasesIntegration(unittest.TestCase):
 
 		# Mock pickup invoice
 		inv_dict = {"is_pickup": True, "grand_total": 300.0}
-		
+
 		is_pickup = _is_pickup_invoice(inv_dict)
 		self.assertTrue(is_pickup)
 
@@ -371,7 +363,7 @@ class TestInvoiceCasesIntegration(unittest.TestCase):
 		if is_pickup:
 			shipping_income = 0.0
 			shipping_expense = 0.0
-		
+
 		self.assertEqual(shipping_income, 0.0)
 		self.assertEqual(shipping_expense, 0.0)
 
@@ -379,7 +371,7 @@ class TestInvoiceCasesIntegration(unittest.TestCase):
 
 	def test_case6_pickup_unpaid_settle_later(self):
 		"""Test Case 6b: Pickup + Unpaid + Settle Later.
-		
+
 		Flow:
 		1. Invoice marked as pickup
 		2. Shipping amounts = 0
@@ -394,12 +386,8 @@ class TestInvoiceCasesIntegration(unittest.TestCase):
 		from jarz_pos.services.settlement_strategies import handle_unpaid_settle_later
 
 		# Mock pickup invoice
-		inv_dict = {
-			"is_pickup": True,
-			"custom_is_pickup": 1,
-			"outstanding_amount": 300.0
-		}
-		
+		inv_dict = {"is_pickup": True, "custom_is_pickup": 1, "outstanding_amount": 300.0}
+
 		is_pickup = _is_pickup_invoice(inv_dict)
 		self.assertTrue(is_pickup)
 
@@ -422,7 +410,7 @@ class TestInvoiceCasesIntegration(unittest.TestCase):
 	# SETTLEMENT OPERATIONS
 	# =========================================================================
 
-	@patch('jarz_pos.services.delivery_handling.frappe')
+	@patch("jarz_pos.services.delivery_handling.frappe")
 	def test_settle_later_settlement_with_settle_single_invoice_paid(self, mock_frappe):
 		"""Test settling a 'settle later' paid invoice."""
 		from jarz_pos.services.delivery_handling import settle_single_invoice_paid
@@ -430,7 +418,7 @@ class TestInvoiceCasesIntegration(unittest.TestCase):
 		# This function settles invoices that were paid but courier settled later
 		self.assertTrue(callable(settle_single_invoice_paid))
 
-	@patch('jarz_pos.services.delivery_handling.frappe')
+	@patch("jarz_pos.services.delivery_handling.frappe")
 	def test_settle_later_settlement_with_settle_courier_collected(self, mock_frappe):
 		"""Test settling a 'settle later' unpaid invoice (COD)."""
 		from jarz_pos.services.delivery_handling import settle_courier_collected_payment
@@ -442,7 +430,7 @@ class TestInvoiceCasesIntegration(unittest.TestCase):
 	# DISPATCH INTEGRATION
 	# =========================================================================
 
-	@patch('jarz_pos.services.settlement_strategies.frappe')
+	@patch("jarz_pos.services.settlement_strategies.frappe")
 	def test_dispatch_settlement_routes_correctly(self, mock_frappe):
 		"""Test dispatch_settlement routes to correct handler based on paid/unpaid."""
 		from jarz_pos.services.settlement_strategies import dispatch_settlement
@@ -478,6 +466,7 @@ class TestInvoiceCasesIntegration(unittest.TestCase):
 		# POS profile needed to resolve cash account
 		# If not provided, tries to get default
 		import inspect
+
 		sig = inspect.signature(dispatch_settlement)
 		params = sig.parameters
 
@@ -489,7 +478,7 @@ class TestInvoiceCasesIntegration(unittest.TestCase):
 		# This allows branch-level reporting and filtering
 
 		branch = "Branch-001"
-		
+
 		# Mock documents that should receive branch
 		mock_inv = MagicMock()
 		mock_inv.custom_kanban_profile = branch

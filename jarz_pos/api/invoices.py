@@ -15,9 +15,9 @@ from jarz_pos.services.invoice_creation import create_pos_invoice as _create_inv
 from jarz_pos.services import delivery_handling as _delivery
 from jarz_pos.constants import ACCOUNTS
 from jarz_pos.utils.access_control import (
-    ensure_open_shift,
-    ensure_open_shift_for_invoice,
-    ensure_profile_scoped_invoice_access,
+	ensure_open_shift,
+	ensure_open_shift_for_invoice,
+	ensure_profile_scoped_invoice_access,
 )
 from jarz_pos.utils.invoice_utils import normalize_woo_order_id
 
@@ -28,95 +28,94 @@ from jarz_pos.utils.invoice_utils import normalize_woo_order_id
 
 
 def _is_truthy_flag(value) -> bool:
-    if isinstance(value, (int, float)):
-        return int(value) == 1
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "on"}
-    return bool(value)
+	if isinstance(value, (int, float)):
+		return int(value) == 1
+	if isinstance(value, str):
+		return value.strip().lower() in {"1", "true", "yes", "on"}
+	return bool(value)
 
 
 def _guard_branch_sale(pos_profile: str | None, *, action_label: str) -> None:
-    """Assert the selling branch belongs to this user and currently has a shift."""
-    profile = str(pos_profile or "").strip()
-    if not profile:
-        return
-    ensure_profile_scoped_invoice_access(
-        frappe._dict({"custom_kanban_profile": profile}),
-        action_label=action_label,
-    )
-    ensure_open_shift(profile, action_label=action_label)
+	"""Assert the selling branch belongs to this user and currently has a shift."""
+	profile = str(pos_profile or "").strip()
+	if not profile:
+		return
+	ensure_profile_scoped_invoice_access(
+		frappe._dict({"custom_kanban_profile": profile}),
+		action_label=action_label,
+	)
+	ensure_open_shift(profile, action_label=action_label)
 
 
 @frappe.whitelist()
 def create_pos_invoice():
-    """
-    Create POS Sales Invoice - Clean implementation with comprehensive debugging
-    
-    This function reads parameters from frappe.form_dict instead of function parameters
-    to avoid Frappe's parameter mapping issues.
-    
-    Returns:
-        dict: Invoice creation result
-    """
-    
-    # Get parameters from frappe.form_dict (Frappe's way)
-    cart_json = frappe.form_dict.get('cart_json')
-    customer_name = frappe.form_dict.get('customer_name')
-    pos_profile_name = frappe.form_dict.get('pos_profile_name')
-    delivery_charges_json = frappe.form_dict.get('delivery_charges_json')
-    required_delivery_datetime = frappe.form_dict.get('required_delivery_datetime')
-    shipping_address_name = frappe.form_dict.get('shipping_address_name')
-    sales_partner = frappe.form_dict.get('sales_partner')
-    payment_type = frappe.form_dict.get('payment_type')  # 'cash' | 'online' (optional)
-    # New: pickup flag (no delivery fee)
-    raw_pickup = frappe.form_dict.get('pickup')
-    is_pickup = _is_truthy_flag(raw_pickup)
-    # New: pos_profile_override flag — caller has already confirmed mismatch
-    raw_pos_profile_override = frappe.form_dict.get('pos_profile_override')
-    is_pos_profile_override = _is_truthy_flag(raw_pos_profile_override)
-    # New delivery slot fields (optional; preferred)
-    delivery_date = frappe.form_dict.get('delivery_date')
-    delivery_time_from = frappe.form_dict.get('delivery_time_from')
-    delivery_duration = frappe.form_dict.get('delivery_duration')
-    
-    # New: payment method (Cash | Instapay | Mobile Wallet)
-    payment_method = frappe.form_dict.get('payment_method')
-    price_list = frappe.form_dict.get('price_list')
-    raw_zero_shipping_override = frappe.form_dict.get('zero_shipping_override')
-    zero_shipping_override = _is_truthy_flag(raw_zero_shipping_override)
-    raw_suppress_shipping_income = frappe.form_dict.get('suppress_shipping_income')
-    raw_suppress_legacy_delivery_charges = frappe.form_dict.get('suppress_legacy_delivery_charges')
-    suppress_shipping_income = _is_truthy_flag(raw_suppress_shipping_income)
-    suppress_legacy_delivery_charges = _is_truthy_flag(raw_suppress_legacy_delivery_charges)
-    custom_delivery_income = frappe.form_dict.get('custom_delivery_income')
-    # New: commercial policy / order purpose (B2B, Employee, Sample, Free-shipping waiver)
-    order_purpose = frappe.form_dict.get('order_purpose')
-    commercial_policy = frappe.form_dict.get('commercial_policy')
-    policy_reason = frappe.form_dict.get('policy_reason')
-    # New: promo codes (JSON list or CSV) + channel for the promo engine
-    promo_codes = frappe.form_dict.get('promo_codes')
-    channel = frappe.form_dict.get('channel') or 'flutter'
-    # New: Employee orders only — "credit" (default, deducted from salary) or
-    # "cash" (paid at the counter, settled into the branch till). Forwarded raw;
-    # the service validates it, because the service is whitelisted on its own.
-    employee_payment = frappe.form_dict.get('employee_payment')
+	"""
+	Create POS Sales Invoice - Clean implementation with comprehensive debugging
 
-    if zero_shipping_override:
-        suppress_shipping_income = True
-        suppress_legacy_delivery_charges = True
+	This function reads parameters from frappe.form_dict instead of function parameters
+	to avoid Frappe's parameter mapping issues.
 
-    # Selling on a branch means moving that branch's stock and cash, so the
-    # branch has to be yours and it has to be open.
-    _guard_branch_sale(pos_profile_name, action_label="creating an order")
+	Returns:
+	    dict: Invoice creation result
+	"""
 
+	# Get parameters from frappe.form_dict (Frappe's way)
+	cart_json = frappe.form_dict.get("cart_json")
+	customer_name = frappe.form_dict.get("customer_name")
+	pos_profile_name = frappe.form_dict.get("pos_profile_name")
+	delivery_charges_json = frappe.form_dict.get("delivery_charges_json")
+	required_delivery_datetime = frappe.form_dict.get("required_delivery_datetime")
+	shipping_address_name = frappe.form_dict.get("shipping_address_name")
+	sales_partner = frappe.form_dict.get("sales_partner")
+	payment_type = frappe.form_dict.get("payment_type")  # 'cash' | 'online' (optional)
+	# New: pickup flag (no delivery fee)
+	raw_pickup = frappe.form_dict.get("pickup")
+	is_pickup = _is_truthy_flag(raw_pickup)
+	# New: pos_profile_override flag — caller has already confirmed mismatch
+	raw_pos_profile_override = frappe.form_dict.get("pos_profile_override")
+	is_pos_profile_override = _is_truthy_flag(raw_pos_profile_override)
+	# New delivery slot fields (optional; preferred)
+	delivery_date = frappe.form_dict.get("delivery_date")
+	delivery_time_from = frappe.form_dict.get("delivery_time_from")
+	delivery_duration = frappe.form_dict.get("delivery_duration")
 
-    # Frappe best practice: Use frappe.logger() for structured logging
-    logger = frappe.logger("jarz_pos.api.invoices", allow_site=frappe.local.site)
-    
-    # Always log API calls in development
-    frappe.log_error(
-        title="POS API Call Debug",
-        message=f"""
+	# New: payment method (Cash | Instapay | Mobile Wallet)
+	payment_method = frappe.form_dict.get("payment_method")
+	price_list = frappe.form_dict.get("price_list")
+	raw_zero_shipping_override = frappe.form_dict.get("zero_shipping_override")
+	zero_shipping_override = _is_truthy_flag(raw_zero_shipping_override)
+	raw_suppress_shipping_income = frappe.form_dict.get("suppress_shipping_income")
+	raw_suppress_legacy_delivery_charges = frappe.form_dict.get("suppress_legacy_delivery_charges")
+	suppress_shipping_income = _is_truthy_flag(raw_suppress_shipping_income)
+	suppress_legacy_delivery_charges = _is_truthy_flag(raw_suppress_legacy_delivery_charges)
+	custom_delivery_income = frappe.form_dict.get("custom_delivery_income")
+	# New: commercial policy / order purpose (B2B, Employee, Sample, Free-shipping waiver)
+	order_purpose = frappe.form_dict.get("order_purpose")
+	commercial_policy = frappe.form_dict.get("commercial_policy")
+	policy_reason = frappe.form_dict.get("policy_reason")
+	# New: promo codes (JSON list or CSV) + channel for the promo engine
+	promo_codes = frappe.form_dict.get("promo_codes")
+	channel = frappe.form_dict.get("channel") or "flutter"
+	# New: Employee orders only — "credit" (default, deducted from salary) or
+	# "cash" (paid at the counter, settled into the branch till). Forwarded raw;
+	# the service validates it, because the service is whitelisted on its own.
+	employee_payment = frappe.form_dict.get("employee_payment")
+
+	if zero_shipping_override:
+		suppress_shipping_income = True
+		suppress_legacy_delivery_charges = True
+
+	# Selling on a branch means moving that branch's stock and cash, so the
+	# branch has to be yours and it has to be open.
+	_guard_branch_sale(pos_profile_name, action_label="creating an order")
+
+	# Frappe best practice: Use frappe.logger() for structured logging
+	logger = frappe.logger("jarz_pos.api.invoices", allow_site=frappe.local.site)
+
+	# Always log API calls in development
+	frappe.log_error(
+		title="POS API Call Debug",
+		message=f"""
 API ENDPOINT: create_pos_invoice
 TIMESTAMP: {frappe.utils.now()}
 USER: {frappe.session.user}
@@ -131,129 +130,134 @@ RAW PARAMETERS:
 - pos_profile_name (type: {type(pos_profile_name)}): {pos_profile_name}
 - delivery_charges_json (type: {type(delivery_charges_json)}): {delivery_charges_json}
 - required_delivery_datetime (type: {type(required_delivery_datetime)}): {required_delivery_datetime}
-        """.strip()
-    )
-    
-    # Console output for development debugging
-    print("\n" + "="*100)
-    print("� JARZ POS API CALL")
-    print("="*100)
-    print(f"🕐 {frappe.utils.now()}")
-    print(f"� User: {frappe.session.user}")
-    print(f"🌐 Site: {frappe.local.site}")
-    print(f"� Method: {getattr(frappe.local.request, 'method', 'N/A')}")
-    print(f"🔗 Endpoint: /api/method/jarz_pos.api.invoices.create_pos_invoice")
-    
-    print(f"\n📋 INCOMING PARAMETERS:")
-    print(f"   cart_json: {cart_json} (type: {type(cart_json)})")
-    print(f"   customer_name: {customer_name} (type: {type(customer_name)})")
-    print(f"   shipping_address_name: {shipping_address_name} (type: {type(shipping_address_name)})")
-    print(f"   pos_profile_name: {pos_profile_name} (type: {type(pos_profile_name)})")
-    print(f"   delivery_charges_json: {delivery_charges_json} (type: {type(delivery_charges_json)})")
-    print(f"   required_delivery_datetime: {required_delivery_datetime} (type: {type(required_delivery_datetime)})")
-    print(f"   delivery_date: {delivery_date} | delivery_time_from: {delivery_time_from} | delivery_duration: {delivery_duration}")
-    print(f"   pickup: {is_pickup}")
-    print(f"   payment_method: {payment_method}")
-    print(f"   price_list: {price_list}")
-    print(f"   zero_shipping_override: {zero_shipping_override}")
-    print(f"   suppress_shipping_income: {suppress_shipping_income}")
-    print(f"   suppress_legacy_delivery_charges: {suppress_legacy_delivery_charges}")
-    
-    try:
-        # Validate parameters before calling legacy function
-        if not cart_json:
-            error_msg = "cart_json parameter is required"
-            print(f"❌ VALIDATION ERROR: {error_msg}")
-            frappe.throw(error_msg)
-        
-        if not customer_name:
-            error_msg = "customer_name parameter is required"
-            print(f"❌ VALIDATION ERROR: {error_msg}")
-            frappe.throw(error_msg)
-        
-        # Parse cart_json to validate it's proper JSON
-        if isinstance(cart_json, str):
-            try:
-                parsed_cart = json.loads(cart_json)
-                print(f"✅ Cart JSON parsed successfully: {len(parsed_cart)} items")
-            except json.JSONDecodeError as e:
-                error_msg = f"Invalid JSON in cart_json: {str(e)}"
-                print(f"❌ JSON PARSE ERROR: {error_msg}")
-                frappe.throw(error_msg)
-        
-        print(f"\n🔄 Calling core function...")
+        """.strip(),
+	)
 
-        # Territory → POS profile safety check (before any DB writes)
-        from jarz_pos.utils.invoice_utils import assert_pos_profile_matches_territory, resolve_order_territory
-        effective_order_territory = resolve_order_territory(
-            customer_name,
-            shipping_address_name=shipping_address_name,
-        )
-        assert_pos_profile_matches_territory(
-            customer_name,
-            pos_profile_name,
-            override=is_pos_profile_override,
-            territory_name=effective_order_territory,
-        )
+	# Console output for development debugging
+	print("\n" + "=" * 100)
+	print("� JARZ POS API CALL")
+	print("=" * 100)
+	print(f"🕐 {frappe.utils.now()}")
+	print(f"� User: {frappe.session.user}")
+	print(f"🌐 Site: {frappe.local.site}")
+	print(f"� Method: {getattr(frappe.local.request, 'method', 'N/A')}")
+	print(f"🔗 Endpoint: /api/method/jarz_pos.api.invoices.create_pos_invoice")
 
-        # Prefer new delivery slot fields; if provided, synthesize a delivery_datetime for service layer
-        if delivery_date and delivery_time_from:
-            try:
-                # Construct ISO string; duration is handled inside service/hook
-                required_delivery_datetime = f"{delivery_date} {delivery_time_from}"
-            except Exception:
-                pass
+	print(f"\n📋 INCOMING PARAMETERS:")
+	print(f"   cart_json: {cart_json} (type: {type(cart_json)})")
+	print(f"   customer_name: {customer_name} (type: {type(customer_name)})")
+	print(f"   shipping_address_name: {shipping_address_name} (type: {type(shipping_address_name)})")
+	print(f"   pos_profile_name: {pos_profile_name} (type: {type(pos_profile_name)})")
+	print(f"   delivery_charges_json: {delivery_charges_json} (type: {type(delivery_charges_json)})")
+	print(
+		f"   required_delivery_datetime: {required_delivery_datetime} (type: {type(required_delivery_datetime)})"
+	)
+	print(
+		f"   delivery_date: {delivery_date} | delivery_time_from: {delivery_time_from} | delivery_duration: {delivery_duration}"
+	)
+	print(f"   pickup: {is_pickup}")
+	print(f"   payment_method: {payment_method}")
+	print(f"   price_list: {price_list}")
+	print(f"   zero_shipping_override: {zero_shipping_override}")
+	print(f"   suppress_shipping_income: {suppress_shipping_income}")
+	print(f"   suppress_legacy_delivery_charges: {suppress_legacy_delivery_charges}")
 
-        # Call the refactored service function
-        result = _create_invoice(
-            cart_json=cart_json,
-            customer_name=customer_name,
-            pos_profile_name=pos_profile_name,
-            delivery_charges_json=delivery_charges_json,
-            required_delivery_datetime=required_delivery_datetime,
-            shipping_address_name=shipping_address_name,
-            sales_partner=sales_partner,
-            payment_type=payment_type,
-            pickup=is_pickup,
-            payment_method=payment_method,
-            price_list=price_list,
-            suppress_shipping_income=suppress_shipping_income,
-            suppress_legacy_delivery_charges=suppress_legacy_delivery_charges,
-            custom_delivery_income=custom_delivery_income,
-            order_purpose=order_purpose,
-            commercial_policy=commercial_policy,
-            policy_reason=policy_reason,
-            promo_codes=promo_codes,
-            channel=channel,
-            employee_payment=employee_payment,
-        )
+	try:
+		# Validate parameters before calling legacy function
+		if not cart_json:
+			error_msg = "cart_json parameter is required"
+			print(f"❌ VALIDATION ERROR: {error_msg}")
+			frappe.throw(error_msg)
 
-        # Log successful response
-        print(f"\n✅ API CALL SUCCESSFUL!")
-        print(f"📤 RESPONSE:")
-        print(f"   Type: {type(result)}")
-        if isinstance(result, dict):
-            for key, value in result.items():
-                print(f"   {key}: {value}")
-        else:
-            print(f"   Value: {result}")
-        
-        # Frappe best practice: Log success to error log for debugging
-        frappe.log_error(
-            title="POS API Success Debug",
-            message=f"""
+		if not customer_name:
+			error_msg = "customer_name parameter is required"
+			print(f"❌ VALIDATION ERROR: {error_msg}")
+			frappe.throw(error_msg)
+
+		# Parse cart_json to validate it's proper JSON
+		if isinstance(cart_json, str):
+			try:
+				parsed_cart = json.loads(cart_json)
+				print(f"✅ Cart JSON parsed successfully: {len(parsed_cart)} items")
+			except json.JSONDecodeError as e:
+				error_msg = f"Invalid JSON in cart_json: {str(e)}"
+				print(f"❌ JSON PARSE ERROR: {error_msg}")
+				frappe.throw(error_msg)
+
+		print(f"\n🔄 Calling core function...")
+
+		# Territory → POS profile safety check (before any DB writes)
+		from jarz_pos.utils.invoice_utils import assert_pos_profile_matches_territory, resolve_order_territory
+
+		effective_order_territory = resolve_order_territory(
+			customer_name,
+			shipping_address_name=shipping_address_name,
+		)
+		assert_pos_profile_matches_territory(
+			customer_name,
+			pos_profile_name,
+			override=is_pos_profile_override,
+			territory_name=effective_order_territory,
+		)
+
+		# Prefer new delivery slot fields; if provided, synthesize a delivery_datetime for service layer
+		if delivery_date and delivery_time_from:
+			try:
+				# Construct ISO string; duration is handled inside service/hook
+				required_delivery_datetime = f"{delivery_date} {delivery_time_from}"
+			except Exception:
+				pass
+
+		# Call the refactored service function
+		result = _create_invoice(
+			cart_json=cart_json,
+			customer_name=customer_name,
+			pos_profile_name=pos_profile_name,
+			delivery_charges_json=delivery_charges_json,
+			required_delivery_datetime=required_delivery_datetime,
+			shipping_address_name=shipping_address_name,
+			sales_partner=sales_partner,
+			payment_type=payment_type,
+			pickup=is_pickup,
+			payment_method=payment_method,
+			price_list=price_list,
+			suppress_shipping_income=suppress_shipping_income,
+			suppress_legacy_delivery_charges=suppress_legacy_delivery_charges,
+			custom_delivery_income=custom_delivery_income,
+			order_purpose=order_purpose,
+			commercial_policy=commercial_policy,
+			policy_reason=policy_reason,
+			promo_codes=promo_codes,
+			channel=channel,
+			employee_payment=employee_payment,
+		)
+
+		# Log successful response
+		print(f"\n✅ API CALL SUCCESSFUL!")
+		print(f"📤 RESPONSE:")
+		print(f"   Type: {type(result)}")
+		if isinstance(result, dict):
+			for key, value in result.items():
+				print(f"   {key}: {value}")
+		else:
+			print(f"   Value: {result}")
+
+		# Frappe best practice: Log success to error log for debugging
+		frappe.log_error(
+			title="POS API Success Debug",
+			message=f"""
 API ENDPOINT: create_pos_invoice
 STATUS: SUCCESS
 RESPONSE: {json.dumps(result, indent=2, default=str)}
-            """.strip()
-        )
-        
-        print("="*100)
-        return result
-        
-    except Exception as e:
-        # Comprehensive error logging
-        error_details = f"""
+            """.strip(),
+		)
+
+		print("=" * 100)
+		return result
+
+	except Exception as e:
+		# Comprehensive error logging
+		error_details = f"""
 API ENDPOINT: create_pos_invoice
 STATUS: ERROR
 ERROR TYPE: {type(e).__name__}
@@ -265,70 +269,71 @@ PARAMETERS:
 USER: {frappe.session.user}
 SITE: {frappe.local.site}
         """.strip()
-        
-        print(f"\n❌ API ERROR:")
-        print(f"   Type: {type(e).__name__}")
-        print(f"   Message: {str(e)}")
-        
-        # Print full traceback for debugging
-        import traceback
-        print(f"   Traceback:")
-        traceback.print_exc()
-        
-        # Frappe best practice: Log error with full context
-        frappe.log_error(
-            title=f"POS API Error: {type(e).__name__}",
-            message=error_details + f"\n\nTRACEBACK:\n{traceback.format_exc()}"
-        )
-        
-        print("="*100)
-        
-        # Re-raise the exception (don't suppress it)
-        raise
+
+		print(f"\n❌ API ERROR:")
+		print(f"   Type: {type(e).__name__}")
+		print(f"   Message: {str(e)}")
+
+		# Print full traceback for debugging
+		import traceback
+
+		print(f"   Traceback:")
+		traceback.print_exc()
+
+		# Frappe best practice: Log error with full context
+		frappe.log_error(
+			title=f"POS API Error: {type(e).__name__}",
+			message=error_details + f"\n\nTRACEBACK:\n{traceback.format_exc()}",
+		)
+
+		print("=" * 100)
+
+		# Re-raise the exception (don't suppress it)
+		raise
 
 
 def _require_confirmed_transfer_proof(invoice_name: str, payment_mode: str) -> None:
-    """An InstaPay/Wallet invoice may only be marked paid against confirmed proof.
+	"""An InstaPay/Wallet invoice may only be marked paid against confirmed proof.
 
-    This is a business rule, not a technical one, and it is the whole reason the
-    payment-receipt flow exists: branch staff cannot see the company bank
-    account, so they have no way of knowing a transfer actually arrived. What
-    they can do is take the screenshot the customer sends. Someone who CAN see
-    the account -- a manager -- then confirms the money is really there. Without
-    that second step, "InstaPay" on an order means only that a customer said
-    they had paid.
+	This is a business rule, not a technical one, and it is the whole reason the
+	payment-receipt flow exists: branch staff cannot see the company bank
+	account, so they have no way of knowing a transfer actually arrived. What
+	they can do is take the screenshot the customer sends. Someone who CAN see
+	the account -- a manager -- then confirms the money is really there. Without
+	that second step, "InstaPay" on an order means only that a customer said
+	they had paid.
 
-    This endpoint bypassed the whole arrangement. It booked the money straight
-    into the bank ledger on a button press, with no receipt, no screenshot and
-    no manager, and it generated the bank reference number itself when the
-    caller did not supply one -- so the reference proved nothing either. On
-    production three orders were booked that way with no proof on file at all
-    (18096, 18025, 17943 -- 1,450 EGP), and 18025's money went into the wrong
-    branch's cash account on top.
+	This endpoint bypassed the whole arrangement. It booked the money straight
+	into the bank ledger on a button press, with no receipt, no screenshot and
+	no manager, and it generated the bank reference number itself when the
+	caller did not supply one -- so the reference proved nothing either. On
+	production three orders were booked that way with no proof on file at all
+	(18096, 18025, 17943 -- 1,450 EGP), and 18025's money went into the wrong
+	branch's cash account on top.
 
-    So: no exceptions. The receipt must exist, carry an image, and be Confirmed.
+	So: no exceptions. The receipt must exist, carry an image, and be Confirmed.
 
-    Note this is not a dead end for either flow. An order dispatched as unpaid
-    online never needs this endpoint -- confirming its receipt posts the payment
-    itself. An order paid at the counter still can: the manager confirms the
-    receipt (a plain stamp, since the order is not awaiting anything), and this
-    check then passes.
-    """
-    rows = frappe.get_all(
-        "POS Payment Receipt",
-        filters={"sales_invoice": invoice_name, "status": "Confirmed"},
-        fields=["name", "receipt_image", "receipt_image_url"],
-    )
-    for row in rows:
-        if str(row.get("receipt_image_url") or row.get("receipt_image") or "").strip():
-            return
+	Note this is not a dead end for either flow. An order dispatched as unpaid
+	online never needs this endpoint -- confirming its receipt posts the payment
+	itself. An order paid at the counter still can: the manager confirms the
+	receipt (a plain stamp, since the order is not awaiting anything), and this
+	check then passes.
+	"""
+	rows = frappe.get_all(
+		"POS Payment Receipt",
+		filters={"sales_invoice": invoice_name, "status": "Confirmed"},
+		fields=["name", "receipt_image", "receipt_image_url"],
+	)
+	for row in rows:
+		if str(row.get("receipt_image_url") or row.get("receipt_image") or "").strip():
+			return
 
-    frappe.throw(
-        f"{payment_mode} payments need a confirmed transfer receipt. Attach the "
-        "customer's transfer screenshot to this order and have a manager confirm "
-        "it -- for an order awaiting payment, confirming the receipt records the "
-        "payment itself."
-    )
+	frappe.throw(
+		f"{payment_mode} payments need a confirmed transfer receipt. Attach the "
+		"customer's transfer screenshot to this order and have a manager confirm "
+		"it -- for an order awaiting payment, confirming the receipt records the "
+		"payment itself."
+	)
 
 
 #: The method an invoice is stamped with once a manager records a Kashier
@@ -339,185 +344,182 @@ KASHIER_PAYMENT_METHOD = "Kashier Card"
 
 
 def _ensure_kashier_payment_access() -> None:
-    """Only the line-manager tier may book money into the Kashier ledger.
+	"""Only the line-manager tier may book money into the Kashier ledger.
 
-    Branch staff cannot see the Kashier dashboard, so they have no way of
-    knowing a payment link was really paid. A line manager can, and that check
-    is what stands in for the transfer screenshot the InstaPay/Wallet modes
-    demand. Same tier as every other line-manager money action
-    (``ROLES.LINE_MANAGER_TIER``) -- never the bare line-manager role.
-    """
-    from jarz_pos.constants import ROLES
+	Branch staff cannot see the Kashier dashboard, so they have no way of
+	knowing a payment link was really paid. A line manager can, and that check
+	is what stands in for the transfer screenshot the InstaPay/Wallet modes
+	demand. Same tier as every other line-manager money action
+	(``ROLES.LINE_MANAGER_TIER``) -- never the bare line-manager role.
+	"""
+	from jarz_pos.constants import ROLES
 
-    roles = {str(r or "").strip() for r in (frappe.get_roles() or []) if str(r or "").strip()}
-    if not roles.intersection(ROLES.ADMIN | ROLES.LINE_MANAGER_TIER):
-        frappe.throw(
-            "Only a line manager can mark an order as paid with Kashier.",
-            frappe.PermissionError,
-        )
+	roles = {str(r or "").strip() for r in (frappe.get_roles() or []) if str(r or "").strip()}
+	if not roles.intersection(ROLES.ADMIN | ROLES.LINE_MANAGER_TIER):
+		frappe.throw(
+			"Only a line manager can mark an order as paid with Kashier.",
+			frappe.PermissionError,
+		)
 
 
 def _resolve_kashier_account(company: str) -> str:
-    """The company's Kashier settlement ledger (``kashier - J`` on production).
+	"""The company's Kashier settlement ledger (``kashier - J`` on production).
 
-    Matched by account name, exactly as ``api/cash_transfer`` does: the
-    Woo-owned ``Company.custom_kashier_account`` field is deliberately not read
-    (domain isolation). Only an enabled Asset leaf qualifies, so an expense
-    account such as "Kashier Fees" can never receive a customer's payment.
-    """
-    rows = frappe.get_all(
-        "Account",
-        filters={"company": company, "is_group": 0, "disabled": 0, "root_type": "Asset"},
-        or_filters=[
-            ["Account", "account_name", "like", "%Kashier%"],
-            ["Account", "name", "like", "%Kashier%"],
-        ],
-        fields=["name", "account_name", "is_group", "disabled"],
-        order_by="name asc",
-    )
-    matches = [
-        r["name"]
-        for r in rows or []
-        if "kashier" in f"{r.get('account_name') or ''} {r.get('name') or ''}".lower()
-        and not frappe.utils.cint(r.get("is_group"))
-        and not frappe.utils.cint(r.get("disabled"))
-    ]
-    if not matches:
-        frappe.throw(f"No Kashier account found for company {company}")
-    if len(matches) > 1:
-        # Refuse rather than guess which ledger the money belongs in.
-        frappe.throw(
-            f"More than one Kashier account found for company {company}: {', '.join(matches)}"
-        )
-    return matches[0]
+	Matched by account name, exactly as ``api/cash_transfer`` does: the
+	Woo-owned ``Company.custom_kashier_account`` field is deliberately not read
+	(domain isolation). Only an enabled Asset leaf qualifies, so an expense
+	account such as "Kashier Fees" can never receive a customer's payment.
+	"""
+	rows = frappe.get_all(
+		"Account",
+		filters={"company": company, "is_group": 0, "disabled": 0, "root_type": "Asset"},
+		or_filters=[
+			["Account", "account_name", "like", "%Kashier%"],
+			["Account", "name", "like", "%Kashier%"],
+		],
+		fields=["name", "account_name", "is_group", "disabled"],
+		order_by="name asc",
+	)
+	matches = [
+		r["name"]
+		for r in rows or []
+		if "kashier" in f"{r.get('account_name') or ''} {r.get('name') or ''}".lower()
+		and not frappe.utils.cint(r.get("is_group"))
+		and not frappe.utils.cint(r.get("disabled"))
+	]
+	if not matches:
+		frappe.throw(f"No Kashier account found for company {company}")
+	if len(matches) > 1:
+		# Refuse rather than guess which ledger the money belongs in.
+		frappe.throw(f"More than one Kashier account found for company {company}: {', '.join(matches)}")
+	return matches[0]
 
 
 def _kashier_existing_payment_or_refuse(inv, existing_payment_entries) -> dict:
-    """Refuse a Kashier request on an invoice whose money went somewhere else.
+	"""Refuse a Kashier request on an invoice whose money went somewhere else.
 
-    Returns the entry when a submitted Receive entry already put the money in
-    the Kashier ledger (a repeated tap), re-stamping the invoice so it reads
-    Kashier Card. Courier Outstanding transfers are not customer payments (see
-    ``get_invoice_settlement_preview``): dispatch posts one for every Cash order,
-    so the courier is carrying the cash, and booking Kashier on top is a
-    settlement question, not a payment.
-    """
-    kashier_account = _resolve_kashier_account(inv.company)
-    customer_payments = [
-        r for r in existing_payment_entries
-        if not str(r.get("paid_to") or "").startswith(ACCOUNTS.COURIER_OUTSTANDING)
-    ]
-    for row in customer_payments:
-        if row.get("paid_to") == kashier_account:
-            inv.db_set("custom_payment_method", KASHIER_PAYMENT_METHOD, update_modified=False)
-            return row
-    if customer_payments:
-        others = ", ".join(f"{r.get('name')} ({r.get('paid_to')})" for r in customer_payments)
-        frappe.throw(
-            f"{inv.name} is already paid into another account: {others}. "
-            "No Kashier payment was recorded. Cancel that payment first if the "
-            "customer really paid by Kashier link."
-        )
-    transfers = ", ".join(r.get("name") or "" for r in existing_payment_entries)
-    frappe.throw(
-        f"{inv.name} is already out with the courier as a cash order ({transfers}). "
-        "No Kashier payment was recorded; settle it with the courier instead."
-    )
+	Returns the entry when a submitted Receive entry already put the money in
+	the Kashier ledger (a repeated tap), re-stamping the invoice so it reads
+	Kashier Card. Courier Outstanding transfers are not customer payments (see
+	``get_invoice_settlement_preview``): dispatch posts one for every Cash order,
+	so the courier is carrying the cash, and booking Kashier on top is a
+	settlement question, not a payment.
+	"""
+	kashier_account = _resolve_kashier_account(inv.company)
+	customer_payments = [
+		r
+		for r in existing_payment_entries
+		if not str(r.get("paid_to") or "").startswith(ACCOUNTS.COURIER_OUTSTANDING)
+	]
+	for row in customer_payments:
+		if row.get("paid_to") == kashier_account:
+			inv.db_set("custom_payment_method", KASHIER_PAYMENT_METHOD, update_modified=False)
+			return row
+	if customer_payments:
+		others = ", ".join(f"{r.get('name')} ({r.get('paid_to')})" for r in customer_payments)
+		frappe.throw(
+			f"{inv.name} is already paid into another account: {others}. "
+			"No Kashier payment was recorded. Cancel that payment first if the "
+			"customer really paid by Kashier link."
+		)
+	transfers = ", ".join(r.get("name") or "" for r in existing_payment_entries)
+	frappe.throw(
+		f"{inv.name} is already out with the courier as a cash order ({transfers}). "
+		"No Kashier payment was recorded; settle it with the courier instead."
+	)
 
 
 def _clear_awaiting_payment_flag(invoice_name: str) -> None:
-    """Clear ``Awaiting Payment`` once this invoice's money is actually in.
+	"""Clear ``Awaiting Payment`` once this invoice's money is actually in.
 
-    Imported lazily and swallowed on failure on purpose: a registered payment
-    must never be undone, or reported as failed, because a status field could
-    not be tidied up afterwards.
-    """
-    try:
-        from jarz_pos.services.delivery_handling import reconcile_payment_confirmation
+	Imported lazily and swallowed on failure on purpose: a registered payment
+	must never be undone, or reported as failed, because a status field could
+	not be tidied up afterwards.
+	"""
+	try:
+		from jarz_pos.services.delivery_handling import reconcile_payment_confirmation
 
-        reconcile_payment_confirmation(invoice_name)
-    except Exception:
-        frappe.logger().error(
-            f"Failed to clear awaiting-payment flag for {invoice_name}"
-        )
+		reconcile_payment_confirmation(invoice_name)
+	except Exception:
+		frappe.logger().error(f"Failed to clear awaiting-payment flag for {invoice_name}")
 
 
 @frappe.whitelist(allow_guest=False)
 def pay_invoice(
-    invoice_name: str,
-    payment_mode: str,
-    pos_profile: str | None = None,
-    reference_no: str | None = None,
-    reference_date: str | None = None,
+	invoice_name: str,
+	payment_mode: str,
+	pos_profile: str | None = None,
+	reference_no: str | None = None,
+	reference_date: str | None = None,
 ):
-    """Create a Payment Entry for a submitted Sales Invoice.
+	"""Create a Payment Entry for a submitted Sales Invoice.
 
-    Adds mandatory Reference No / Reference Date when payment_mode is Wallet or InstaPay.
+	Adds mandatory Reference No / Reference Date when payment_mode is Wallet or InstaPay.
 
-    payment_mode:
-      - Wallet   -> "Mobile Wallet - <COMPANY ABBR>" (requires reference_no & reference_date)
-      - InstaPay -> "Bank Account - <COMPANY ABBR>" (requires reference_no & reference_date)
-      - Cash     -> "<POS PROFILE NAME> - <COMPANY ABBR>" (requires pos_profile; reference fields optional/ignored)
-      - Kashier  -> the company's Kashier ledger (line-manager tier only; for an
-                    order the customer paid afterwards through a Kashier payment
-                    link). No till moves, so no open shift is required, and the
-                    invoice is re-stamped "Kashier Card" so it stops reading Cash.
+	payment_mode:
+	  - Wallet   -> "Mobile Wallet - <COMPANY ABBR>" (requires reference_no & reference_date)
+	  - InstaPay -> "Bank Account - <COMPANY ABBR>" (requires reference_no & reference_date)
+	  - Cash     -> "<POS PROFILE NAME> - <COMPANY ABBR>" (requires pos_profile; reference fields optional/ignored)
+	  - Kashier  -> the company's Kashier ledger (line-manager tier only; for an
+	                order the customer paid afterwards through a Kashier payment
+	                link). No till moves, so no open shift is required, and the
+	                invoice is re-stamped "Kashier Card" so it stops reading Cash.
 
-    Args:
-        invoice_name: Sales Invoice name (must be submitted, outstanding)
-        payment_mode: wallet | instapay | cash | kashier (case-insensitive)
-        pos_profile: POS Profile (required when payment_mode == cash)
-        reference_no: External transaction / bank reference (required for wallet & instapay)
-        reference_date: Date string (YYYY-MM-DD) of external transaction (required for wallet & instapay)
-    """
-    try:
-        if not invoice_name:
-            frappe.throw("invoice_name is required")
-        if not payment_mode:
-            frappe.throw("payment_mode is required")
-        payment_mode = payment_mode.strip()
-        mode_lower = payment_mode.lower()
+	Args:
+	    invoice_name: Sales Invoice name (must be submitted, outstanding)
+	    payment_mode: wallet | instapay | cash | kashier (case-insensitive)
+	    pos_profile: POS Profile (required when payment_mode == cash)
+	    reference_no: External transaction / bank reference (required for wallet & instapay)
+	    reference_date: Date string (YYYY-MM-DD) of external transaction (required for wallet & instapay)
+	"""
+	try:
+		if not invoice_name:
+			frappe.throw("invoice_name is required")
+		if not payment_mode:
+			frappe.throw("payment_mode is required")
+		payment_mode = payment_mode.strip()
+		mode_lower = payment_mode.lower()
 
-        # Before the lock: a refused caller should not hold the invoice row.
-        if mode_lower == "kashier":
-            _ensure_kashier_payment_access()
+		# Before the lock: a refused caller should not hold the invoice row.
+		if mode_lower == "kashier":
+			_ensure_kashier_payment_access()
 
-        # Add database-level lock to prevent concurrent payment entry creation
-        try:
-            frappe.db.sql("SELECT name FROM `tabSales Invoice` WHERE name=%s FOR UPDATE", (invoice_name,))
-        except Exception:
-            pass  # Lock attempt - continue even if fails
+		# Add database-level lock to prevent concurrent payment entry creation
+		try:
+			frappe.db.sql("SELECT name FROM `tabSales Invoice` WHERE name=%s FOR UPDATE", (invoice_name,))
+		except Exception:
+			pass  # Lock attempt - continue even if fails
 
-        inv = frappe.get_doc("Sales Invoice", invoice_name)
-        ensure_profile_scoped_invoice_access(inv, action_label="registering a payment")
-        # A Kashier payment lands in the gateway ledger, which no shift counts,
-        # and is recorded by a manager who is often not on the branch's shift.
-        if mode_lower != "kashier":
-            ensure_open_shift_for_invoice(inv, action_label="registering a payment")
-        if inv.docstatus != 1:
-            frappe.throw("Invoice must be submitted before registering payment")
-        
-        # Always re-read the latest outstanding from the database to avoid cache/stale values
-        try:
-            latest_outstanding = frappe.db.get_value("Sales Invoice", inv.name, "outstanding_amount")
-            outstanding = float(latest_outstanding or 0)
-        except Exception:
-            outstanding = float(inv.outstanding_amount or 0)
-        
-        # Check for existing payment entries BEFORE checking outstanding (idempotency check)
-        #
-        # A LOCKING read, and it must stay one. The `FOR UPDATE` on the invoice
-        # row above serialises two concurrent payments but does NOT refresh
-        # either transaction's snapshot: MariaDB runs at REPEATABLE READ and
-        # Frappe never sets an isolation level, so the second caller blocks on
-        # the invoice lock, wakes after the first commits, and a plain read here
-        # still answers "no payment yet" from the snapshot it opened earlier. It
-        # then posts a second Payment Entry for the same money. Both balance, so
-        # nothing downstream flags it. Reading the rows FOR UPDATE reads the
-        # latest committed ones instead, which is the whole fix.
-        try:
-            existing_payment_entries = frappe.db.sql(
-                """
+		inv = frappe.get_doc("Sales Invoice", invoice_name)
+		ensure_profile_scoped_invoice_access(inv, action_label="registering a payment")
+		# A Kashier payment lands in the gateway ledger, which no shift counts,
+		# and is recorded by a manager who is often not on the branch's shift.
+		if mode_lower != "kashier":
+			ensure_open_shift_for_invoice(inv, action_label="registering a payment")
+		if inv.docstatus != 1:
+			frappe.throw("Invoice must be submitted before registering payment")
+
+		# Always re-read the latest outstanding from the database to avoid cache/stale values
+		try:
+			latest_outstanding = frappe.db.get_value("Sales Invoice", inv.name, "outstanding_amount")
+			outstanding = float(latest_outstanding or 0)
+		except Exception:
+			outstanding = float(inv.outstanding_amount or 0)
+
+		# Check for existing payment entries BEFORE checking outstanding (idempotency check)
+		#
+		# A LOCKING read, and it must stay one. The `FOR UPDATE` on the invoice
+		# row above serialises two concurrent payments but does NOT refresh
+		# either transaction's snapshot: MariaDB runs at REPEATABLE READ and
+		# Frappe never sets an isolation level, so the second caller blocks on
+		# the invoice lock, wakes after the first commits, and a plain read here
+		# still answers "no payment yet" from the snapshot it opened earlier. It
+		# then posts a second Payment Entry for the same money. Both balance, so
+		# nothing downstream flags it. Reading the rows FOR UPDATE reads the
+		# latest committed ones instead, which is the whole fix.
+		try:
+			existing_payment_entries = frappe.db.sql(
+				"""
                 SELECT pe.name, pe.posting_date, pe.paid_amount, pe.paid_to
                 FROM `tabPayment Entry` pe
                 INNER JOIN `tabPayment Entry Reference` per ON per.parent = pe.name
@@ -528,669 +530,683 @@ def pay_invoice(
                 ORDER BY pe.creation ASC
                 FOR UPDATE
                 """,
-                (inv.name,),
-                as_dict=True,
-            )
-        except Exception as e:
-            # Deliberately NOT swallowed any more. This check used to log and
-            # carry on "if the check fails" -- but the moment it is most likely
-            # to fail (a lock wait or deadlock) is exactly the moment two people
-            # are paying the same order, which is the case it exists to stop.
-            # A refusal is retryable; a duplicate payment is not.
-            # Wrapped: log_error raises on its own when a message trips its
-            # length or encoding limits, and losing the refusal below to a
-            # logging failure would put us back to posting blind.
-            try:
-                frappe.log_error(
-                    title="Pay Invoice - Existing Payment Check Error",
-                    message=f"Invoice: {invoice_name}\nError: {str(e)}",
-                )
-            except Exception:
-                pass
-            frappe.throw(
-                "Could not check whether this invoice has already been paid. "
-                "Nothing was posted - please try again."
-            )
+				(inv.name,),
+				as_dict=True,
+			)
+		except Exception as e:
+			# Deliberately NOT swallowed any more. This check used to log and
+			# carry on "if the check fails" -- but the moment it is most likely
+			# to fail (a lock wait or deadlock) is exactly the moment two people
+			# are paying the same order, which is the case it exists to stop.
+			# A refusal is retryable; a duplicate payment is not.
+			# Wrapped: log_error raises on its own when a message trips its
+			# length or encoding limits, and losing the refusal below to a
+			# logging failure would put us back to posting blind.
+			try:
+				frappe.log_error(
+					title="Pay Invoice - Existing Payment Check Error",
+					message=f"Invoice: {invoice_name}\nError: {str(e)}",
+				)
+			except Exception:
+				pass
+			frappe.throw(
+				"Could not check whether this invoice has already been paid. "
+				"Nothing was posted - please try again."
+			)
 
-        if mode_lower == "kashier" and existing_payment_entries:
-            # "Already paid" is only the same request repeated when the money
-            # already sits in the Kashier ledger. A Cash tap that won the row
-            # lock, or the Courier Outstanding transfer dispatch posts, would
-            # otherwise answer "success" while nothing was booked to Kashier and
-            # the order still read Cash.
-            pe = _kashier_existing_payment_or_refuse(inv, existing_payment_entries)
-            _clear_awaiting_payment_flag(inv.name)
-            return {
-                "success": True,
-                "payment_entry": pe.get("name"),
-                "invoice": inv.name,
-                "allocated_amount": float(pe.get("paid_amount", 0)),
-                "paid_to": pe.get("paid_to", ""),
-                "note": "Invoice already has a Kashier payment entry (idempotent response)",
-            }
+		if mode_lower == "kashier" and existing_payment_entries:
+			# "Already paid" is only the same request repeated when the money
+			# already sits in the Kashier ledger. A Cash tap that won the row
+			# lock, or the Courier Outstanding transfer dispatch posts, would
+			# otherwise answer "success" while nothing was booked to Kashier and
+			# the order still read Cash.
+			pe = _kashier_existing_payment_or_refuse(inv, existing_payment_entries)
+			_clear_awaiting_payment_flag(inv.name)
+			return {
+				"success": True,
+				"payment_entry": pe.get("name"),
+				"invoice": inv.name,
+				"allocated_amount": float(pe.get("paid_amount", 0)),
+				"paid_to": pe.get("paid_to", ""),
+				"note": "Invoice already has a Kashier payment entry (idempotent response)",
+			}
 
-        if existing_payment_entries:
-            # Return existing payment entry instead of throwing error (idempotency)
-            pe = existing_payment_entries[0]
-            _clear_awaiting_payment_flag(inv.name)
-            return {
-                "success": True,
-                "payment_entry": pe.get("name"),
-                "invoice": inv.name,
-                "allocated_amount": float(pe.get("paid_amount", 0)),
-                "note": "Invoice already has a payment entry (idempotent response)",
-            }
+		if existing_payment_entries:
+			# Return existing payment entry instead of throwing error (idempotency)
+			pe = existing_payment_entries[0]
+			_clear_awaiting_payment_flag(inv.name)
+			return {
+				"success": True,
+				"payment_entry": pe.get("name"),
+				"invoice": inv.name,
+				"allocated_amount": float(pe.get("paid_amount", 0)),
+				"note": "Invoice already has a payment entry (idempotent response)",
+			}
 
-        # Now check if there's outstanding amount
-        if outstanding <= 0.0001:
-            frappe.throw("Invoice already paid (no outstanding amount)")
-        
-        company = inv.company
-        company_abbr = frappe.db.get_value("Company", company, "abbr") or ""
+		# Now check if there's outstanding amount
+		if outstanding <= 0.0001:
+			frappe.throw("Invoice already paid (no outstanding amount)")
 
-        # Map payment mode to destination account base name
-        account_base = None
-        paid_to_account = None
-        if mode_lower == "kashier":
-            paid_to_account = _resolve_kashier_account(company)
-        elif mode_lower == "wallet":
-            account_base = ACCOUNTS.MOBILE_WALLET
-            # Wallet payments require reference metadata – auto-generate if absent
-            if not reference_no:
-                reference_no = f"WAL-{frappe.generate_hash(length=8)}"
-            if not reference_date:
-                reference_date = frappe.utils.nowdate()
-        elif mode_lower == "instapay":
-            account_base = "Bank Account"
-            # InstaPay payments require reference metadata – auto-generate if absent
-            if not reference_no:
-                reference_no = f"IPY-{frappe.generate_hash(length=8)}"
-            if not reference_date:
-                reference_date = frappe.utils.nowdate()
-        elif mode_lower == "cash":
-            if not pos_profile:
-                frappe.throw("pos_profile is required for Cash payments")
-            from jarz_pos.utils.validation_utils import assert_pos_profile_enabled
-            assert_pos_profile_enabled(pos_profile)
-            account_base = pos_profile  # POS profile name itself
-        else:
-            frappe.throw(f"Unsupported payment_mode: {payment_mode}")
+		company = inv.company
+		company_abbr = frappe.db.get_value("Company", company, "abbr") or ""
 
-        # Money is about to move into a ledger nobody on the floor can see.
-        # Gate it on proof a manager has already verified. Runs before the
-        # Payment Entry is built, so a refusal changes nothing.
-        if mode_lower in ("wallet", "instapay"):
-            _require_confirmed_transfer_proof(inv.name, payment_mode)
+		# Map payment mode to destination account base name
+		account_base = None
+		paid_to_account = None
+		if mode_lower == "kashier":
+			paid_to_account = _resolve_kashier_account(company)
+		elif mode_lower == "wallet":
+			account_base = ACCOUNTS.MOBILE_WALLET
+			# Wallet payments require reference metadata – auto-generate if absent
+			if not reference_no:
+				reference_no = f"WAL-{frappe.generate_hash(length=8)}"
+			if not reference_date:
+				reference_date = frappe.utils.nowdate()
+		elif mode_lower == "instapay":
+			account_base = "Bank Account"
+			# InstaPay payments require reference metadata – auto-generate if absent
+			if not reference_no:
+				reference_no = f"IPY-{frappe.generate_hash(length=8)}"
+			if not reference_date:
+				reference_date = frappe.utils.nowdate()
+		elif mode_lower == "cash":
+			if not pos_profile:
+				frappe.throw("pos_profile is required for Cash payments")
+			from jarz_pos.utils.validation_utils import assert_pos_profile_enabled
 
-        # Validate reference_date format if provided (allow strict date only)
-        if reference_date:
-            try:
-                # getdate will raise for invalid formats; keep original string assignment later
-                frappe.utils.getdate(reference_date)
-            except Exception:
-                frappe.throw("Invalid reference_date format. Use YYYY-MM-DD")
+			assert_pos_profile_enabled(pos_profile)
+			account_base = pos_profile  # POS profile name itself
+		else:
+			frappe.throw(f"Unsupported payment_mode: {payment_mode}")
 
-        if not paid_to_account:
-            paid_to_account = f"{account_base} - {company_abbr}".strip()
-        if not frappe.db.exists("Account", paid_to_account):
-            frappe.throw(f"Destination account not found: {paid_to_account}")
+		# Money is about to move into a ledger nobody on the floor can see.
+		# Gate it on proof a manager has already verified. Runs before the
+		# Payment Entry is built, so a refusal changes nothing.
+		if mode_lower in ("wallet", "instapay"):
+			_require_confirmed_transfer_proof(inv.name, payment_mode)
 
-        # Determine receivable (paid_from) account
-        receivable = frappe.get_cached_value("Company", company, "default_receivable_account")
-        if not receivable:
-            # Fallback: first non-group Receivable account for company
-            receivable = frappe.db.get_value(
-                "Account",
-                {"company": company, "account_type": "Receivable", "is_group": 0},
-                "name",
-            )
-        if not receivable:
-            frappe.throw("Could not determine receivable account for company")
+		# Validate reference_date format if provided (allow strict date only)
+		if reference_date:
+			try:
+				# getdate will raise for invalid formats; keep original string assignment later
+				frappe.utils.getdate(reference_date)
+			except Exception:
+				frappe.throw("Invalid reference_date format. Use YYYY-MM-DD")
 
-        # Create Payment Entry
-        pe = frappe.new_doc("Payment Entry")
-        pe.payment_type = "Receive"
-        pe.party_type = "Customer"
-        pe.party = inv.customer
-        pe.company = company
-        pe.posting_date = frappe.utils.today()
-        pe.mode_of_payment = payment_mode if frappe.db.exists("Mode of Payment", payment_mode) else None
-        pe.paid_from = receivable
-        pe.paid_to = paid_to_account
-        pe.party_account = receivable  # ensure attribute for older meta / set_missing_values
-        pe.paid_amount = outstanding
-        pe.received_amount = outstanding
-        pe.references = []
-        pe.append("references", {
-            "reference_doctype": "Sales Invoice",
-            "reference_name": inv.name,
-            "due_date": inv.get("due_date"),
-            "total_amount": float(inv.grand_total or 0),
-            "outstanding_amount": outstanding,
-            "allocated_amount": outstanding,
-        })
-        # Set flags to bypass POS validations if needed
-        pe.flags.ignore_permissions = True
-        try:
-            pe.set_missing_values()
-        except AttributeError:
-            # Older Payment Entry implementation expecting party_account
-            if not getattr(pe, 'party_account', None):
-                pe.party_account = receivable
-        # Assign reference metadata (only set if supplied for clarity)
-        if reference_no:
-            pe.reference_no = reference_no
-        if reference_date:
-            pe.reference_date = reference_date
-        if mode_lower == "kashier":
-            # The manager's say-so is the evidence here, so name them on the entry.
-            pe.remarks = (
-                f"Kashier payment link for {inv.name}, recorded by {frappe.session.user}"
-                + (f" (ref {reference_no})" if reference_no else "")
-            )
-            # Without this, PaymentEntry.validate() -> set_remarks() replaces the
-            # text with its generic "Amount EGP ... received from ..." line.
-            pe.custom_remarks = 1
+		if not paid_to_account:
+			paid_to_account = f"{account_base} - {company_abbr}".strip()
+		if not frappe.db.exists("Account", paid_to_account):
+			frappe.throw(f"Destination account not found: {paid_to_account}")
 
-        try:
-            pe.insert(ignore_permissions=True)
-            pe.submit()
-        except frappe.exceptions.DuplicateEntryError as dup_err:
-            # Handle duplicate Payment Entry name - return existing entry (idempotency)
-            frappe.log_error(
-                title="Pay Invoice - Duplicate Payment Entry",
-                message=f"Invoice: {invoice_name}\nAttempted duplicate payment entry creation\n{str(dup_err)}",
-            )
-            # Try to find and return the existing payment entry
-            try:
-                ref_parents = frappe.get_all(
-                    "Payment Entry Reference",
-                    filters={"reference_doctype": "Sales Invoice", "reference_name": inv.name},
-                    pluck="parent",
-                )
-                if ref_parents:
-                    existing_pe = frappe.get_all(
-                        "Payment Entry",
-                        filters={"name": ["in", ref_parents], "docstatus": 1, "payment_type": "Receive"},
-                        fields=["name", "paid_amount", "paid_to"],
-                        order_by="creation asc",
-                    )
-                    if mode_lower == "kashier":
-                        # Same rule as the idempotency check: only a payment
-                        # already in the Kashier ledger answers this request.
-                        existing_pe = [r for r in existing_pe if r.get("paid_to") == paid_to_account]
-                    if existing_pe:
-                        pe_data = existing_pe[0]
-                        _clear_awaiting_payment_flag(inv.name)
-                        return {
-                            "success": True,
-                            "payment_entry": pe_data.get("name"),
-                            "invoice": inv.name,
-                            "allocated_amount": float(pe_data.get("paid_amount", 0)),
-                            "paid_to": pe_data.get("paid_to", ""),
-                            "note": "Payment entry already exists (recovered from duplicate error)",
-                        }
-            except Exception:
-                pass
-            # If we can't find existing, throw clear error
-            frappe.throw(f"Payment entry creation failed due to duplicate. Please refresh and try again.")
-        except Exception as pe_err:
-            # Provide a clearer message when invoice is already settled
-            msg = str(pe_err)
-            if "already been fully paid" in msg.lower() or "fully paid" in msg.lower():
-                # Re-evaluate outstanding to report precise state
-                try:
-                    latest = float(frappe.db.get_value("Sales Invoice", inv.name, "outstanding_amount") or 0)
-                except Exception:
-                    latest = outstanding
-                hint = f"(current outstanding={latest:.2f})"
-                # Include any existing Payment Entry name if present
-                try:
-                    ref_parents = frappe.get_all(
-                        "Payment Entry Reference",
-                        filters={"reference_doctype": "Sales Invoice", "reference_name": inv.name},
-                        pluck="parent",
-                    )
-                    if ref_parents:
-                        frappe.throw(
-                            f"Invoice already paid. Existing Payment Entry: {', '.join(ref_parents)} {hint}"
-                        )
-                except Exception:
-                    pass
-                frappe.throw(f"Invoice already paid {hint}")
-            # Bubble other errors unchanged after logging
-            frappe.log_error(
-                title="Pay Invoice Submission Error",
-                message=f"Invoice: {invoice_name}\nError: {frappe.get_traceback()}",
-            )
-            raise
+		# Determine receivable (paid_from) account
+		receivable = frappe.get_cached_value("Company", company, "default_receivable_account")
+		if not receivable:
+			# Fallback: first non-group Receivable account for company
+			receivable = frappe.db.get_value(
+				"Account",
+				{"company": company, "account_type": "Receivable", "is_group": 0},
+				"name",
+			)
+		if not receivable:
+			frappe.throw("Could not determine receivable account for company")
 
-        # The money is in. An order dispatched as unpaid-online is still flagged
-        # Awaiting Payment at this point, and nothing here used to clear it -- so
-        # a paid order stayed in the reconciliation queue for ever and staff chased
-        # the customer for money already banked. Reconciling reads the ledger, so
-        # it is a no-op for every invoice that was never awaiting anything.
-        _clear_awaiting_payment_flag(inv.name)
+		# Create Payment Entry
+		pe = frappe.new_doc("Payment Entry")
+		pe.payment_type = "Receive"
+		pe.party_type = "Customer"
+		pe.party = inv.customer
+		pe.company = company
+		pe.posting_date = frappe.utils.today()
+		pe.mode_of_payment = payment_mode if frappe.db.exists("Mode of Payment", payment_mode) else None
+		pe.paid_from = receivable
+		pe.paid_to = paid_to_account
+		pe.party_account = receivable  # ensure attribute for older meta / set_missing_values
+		pe.paid_amount = outstanding
+		pe.received_amount = outstanding
+		pe.references = []
+		pe.append(
+			"references",
+			{
+				"reference_doctype": "Sales Invoice",
+				"reference_name": inv.name,
+				"due_date": inv.get("due_date"),
+				"total_amount": float(inv.grand_total or 0),
+				"outstanding_amount": outstanding,
+				"allocated_amount": outstanding,
+			},
+		)
+		# Set flags to bypass POS validations if needed
+		pe.flags.ignore_permissions = True
+		try:
+			pe.set_missing_values()
+		except AttributeError:
+			# Older Payment Entry implementation expecting party_account
+			if not getattr(pe, "party_account", None):
+				pe.party_account = receivable
+		# Assign reference metadata (only set if supplied for clarity)
+		if reference_no:
+			pe.reference_no = reference_no
+		if reference_date:
+			pe.reference_date = reference_date
+		if mode_lower == "kashier":
+			# The manager's say-so is the evidence here, so name them on the entry.
+			pe.remarks = f"Kashier payment link for {inv.name}, recorded by {frappe.session.user}" + (
+				f" (ref {reference_no})" if reference_no else ""
+			)
+			# Without this, PaymentEntry.validate() -> set_remarks() replaces the
+			# text with its generic "Amount EGP ... received from ..." line.
+			pe.custom_remarks = 1
 
-        if mode_lower == "kashier":
-            # An order taken as Cash/COD and paid later by link must stop reading
-            # Cash, or dispatch, the receipt and the badge all promise the courier
-            # collects money the customer has already paid.
-            inv.db_set("custom_payment_method", KASHIER_PAYMENT_METHOD, update_modified=False)
+		try:
+			pe.insert(ignore_permissions=True)
+			pe.submit()
+		except frappe.exceptions.DuplicateEntryError as dup_err:
+			# Handle duplicate Payment Entry name - return existing entry (idempotency)
+			frappe.log_error(
+				title="Pay Invoice - Duplicate Payment Entry",
+				message=f"Invoice: {invoice_name}\nAttempted duplicate payment entry creation\n{str(dup_err)}",
+			)
+			# Try to find and return the existing payment entry
+			try:
+				ref_parents = frappe.get_all(
+					"Payment Entry Reference",
+					filters={"reference_doctype": "Sales Invoice", "reference_name": inv.name},
+					pluck="parent",
+				)
+				if ref_parents:
+					existing_pe = frappe.get_all(
+						"Payment Entry",
+						filters={"name": ["in", ref_parents], "docstatus": 1, "payment_type": "Receive"},
+						fields=["name", "paid_amount", "paid_to"],
+						order_by="creation asc",
+					)
+					if mode_lower == "kashier":
+						# Same rule as the idempotency check: only a payment
+						# already in the Kashier ledger answers this request.
+						existing_pe = [r for r in existing_pe if r.get("paid_to") == paid_to_account]
+					if existing_pe:
+						pe_data = existing_pe[0]
+						_clear_awaiting_payment_flag(inv.name)
+						return {
+							"success": True,
+							"payment_entry": pe_data.get("name"),
+							"invoice": inv.name,
+							"allocated_amount": float(pe_data.get("paid_amount", 0)),
+							"paid_to": pe_data.get("paid_to", ""),
+							"note": "Payment entry already exists (recovered from duplicate error)",
+						}
+			except Exception:
+				pass
+			# If we can't find existing, throw clear error
+			frappe.throw(f"Payment entry creation failed due to duplicate. Please refresh and try again.")
+		except Exception as pe_err:
+			# Provide a clearer message when invoice is already settled
+			msg = str(pe_err)
+			if "already been fully paid" in msg.lower() or "fully paid" in msg.lower():
+				# Re-evaluate outstanding to report precise state
+				try:
+					latest = float(frappe.db.get_value("Sales Invoice", inv.name, "outstanding_amount") or 0)
+				except Exception:
+					latest = outstanding
+				hint = f"(current outstanding={latest:.2f})"
+				# Include any existing Payment Entry name if present
+				try:
+					ref_parents = frappe.get_all(
+						"Payment Entry Reference",
+						filters={"reference_doctype": "Sales Invoice", "reference_name": inv.name},
+						pluck="parent",
+					)
+					if ref_parents:
+						frappe.throw(
+							f"Invoice already paid. Existing Payment Entry: {', '.join(ref_parents)} {hint}"
+						)
+				except Exception:
+					pass
+				frappe.throw(f"Invoice already paid {hint}")
+			# Bubble other errors unchanged after logging
+			frappe.log_error(
+				title="Pay Invoice Submission Error",
+				message=f"Invoice: {invoice_name}\nError: {frappe.get_traceback()}",
+			)
+			raise
 
-        return {
-            "success": True,
-            "payment_entry": pe.name,
-            "invoice": inv.name,
-            "allocated_amount": outstanding,
-            "paid_to": paid_to_account,
-            "receivable": receivable,
-            "reference_no": getattr(pe, "reference_no", None),
-            "reference_date": getattr(pe, "reference_date", None),
-        }
-    except Exception as e:
-        frappe.log_error(
-            title="Pay Invoice Error",
-            message=f"Invoice: {invoice_name}\nMode: {payment_mode}\nError: {frappe.get_traceback()}"
-        )
-        raise
+		# The money is in. An order dispatched as unpaid-online is still flagged
+		# Awaiting Payment at this point, and nothing here used to clear it -- so
+		# a paid order stayed in the reconciliation queue for ever and staff chased
+		# the customer for money already banked. Reconciling reads the ledger, so
+		# it is a no-op for every invoice that was never awaiting anything.
+		_clear_awaiting_payment_flag(inv.name)
+
+		if mode_lower == "kashier":
+			# An order taken as Cash/COD and paid later by link must stop reading
+			# Cash, or dispatch, the receipt and the badge all promise the courier
+			# collects money the customer has already paid.
+			inv.db_set("custom_payment_method", KASHIER_PAYMENT_METHOD, update_modified=False)
+
+		return {
+			"success": True,
+			"payment_entry": pe.name,
+			"invoice": inv.name,
+			"allocated_amount": outstanding,
+			"paid_to": paid_to_account,
+			"receivable": receivable,
+			"reference_no": getattr(pe, "reference_no", None),
+			"reference_date": getattr(pe, "reference_date", None),
+		}
+	except Exception as e:
+		frappe.log_error(
+			title="Pay Invoice Error",
+			message=f"Invoice: {invoice_name}\nMode: {payment_mode}\nError: {frappe.get_traceback()}",
+		)
+		raise
 
 
 @frappe.whitelist()
-def get_invoice_settlement_preview(invoice_name: str, party_type: str | None = None, party: str | None = None):
-    """Return settlement preview for confirmation popup.
+def get_invoice_settlement_preview(
+	invoice_name: str, party_type: str | None = None, party: str | None = None
+):
+	"""Return settlement preview for confirmation popup.
 
-        Logic (updated):
-            - Determine order_amount from first unsettled Courier Transaction amount (>0) else 0.
-            - shipping_amount derived from helper.
-            - net_amount = order_amount - shipping_amount.
-                * If net_amount > 0 => branch collects that positive amount from courier.
-                * If net_amount < 0 => branch pays ABS(net_amount) to courier.
-                * If net_amount == 0 and shipping>0 with no order_amount => pay shipping (treat as negative net for clarity).
-            - scenario kept for backward compatibility but not required by frontend; branch_action derives from sign.
+	    Logic (updated):
+	        - Determine order_amount from first unsettled Courier Transaction amount (>0) else 0.
+	        - shipping_amount derived from helper.
+	        - net_amount = order_amount - shipping_amount.
+	            * If net_amount > 0 => branch collects that positive amount from courier.
+	            * If net_amount < 0 => branch pays ABS(net_amount) to courier.
+	            * If net_amount == 0 and shipping>0 with no order_amount => pay shipping (treat as negative net for clarity).
+	        - scenario kept for backward compatibility but not required by frontend; branch_action derives from sign.
 
-    Returns:
-      {
-        invoice, party_type, party,
-        order_amount, shipping_amount,
-        scenario: shipping_only | collect | pay_excess,
-        branch_action: pay | collect,
-        courier_amount: numeric amount branch pays (+) or collects (+) expressed as positive number,
-        message: human readable string
-      }
-    """
-    if not invoice_name:
-        frappe.throw("invoice_name required")
+	Returns:
+	  {
+	    invoice, party_type, party,
+	    order_amount, shipping_amount,
+	    scenario: shipping_only | collect | pay_excess,
+	    branch_action: pay | collect,
+	    courier_amount: numeric amount branch pays (+) or collects (+) expressed as positive number,
+	    message: human readable string
+	  }
+	"""
+	if not invoice_name:
+		frappe.throw("invoice_name required")
 
-    inv = frappe.get_doc("Sales Invoice", invoice_name)
-    ensure_profile_scoped_invoice_access(inv, action_label="previewing this settlement")
-    if inv.docstatus != 1:
-        frappe.throw("Invoice must be submitted")
+	inv = frappe.get_doc("Sales Invoice", invoice_name)
+	ensure_profile_scoped_invoice_access(inv, action_label="previewing this settlement")
+	if inv.docstatus != 1:
+		frappe.throw("Invoice must be submitted")
 
-    # Derive party if missing: the courier holding an open row first, then any courier
-    # on record. Open first matters because the rows read below are then scoped to
-    # this party, and deriving an earlier, already-settled courier would hide them.
-    if not (party_type and party):
-        derived_type, derived_party = _delivery._existing_courier_party(invoice_name, open_only=True)
-        if not derived_party:
-            derived_type, derived_party = _delivery._existing_courier_party(invoice_name)
-        if derived_party:
-            party_type, party = derived_type, derived_party
+	# Derive party if missing: the courier holding an open row first, then any courier
+	# on record. Open first matters because the rows read below are then scoped to
+	# this party, and deriving an earlier, already-settled courier would hide them.
+	if not (party_type and party):
+		derived_type, derived_party = _delivery._existing_courier_party(invoice_name, open_only=True)
+		if not derived_party:
+			derived_type, derived_party = _delivery._existing_courier_party(invoice_name)
+		if derived_party:
+			party_type, party = derived_type, derived_party
 
-    # Read shipping from the stored SI value first, fallback to territory calculation
-    _stored_ship = float(getattr(inv, "custom_shipping_expense", 0) or 0)
-    shipping = _stored_ship if _stored_ship > 0 else (_delivery._get_delivery_expense_amount(inv) or 0.0)
+	# Read shipping from the stored SI value first, fallback to territory calculation
+	_stored_ship = float(getattr(inv, "custom_shipping_expense", 0) or 0)
+	shipping = _stored_ship if _stored_ship > 0 else (_delivery._get_delivery_expense_amount(inv) or 0.0)
 
-    # Fetch unsettled CTs; when party not provided, do NOT filter by party to avoid excluding valid rows
-    ct_filters = {
-        "reference_invoice": invoice_name,
-        "status": ["!=", "Settled"],
-    }
-    if party_type and party:
-        ct_filters["party_type"] = party_type
-        ct_filters["party"] = party
-    cts = frappe.get_all(
-        "Courier Transaction",
-        filters=ct_filters,
-        fields=["name", "amount", "shipping_amount", "party_type", "party"],
-    )
+	# Fetch unsettled CTs; when party not provided, do NOT filter by party to avoid excluding valid rows
+	ct_filters = {
+		"reference_invoice": invoice_name,
+		"status": ["!=", "Settled"],
+	}
+	if party_type and party:
+		ct_filters["party_type"] = party_type
+		ct_filters["party"] = party
+	cts = frappe.get_all(
+		"Courier Transaction",
+		filters=ct_filters,
+		fields=["name", "amount", "shipping_amount", "party_type", "party"],
+	)
 
-    # Courier-side order amount = what the courier is actually holding for this invoice,
-    # summed over every unsettled Courier Transaction row — the SAME aggregation the batch
-    # path performs (get_courier_balances / _summarize_courier_transactions).
-    ct_order_total = sum(float(r.get("amount") or 0) for r in cts)
-    order_amount = ct_order_total
-    any_ct_order = ct_order_total > 0
+	# Courier-side order amount = what the courier is actually holding for this invoice,
+	# summed over every unsettled Courier Transaction row — the SAME aggregation the batch
+	# path performs (get_courier_balances / _summarize_courier_transactions).
+	ct_order_total = sum(float(r.get("amount") or 0) for r in cts)
+	order_amount = ct_order_total
+	any_ct_order = ct_order_total > 0
 
-    # Shipping MUST come from the SAME source the batch settlement (settle_delivery_party /
-    # get_courier_balances) and the actual settlement JE (settle_single_invoice_paid /
-    # settle_courier_collected_payment) use: the freight accrued on the Courier Transaction.
-    #
-    # Deriving shipping from the Sales Invoice / territory (above) diverges from the CT whenever
-    # the accrued freight differs from the current territory value — e.g. a shipping override, a
-    # doubled double-shipping trip, a territory that changed after OFD, or a stored expense that
-    # was never persisted.
-    #
-    # A CT that says zero means zero, and is taken verbatim rather than "corrected" from the
-    # territory. The freight payable is created by the accrual JE (DR Freight / CR Creditors)
-    # posted at Out for Delivery, and its amount IS the CT's shipping_amount. Where nothing was
-    # accrued there is no payable to clear, so deducting a territory-derived freight at settlement
-    # would debit Creditors against a credit that was never posted — leaving the courier carrying a
-    # phantom debit balance. This is the state the older free-shipping-bundle orders are in
-    # (deliberately not backfilled), and it is why the batch view showed a different net from the
-    # single-invoice view on them.
-    ct_shipping_total = sum(float(r.get("shipping_amount") or 0) for r in cts)
-    if cts:
-        shipping = ct_shipping_total
+	# Shipping MUST come from the SAME source the batch settlement (settle_delivery_party /
+	# get_courier_balances) and the actual settlement JE (settle_single_invoice_paid /
+	# settle_courier_collected_payment) use: the freight accrued on the Courier Transaction.
+	#
+	# Deriving shipping from the Sales Invoice / territory (above) diverges from the CT whenever
+	# the accrued freight differs from the current territory value — e.g. a shipping override, a
+	# doubled double-shipping trip, a territory that changed after OFD, or a stored expense that
+	# was never persisted.
+	#
+	# A CT that says zero means zero, and is taken verbatim rather than "corrected" from the
+	# territory. The freight payable is created by the accrual JE (DR Freight / CR Creditors)
+	# posted at Out for Delivery, and its amount IS the CT's shipping_amount. Where nothing was
+	# accrued there is no payable to clear, so deducting a territory-derived freight at settlement
+	# would debit Creditors against a credit that was never posted — leaving the courier carrying a
+	# phantom debit balance. This is the state the older free-shipping-bundle orders are in
+	# (deliberately not backfilled), and it is why the batch view showed a different net from the
+	# single-invoice view on them.
+	ct_shipping_total = sum(float(r.get("shipping_amount") or 0) for r in cts)
+	if cts:
+		shipping = ct_shipping_total
 
-    invoice_total = float(inv.grand_total or 0)
-    has_ct_rows = bool(cts)
-    status_l = (str(inv.get("status") or "") or "").strip().lower()
-    outstanding = float(inv.outstanding_amount or 0)
-    is_unpaid = (
-        outstanding > 0.01
-        or status_l in {"unpaid", "overdue", "partially paid"}
-    )
-    is_paid = (outstanding <= 0.01 and status_l in {"paid", "credit note issued"})
+	invoice_total = float(inv.grand_total or 0)
+	has_ct_rows = bool(cts)
+	status_l = (str(inv.get("status") or "") or "").strip().lower()
+	outstanding = float(inv.outstanding_amount or 0)
+	is_unpaid = outstanding > 0.01 or status_l in {"unpaid", "overdue", "partially paid"}
+	is_paid = outstanding <= 0.01 and status_l in {"paid", "credit note issued"}
 
-    # Determine if customer actually paid via Payment Entry (Receive)
-    has_customer_payment = False
-    pe_names = []
-    pe_first_creation = None
-    try:
-        ref_parents = frappe.get_all(
-            "Payment Entry Reference",
-            filters={"reference_doctype": "Sales Invoice", "reference_name": inv.name},
-            pluck="parent",
-        )
-        if ref_parents:
-            rows = frappe.get_all(
-                "Payment Entry",
-                filters={"name": ["in", ref_parents], "docstatus": 1, "payment_type": "Receive"},
-                fields=["name", "creation", "posting_date", "reference_no", "paid_to"],
-            )
-            # The transfer to Courier Outstanding is not a customer payment: it is
-            # what dispatch posts, always AFTER the courier row, so counting it
-            # here flipped every settled cash order back to "unpaid" and offered
-            # "Collect <total>" again once its rows were closed.
-            rows = [
-                r for r in rows
-                if not str(r.get("paid_to") or "").startswith(ACCOUNTS.COURIER_OUTSTANDING)
-            ]
-            pe_names = [r["name"] for r in rows]
-            has_customer_payment = bool(rows)
-            if rows:
-                pe_first_creation = min([r["creation"] for r in rows if r.get("creation")])
-    except Exception:
-        # Ignore lookup errors; default to False
-        has_customer_payment = False
+	# Determine if customer actually paid via Payment Entry (Receive)
+	has_customer_payment = False
+	pe_names = []
+	pe_first_creation = None
+	try:
+		ref_parents = frappe.get_all(
+			"Payment Entry Reference",
+			filters={"reference_doctype": "Sales Invoice", "reference_name": inv.name},
+			pluck="parent",
+		)
+		if ref_parents:
+			rows = frappe.get_all(
+				"Payment Entry",
+				filters={"name": ["in", ref_parents], "docstatus": 1, "payment_type": "Receive"},
+				fields=["name", "creation", "posting_date", "reference_no", "paid_to"],
+			)
+			# The transfer to Courier Outstanding is not a customer payment: it is
+			# what dispatch posts, always AFTER the courier row, so counting it
+			# here flipped every settled cash order back to "unpaid" and offered
+			# "Collect <total>" again once its rows were closed.
+			rows = [
+				r for r in rows if not str(r.get("paid_to") or "").startswith(ACCOUNTS.COURIER_OUTSTANDING)
+			]
+			pe_names = [r["name"] for r in rows]
+			has_customer_payment = bool(rows)
+			if rows:
+				pe_first_creation = min([r["creation"] for r in rows if r.get("creation")])
+	except Exception:
+		# Ignore lookup errors; default to False
+		has_customer_payment = False
 
-    # Detect if OFD JE/CT exists and its creation timestamp
-    ofd_creation = None
-    try:
-        ofd_rows = frappe.get_all(
-            "Journal Entry",
-            filters={"title": ["like", f"Out For Delivery – {inv.name}%"], "docstatus": 1, "company": inv.company},
-            fields=["name", "creation"],
-            limit_page_length=1,
-        )
-        if ofd_rows:
-            ofd_creation = ofd_rows[0].get("creation")
-        if not ofd_creation:
-            ct_rows = frappe.get_all(
-                "Courier Transaction",
-                filters={"reference_invoice": inv.name},
-                fields=["name", "creation"],
-                limit_page_length=1,
-            )
-            if ct_rows:
-                ofd_creation = ct_rows[0].get("creation")
-    except Exception:
-        pass
+	# Detect if OFD JE/CT exists and its creation timestamp
+	ofd_creation = None
+	try:
+		ofd_rows = frappe.get_all(
+			"Journal Entry",
+			filters={
+				"title": ["like", f"Out For Delivery – {inv.name}%"],
+				"docstatus": 1,
+				"company": inv.company,
+			},
+			fields=["name", "creation"],
+			limit_page_length=1,
+		)
+		if ofd_rows:
+			ofd_creation = ofd_rows[0].get("creation")
+		if not ofd_creation:
+			ct_rows = frappe.get_all(
+				"Courier Transaction",
+				filters={"reference_invoice": inv.name},
+				fields=["name", "creation"],
+				limit_page_length=1,
+			)
+			if ct_rows:
+				ofd_creation = ct_rows[0].get("creation")
+	except Exception:
+		pass
 
-    # Key rule: For unpaid/overdue invoices (settle now path), always collect total - shipping
-    # regardless of existing shipping-only courier transactions.
-    # If system says Paid but payment seems to have been created AFTER OFD transition, treat as unpaid for preview
-    paid_after_ofd = False
-    if not is_unpaid and is_paid and pe_first_creation and ofd_creation and pe_first_creation > ofd_creation:
-        paid_after_ofd = True
-        is_unpaid = True
+	# Key rule: For unpaid/overdue invoices (settle now path), always collect total - shipping
+	# regardless of existing shipping-only courier transactions.
+	# If system says Paid but payment seems to have been created AFTER OFD transition, treat as unpaid for preview
+	paid_after_ofd = False
+	if not is_unpaid and is_paid and pe_first_creation and ofd_creation and pe_first_creation > ofd_creation:
+		paid_after_ofd = True
+		is_unpaid = True
 
-    # No open rows but settled ones: the courier position for this order is closed.
-    # Nothing is left to collect or pay, whatever the invoice's payment status says.
-    already_settled = False
-    if not has_ct_rows:
-        try:
-            settled_row = frappe.db.exists(
-                "Courier Transaction", {"reference_invoice": inv.name, "status": "Settled"}
-            )
-            # exists() answers with the row name; anything else (a test double) is not a hit.
-            already_settled = isinstance(settled_row, str) and bool(settled_row.strip())
-        except Exception:
-            already_settled = False
+	# No open rows but settled ones: the courier position for this order is closed.
+	# Nothing is left to collect or pay, whatever the invoice's payment status says.
+	already_settled = False
+	if not has_ct_rows:
+		try:
+			settled_row = frappe.db.exists(
+				"Courier Transaction", {"reference_invoice": inv.name, "status": "Settled"}
+			)
+			# exists() answers with the row name; anything else (a test double) is not a hit.
+			already_settled = isinstance(settled_row, str) and bool(settled_row.strip())
+		except Exception:
+			already_settled = False
 
-    # Credit / on-account: the customer owes US, on agreed terms — the rider carries
-    # nothing. Resolved here rather than with the other flags below because it has to
-    # be able to short-circuit the "no transaction yet -> anticipate collecting the
-    # whole invoice" branch; once dispatch has run, the CT (amount=0) says the same
-    # thing and the authoritative branch above wins anyway.
-    try:
-        from jarz_pos.services.settlement_strategies import _is_credit_intent
+	# Credit / on-account: the customer owes US, on agreed terms — the rider carries
+	# nothing. Resolved here rather than with the other flags below because it has to
+	# be able to short-circuit the "no transaction yet -> anticipate collecting the
+	# whole invoice" branch; once dispatch has run, the CT (amount=0) says the same
+	# thing and the authoritative branch above wins anyway.
+	try:
+		from jarz_pos.services.settlement_strategies import _is_credit_intent
 
-        is_credit_on_account = bool(is_unpaid and _is_credit_intent(inv))
-    except Exception:
-        is_credit_on_account = False
+		is_credit_on_account = bool(is_unpaid and _is_credit_intent(inv))
+	except Exception:
+		is_credit_on_account = False
 
-    if has_ct_rows:
-        # AUTHORITATIVE: an unsettled Courier Transaction exists, so the courier's position on
-        # this invoice is already recorded. Take it verbatim — exactly like the batch path,
-        # whose per-party balance is sum(amount) - sum(shipping_amount).
-        #
-        # Re-deriving the order amount from the invoice's paid/unpaid status here is what made
-        # this preview contradict the batch "Settle All" view. The clearest case is an UNPAID
-        # online-intent order (InstaPay / Mobile Wallet) dispatched Out for Delivery: the courier
-        # collects NOTHING (the customer transfers online and a manager confirms it separately),
-        # so its CT is accrued with amount=0 and shipping_amount=<freight>. The batch view
-        # correctly reads that as "pay the courier the freight", while the old
-        # `is_unpaid -> order_amount = grand_total` override here reported "collect
-        # grand_total - freight" — and, worse, routed the operator into
-        # settle_courier_collected_payment, fabricating a cash receipt for money nobody ever
-        # collected and crediting a Courier Outstanding balance that was never debited.
-        order_amount = ct_order_total
-    elif already_settled:
-        order_amount = 0.0
-        shipping = 0.0
-    elif is_credit_on_account:
-        # Unpaid AND on account: there is nothing for the courier to hand over now or
-        # later. Only his freight is in play, so the preview reads "pay the courier
-        # the freight" instead of "collect the invoice from the courier".
-        order_amount = 0.0
-    elif is_unpaid:
-        # No transaction accrued yet (preview requested before Out for Delivery): anticipate a
-        # settle-now collection of the whole invoice.
-        order_amount = invoice_total
-    elif has_customer_payment or is_paid:
-        # Customer paid -> shipping only
-        order_amount = 0.0
-    else:
-        # No evidence of customer payment -> treat as settle-now
-        order_amount = invoice_total
+	if has_ct_rows:
+		# AUTHORITATIVE: an unsettled Courier Transaction exists, so the courier's position on
+		# this invoice is already recorded. Take it verbatim — exactly like the batch path,
+		# whose per-party balance is sum(amount) - sum(shipping_amount).
+		#
+		# Re-deriving the order amount from the invoice's paid/unpaid status here is what made
+		# this preview contradict the batch "Settle All" view. The clearest case is an UNPAID
+		# online-intent order (InstaPay / Mobile Wallet) dispatched Out for Delivery: the courier
+		# collects NOTHING (the customer transfers online and a manager confirms it separately),
+		# so its CT is accrued with amount=0 and shipping_amount=<freight>. The batch view
+		# correctly reads that as "pay the courier the freight", while the old
+		# `is_unpaid -> order_amount = grand_total` override here reported "collect
+		# grand_total - freight" — and, worse, routed the operator into
+		# settle_courier_collected_payment, fabricating a cash receipt for money nobody ever
+		# collected and crediting a Courier Outstanding balance that was never debited.
+		order_amount = ct_order_total
+	elif already_settled:
+		order_amount = 0.0
+		shipping = 0.0
+	elif is_credit_on_account:
+		# Unpaid AND on account: there is nothing for the courier to hand over now or
+		# later. Only his freight is in play, so the preview reads "pay the courier
+		# the freight" instead of "collect the invoice from the courier".
+		order_amount = 0.0
+	elif is_unpaid:
+		# No transaction accrued yet (preview requested before Out for Delivery): anticipate a
+		# settle-now collection of the whole invoice.
+		order_amount = invoice_total
+	elif has_customer_payment or is_paid:
+		# Customer paid -> shipping only
+		order_amount = 0.0
+	else:
+		# No evidence of customer payment -> treat as settle-now
+		order_amount = invoice_total
 
-    net_amount = order_amount - shipping
-    # Special case: pure shipping (order_amount == 0 < shipping)
-    if order_amount == 0 and shipping > 0:
-        net_amount = -shipping
+	net_amount = order_amount - shipping
+	# Special case: pure shipping (order_amount == 0 < shipping)
+	if order_amount == 0 and shipping > 0:
+		net_amount = -shipping
 
-    # Diagnostic trace. This fires on EVERY preview, so it belongs in the app log, not the
-    # Error Log — as frappe.log_error it wrote one Error Log row per preview opened in the POS
-    # and buried real errors on production. Keep every field: when the single preview and the
-    # batch "Settle All" view disagree, this line is what shows which branch above was taken.
-    try:
-        # setLevel is required, not decoration. frappe.get_logger() applies
-        # `frappe.log_level or default_log_level`, and default_log_level is ERROR on anything
-        # that is not a dev server (frappe/utils/logger.py) — so on staging and production a
-        # bare .info() (and .warning()) is discarded and the trace would vanish entirely
-        # rather than move. Ask for INFO explicitly so it actually lands in
-        # sites/<site>/logs/jarz_pos.api.invoices.log.
-        _trace_logger = frappe.logger("jarz_pos.api.invoices", allow_site=frappe.local.site)
-        _trace_logger.setLevel(logging.INFO)
-        _trace_logger.info(
-            f"Settlement Preview Trace | Invoice: {inv.name} | "
-            f"Status: {status_l} | Outstanding: {outstanding} | "
-            f"is_unpaid: {is_unpaid} | is_paid: {is_paid} | "
-            f"invoice_total: {invoice_total} | order_amount: {order_amount} | shipping: {shipping} | "
-            f"net_amount: {net_amount} | CTs: {len(cts)}"
-        )
-    except Exception:
-        # Guards only the emission of the trace above — no business result is being swallowed
-        # here, so this cannot hide a failure the way a bare except around real logic would.
-        pass
+	# Diagnostic trace. This fires on EVERY preview, so it belongs in the app log, not the
+	# Error Log — as frappe.log_error it wrote one Error Log row per preview opened in the POS
+	# and buried real errors on production. Keep every field: when the single preview and the
+	# batch "Settle All" view disagree, this line is what shows which branch above was taken.
+	try:
+		# setLevel is required, not decoration. frappe.get_logger() applies
+		# `frappe.log_level or default_log_level`, and default_log_level is ERROR on anything
+		# that is not a dev server (frappe/utils/logger.py) — so on staging and production a
+		# bare .info() (and .warning()) is discarded and the trace would vanish entirely
+		# rather than move. Ask for INFO explicitly so it actually lands in
+		# sites/<site>/logs/jarz_pos.api.invoices.log.
+		_trace_logger = frappe.logger("jarz_pos.api.invoices", allow_site=frappe.local.site)
+		_trace_logger.setLevel(logging.INFO)
+		_trace_logger.info(
+			f"Settlement Preview Trace | Invoice: {inv.name} | "
+			f"Status: {status_l} | Outstanding: {outstanding} | "
+			f"is_unpaid: {is_unpaid} | is_paid: {is_paid} | "
+			f"invoice_total: {invoice_total} | order_amount: {order_amount} | shipping: {shipping} | "
+			f"net_amount: {net_amount} | CTs: {len(cts)}"
+		)
+	except Exception:
+		# Guards only the emission of the trace above — no business result is being swallowed
+		# here, so this cannot hide a failure the way a bare except around real logic would.
+		pass
 
-    paid_note = "Paid" if (is_paid and not paid_after_ofd) else ("Unpaid" if is_unpaid else status_l.capitalize() or "Unknown")
+	paid_note = (
+		"Paid"
+		if (is_paid and not paid_after_ofd)
+		else ("Unpaid" if is_unpaid else status_l.capitalize() or "Unknown")
+	)
 
-    # Flag the InstaPay / Mobile Wallet case so the client can explain WHY an unpaid invoice
-    # still nets to "pay the courier": the customer owes the money online, not to the courier.
-    try:
-        from jarz_pos.services.settlement_strategies import _is_online_intent
+	# Flag the InstaPay / Mobile Wallet case so the client can explain WHY an unpaid invoice
+	# still nets to "pay the courier": the customer owes the money online, not to the courier.
+	try:
+		from jarz_pos.services.settlement_strategies import _is_online_intent
 
-        is_online_unconfirmed = bool(is_unpaid and _is_online_intent(inv))
-    except Exception:
-        is_online_unconfirmed = False
+		is_online_unconfirmed = bool(is_unpaid and _is_online_intent(inv))
+	except Exception:
+		is_online_unconfirmed = False
 
-    if net_amount > 0:
-        scenario = "collect"
-        branch_action = "collect"
-        msg = f"Collect {net_amount:.2f} from courier (order {order_amount:.2f} - shipping {shipping:.2f}) – Invoice: {paid_note}"
-    elif net_amount < 0:
-        scenario = "pay" if order_amount == 0 else "pay_excess"
-        branch_action = "pay"
-        msg = f"Pay courier {abs(net_amount):.2f} (shipping {shipping:.2f} - order {order_amount:.2f}) – Invoice: {paid_note}"
-    else:  # net_amount == 0
-        scenario = "even"
-        branch_action = "none"
-        msg = (
-            f"Courier position already settled – Invoice: {paid_note}"
-            if already_settled
-            else f"Nothing to pay or collect – Invoice: {paid_note}"
-        )
+	if net_amount > 0:
+		scenario = "collect"
+		branch_action = "collect"
+		msg = f"Collect {net_amount:.2f} from courier (order {order_amount:.2f} - shipping {shipping:.2f}) – Invoice: {paid_note}"
+	elif net_amount < 0:
+		scenario = "pay" if order_amount == 0 else "pay_excess"
+		branch_action = "pay"
+		msg = f"Pay courier {abs(net_amount):.2f} (shipping {shipping:.2f} - order {order_amount:.2f}) – Invoice: {paid_note}"
+	else:  # net_amount == 0
+		scenario = "even"
+		branch_action = "none"
+		msg = (
+			f"Courier position already settled – Invoice: {paid_note}"
+			if already_settled
+			else f"Nothing to pay or collect – Invoice: {paid_note}"
+		)
 
-    return {
-        "invoice": inv.name,
-        "woo_order_id": normalize_woo_order_id(inv.get("woo_order_id")),
-        "party_type": party_type,
-        "party": party,
-    "order_amount": order_amount,
-    "invoice_total": invoice_total,
-        "shipping_amount": shipping,
-    "scenario": scenario,
-    "branch_action": branch_action,
-    "net_amount": net_amount,
-    "collect_amount": net_amount if net_amount > 0 else 0,
-    "pay_amount": abs(net_amount) if net_amount < 0 else 0,
-    "invoice_status": status_l,
-    "outstanding": outstanding,
-    "is_unpaid_effective": is_unpaid,
-    "is_paid_now": is_paid,
-    "paid_after_ofd": paid_after_ofd,
-    "payment_entries": pe_names,
-    "payment_first_creation": pe_first_creation,
-    "ofd_creation": ofd_creation,
-    # True when the amounts above came verbatim from the accrued Courier Transaction
-    # (the same rows the batch settlement aggregates) rather than the pre-OFD heuristic.
-    "has_courier_transaction": has_ct_rows,
-    "already_settled": already_settled,
-    "courier_order_amount": ct_order_total,
-    "courier_shipping_amount": ct_shipping_total,
-    "is_online_unconfirmed": is_online_unconfirmed,
-    # Same purpose as the flag above, different reason: this invoice is unpaid
-    # because the shop took it on account, not because a transfer is pending.
-    "is_credit_on_account": is_credit_on_account,
-    "message": msg,
-    }
+	return {
+		"invoice": inv.name,
+		"woo_order_id": normalize_woo_order_id(inv.get("woo_order_id")),
+		"party_type": party_type,
+		"party": party,
+		"order_amount": order_amount,
+		"invoice_total": invoice_total,
+		"shipping_amount": shipping,
+		"scenario": scenario,
+		"branch_action": branch_action,
+		"net_amount": net_amount,
+		"collect_amount": net_amount if net_amount > 0 else 0,
+		"pay_amount": abs(net_amount) if net_amount < 0 else 0,
+		"invoice_status": status_l,
+		"outstanding": outstanding,
+		"is_unpaid_effective": is_unpaid,
+		"is_paid_now": is_paid,
+		"paid_after_ofd": paid_after_ofd,
+		"payment_entries": pe_names,
+		"payment_first_creation": pe_first_creation,
+		"ofd_creation": ofd_creation,
+		# True when the amounts above came verbatim from the accrued Courier Transaction
+		# (the same rows the batch settlement aggregates) rather than the pre-OFD heuristic.
+		"has_courier_transaction": has_ct_rows,
+		"already_settled": already_settled,
+		"courier_order_amount": ct_order_total,
+		"courier_shipping_amount": ct_shipping_total,
+		"is_online_unconfirmed": is_online_unconfirmed,
+		# Same purpose as the flag above, different reason: this invoice is unpaid
+		# because the shop took it on account, not because a transfer is pending.
+		"is_credit_on_account": is_credit_on_account,
+		"message": msg,
+	}
 
 
 def _assert_delivery_slot_not_ended(delivery_date, delivery_time_from, delivery_duration) -> None:
-    """Refuse a reschedule onto a delivery window that has already ended.
+	"""Refuse a reschedule onto a delivery window that has already ended.
 
-    The Kanban reschedule dialog lists the slot that is running right now. Left
-    open past that slot's end and then saved, it posted a window that was
-    already over, and the order was stored in it. A running slot is still fine:
-    only a window whose end is at or before the site clock is refused.
-    """
-    try:
-        start = frappe.utils.get_datetime(f"{delivery_date} {delivery_time_from}")
-    except Exception:
-        start = None
-    if start is None:
-        frappe.throw(
-            frappe._("Invalid delivery date or time: {0} {1}").format(delivery_date, delivery_time_from),
-            frappe.ValidationError,
-        )
-    try:
-        duration_seconds = max(int(float(delivery_duration or 0)), 0)
-    except (TypeError, ValueError):
-        duration_seconds = 0
-    end = start + datetime.timedelta(seconds=duration_seconds)
-    if end <= frappe.utils.now_datetime():
-        frappe.throw(
-            frappe._(
-                "This delivery slot ended at {0}. Reopen the slot list and pick a slot that has not ended."
-            ).format(end.strftime("%I:%M %p")),
-            frappe.ValidationError,
-        )
+	The Kanban reschedule dialog lists the slot that is running right now. Left
+	open past that slot's end and then saved, it posted a window that was
+	already over, and the order was stored in it. A running slot is still fine:
+	only a window whose end is at or before the site clock is refused.
+	"""
+	try:
+		start = frappe.utils.get_datetime(f"{delivery_date} {delivery_time_from}")
+	except Exception:
+		start = None
+	if start is None:
+		frappe.throw(
+			frappe._("Invalid delivery date or time: {0} {1}").format(delivery_date, delivery_time_from),
+			frappe.ValidationError,
+		)
+	try:
+		duration_seconds = max(int(float(delivery_duration or 0)), 0)
+	except (TypeError, ValueError):
+		duration_seconds = 0
+	end = start + datetime.timedelta(seconds=duration_seconds)
+	if end <= frappe.utils.now_datetime():
+		frappe.throw(
+			frappe._(
+				"This delivery slot ended at {0}. Reopen the slot list and pick a slot that has not ended."
+			).format(end.strftime("%I:%M %p")),
+			frappe.ValidationError,
+		)
 
 
 @frappe.whitelist()
-def update_invoice_delivery_slot(invoice_id: str, delivery_date: str, delivery_time_from: str, delivery_duration: int, delivery_slot_label: str = ""):
-    """Update delivery slot for a submitted Sales Invoice.
-    
-    Args:
-        invoice_id: Sales Invoice name
-        delivery_date: Delivery date in YYYY-MM-DD format
-        delivery_time_from: Delivery time in HH:MM:SS format
-        delivery_duration: Duration in seconds
-        delivery_slot_label: Human-readable slot label (e.g. "21:00 - 22:00 (1h)")
-    
-    Returns:
-        dict: Success status and message
-    """
-    # Before the try: its handler re-wraps every error as "Failed to update
-    # delivery slot: ...", and this refusal should read as itself.
-    _assert_delivery_slot_not_ended(delivery_date, delivery_time_from, delivery_duration)
+def update_invoice_delivery_slot(
+	invoice_id: str,
+	delivery_date: str,
+	delivery_time_from: str,
+	delivery_duration: int,
+	delivery_slot_label: str = "",
+):
+	"""Update delivery slot for a submitted Sales Invoice.
 
-    try:
-        frappe.logger().info(f"Updating delivery slot for invoice {invoice_id}")
-        frappe.logger().info(f"New slot: {delivery_date} {delivery_time_from}, duration: {delivery_duration}s")
-        
-        # Get the invoice
-        inv = frappe.get_doc("Sales Invoice", invoice_id)
-        ensure_profile_scoped_invoice_access(inv, action_label="rescheduling this order")
+	Args:
+	    invoice_id: Sales Invoice name
+	    delivery_date: Delivery date in YYYY-MM-DD format
+	    delivery_time_from: Delivery time in HH:MM:SS format
+	    delivery_duration: Duration in seconds
+	    delivery_slot_label: Human-readable slot label (e.g. "21:00 - 22:00 (1h)")
 
-        # Check permissions
-        if not frappe.has_permission("Sales Invoice", "write", inv):
-            frappe.throw("Insufficient permissions to update this invoice")
-        
-        # Update delivery slot fields.
-        #
-        # This deliberately goes through save() rather than db_set(): db_set skips
-        # the post-submit document lifecycle, so a reschedule never fired
-        # on_update_after_submit and the new slot silently never reached the
-        # linked WooCommerce order. All four fields are allow_on_submit.
-        inv.custom_delivery_date = delivery_date
-        inv.custom_delivery_time_from = delivery_time_from
-        inv.custom_delivery_duration = int(delivery_duration)
-        if delivery_slot_label:
-            inv.custom_delivery_slot_label = delivery_slot_label
-        inv.save(ignore_permissions=True)
+	Returns:
+	    dict: Success status and message
+	"""
+	# Before the try: its handler re-wraps every error as "Failed to update
+	# delivery slot: ...", and this refusal should read as itself.
+	_assert_delivery_slot_not_ended(delivery_date, delivery_time_from, delivery_duration)
 
-        frappe.db.commit()
-        
-        frappe.logger().info(f"Successfully updated delivery slot for {invoice_id}")
-        
-        return {
-            "success": True,
-            "message": "Delivery slot updated successfully"
-        }
-    except Exception as e:
-        frappe.logger().error(f"Failed to update delivery slot for {invoice_id}: {str(e)}")
-        frappe.throw(f"Failed to update delivery slot: {str(e)}")
+	try:
+		frappe.logger().info(f"Updating delivery slot for invoice {invoice_id}")
+		frappe.logger().info(
+			f"New slot: {delivery_date} {delivery_time_from}, duration: {delivery_duration}s"
+		)
+
+		# Get the invoice
+		inv = frappe.get_doc("Sales Invoice", invoice_id)
+		ensure_profile_scoped_invoice_access(inv, action_label="rescheduling this order")
+
+		# Check permissions
+		if not frappe.has_permission("Sales Invoice", "write", inv):
+			frappe.throw("Insufficient permissions to update this invoice")
+
+		# Update delivery slot fields.
+		#
+		# This deliberately goes through save() rather than db_set(): db_set skips
+		# the post-submit document lifecycle, so a reschedule never fired
+		# on_update_after_submit and the new slot silently never reached the
+		# linked WooCommerce order. All four fields are allow_on_submit.
+		inv.custom_delivery_date = delivery_date
+		inv.custom_delivery_time_from = delivery_time_from
+		inv.custom_delivery_duration = int(delivery_duration)
+		if delivery_slot_label:
+			inv.custom_delivery_slot_label = delivery_slot_label
+		inv.save(ignore_permissions=True)
+
+		frappe.db.commit()
+
+		frappe.logger().info(f"Successfully updated delivery slot for {invoice_id}")
+
+		return {"success": True, "message": "Delivery slot updated successfully"}
+	except Exception as e:
+		frappe.logger().error(f"Failed to update delivery slot for {invoice_id}: {str(e)}")
+		frappe.throw(f"Failed to update delivery slot: {str(e)}")

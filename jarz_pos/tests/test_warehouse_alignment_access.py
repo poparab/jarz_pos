@@ -62,7 +62,12 @@ def _alignment_frappe(profile_warehouse="Stores - Nasr city", warehouse_found="S
 		"warehouse_found": warehouse_found,
 		"warehouse_company": "Jarz" if warehouse_found else None,
 	}
-	stock_row = {"parent": "INV-006", "name": "SII-030", "item_code": "ITEM-001", "warehouse": "Stores - Dokki"}
+	stock_row = {
+		"parent": "INV-006",
+		"name": "SII-030",
+		"item_code": "ITEM-001",
+		"warehouse": "Stores - Dokki",
+	}
 
 	def _sql(query, params=None, as_dict=False, **kwargs):
 		if "FROM `tabSales Invoice` si" in query:

@@ -26,80 +26,80 @@ WORK_ORDER_STAMP_FIELD = "jarz_sop_version"
 
 
 def _field(row: Any, name: str, default: Any = None) -> Any:
-    if isinstance(row, dict):
-        return row.get(name, default)
-    return getattr(row, name, default)
+	if isinstance(row, dict):
+		return row.get(name, default)
+	return getattr(row, name, default)
 
 
 def _set_field(row: Any, name: str, value: Any) -> None:
-    if isinstance(row, dict):
-        row[name] = value
-    else:
-        setattr(row, name, value)
+	if isinstance(row, dict):
+		row[name] = value
+	else:
+		setattr(row, name, value)
 
 
 def _idx_of(row: Any) -> int:
-    try:
-        return int(_field(row, "idx") or 0)
-    except (TypeError, ValueError):
-        return 0
+	try:
+		return int(_field(row, "idx") or 0)
+	except (TypeError, ValueError):
+		return 0
 
 
 def renumber_steps(rows: Any) -> List[Any]:
-    """Assign ``step_no`` 1..n in ``idx`` order.
+	"""Assign ``step_no`` 1..n in ``idx`` order.
 
-    ``sorted`` is stable, so rows that share an ``idx`` (or have none) keep the
-    order they arrived in rather than being shuffled.  Returns the ordered rows
-    so callers can assert on them.
-    """
-    ordered = sorted(list(rows or []), key=_idx_of)
-    for position, row in enumerate(ordered, start=1):
-        _set_field(row, "step_no", position)
-    return ordered
+	``sorted`` is stable, so rows that share an ``idx`` (or have none) keep the
+	order they arrived in rather than being shuffled.  Returns the ordered rows
+	so callers can assert on them.
+	"""
+	ordered = sorted(list(rows or []), key=_idx_of)
+	for position, row in enumerate(ordered, start=1):
+		_set_field(row, "step_no", position)
+	return ordered
 
 
 class JarzSOP(Document):
-    def validate(self):
-        renumber_steps(self.steps)
-        self._guard_steps_are_immutable_once_used()
+	def validate(self):
+		renumber_steps(self.steps)
+		self._guard_steps_are_immutable_once_used()
 
-    def _guard_steps_are_immutable_once_used(self):
-        """Refuse a step edit on a procedure some batch was already made to."""
-        if frappe.db.exists(
-            "Work Order",
-            {WORK_ORDER_STAMP_FIELD: ["like", f"{self.name}{VERSION_STAMP_SEPARATOR}%"]},
-        ) and self.has_value_changed("steps"):
-            frappe.throw(_("This SOP has been used in production. Create a new version instead."))
+	def _guard_steps_are_immutable_once_used(self):
+		"""Refuse a step edit on a procedure some batch was already made to."""
+		if frappe.db.exists(
+			"Work Order",
+			{WORK_ORDER_STAMP_FIELD: ["like", f"{self.name}{VERSION_STAMP_SEPARATOR}%"]},
+		) and self.has_value_changed("steps"):
+			frappe.throw(_("This SOP has been used in production. Create a new version instead."))
 
-    def on_update(self):
-        self._deactivate_other_versions()
+	def on_update(self):
+		self._deactivate_other_versions()
 
-    def _deactivate_other_versions(self):
-        """Keep at most one active SOP per item, and say so out loud.
+	def _deactivate_other_versions(self):
+		"""Keep at most one active SOP per item, and say so out loud.
 
-        Silently flipping another record's flag is the kind of side effect that
-        gets discovered three weeks later, so it is announced.
-        """
-        if not self.is_active:
-            return
+		Silently flipping another record's flag is the kind of side effect that
+		gets discovered three weeks later, so it is announced.
+		"""
+		if not self.is_active:
+			return
 
-        others = frappe.get_all(
-            SOP_DOCTYPE,
-            filters={
-                "item_code": self.item_code,
-                "is_active": 1,
-                "name": ["!=", self.name],
-            },
-            pluck="name",
-        )
-        if not others:
-            return
+		others = frappe.get_all(
+			SOP_DOCTYPE,
+			filters={
+				"item_code": self.item_code,
+				"is_active": 1,
+				"name": ["!=", self.name],
+			},
+			pluck="name",
+		)
+		if not others:
+			return
 
-        for name in others:
-            frappe.db.set_value(SOP_DOCTYPE, name, "is_active", 0, update_modified=False)
+		for name in others:
+			frappe.db.set_value(SOP_DOCTYPE, name, "is_active", 0, update_modified=False)
 
-        frappe.msgprint(
-            _("Deactivated {0} other active SOP(s) for {1}: {2}").format(
-                len(others), self.item_code, ", ".join(others)
-            )
-        )
+		frappe.msgprint(
+			_("Deactivated {0} other active SOP(s) for {1}: {2}").format(
+				len(others), self.item_code, ", ".join(others)
+			)
+		)

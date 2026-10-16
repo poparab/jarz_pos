@@ -17,17 +17,17 @@ from jarz_pos.constants import ROLES
 
 
 def _ensure_jarz_manager():
-    """Raise if the current user is not a JARZ Manager."""
-    roles = set(frappe.get_roles(frappe.session.user))
-    if ROLES.JARZ_MANAGER not in roles and ROLES.ADMINISTRATOR not in roles:
-        frappe.throw(_("Only JARZ Manager can access reports"), frappe.PermissionError)
+	"""Raise if the current user is not a JARZ Manager."""
+	roles = set(frappe.get_roles(frappe.session.user))
+	if ROLES.JARZ_MANAGER not in roles and ROLES.ADMINISTRATOR not in roles:
+		frappe.throw(_("Only JARZ Manager can access reports"), frappe.PermissionError)
 
 
 def _ensure_materials_report_access():
-    """Materials & Consumables — the line-manager tier (line manager and above)."""
-    roles = set(frappe.get_roles(frappe.session.user))
-    if not roles.intersection(ROLES.LINE_MANAGER_TIER):
-        frappe.throw(_("You are not permitted to access this report"), frappe.PermissionError)
+	"""Materials & Consumables — the line-manager tier (line manager and above)."""
+	roles = set(frappe.get_roles(frappe.session.user))
+	if not roles.intersection(ROLES.LINE_MANAGER_TIER):
+		frappe.throw(_("You are not permitted to access this report"), frappe.PermissionError)
 
 
 #: Item groups each bucket of the Materials & Consumables report covers.
@@ -43,337 +43,339 @@ _CONSUMABLE_ROOTS = ("Consumable",)
 
 
 def _finished_goods_warehouses() -> List[str]:
-    """The finished-goods store, so the Final Products tables always show it.
+	"""The finished-goods store, so the Final Products tables always show it.
 
-    The column set used to be "whatever warehouses happen to hold one of these
-    items", which moves under the report. On production 2026-09-18 that meant
-    the Large table had no ``Finished Goods`` column at all — no Large size was
-    sitting in the store that day — while the Medium table grew a ``Raw
-    Material`` column off a single stray Bin row. A stock report whose columns
-    come and go cannot be read side by side, so the store is pinned here and
-    everything else is added on top.
+	The column set used to be "whatever warehouses happen to hold one of these
+	items", which moves under the report. On production 2026-09-18 that meant
+	the Large table had no ``Finished Goods`` column at all — no Large size was
+	sitting in the store that day — while the Medium table grew a ``Raw
+	Material`` column off a single stray Bin row. A stock report whose columns
+	come and go cannot be read side by side, so the store is pinned here and
+	everything else is added on top.
 
-    Read off the **Company**, not Manufacturing Settings: v16's
-    ``set_company_wise_warehouses`` patch moved the setting, and
-    ``get_single_value`` *raises* on a field the meta no longer has. Production
-    still answers the old address from a stale ``tabSingles`` row left by v15,
-    so the old spelling looks fine there and throws on a site without it —
-    ``_get_mfg_defaults`` in ``api/manufacturing.py`` reads the Company the
-    same way.
-    """
-    try:
-        rows = frappe.get_all("Company", fields=["default_fg_warehouse"])
-    except Exception:
-        return []
+	Read off the **Company**, not Manufacturing Settings: v16's
+	``set_company_wise_warehouses`` patch moved the setting, and
+	``get_single_value`` *raises* on a field the meta no longer has. Production
+	still answers the old address from a stale ``tabSingles`` row left by v15,
+	so the old spelling looks fine there and throws on a site without it —
+	``_get_mfg_defaults`` in ``api/manufacturing.py`` reads the Company the
+	same way.
+	"""
+	try:
+		rows = frappe.get_all("Company", fields=["default_fg_warehouse"])
+	except Exception:
+		return []
 
-    names: List[str] = []
-    for row in rows:
-        warehouse = row.get("default_fg_warehouse")
-        if not warehouse or warehouse in names:
-            continue
-        try:
-            if frappe.db.get_value("Warehouse", warehouse, "is_group"):
-                continue
-        except Exception:
-            pass
-        names.append(warehouse)
-    return names
+	names: List[str] = []
+	for row in rows:
+		warehouse = row.get("default_fg_warehouse")
+		if not warehouse or warehouse in names:
+			continue
+		try:
+			if frappe.db.get_value("Warehouse", warehouse, "is_group"):
+				continue
+		except Exception:
+			pass
+		names.append(warehouse)
+	return names
 
 
 def _expand_item_groups(roots: tuple) -> List[str]:
-    """Each named group plus every group beneath it in the Item Group tree."""
-    names: List[str] = []
-    for root in roots:
-        bounds = frappe.db.get_value("Item Group", root, ["lft", "rgt"], as_dict=True)
-        if not bounds:
-            continue
-        names.extend(
-            row["name"]
-            for row in frappe.get_all(
-                "Item Group",
-                filters={"lft": [">=", bounds["lft"]], "rgt": ["<=", bounds["rgt"]]},
-                fields=["name"],
-            )
-        )
-    return names
+	"""Each named group plus every group beneath it in the Item Group tree."""
+	names: List[str] = []
+	for root in roots:
+		bounds = frappe.db.get_value("Item Group", root, ["lft", "rgt"], as_dict=True)
+		if not bounds:
+			continue
+		names.extend(
+			row["name"]
+			for row in frappe.get_all(
+				"Item Group",
+				filters={"lft": [">=", bounds["lft"]], "rgt": ["<=", bounds["rgt"]]},
+				fields=["name"],
+			)
+		)
+	return names
 
 
 def branch_warehouse(branch: Optional[str]) -> Optional[str]:
-    """The stock warehouse of a branch (POS Profile), or None when no branch.
+	"""The stock warehouse of a branch (POS Profile), or None when no branch.
 
-    Raises a clear ValidationError when the branch has no warehouse, rather than
-    silently reporting company-wide stock under a branch's name.
-    """
-    branch = (branch or "").strip()
-    if not branch:
-        return None
-    warehouse = (frappe.db.get_value("POS Profile", branch, "warehouse") or "").strip()
-    if not warehouse:
-        frappe.throw(
-            _("Branch {0} has no stock warehouse configured on its POS Profile.").format(branch),
-            frappe.ValidationError,
-        )
-    return warehouse
+	Raises a clear ValidationError when the branch has no warehouse, rather than
+	silently reporting company-wide stock under a branch's name.
+	"""
+	branch = (branch or "").strip()
+	if not branch:
+		return None
+	warehouse = (frappe.db.get_value("POS Profile", branch, "warehouse") or "").strip()
+	if not warehouse:
+		frappe.throw(
+			_("Branch {0} has no stock warehouse configured on its POS Profile.").format(branch),
+			frappe.ValidationError,
+		)
+	return warehouse
 
 
 def _bin_maps(item_codes: List[str], warehouse: Optional[str]):
-    """``(qty_map, value_map)``: item → {warehouse: qty} and item → {warehouse: value}."""
-    filters: Dict[str, Any] = {"item_code": ["in", item_codes], "actual_qty": ["!=", 0]}
-    if warehouse:
-        filters["warehouse"] = warehouse
-    bins = frappe.get_all(
-        "Bin",
-        filters=filters,
-        fields=["item_code", "warehouse", "actual_qty", "stock_value"],
-    )
-    qty_map: Dict[str, Dict[str, float]] = {}
-    value_map: Dict[str, Dict[str, float]] = {}
-    for b in bins:
-        qty_map.setdefault(b["item_code"], {})[b["warehouse"]] = float(b["actual_qty"])
-        value_map.setdefault(b["item_code"], {})[b["warehouse"]] = float(b.get("stock_value") or 0)
-    return qty_map, value_map
+	"""``(qty_map, value_map)``: item → {warehouse: qty} and item → {warehouse: value}."""
+	filters: Dict[str, Any] = {"item_code": ["in", item_codes], "actual_qty": ["!=", 0]}
+	if warehouse:
+		filters["warehouse"] = warehouse
+	bins = frappe.get_all(
+		"Bin",
+		filters=filters,
+		fields=["item_code", "warehouse", "actual_qty", "stock_value"],
+	)
+	qty_map: Dict[str, Dict[str, float]] = {}
+	value_map: Dict[str, Dict[str, float]] = {}
+	for b in bins:
+		qty_map.setdefault(b["item_code"], {})[b["warehouse"]] = float(b["actual_qty"])
+		value_map.setdefault(b["item_code"], {})[b["warehouse"]] = float(b.get("stock_value") or 0)
+	return qty_map, value_map
 
 
 def _totals(rows: List[Dict[str, Any]]) -> Dict[str, float]:
-    return {
-        "qty": round(sum(float(r.get("total_qty") or 0) for r in rows), 3),
-        "stock_value": round(sum(float(r.get("stock_value") or 0) for r in rows), 2),
-    }
+	return {
+		"qty": round(sum(float(r.get("total_qty") or 0) for r in rows), 3),
+		"stock_value": round(sum(float(r.get("stock_value") or 0) for r in rows), 2),
+	}
 
 
 @frappe.whitelist()
 def get_final_products_report(branch: Optional[str] = None) -> Dict[str, Any]:
-    """
-    Return stock balances for items in the "Small", "Medium" and "Large" item
-    groups, pivoted by warehouse.
+	"""
+	Return stock balances for items in the "Small", "Medium" and "Large" item
+	groups, pivoted by warehouse.
 
-    ``branch`` (optional POS Profile): only that branch's warehouse is read and
-    it is the only column. Each item row carries ``stock_value`` (sum of
-    ``Bin.stock_value`` over the columns shown) and ``warehouse_value``; each
-    group carries ``totals: {"qty", "stock_value"}`` and so does the response.
+	``branch`` (optional POS Profile): only that branch's warehouse is read and
+	it is the only column. Each item row carries ``stock_value`` (sum of
+	``Bin.stock_value`` over the columns shown) and ``warehouse_value``; each
+	group carries ``totals: {"qty", "stock_value"}`` and so does the response.
 
-    Every table carries the *same* warehouse columns — see
-    ``_finished_goods_warehouses`` — and every active size gets a row whether or
-    not it has stock, because "we are out of Carrot cake" is the line a stock
-    count exists to show and the old "skip items with no Bin row" rule hid it.
+	Every table carries the *same* warehouse columns — see
+	``_finished_goods_warehouses`` — and every active size gets a row whether or
+	not it has stock, because "we are out of Carrot cake" is the line a stock
+	count exists to show and the old "skip items with no Bin row" rule hid it.
 
-    Response shape:
-    {
-        "warehouses": ["WH-A", "WH-B", ...],
-        "items": [
-            {
-                "item_code": "ITEM-001",
-                "item_name": "...",
-                "item_group": "Medium",
-                "stock_uom": "Nos",
-                "warehouse_qty": {"WH-A": 10.0, "WH-B": 5.0},
-                "total_qty": 15.0
-            },
-            ...
-        ]
-    }
-    """
-    _ensure_jarz_manager()
-    branch = (branch or "").strip() or None
-    warehouse = branch_warehouse(branch)
-    filters_echo = {"branch": branch, "warehouse": warehouse}
+	Response shape:
+	{
+	    "warehouses": ["WH-A", "WH-B", ...],
+	    "items": [
+	        {
+	            "item_code": "ITEM-001",
+	            "item_name": "...",
+	            "item_group": "Medium",
+	            "stock_uom": "Nos",
+	            "warehouse_qty": {"WH-A": 10.0, "WH-B": 5.0},
+	            "total_qty": 15.0
+	        },
+	        ...
+	    ]
+	}
+	"""
+	_ensure_jarz_manager()
+	branch = (branch or "").strip() or None
+	warehouse = branch_warehouse(branch)
+	filters_echo = {"branch": branch, "warehouse": warehouse}
 
-    group_aliases = {
-        "Small": {"Small"},
-        "Medium": {"Medium", "Meduim"},
-        "Large": {"Large"},
-    }
-    target_groups = sorted({group for aliases in group_aliases.values() for group in aliases})
+	group_aliases = {
+		"Small": {"Small"},
+		"Medium": {"Medium", "Meduim"},
+		"Large": {"Large"},
+	}
+	target_groups = sorted({group for aliases in group_aliases.values() for group in aliases})
 
-    # Get all non-disabled items in the target groups
-    items = frappe.get_all(
-        "Item",
-        filters={"item_group": ["in", target_groups], "disabled": 0, "has_variants": 0},
-        fields=["name as item_code", "item_name", "item_group", "stock_uom"],
-        order_by="item_group asc, item_name asc",
-    )
+	# Get all non-disabled items in the target groups
+	items = frappe.get_all(
+		"Item",
+		filters={"item_group": ["in", target_groups], "disabled": 0, "has_variants": 0},
+		fields=["name as item_code", "item_name", "item_group", "stock_uom"],
+		order_by="item_group asc, item_name asc",
+	)
 
-    if not items:
-        return {"groups": [], "totals": {"qty": 0.0, "stock_value": 0.0}, "filters": filters_echo}
+	if not items:
+		return {"groups": [], "totals": {"qty": 0.0, "stock_value": 0.0}, "filters": filters_echo}
 
-    item_codes = [it["item_code"] for it in items]
+	item_codes = [it["item_code"] for it in items]
 
-    # Every non-zero balance, negatives included. The filter used to be
-    # ``> 0``, which dropped a branch's oversold bin and so read the total
-    # HIGH: on production Chocolate Hazelnut Medium showed 74 while the ledger
-    # said 70, because Dokki's -4 was simply not fetched.
-    item_wh_map, item_value_map = _bin_maps(item_codes, warehouse)
+	# Every non-zero balance, negatives included. The filter used to be
+	# ``> 0``, which dropped a branch's oversold bin and so read the total
+	# HIGH: on production Chocolate Hazelnut Medium showed 74 while the ledger
+	# said 70, because Dokki's -4 was simply not fetched.
+	item_wh_map, item_value_map = _bin_maps(item_codes, warehouse)
 
-    # One column set for the whole report. What this guarantees is that the
-    # Company's FG warehouse is ALWAYS a column, and that Small, Medium and
-    # Large always carry identical columns so the tables line up.
-    #
-    # It does NOT freeze the column list: warehouse_set is the union of the
-    # pinned FG warehouse and every warehouse holding a non-zero bin, so a
-    # stray Bin row elsewhere still grows a column (and since the filter above
-    # counts negatives, an oversold bin now grows one too). The report that
-    # sprouted a "Raw Material" column was cured by repairing the phantom bins,
-    # not by this line.
-    if warehouse:
-        # A branch view shows that branch's store and nothing else.
-        warehouses = [warehouse]
-    else:
-        warehouse_set: set = set(_finished_goods_warehouses())
-        for wh_qty in item_wh_map.values():
-            warehouse_set.update(wh_qty.keys())
-        warehouses = sorted(warehouse_set)
+	# One column set for the whole report. What this guarantees is that the
+	# Company's FG warehouse is ALWAYS a column, and that Small, Medium and
+	# Large always carry identical columns so the tables line up.
+	#
+	# It does NOT freeze the column list: warehouse_set is the union of the
+	# pinned FG warehouse and every warehouse holding a non-zero bin, so a
+	# stray Bin row elsewhere still grows a column (and since the filter above
+	# counts negatives, an oversold bin now grows one too). The report that
+	# sprouted a "Raw Material" column was cured by repairing the phantom bins,
+	# not by this line.
+	if warehouse:
+		# A branch view shows that branch's store and nothing else.
+		warehouses = [warehouse]
+	else:
+		warehouse_set: set = set(_finished_goods_warehouses())
+		for wh_qty in item_wh_map.values():
+			warehouse_set.update(wh_qty.keys())
+		warehouses = sorted(warehouse_set)
 
-    # Build separate tables per group, smallest jar first.
-    groups_order = ["Small", "Medium", "Large"]
-    result_groups = []
+	# Build separate tables per group, smallest jar first.
+	groups_order = ["Small", "Medium", "Large"]
+	result_groups = []
 
-    for group_name in groups_order:
-        group_items = [
-            it for it in items if it["item_group"] in group_aliases[group_name]
-        ]
-        if not group_items:
-            continue
+	for group_name in groups_order:
+		group_items = [it for it in items if it["item_group"] in group_aliases[group_name]]
+		if not group_items:
+			continue
 
-        group_result_items = []
-        for it in group_items:
-            wh_qty = item_wh_map.get(it["item_code"], {})
-            wh_value = item_value_map.get(it["item_code"], {})
-            total = sum(wh_qty.values())
-            group_result_items.append({
-                "item_code": it["item_code"],
-                "item_name": it["item_name"],
-                "item_group": group_name,
-                "stock_uom": it["stock_uom"],
-                "warehouse_qty": wh_qty,
-                "total_qty": total,
-                "warehouse_value": {wh: round(v, 2) for wh, v in wh_value.items()},
-                "stock_value": round(sum(wh_value.values()), 2),
-            })
+		group_result_items = []
+		for it in group_items:
+			wh_qty = item_wh_map.get(it["item_code"], {})
+			wh_value = item_value_map.get(it["item_code"], {})
+			total = sum(wh_qty.values())
+			group_result_items.append(
+				{
+					"item_code": it["item_code"],
+					"item_name": it["item_name"],
+					"item_group": group_name,
+					"stock_uom": it["stock_uom"],
+					"warehouse_qty": wh_qty,
+					"total_qty": total,
+					"warehouse_value": {wh: round(v, 2) for wh, v in wh_value.items()},
+					"stock_value": round(sum(wh_value.values()), 2),
+				}
+			)
 
-        result_groups.append({
-            "group_name": group_name,
-            "warehouses": warehouses,
-            "items": group_result_items,
-            "totals": _totals(group_result_items),
-        })
+		result_groups.append(
+			{
+				"group_name": group_name,
+				"warehouses": warehouses,
+				"items": group_result_items,
+				"totals": _totals(group_result_items),
+			}
+		)
 
-    all_rows = [row for group in result_groups for row in group["items"]]
-    return {"groups": result_groups, "totals": _totals(all_rows), "filters": filters_echo}
+	all_rows = [row for group in result_groups for row in group["items"]]
+	return {"groups": result_groups, "totals": _totals(all_rows), "filters": filters_echo}
 
 
 def _materials_payload(raw_materials, sub_assemblies, consumables, filters_echo) -> Dict[str, Any]:
-    bucket_totals = {
-        "raw_materials": _totals(raw_materials),
-        "sub_assemblies": _totals(sub_assemblies),
-        "consumables": _totals(consumables),
-    }
-    return {
-        "raw_materials": raw_materials,
-        "sub_assemblies": sub_assemblies,
-        "consumables": consumables,
-        "bucket_totals": bucket_totals,
-        "totals": _totals(raw_materials + sub_assemblies + consumables),
-        "filters": filters_echo,
-    }
+	bucket_totals = {
+		"raw_materials": _totals(raw_materials),
+		"sub_assemblies": _totals(sub_assemblies),
+		"consumables": _totals(consumables),
+	}
+	return {
+		"raw_materials": raw_materials,
+		"sub_assemblies": sub_assemblies,
+		"consumables": consumables,
+		"bucket_totals": bucket_totals,
+		"totals": _totals(raw_materials + sub_assemblies + consumables),
+		"filters": filters_echo,
+	}
 
 
 @frappe.whitelist()
 def get_materials_report(branch: Optional[str] = None) -> Dict[str, Any]:
-    """
-    Return stock balances for the material, sub-assembly and consumable item
-    groups — each expanded to its descendants, so the report follows the Item
-    Group tree rather than a fixed list of leaf names.
+	"""
+	Return stock balances for the material, sub-assembly and consumable item
+	groups — each expanded to its descendants, so the report follows the Item
+	Group tree rather than a fixed list of leaf names.
 
-    ``branch`` (optional POS Profile): only that branch's warehouse is read.
-    Each row carries ``stock_value`` (sum of ``Bin.stock_value``) and
-    ``warehouse_value``; ``bucket_totals`` gives ``{"qty", "stock_value"}`` per
-    bucket and ``totals`` the grand total (qty mixes UOMs — use the value).
+	``branch`` (optional POS Profile): only that branch's warehouse is read.
+	Each row carries ``stock_value`` (sum of ``Bin.stock_value``) and
+	``warehouse_value``; ``bucket_totals`` gives ``{"qty", "stock_value"}`` per
+	bucket and ``totals`` the grand total (qty mixes UOMs — use the value).
 
-    Response shape:
-    {
-        "raw_materials": [
-            {
-                "item_code": "RM-001",
-                "item_name": "...",
-                "item_group": "Raw Material",
-                "stock_uom": "Kg",
-                "warehouse_qty": {"WH-A": 100.0},
-                "total_qty": 100.0,
-                "warehouse_count": 1
-            },
-            ...
-        ],
-        "sub_assemblies": [ ... ],
-        "consumables": [ ... ]
-    }
-    """
-    _ensure_materials_report_access()
-    branch = (branch or "").strip() or None
-    warehouse = branch_warehouse(branch)
-    filters_echo = {"branch": branch, "warehouse": warehouse}
+	Response shape:
+	{
+	    "raw_materials": [
+	        {
+	            "item_code": "RM-001",
+	            "item_name": "...",
+	            "item_group": "Raw Material",
+	            "stock_uom": "Kg",
+	            "warehouse_qty": {"WH-A": 100.0},
+	            "total_qty": 100.0,
+	            "warehouse_count": 1
+	        },
+	        ...
+	    ],
+	    "sub_assemblies": [ ... ],
+	    "consumables": [ ... ]
+	}
+	"""
+	_ensure_materials_report_access()
+	branch = (branch or "").strip() or None
+	warehouse = branch_warehouse(branch)
+	filters_echo = {"branch": branch, "warehouse": warehouse}
 
-    # Previously a literal ["Raw Material", "Sub Assembly", "Consumable"]. The
-    # middle name never matched anything — the group is "Sub Assemblies", plural
-    # — so the sub-assemblies bucket was empty on every site since this shipped.
-    material_groups = _expand_item_groups(_MATERIAL_ROOTS)
-    sub_assembly_groups = _expand_item_groups(_SUB_ASSEMBLY_ROOTS)
-    consumable_groups = _expand_item_groups(_CONSUMABLE_ROOTS)
-    target_groups = material_groups + sub_assembly_groups + consumable_groups
-    if not target_groups:
-        return _materials_payload([], [], [], filters_echo)
+	# Previously a literal ["Raw Material", "Sub Assembly", "Consumable"]. The
+	# middle name never matched anything — the group is "Sub Assemblies", plural
+	# — so the sub-assemblies bucket was empty on every site since this shipped.
+	material_groups = _expand_item_groups(_MATERIAL_ROOTS)
+	sub_assembly_groups = _expand_item_groups(_SUB_ASSEMBLY_ROOTS)
+	consumable_groups = _expand_item_groups(_CONSUMABLE_ROOTS)
+	target_groups = material_groups + sub_assembly_groups + consumable_groups
+	if not target_groups:
+		return _materials_payload([], [], [], filters_echo)
 
-    items = frappe.get_all(
-        "Item",
-        filters={"item_group": ["in", target_groups], "disabled": 0, "has_variants": 0},
-        fields=["name as item_code", "item_name", "item_group", "stock_uom"],
-        order_by="item_group asc, item_name asc",
-    )
+	items = frappe.get_all(
+		"Item",
+		filters={"item_group": ["in", target_groups], "disabled": 0, "has_variants": 0},
+		fields=["name as item_code", "item_name", "item_group", "stock_uom"],
+		order_by="item_group asc, item_name asc",
+	)
 
-    if not items:
-        return _materials_payload([], [], [], filters_echo)
+	if not items:
+		return _materials_payload([], [], [], filters_echo)
 
-    item_codes = [it["item_code"] for it in items]
+	item_codes = [it["item_code"] for it in items]
 
-    # Every non-zero balance, negatives included -- the same rule as
-    # get_final_products_report, and for the same reason. > 0 dropped a
-    # branch's oversold bin, so the total read HIGH: a raw material at 70 in
-    # the factory store and -4 at Dokki reported 70, not 66. The two halves of
-    # this screen disagreeing was worse than either rule on its own, because
-    # the same item in the same condition read differently depending on which
-    # tab you opened.
-    item_wh_map, item_value_map = _bin_maps(item_codes, warehouse)
+	# Every non-zero balance, negatives included -- the same rule as
+	# get_final_products_report, and for the same reason. > 0 dropped a
+	# branch's oversold bin, so the total read HIGH: a raw material at 70 in
+	# the factory store and -4 at Dokki reported 70, not 66. The two halves of
+	# this screen disagreeing was worse than either rule on its own, because
+	# the same item in the same condition read differently depending on which
+	# tab you opened.
+	item_wh_map, item_value_map = _bin_maps(item_codes, warehouse)
 
-    raw_materials = []
-    sub_assemblies = []
-    consumables = []
-    sub_assembly_set = set(sub_assembly_groups)
-    consumable_set = set(consumable_groups)
+	raw_materials = []
+	sub_assemblies = []
+	consumables = []
+	sub_assembly_set = set(sub_assembly_groups)
+	consumable_set = set(consumable_groups)
 
-    for it in items:
-        wh_qty = item_wh_map.get(it["item_code"], {})
-        if not wh_qty:
-            continue
-        total = sum(wh_qty.values())
-        wh_value = item_value_map.get(it["item_code"], {})
-        entry = {
-            "item_code": it["item_code"],
-            "item_name": it["item_name"],
-            "item_group": it["item_group"],
-            "stock_uom": it["stock_uom"],
-            "warehouse_qty": wh_qty,
-            "total_qty": total,
-            "warehouse_count": len(wh_qty),
-            "warehouse_value": {wh: round(v, 2) for wh, v in wh_value.items()},
-            "stock_value": round(sum(wh_value.values()), 2),
-        }
-        if it["item_group"] in sub_assembly_set:
-            sub_assemblies.append(entry)
-        elif it["item_group"] in consumable_set:
-            consumables.append(entry)
-        else:
-            raw_materials.append(entry)
+	for it in items:
+		wh_qty = item_wh_map.get(it["item_code"], {})
+		if not wh_qty:
+			continue
+		total = sum(wh_qty.values())
+		wh_value = item_value_map.get(it["item_code"], {})
+		entry = {
+			"item_code": it["item_code"],
+			"item_name": it["item_name"],
+			"item_group": it["item_group"],
+			"stock_uom": it["stock_uom"],
+			"warehouse_qty": wh_qty,
+			"total_qty": total,
+			"warehouse_count": len(wh_qty),
+			"warehouse_value": {wh: round(v, 2) for wh, v in wh_value.items()},
+			"stock_value": round(sum(wh_value.values()), 2),
+		}
+		if it["item_group"] in sub_assembly_set:
+			sub_assemblies.append(entry)
+		elif it["item_group"] in consumable_set:
+			consumables.append(entry)
+		else:
+			raw_materials.append(entry)
 
-    # Sort consumables: items in more warehouses first
-    consumables.sort(key=lambda x: (-x["warehouse_count"], x["item_name"]))
+	# Sort consumables: items in more warehouses first
+	consumables.sort(key=lambda x: (-x["warehouse_count"], x["item_name"]))
 
-    return _materials_payload(raw_materials, sub_assemblies, consumables, filters_echo)
+	return _materials_payload(raw_materials, sub_assemblies, consumables, filters_echo)

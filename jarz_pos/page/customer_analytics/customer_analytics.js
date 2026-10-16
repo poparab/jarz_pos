@@ -1,18 +1,18 @@
 /* jshint esversion: 9 */
 /* globals frappe */
 
-frappe.pages['customer-analytics'].on_page_load = function (wrapper) {
+frappe.pages["customer-analytics"].on_page_load = function (wrapper) {
 	let page = frappe.ui.make_app_page({
 		parent: wrapper,
-		title: __('Customer Analytics'),
+		title: __("Customer Analytics"),
 		single_column: true,
 	});
 	let dash = new CustomerAnalyticsDashboard(page);
-	$(wrapper).data('ca_dash', dash);
+	$(wrapper).data("ca_dash", dash);
 };
 
-frappe.pages['customer-analytics'].on_page_show = function (wrapper) {
-	let dash = $(wrapper).data('ca_dash');
+frappe.pages["customer-analytics"].on_page_show = function (wrapper) {
+	let dash = $(wrapper).data("ca_dash");
 	if (dash) dash.refresh();
 };
 
@@ -34,9 +34,9 @@ class CustomerAnalyticsDashboard {
 		let me = this;
 
 		this.page.add_field({
-			fieldtype: 'Date',
-			fieldname: 'from_date',
-			label: __('From'),
+			fieldtype: "Date",
+			fieldname: "from_date",
+			label: __("From"),
 			change() {
 				me.from_date = me.page.fields_dict.from_date.get_value() || me.from_date;
 				me.refresh();
@@ -45,9 +45,9 @@ class CustomerAnalyticsDashboard {
 		this.page.fields_dict.from_date.set_value(this.from_date);
 
 		this.page.add_field({
-			fieldtype: 'Date',
-			fieldname: 'to_date',
-			label: __('To'),
+			fieldtype: "Date",
+			fieldname: "to_date",
+			label: __("To"),
 			change() {
 				me.to_date = me.page.fields_dict.to_date.get_value() || me.to_date;
 				me.refresh();
@@ -55,7 +55,7 @@ class CustomerAnalyticsDashboard {
 		});
 		this.page.fields_dict.to_date.set_value(this.to_date);
 
-		this.page.add_inner_button(__('This Month'), () => {
+		this.page.add_inner_button(__("This Month"), () => {
 			this.from_date = frappe.datetime.month_start();
 			this.to_date = frappe.datetime.month_end();
 			this.page.fields_dict.from_date.set_value(this.from_date);
@@ -63,7 +63,7 @@ class CustomerAnalyticsDashboard {
 			this.refresh();
 		});
 
-		this.page.add_inner_button(__('Last 30 Days'), () => {
+		this.page.add_inner_button(__("Last 30 Days"), () => {
 			this.to_date = frappe.datetime.nowdate();
 			this.from_date = frappe.datetime.add_days(this.to_date, -30);
 			this.page.fields_dict.from_date.set_value(this.from_date);
@@ -71,7 +71,7 @@ class CustomerAnalyticsDashboard {
 			this.refresh();
 		});
 
-		this.page.add_inner_button(__('Last 90 Days'), () => {
+		this.page.add_inner_button(__("Last 90 Days"), () => {
 			this.to_date = frappe.datetime.nowdate();
 			this.from_date = frappe.datetime.add_days(this.to_date, -90);
 			this.page.fields_dict.from_date.set_value(this.from_date);
@@ -203,77 +203,81 @@ class CustomerAnalyticsDashboard {
 	// ── Data loading ─────────────────────────────────────────────────────────
 
 	refresh() {
-		$('#ca-kpis').html('<div class="ca-loading">Loading…</div>');
+		$("#ca-kpis").html('<div class="ca-loading">Loading…</div>');
 
-		frappe.call({
-			method: 'jarz_pos.api.customer_analytics.get_customer_analytics',
-			args: { date_from: this.from_date, date_to: this.to_date },
-		}).then(r => {
-			if (!r.message) return;
-			let d = r.message;
-			this._render_kpis(d.summary);
-			this._render_segments(d.segment_distribution || [], d.segment_table || []);
-			this._render_top(d.top_customers || []);
-			this._render_risk(d.at_risk_customers || []);
-			this._render_acquisition(d.acquisition_trend || []);
-		});
+		frappe
+			.call({
+				method: "jarz_pos.api.customer_analytics.get_customer_analytics",
+				args: { date_from: this.from_date, date_to: this.to_date },
+			})
+			.then((r) => {
+				if (!r.message) return;
+				let d = r.message;
+				this._render_kpis(d.summary);
+				this._render_segments(d.segment_distribution || [], d.segment_table || []);
+				this._render_top(d.top_customers || []);
+				this._render_risk(d.at_risk_customers || []);
+				this._render_acquisition(d.acquisition_trend || []);
+			});
 	}
 
 	// ── Renderers ────────────────────────────────────────────────────────────
 
 	_render_kpis(s) {
-		let repeat_cls = s.repeat_rate >= 40 ? 'pos' : s.repeat_rate >= 20 ? 'info' : 'warn';
-		let risk_cls = s.at_risk > 0 ? 'warn' : 'pos';
+		let repeat_cls = s.repeat_rate >= 40 ? "pos" : s.repeat_rate >= 20 ? "info" : "warn";
+		let risk_cls = s.at_risk > 0 ? "warn" : "pos";
 
-		$('#ca-kpis').html(`
-			${_kpi('Total Customers',   (s.total_customers || 0).toLocaleString(), '')}
-			${_kpi('Active (Range)',    (s.active_in_period || 0).toLocaleString(), 'info')}
-			${_kpi('New (Range)',       (s.new_customers || 0).toLocaleString(), 'pos')}
-			${_kpi('Repeat Rate',       (s.repeat_rate || 0) + '%', repeat_cls)}
-			${_kpi('Champions',         (s.champions || 0).toLocaleString(), 'pos')}
-			${_kpi('At Risk / Can\'t Lose', (s.at_risk || 0).toLocaleString(), risk_cls)}
-			${_kpi('Lost',              (s.lost || 0).toLocaleString(), 'neg')}
-			${_kpi('Avg Order Value',   _egp(s.avg_order_value), 'info')}
+		$("#ca-kpis").html(`
+			${_kpi("Total Customers", (s.total_customers || 0).toLocaleString(), "")}
+			${_kpi("Active (Range)", (s.active_in_period || 0).toLocaleString(), "info")}
+			${_kpi("New (Range)", (s.new_customers || 0).toLocaleString(), "pos")}
+			${_kpi("Repeat Rate", (s.repeat_rate || 0) + "%", repeat_cls)}
+			${_kpi("Champions", (s.champions || 0).toLocaleString(), "pos")}
+			${_kpi("At Risk / Can't Lose", (s.at_risk || 0).toLocaleString(), risk_cls)}
+			${_kpi("Lost", (s.lost || 0).toLocaleString(), "neg")}
+			${_kpi("Avg Order Value", _egp(s.avg_order_value), "info")}
 		`);
 	}
 
 	_render_segments(dist, table) {
 		if (dist.length) {
-			_chart('ca-chart-seg-dist', {
-				type: 'donut',
+			_chart("ca-chart-seg-dist", {
+				type: "donut",
 				height: 280,
 				data: {
-					labels: dist.map(r => r.segment),
-					datasets: [{ values: dist.map(r => r.count) }],
+					labels: dist.map((r) => r.segment),
+					datasets: [{ values: dist.map((r) => r.count) }],
 				},
-				colors: dist.map(r => _seg_color(r.segment)),
+				colors: dist.map((r) => _seg_color(r.segment)),
 			});
 		} else {
-			$('#ca-chart-seg-dist').html('<div class="ca-loading">No segmented customers yet.</div>');
+			$("#ca-chart-seg-dist").html(
+				'<div class="ca-loading">No segmented customers yet.</div>'
+			);
 		}
 
-		let with_rev = table.filter(r => r.revenue > 0);
+		let with_rev = table.filter((r) => r.revenue > 0);
 		if (with_rev.length) {
-			_chart('ca-chart-seg-rev', {
-				type: 'bar',
+			_chart("ca-chart-seg-rev", {
+				type: "bar",
 				height: 280,
 				data: {
-					labels: with_rev.map(r => r.segment),
-					datasets: [{ name: 'Revenue', values: with_rev.map(r => r.revenue) }],
+					labels: with_rev.map((r) => r.segment),
+					datasets: [{ name: "Revenue", values: with_rev.map((r) => r.revenue) }],
 				},
-				colors: with_rev.map(r => _seg_color(r.segment)),
-				tooltipOptions: { formatTooltipY: v => _egp(v) },
+				colors: with_rev.map((r) => _seg_color(r.segment)),
+				tooltipOptions: { formatTooltipY: (v) => _egp(v) },
 			});
 		} else {
-			$('#ca-chart-seg-rev').html('<div class="ca-loading">No revenue in range.</div>');
+			$("#ca-chart-seg-rev").html('<div class="ca-loading">No revenue in range.</div>');
 		}
 
 		if (!table.length) {
-			$('#ca-table-seg').html('<div class="ca-loading">No customer data.</div>');
+			$("#ca-table-seg").html('<div class="ca-loading">No customer data.</div>');
 			return;
 		}
 
-		$('#ca-table-seg').html(`
+		$("#ca-table-seg").html(`
 			<table class="ca-table">
 				<thead><tr>
 					<th>Segment</th>
@@ -286,26 +290,32 @@ class CustomerAnalyticsDashboard {
 					<th>Avg Order Value</th>
 				</tr></thead>
 				<tbody>
-					${table.map(r => `<tr>
-						<td><span class="ca-badge" style="background:${_seg_bg(r.segment)};color:${_seg_color(r.segment)}">${r.segment}</span></td>
+					${table
+						.map(
+							(r) => `<tr>
+						<td><span class="ca-badge" style="background:${_seg_bg(r.segment)};color:${_seg_color(
+								r.segment
+							)}">${r.segment}</span></td>
 						<td>${(r.customers || 0).toLocaleString()}</td>
 						<td>${(r.active_customers || 0).toLocaleString()}</td>
 						<td>${(r.orders || 0).toLocaleString()}</td>
-						<td>${r.revenue > 0 ? _egp(r.revenue) : '—'}</td>
+						<td>${r.revenue > 0 ? _egp(r.revenue) : "—"}</td>
 						<td class="muted">${r.avg_recency || 0}d</td>
 						<td class="muted">${r.avg_frequency || 0}</td>
-						<td>${r.avg_aov > 0 ? _egp(r.avg_aov) : '—'}</td>
-					</tr>`).join('')}
+						<td>${r.avg_aov > 0 ? _egp(r.avg_aov) : "—"}</td>
+					</tr>`
+						)
+						.join("")}
 				</tbody>
 			</table>`);
 	}
 
 	_render_top(rows) {
 		if (!rows.length) {
-			$('#ca-table-top').html('<div class="ca-loading">No customer orders in range.</div>');
+			$("#ca-table-top").html('<div class="ca-loading">No customer orders in range.</div>');
 			return;
 		}
-		$('#ca-table-top').html(`
+		$("#ca-table-top").html(`
 			<table class="ca-table">
 				<thead><tr>
 					<th>#</th>
@@ -316,24 +326,34 @@ class CustomerAnalyticsDashboard {
 					<th>Last Order</th>
 				</tr></thead>
 				<tbody>
-					${rows.map((r, i) => `<tr>
+					${rows
+						.map(
+							(r, i) => `<tr>
 						<td class="muted">${i + 1}</td>
-						<td><a href="/app/customer/${encodeURIComponent(r.customer)}" target="_blank">${r.customer_name || r.customer}</a></td>
-						<td><span class="ca-badge" style="background:${_seg_bg(r.segment)};color:${_seg_color(r.segment)}">${r.segment}</span></td>
+						<td><a href="/app/customer/${encodeURIComponent(r.customer)}" target="_blank">${
+								r.customer_name || r.customer
+							}</a></td>
+						<td><span class="ca-badge" style="background:${_seg_bg(r.segment)};color:${_seg_color(
+								r.segment
+							)}">${r.segment}</span></td>
 						<td>${(r.orders || 0).toLocaleString()}</td>
 						<td class="green">${_egp(r.revenue)}</td>
 						<td class="muted">${r.recency_days}d ago</td>
-					</tr>`).join('')}
+					</tr>`
+						)
+						.join("")}
 				</tbody>
 			</table>`);
 	}
 
 	_render_risk(rows) {
 		if (!rows.length) {
-			$('#ca-table-risk').html('<div class="ca-loading">✅ No at-risk customers right now.</div>');
+			$("#ca-table-risk").html(
+				'<div class="ca-loading">✅ No at-risk customers right now.</div>'
+			);
 			return;
 		}
-		$('#ca-table-risk').html(`
+		$("#ca-table-risk").html(`
 			<table class="ca-table">
 				<thead><tr>
 					<th>Customer</th>
@@ -344,31 +364,39 @@ class CustomerAnalyticsDashboard {
 					<th>Avg Order Value</th>
 				</tr></thead>
 				<tbody>
-					${rows.map(r => `<tr>
-						<td><a href="/app/customer/${encodeURIComponent(r.customer)}" target="_blank">${r.customer_name || r.customer}</a></td>
-						<td><span class="ca-badge" style="background:${_seg_bg(r.segment)};color:${_seg_color(r.segment)}">${r.segment}</span></td>
-						<td class="muted">${r.territory || '—'}</td>
+					${rows
+						.map(
+							(r) => `<tr>
+						<td><a href="/app/customer/${encodeURIComponent(r.customer)}" target="_blank">${
+								r.customer_name || r.customer
+							}</a></td>
+						<td><span class="ca-badge" style="background:${_seg_bg(r.segment)};color:${_seg_color(
+								r.segment
+							)}">${r.segment}</span></td>
+						<td class="muted">${r.territory || "—"}</td>
 						<td class="red">${r.recency_days}d</td>
 						<td>${r.frequency}</td>
-						<td>${r.avg_aov > 0 ? _egp(r.avg_aov) : '—'}</td>
-					</tr>`).join('')}
+						<td>${r.avg_aov > 0 ? _egp(r.avg_aov) : "—"}</td>
+					</tr>`
+						)
+						.join("")}
 				</tbody>
 			</table>`);
 	}
 
 	_render_acquisition(rows) {
 		if (!rows.length) {
-			$('#ca-chart-acq').html('<div class="ca-loading">No new customers in range.</div>');
+			$("#ca-chart-acq").html('<div class="ca-loading">No new customers in range.</div>');
 			return;
 		}
-		_chart('ca-chart-acq', {
-			type: 'bar',
+		_chart("ca-chart-acq", {
+			type: "bar",
 			height: 280,
 			data: {
-				labels: rows.map(r => r.date),
-				datasets: [{ name: 'New Customers', values: rows.map(r => r.new_customers) }],
+				labels: rows.map((r) => r.date),
+				datasets: [{ name: "New Customers", values: rows.map((r) => r.new_customers) }],
 			},
-			colors: ['#27ae60'],
+			colors: ["#27ae60"],
 		});
 	}
 }
@@ -377,10 +405,13 @@ class CustomerAnalyticsDashboard {
 
 function _egp(v) {
 	let n = parseFloat(v || 0);
-	return 'EGP ' + n.toLocaleString('en', {
-		minimumFractionDigits: 0,
-		maximumFractionDigits: 0,
-	});
+	return (
+		"EGP " +
+		n.toLocaleString("en", {
+			minimumFractionDigits: 0,
+			maximumFractionDigits: 0,
+		})
+	);
 }
 
 function _kpi(label, value, cls) {
@@ -392,19 +423,19 @@ function _kpi(label, value, cls) {
 
 // Segment colour palette — text/accent colour.
 const _SEG_COLORS = {
-	'Champion':           '#16a34a',
-	'Loyal':              '#2563eb',
-	'Potential Loyalist': '#0891b2',
-	'New Customer':       '#7c3aed',
-	'At Risk':            '#ea580c',
-	"Can't Lose Them":    '#dc2626',
-	'Lost':               '#6b7280',
-	'One-Time':           '#a16207',
-	'Unclassified':       '#94a3b8',
+	Champion: "#16a34a",
+	Loyal: "#2563eb",
+	"Potential Loyalist": "#0891b2",
+	"New Customer": "#7c3aed",
+	"At Risk": "#ea580c",
+	"Can't Lose Them": "#dc2626",
+	Lost: "#6b7280",
+	"One-Time": "#a16207",
+	Unclassified: "#94a3b8",
 };
 
 function _seg_color(segment) {
-	return _SEG_COLORS[segment] || '#7B61FF';
+	return _SEG_COLORS[segment] || "#7B61FF";
 }
 
 // Soft background tint for badges (derived from the accent colour at low alpha).
@@ -420,7 +451,7 @@ function _seg_bg(segment) {
 function _chart(id, opts) {
 	let el = document.getElementById(id);
 	if (!el) return;
-	el.innerHTML = '';
+	el.innerHTML = "";
 	try {
 		new frappe.Chart(el, opts);
 	} catch (e) {

@@ -41,9 +41,7 @@ def _fake_account_get_all(accounts):
 		for row in accounts:
 			if any(not matches(row, f, c) for f, c in (filters or {}).items()):
 				continue
-			if or_filters and not any(
-				matches(row, of[1], [of[2], of[3]]) for of in or_filters
-			):
+			if or_filters and not any(matches(row, of[1], [of[2], of[3]]) for of in or_filters):
 				continue
 			picked = {f: row.get(f) for f in fields} if fields else dict(row)
 			out.append(picked)
@@ -90,44 +88,51 @@ class TestKashierGatewayAccount(unittest.TestCase):
 	def _list_accounts(self, accounts, pos_rows=None, partner_rows=None):
 		from jarz_pos.api import cash_transfer
 
-		with patch.object(cash_transfer, "_ensure_manager_access"), patch.object(
-			cash_transfer.frappe, "get_all", side_effect=_fake_account_get_all(accounts)
-		), patch.object(
-			cash_transfer, "_get_pos_profile_accounts", return_value=list(pos_rows or [])
-		), patch.object(
-			cash_transfer, "_get_sales_partner_accounts", return_value=list(partner_rows or [])
-		), patch.object(cash_transfer, "_get_balance_on", return_value=92821.0):
+		with (
+			patch.object(cash_transfer, "_ensure_manager_access"),
+			patch.object(cash_transfer.frappe, "get_all", side_effect=_fake_account_get_all(accounts)),
+			patch.object(cash_transfer, "_get_pos_profile_accounts", return_value=list(pos_rows or [])),
+			patch.object(cash_transfer, "_get_sales_partner_accounts", return_value=list(partner_rows or [])),
+			patch.object(cash_transfer, "_get_balance_on", return_value=92821.0),
+		):
 			return cash_transfer.list_accounts(company="JARZ")
 
 	def test_kashier_current_asset_is_returned_as_gateway(self):
 		rows = self._cashlike(self.BASE)
 		kashier = [r for r in rows if r["name"] == "kashier - J"]
 		self.assertEqual(len(kashier), 1)
-		self.assertEqual(kashier[0], {
-			"name": "kashier - J",
-			"account_name": "kashier",
-			"account_type": "Current Asset",
-			"company": "JARZ",
-			"category": "gateway",
-		})
+		self.assertEqual(
+			kashier[0],
+			{
+				"name": "kashier - J",
+				"account_name": "kashier",
+				"account_type": "Current Asset",
+				"company": "JARZ",
+				"category": "gateway",
+			},
+		)
 
 	def test_list_accounts_exposes_kashier_row_shape(self):
 		out = self._list_accounts(self.BASE)
 		kashier = [a for a in out if a["account"] == "kashier - J"]
-		self.assertEqual(kashier, [{
-			"account": "kashier - J",
-			"label": "kashier",
-			"company": "JARZ",
-			"type": "Current Asset",
-			"category": "gateway",
-			"balance": 92821.0,
-		}])
+		self.assertEqual(
+			kashier,
+			[
+				{
+					"account": "kashier - J",
+					"label": "kashier",
+					"company": "JARZ",
+					"type": "Current Asset",
+					"category": "gateway",
+					"balance": 92821.0,
+				}
+			],
+		)
 
 	def test_match_is_case_insensitive(self):
 		accounts = [_account("KASHIER Settlement - J", account_type="Current Asset")]
 		rows = self._cashlike(accounts)
-		self.assertEqual([(r["name"], r["category"]) for r in rows],
-						 [("KASHIER Settlement - J", "gateway")])
+		self.assertEqual([(r["name"], r["category"]) for r in rows], [("KASHIER Settlement - J", "gateway")])
 
 	def test_kashier_not_duplicated_when_also_bank_typed(self):
 		accounts = [_account("Kashier - J", account_type="Bank")]
@@ -137,14 +142,17 @@ class TestKashierGatewayAccount(unittest.TestCase):
 	def test_kashier_not_duplicated_when_also_named_wallet(self):
 		accounts = [_account("Kashier Wallet - J", account_type="Current Asset")]
 		rows = self._cashlike(accounts)
-		self.assertEqual([(r["name"], r["category"]) for r in rows],
-						 [("Kashier Wallet - J", "mobile")])
+		self.assertEqual([(r["name"], r["category"]) for r in rows], [("Kashier Wallet - J", "mobile")])
 
 	def test_kashier_not_duplicated_across_pos_profile_and_partner_rules(self):
-		dup = {"name": "kashier - J", "account_name": "kashier", "account_type": None,
-			   "company": "JARZ", "category": "sales_partner"}
-		out = self._list_accounts(self.BASE, pos_rows=[dict(dup, category="pos_profile")],
-								  partner_rows=[dup])
+		dup = {
+			"name": "kashier - J",
+			"account_name": "kashier",
+			"account_type": None,
+			"company": "JARZ",
+			"category": "sales_partner",
+		}
+		out = self._list_accounts(self.BASE, pos_rows=[dict(dup, category="pos_profile")], partner_rows=[dup])
 		kashier = [a for a in out if a["account"] == "kashier - J"]
 		self.assertEqual(len(kashier), 1)
 		self.assertEqual(kashier[0]["category"], "gateway")
@@ -164,22 +172,28 @@ class TestKashierGatewayAccount(unittest.TestCase):
 	def test_existing_accounts_still_appear(self):
 		out = self._list_accounts(self.BASE)
 		by_account = {a["account"]: a["category"] for a in out}
-		self.assertEqual(by_account, {
-			"Cash - J": "cash",
-			"CIB - J": "bank",
-			"Vodafone Wallet - J": "mobile",
-			"kashier - J": "gateway",
-		})
+		self.assertEqual(
+			by_account,
+			{
+				"Cash - J": "cash",
+				"CIB - J": "bank",
+				"Vodafone Wallet - J": "mobile",
+				"kashier - J": "gateway",
+			},
+		)
 		# Stable UI order: cash, bank, mobile, then the gateway.
-		self.assertEqual([a["account"] for a in out],
-						 ["Cash - J", "CIB - J", "Vodafone Wallet - J", "kashier - J"])
+		self.assertEqual(
+			[a["account"] for a in out], ["Cash - J", "CIB - J", "Vodafone Wallet - J", "kashier - J"]
+		)
 
 	def test_kashier_is_in_transfer_history_membership(self):
 		from jarz_pos.api import cash_transfer
 
-		with patch.object(cash_transfer.frappe, "get_all", side_effect=_fake_account_get_all(self.BASE)), \
-				patch.object(cash_transfer, "_get_pos_profile_accounts", return_value=[]), \
-				patch.object(cash_transfer, "_get_sales_partner_accounts", return_value=[]):
+		with (
+			patch.object(cash_transfer.frappe, "get_all", side_effect=_fake_account_get_all(self.BASE)),
+			patch.object(cash_transfer, "_get_pos_profile_accounts", return_value=[]),
+			patch.object(cash_transfer, "_get_sales_partner_accounts", return_value=[]),
+		):
 			names = cash_transfer._transferable_account_names("JARZ")
 		self.assertIn("kashier - J", names)
 		self.assertIn("Cash - J", names)

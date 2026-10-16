@@ -9,6 +9,7 @@ Each test pins one finding from the audit so it cannot come back quietly:
 * a second dispatch of a dispatched order is refused;
 * a courier row switched to an online ledger reports its reversible amount.
 """
+
 from __future__ import annotations
 
 import unittest
@@ -107,9 +108,7 @@ class TestPartnerTransactionsBlockOnlyWhenSettled(unittest.TestCase):
 		inv = {"name": "INV-TALABAT"}
 
 		self.assertIsNotNone(get_invoice_hard_mutation_blocker(inv))
-		self.assertIsNone(
-			get_invoice_hard_mutation_blocker(inv, ignore_unsettled_partner_transactions=True)
-		)
+		self.assertIsNone(get_invoice_hard_mutation_blocker(inv, ignore_unsettled_partner_transactions=True))
 
 
 class TestAlreadyDispatchedGuard(unittest.TestCase):
@@ -153,13 +152,23 @@ class TestSwitchedOnlineAmount(unittest.TestCase):
 	def test_settled_zero_or_unlinked_rows_report_nothing(self):
 		fn = self._module()._switched_online_amount
 		self.assertEqual(fn(None), 0.0)
-		self.assertEqual(fn({"status": "Settled", "amount": 0, "journal_entry": "JE", "payment_mode": "Instapay"}), 0.0)
-		self.assertEqual(fn({"status": "Unsettled", "amount": 330, "journal_entry": "JE", "payment_mode": "Instapay"}), 0.0)
-		self.assertEqual(fn({"status": "Unsettled", "amount": 0, "journal_entry": "", "payment_mode": "Instapay"}), 0.0)
+		self.assertEqual(
+			fn({"status": "Settled", "amount": 0, "journal_entry": "JE", "payment_mode": "Instapay"}), 0.0
+		)
+		self.assertEqual(
+			fn({"status": "Unsettled", "amount": 330, "journal_entry": "JE", "payment_mode": "Instapay"}), 0.0
+		)
+		self.assertEqual(
+			fn({"status": "Unsettled", "amount": 0, "journal_entry": "", "payment_mode": "Instapay"}), 0.0
+		)
 		# A dispatch label is not a collection method; a partner fee row rides "Online"
 		# but its entry carries no Courier Outstanding credit (covered below).
-		self.assertEqual(fn({"status": "Unsettled", "amount": 0, "journal_entry": "JE", "payment_mode": "Deferred"}), 0.0)
-		self.assertEqual(fn({"status": "Unsettled", "amount": 0, "journal_entry": "JE", "payment_mode": "Cash"}), 0.0)
+		self.assertEqual(
+			fn({"status": "Unsettled", "amount": 0, "journal_entry": "JE", "payment_mode": "Deferred"}), 0.0
+		)
+		self.assertEqual(
+			fn({"status": "Unsettled", "amount": 0, "journal_entry": "JE", "payment_mode": "Cash"}), 0.0
+		)
 
 	@patch("jarz_pos.services.delivery_handling.frappe")
 	def test_reads_the_courier_outstanding_credit_of_the_switch_entry(self, mock_frappe):

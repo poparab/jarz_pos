@@ -34,9 +34,7 @@ def ensure_pos_staff_role() -> None:
 				"disabled": 0,
 			}
 		).insert(ignore_permissions=True)
-		frappe.logger("jarz_pos.setup", allow_site=True).info(
-			f"Created Role '{ROLE_NAME}'"
-		)
+		frappe.logger("jarz_pos.setup", allow_site=True).info(f"Created Role '{ROLE_NAME}'")
 	except Exception:
 		frappe.logger("jarz_pos.setup", allow_site=True).error(
 			f"Failed to ensure Role '{ROLE_NAME}'", exc_info=True

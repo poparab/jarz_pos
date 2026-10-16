@@ -75,9 +75,7 @@ def _ensure_production_role_profile(log):
 		doc.insert(ignore_permissions=True)
 		log["created"].append(f"Role Profile: {ROLE_PROFILE_NAME}")
 	except Exception:
-		_logger().error(
-			f"Failed to ensure Role Profile '{ROLE_PROFILE_NAME}'", exc_info=True
-		)
+		_logger().error(f"Failed to ensure Role Profile '{ROLE_PROFILE_NAME}'", exc_info=True)
 
 
 def _custom_docperm_roles(doctype):
@@ -151,9 +149,7 @@ def _ensure_production_docperms(log):
 
 			_repair_displaced_standard_perms(doctype, log)
 
-			if frappe.db.exists(
-				"Custom DocPerm", {"parent": doctype, "role": ROLE_NAME, "permlevel": 0}
-			):
+			if frappe.db.exists("Custom DocPerm", {"parent": doctype, "role": ROLE_NAME, "permlevel": 0}):
 				log["existing"].append(f"Custom DocPerm: {ROLE_NAME} on {doctype}")
 				continue
 
@@ -216,8 +212,7 @@ def ensure_production_setup():
 			# Loud on purpose: this means the site had been running with the
 			# standard permissions on these doctypes revoked.
 			logger.error(
-				"Production setup RESTORED displaced standard permissions on: "
-				+ ", ".join(log["repaired"])
+				"Production setup RESTORED displaced standard permissions on: " + ", ".join(log["repaired"])
 			)
 
 		if log["created"]:

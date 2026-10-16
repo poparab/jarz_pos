@@ -1,18 +1,18 @@
 /* jshint esversion: 9 */
 /* globals frappe */
 
-frappe.pages['inventory-analytics'].on_page_load = function (wrapper) {
+frappe.pages["inventory-analytics"].on_page_load = function (wrapper) {
 	let page = frappe.ui.make_app_page({
 		parent: wrapper,
-		title: __('Inventory Intelligence'),
+		title: __("Inventory Intelligence"),
 		single_column: true,
 	});
 	let dash = new InventoryAnalyticsDashboard(page);
-	$(wrapper).data('inv_dash', dash);
+	$(wrapper).data("inv_dash", dash);
 };
 
-frappe.pages['inventory-analytics'].on_page_show = function (wrapper) {
-	let dash = $(wrapper).data('inv_dash');
+frappe.pages["inventory-analytics"].on_page_show = function (wrapper) {
+	let dash = $(wrapper).data("inv_dash");
 	if (dash) dash.refresh();
 };
 
@@ -34,9 +34,9 @@ class InventoryAnalyticsDashboard {
 		let me = this;
 
 		this.page.add_field({
-			fieldtype: 'Date',
-			fieldname: 'from_date',
-			label: __('From'),
+			fieldtype: "Date",
+			fieldname: "from_date",
+			label: __("From"),
 			change() {
 				me.from_date = me.page.fields_dict.from_date.get_value() || me.from_date;
 				me.refresh();
@@ -45,9 +45,9 @@ class InventoryAnalyticsDashboard {
 		this.page.fields_dict.from_date.set_value(this.from_date);
 
 		this.page.add_field({
-			fieldtype: 'Date',
-			fieldname: 'to_date',
-			label: __('To'),
+			fieldtype: "Date",
+			fieldname: "to_date",
+			label: __("To"),
 			change() {
 				me.to_date = me.page.fields_dict.to_date.get_value() || me.to_date;
 				me.refresh();
@@ -55,7 +55,7 @@ class InventoryAnalyticsDashboard {
 		});
 		this.page.fields_dict.to_date.set_value(this.to_date);
 
-		this.page.add_inner_button(__('This Month'), () => {
+		this.page.add_inner_button(__("This Month"), () => {
 			this.from_date = frappe.datetime.month_start();
 			this.to_date = frappe.datetime.month_end();
 			this.page.fields_dict.from_date.set_value(this.from_date);
@@ -63,7 +63,7 @@ class InventoryAnalyticsDashboard {
 			this.refresh();
 		});
 
-		this.page.add_inner_button(__('Last 30 Days'), () => {
+		this.page.add_inner_button(__("Last 30 Days"), () => {
 			this.to_date = frappe.datetime.nowdate();
 			this.from_date = frappe.datetime.add_days(this.to_date, -30);
 			this.page.fields_dict.from_date.set_value(this.from_date);
@@ -71,7 +71,7 @@ class InventoryAnalyticsDashboard {
 			this.refresh();
 		});
 
-		this.page.add_inner_button(__('Last 90 Days'), () => {
+		this.page.add_inner_button(__("Last 90 Days"), () => {
 			this.to_date = frappe.datetime.nowdate();
 			this.from_date = frappe.datetime.add_days(this.to_date, -90);
 			this.page.fields_dict.from_date.set_value(this.from_date);
@@ -218,72 +218,76 @@ class InventoryAnalyticsDashboard {
 	// ── Data loading ─────────────────────────────────────────────────────────
 
 	refresh() {
-		$('#inv-kpis').html('<div class="inv-loading">Loading…</div>');
+		$("#inv-kpis").html('<div class="inv-loading">Loading…</div>');
 
-		frappe.call({
-			method: 'jarz_pos.api.inventory_analytics.get_inventory_analytics',
-			args: { date_from: this.from_date, date_to: this.to_date },
-		}).then(r => {
-			if (!r.message) return;
-			let d = r.message;
-			let a = d.alerts || {};
-			this._render_kpis(d.summary || {});
-			this._render_trend(d.velocity_distribution || []);
-			this._render_movers(d.top_movers || []);
-			this._render_critical(a.critical || []);
-			this._render_watch(a.watch_list || []);
-			this._render_slow(a.slow_movers || []);
-			this._render_over(a.overstocked || []);
-			this._render_sold(d.top_sold_in_range || []);
-		});
+		frappe
+			.call({
+				method: "jarz_pos.api.inventory_analytics.get_inventory_analytics",
+				args: { date_from: this.from_date, date_to: this.to_date },
+			})
+			.then((r) => {
+				if (!r.message) return;
+				let d = r.message;
+				let a = d.alerts || {};
+				this._render_kpis(d.summary || {});
+				this._render_trend(d.velocity_distribution || []);
+				this._render_movers(d.top_movers || []);
+				this._render_critical(a.critical || []);
+				this._render_watch(a.watch_list || []);
+				this._render_slow(a.slow_movers || []);
+				this._render_over(a.overstocked || []);
+				this._render_sold(d.top_sold_in_range || []);
+			});
 	}
 
 	// ── Renderers ────────────────────────────────────────────────────────────
 
 	_render_kpis(s) {
-		$('#inv-kpis').html(`
-			${_kpi('Stock Items',     (s.total_stock_items || 0).toLocaleString(), '')}
-			${_kpi('Critical',        (s.critical_count || 0).toLocaleString(), s.critical_count > 0 ? 'neg' : 'pos')}
-			${_kpi('Watch List',      (s.watch_count || 0).toLocaleString(), s.watch_count > 0 ? 'warn' : 'pos')}
-			${_kpi('Slow Movers',     (s.slow_count || 0).toLocaleString(), s.slow_count > 0 ? 'warn' : 'pos')}
-			${_kpi('Overstocked',     (s.overstock_count || 0).toLocaleString(), 'info')}
-			${_kpi('Total Stock Value', _egp(s.total_stock_value), '')}
+		$("#inv-kpis").html(`
+			${_kpi("Stock Items", (s.total_stock_items || 0).toLocaleString(), "")}
+			${_kpi("Critical", (s.critical_count || 0).toLocaleString(), s.critical_count > 0 ? "neg" : "pos")}
+			${_kpi("Watch List", (s.watch_count || 0).toLocaleString(), s.watch_count > 0 ? "warn" : "pos")}
+			${_kpi("Slow Movers", (s.slow_count || 0).toLocaleString(), s.slow_count > 0 ? "warn" : "pos")}
+			${_kpi("Overstocked", (s.overstock_count || 0).toLocaleString(), "info")}
+			${_kpi("Total Stock Value", _egp(s.total_stock_value), "")}
 		`);
 	}
 
 	_render_trend(rows) {
 		if (!rows.length) {
-			$('#inv-chart-trend').html('<div class="inv-loading">No velocity data yet — run a velocity update.</div>');
+			$("#inv-chart-trend").html(
+				'<div class="inv-loading">No velocity data yet — run a velocity update.</div>'
+			);
 			return;
 		}
-		_chart('inv-chart-trend', {
-			type: 'donut',
+		_chart("inv-chart-trend", {
+			type: "donut",
 			height: 280,
 			data: {
-				labels: rows.map(r => r.trend),
-				datasets: [{ values: rows.map(r => r.count) }],
+				labels: rows.map((r) => r.trend),
+				datasets: [{ values: rows.map((r) => r.count) }],
 			},
-			colors: rows.map(r => _trend_color(r.trend)),
+			colors: rows.map((r) => _trend_color(r.trend)),
 		});
 	}
 
 	_render_movers(rows) {
 		if (!rows.length) {
-			$('#inv-chart-movers').html('<div class="inv-loading">No movers yet.</div>');
+			$("#inv-chart-movers").html('<div class="inv-loading">No movers yet.</div>');
 			return;
 		}
 		let top = rows.slice(0, 10);
-		_chart('inv-chart-movers', {
-			type: 'bar',
+		_chart("inv-chart-movers", {
+			type: "bar",
 			height: 280,
 			data: {
-				labels: top.map(r => _short(r.item_name || r.item_code)),
-				datasets: [{ name: 'Units/day', values: top.map(r => r.velocity_60d) }],
+				labels: top.map((r) => _short(r.item_name || r.item_code)),
+				datasets: [{ name: "Units/day", values: top.map((r) => r.velocity_60d) }],
 			},
-			colors: ['#16a085'],
+			colors: ["#16a085"],
 		});
 
-		$('#inv-table-movers').html(`
+		$("#inv-table-movers").html(`
 			<table class="inv-table">
 				<thead><tr>
 					<th>Item</th><th>Group</th><th>Type</th>
@@ -291,28 +295,30 @@ class InventoryAnalyticsDashboard {
 					<th>Stock</th><th>Days Left</th>
 				</tr></thead>
 				<tbody>
-					${rows.map(r => `<tr>
+					${rows
+						.map(
+							(r) => `<tr>
 						<td>${r.item_name || r.item_code}</td>
-						<td class="muted">${r.item_group || '—'}</td>
+						<td class="muted">${r.item_group || "—"}</td>
 						<td>${_replenish_badge(r.replenishment_type)}</td>
 						<td>${(r.velocity_30d || 0).toFixed(2)}</td>
 						<td>${(r.velocity_60d || 0).toFixed(2)}</td>
-						<td class="${_trend_cls(r.trend)}">${r.trend || '—'}</td>
+						<td class="${_trend_cls(r.trend)}">${r.trend || "—"}</td>
 						<td>${(r.stock_on_hand || 0).toLocaleString()}</td>
 						<td>${_days_cell(r.days_of_stock)}</td>
-					</tr>`).join('')}
+					</tr>`
+						)
+						.join("")}
 				</tbody>
 			</table>`);
 	}
 
 	_render_critical(rows) {
-		this._alert_table('#inv-table-critical', rows, true,
-			'✅ Nothing critical right now.');
+		this._alert_table("#inv-table-critical", rows, true, "✅ Nothing critical right now.");
 	}
 
 	_render_watch(rows) {
-		this._alert_table('#inv-table-watch', rows, true,
-			'✅ Nothing on the watch list.');
+		this._alert_table("#inv-table-watch", rows, true, "✅ Nothing on the watch list.");
 	}
 
 	_alert_table(sel, rows, show_days, empty_msg) {
@@ -324,82 +330,98 @@ class InventoryAnalyticsDashboard {
 			<table class="inv-table">
 				<thead><tr>
 					<th>Item</th><th>Type</th><th>Stock</th>
-					<th>Velocity</th>${show_days ? '<th>Days Left</th>' : ''}
+					<th>Velocity</th>${show_days ? "<th>Days Left</th>" : ""}
 				</tr></thead>
 				<tbody>
-					${rows.map(r => `<tr>
+					${rows
+						.map(
+							(r) => `<tr>
 						<td>${r.item_name || r.item_code}</td>
 						<td>${_replenish_badge(r.replenishment_type)}</td>
 						<td>${(r.stock_on_hand || 0).toLocaleString()}</td>
 						<td class="muted">${parseFloat(r.daily_velocity || 0).toFixed(2)}/day</td>
-						${show_days ? `<td>${_days_cell(r.days_remaining)}</td>` : ''}
-					</tr>`).join('')}
+						${show_days ? `<td>${_days_cell(r.days_remaining)}</td>` : ""}
+					</tr>`
+						)
+						.join("")}
 				</tbody>
 			</table>`);
 	}
 
 	_render_slow(rows) {
 		if (!rows.length) {
-			$('#inv-table-slow').html('<div class="inv-loading">✅ No slow-moving stock.</div>');
+			$("#inv-table-slow").html('<div class="inv-loading">✅ No slow-moving stock.</div>');
 			return;
 		}
-		$('#inv-table-slow').html(`
+		$("#inv-table-slow").html(`
 			<table class="inv-table">
 				<thead><tr>
 					<th>Item</th><th>Group</th><th>Type</th><th>Stock</th><th>Trend</th>
 				</tr></thead>
 				<tbody>
-					${rows.map(r => `<tr>
+					${rows
+						.map(
+							(r) => `<tr>
 						<td>${r.item_name || r.item_code}</td>
-						<td class="muted">${r.item_group || '—'}</td>
+						<td class="muted">${r.item_group || "—"}</td>
 						<td>${_replenish_badge(r.replenishment_type)}</td>
 						<td>${(r.stock_on_hand || 0).toLocaleString()}</td>
-						<td class="${_trend_cls(r.trend)}">${r.trend || '—'}</td>
-					</tr>`).join('')}
+						<td class="${_trend_cls(r.trend)}">${r.trend || "—"}</td>
+					</tr>`
+						)
+						.join("")}
 				</tbody>
 			</table>`);
 	}
 
 	_render_over(rows) {
 		if (!rows.length) {
-			$('#inv-table-over').html('<div class="inv-loading">✅ No overstocked items.</div>');
+			$("#inv-table-over").html('<div class="inv-loading">✅ No overstocked items.</div>');
 			return;
 		}
-		$('#inv-table-over').html(`
+		$("#inv-table-over").html(`
 			<table class="inv-table">
 				<thead><tr>
 					<th>Item</th><th>Type</th><th>Stock</th><th>Days Supply</th><th>Est. Value</th>
 				</tr></thead>
 				<tbody>
-					${rows.map(r => `<tr>
+					${rows
+						.map(
+							(r) => `<tr>
 						<td>${r.item_name || r.item_code}</td>
 						<td>${_replenish_badge(r.replenishment_type)}</td>
 						<td>${(r.stock_on_hand || 0).toLocaleString()}</td>
 						<td class="amber">${r.days_remaining}</td>
 						<td>${_egp(r.stock_value)}</td>
-					</tr>`).join('')}
+					</tr>`
+						)
+						.join("")}
 				</tbody>
 			</table>`);
 	}
 
 	_render_sold(rows) {
 		if (!rows.length) {
-			$('#inv-table-sold').html('<div class="inv-loading">No sales in range.</div>');
+			$("#inv-table-sold").html('<div class="inv-loading">No sales in range.</div>');
 			return;
 		}
-		$('#inv-table-sold').html(`
+		$("#inv-table-sold").html(`
 			<table class="inv-table">
 				<thead><tr>
 					<th>#</th><th>Item</th><th>Group</th><th>Units Sold</th><th>Revenue</th>
 				</tr></thead>
 				<tbody>
-					${rows.map((r, i) => `<tr>
+					${rows
+						.map(
+							(r, i) => `<tr>
 						<td class="muted">${i + 1}</td>
 						<td>${r.item_name || r.item_code}</td>
-						<td class="muted">${r.item_group || '—'}</td>
+						<td class="muted">${r.item_group || "—"}</td>
 						<td>${(r.qty || 0).toLocaleString()}</td>
 						<td class="green">${_egp(r.revenue)}</td>
-					</tr>`).join('')}
+					</tr>`
+						)
+						.join("")}
 				</tbody>
 			</table>`);
 	}
@@ -409,15 +431,18 @@ class InventoryAnalyticsDashboard {
 
 function _egp(v) {
 	let n = parseFloat(v || 0);
-	return 'EGP ' + n.toLocaleString('en', {
-		minimumFractionDigits: 0,
-		maximumFractionDigits: 0,
-	});
+	return (
+		"EGP " +
+		n.toLocaleString("en", {
+			minimumFractionDigits: 0,
+			maximumFractionDigits: 0,
+		})
+	);
 }
 
 function _short(label, max = 18) {
-	if (!label) return '—';
-	return label.length > max ? label.slice(0, max - 1) + '…' : label;
+	if (!label) return "—";
+	return label.length > max ? label.slice(0, max - 1) + "…" : label;
 }
 
 function _kpi(label, value, cls) {
@@ -428,40 +453,40 @@ function _kpi(label, value, cls) {
 }
 
 function _replenish_badge(type) {
-	if (type === 'Manufacture') return '<span class="inv-badge badge-make">🏭 Make</span>';
+	if (type === "Manufacture") return '<span class="inv-badge badge-make">🏭 Make</span>';
 	return '<span class="inv-badge badge-buy">🛒 Buy</span>';
 }
 
 function _days_cell(days) {
 	let d = parseInt(days || 0, 10);
 	if (d >= 999) return '<span class="muted">∞</span>';
-	let cls = d <= 5 ? 'red' : d <= 14 ? 'amber' : '';
+	let cls = d <= 5 ? "red" : d <= 14 ? "amber" : "";
 	return `<span class="${cls}">${d}d</span>`;
 }
 
 const _TREND_COLORS = {
-	'Accelerating': '#16a34a',
-	'Stable':       '#2563eb',
-	'Declining':    '#dc2626',
-	'New Item':     '#7c3aed',
-	'No Sales':     '#6b7280',
-	'Unrated':      '#94a3b8',
+	Accelerating: "#16a34a",
+	Stable: "#2563eb",
+	Declining: "#dc2626",
+	"New Item": "#7c3aed",
+	"No Sales": "#6b7280",
+	Unrated: "#94a3b8",
 };
 
 function _trend_color(trend) {
-	return _TREND_COLORS[trend] || '#94a3b8';
+	return _TREND_COLORS[trend] || "#94a3b8";
 }
 
 function _trend_cls(trend) {
-	if (trend === 'Accelerating') return 'trend-up';
-	if (trend === 'Declining' || trend === 'No Sales') return 'trend-down';
-	return 'trend-flat';
+	if (trend === "Accelerating") return "trend-up";
+	if (trend === "Declining" || trend === "No Sales") return "trend-down";
+	return "trend-flat";
 }
 
 function _chart(id, opts) {
 	let el = document.getElementById(id);
 	if (!el) return;
-	el.innerHTML = '';
+	el.innerHTML = "";
 	try {
 		new frappe.Chart(el, opts);
 	} catch (e) {

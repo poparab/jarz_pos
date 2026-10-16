@@ -82,8 +82,10 @@ def ensure_sentry() -> bool:
 
 
 def is_sentry_enabled() -> bool:
-	return sentry_sdk is not None and _as_bool(frappe.conf.get("sentry_enabled")) and bool(
-		str(frappe.conf.get("sentry_dsn_backend") or "").strip()
+	return (
+		sentry_sdk is not None
+		and _as_bool(frappe.conf.get("sentry_enabled"))
+		and bool(str(frappe.conf.get("sentry_dsn_backend") or "").strip())
 	)
 
 
@@ -201,9 +203,7 @@ def _before_send(event: dict[str, Any], hint: Mapping[str, Any]) -> dict[str, An
 		headers = request.get("headers") or {}
 		if isinstance(headers, Mapping):
 			request["headers"] = {
-				key: value
-				for key, value in headers.items()
-				if not _is_sensitive_key(str(key))
+				key: value for key, value in headers.items() if not _is_sensitive_key(str(key))
 			}
 		request["data"] = _sanitize_value("request_data", request.get("data"))
 		event["request"] = request
@@ -219,10 +219,7 @@ def _before_send(event: dict[str, Any], hint: Mapping[str, Any]) -> dict[str, An
 
 
 def _sanitize_mapping(values: Mapping[str, Any]) -> dict[str, Any]:
-	return {
-		str(key): _sanitize_value(str(key), value)
-		for key, value in values.items()
-	}
+	return {str(key): _sanitize_value(str(key), value) for key, value in values.items()}
 
 
 def _sanitize_value(key: str, value: Any) -> Any:

@@ -22,110 +22,110 @@ from jarz_pos.services import branch_access as service
 
 
 def _clean(value: Any) -> Optional[str]:
-    text = str(value or "").strip()
-    return text or None
+	text = str(value or "").strip()
+	return text or None
 
 
 def _coerce_date(value: Any, label: str) -> str:
-    if not value:
-        frappe.throw(_("{0} is required.").format(label))
-    try:
-        return str(getdate(value))
-    except Exception:
-        frappe.throw(_("{0} is not a valid date: {1}").format(label, value))
+	if not value:
+		frappe.throw(_("{0} is required.").format(label))
+	try:
+		return str(getdate(value))
+	except Exception:
+		frappe.throw(_("{0} is not a valid date: {1}").format(label, value))
 
 
 @frappe.whitelist()
 def get_branch_access() -> Dict[str, Any]:
-    """Branches (with open-shift state), users, memberships and day accesses."""
-    data = service.get_branch_access()
-    data["success"] = True
-    return data
+	"""Branches (with open-shift state), users, memberships and day accesses."""
+	data = service.get_branch_access()
+	data["success"] = True
+	return data
 
 
 @frappe.whitelist(methods=["POST"])
 def set_branch_access(
-    user: str,
-    pos_profile: str,
-    allowed: Any,
-    notes: Optional[str] = None,
+	user: str,
+	pos_profile: str,
+	allowed: Any,
+	notes: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Add (``allowed=1``) or remove (``allowed=0``) a permanent membership.
+	"""Add (``allowed=1``) or remove (``allowed=0``) a permanent membership.
 
-    ``changed`` is false when the user is already in the requested state; no
-    log row is written then.
-    """
-    result = service.set_branch_access(
-        _clean(user),
-        _clean(pos_profile),
-        service.as_flag(allowed),
-        notes=_clean(notes),
-    )
-    result["success"] = True
-    return result
+	``changed`` is false when the user is already in the requested state; no
+	log row is written then.
+	"""
+	result = service.set_branch_access(
+		_clean(user),
+		_clean(pos_profile),
+		service.as_flag(allowed),
+		notes=_clean(notes),
+	)
+	result["success"] = True
+	return result
 
 
 @frappe.whitelist(methods=["POST"])
 def grant_day_access(
-    user: str,
-    pos_profile: str,
-    access_date: str,
-    notes: Optional[str] = None,
+	user: str,
+	pos_profile: str,
+	access_date: str,
+	notes: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """One branch day of POS access: today starts now, a later day is scheduled."""
-    result = service.grant_day_access(
-        _clean(user),
-        _clean(pos_profile),
-        _coerce_date(access_date, _("Date")),
-        notes=_clean(notes),
-    )
-    result["success"] = True
-    return result
+	"""One branch day of POS access: today starts now, a later day is scheduled."""
+	result = service.grant_day_access(
+		_clean(user),
+		_clean(pos_profile),
+		_coerce_date(access_date, _("Date")),
+		notes=_clean(notes),
+	)
+	result["success"] = True
+	return result
 
 
 @frappe.whitelist(methods=["POST"])
 def cancel_day_access(name: str) -> Dict[str, Any]:
-    """Withdraw a scheduled or running day access."""
-    result = service.cancel_day_access(_clean(name))
-    result["success"] = True
-    return result
+	"""Withdraw a scheduled or running day access."""
+	result = service.cancel_day_access(_clean(name))
+	result["success"] = True
+	return result
 
 
 @frappe.whitelist(methods=["POST"])
 def move_branch(
-    user: str,
-    to_pos_profile: str,
-    from_pos_profile: Optional[str] = None,
-    keep_old_access: Any = 0,
-    notes: Optional[str] = None,
+	user: str,
+	to_pos_profile: str,
+	from_pos_profile: Optional[str] = None,
+	keep_old_access: Any = 0,
+	notes: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Move somebody to another branch for good: POS access and future shifts.
+	"""Move somebody to another branch for good: POS access and future shifts.
 
-    ``from_pos_profile`` defaults to the branch their schedule puts them at;
-    ``keep_old_access=1`` keeps the old branch's POS access.
-    """
-    return service.move_branch(
-        _clean(user),
-        _clean(to_pos_profile),
-        from_pos_profile=_clean(from_pos_profile),
-        keep_old_access=service.as_flag(keep_old_access),
-        notes=_clean(notes),
-    )
+	``from_pos_profile`` defaults to the branch their schedule puts them at;
+	``keep_old_access=1`` keeps the old branch's POS access.
+	"""
+	return service.move_branch(
+		_clean(user),
+		_clean(to_pos_profile),
+		from_pos_profile=_clean(from_pos_profile),
+		keep_old_access=service.as_flag(keep_old_access),
+		notes=_clean(notes),
+	)
 
 
 @frappe.whitelist()
 def get_access_log(
-    pos_profile: Optional[str] = None,
-    user: Optional[str] = None,
-    limit: Any = 50,
-    start: Any = 0,
+	pos_profile: Optional[str] = None,
+	user: Optional[str] = None,
+	limit: Any = 50,
+	start: Any = 0,
 ) -> Dict[str, Any]:
-    """The change history, newest first, paged with ``start``/``limit``."""
-    result = service.get_access_log(
-        pos_profile=_clean(pos_profile),
-        user=_clean(user),
-        limit=cint(limit) or 50,
-        start=cint(start),
-    )
-    result["success"] = True
-    return result
+	"""The change history, newest first, paged with ``start``/``limit``."""
+	result = service.get_access_log(
+		pos_profile=_clean(pos_profile),
+		user=_clean(user),
+		limit=cint(limit) or 50,
+		start=cint(start),
+	)
+	result["success"] = True
+	return result

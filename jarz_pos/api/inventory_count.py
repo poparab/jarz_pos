@@ -11,401 +11,397 @@ from jarz_pos.utils.posting_datetime import apply_stock_posting_datetime
 
 
 def _ensure_manager_access() -> None:
-    roles = set(frappe.get_roles())
-    allowed = ROLES.STOCK
-    if not roles.intersection(allowed):
-        frappe.throw(_("Not permitted: Managers only"), frappe.PermissionError)
+	roles = set(frappe.get_roles())
+	allowed = ROLES.STOCK
+	if not roles.intersection(allowed):
+		frappe.throw(_("Not permitted: Managers only"), frappe.PermissionError)
 
 
 def _get_uom_conversions(item_code: str) -> List[Dict[str, Any]]:
-    """Return available UOM conversions for an item, including stock_uom with factor 1."""
-    stock_uom = frappe.db.get_value("Item", item_code, "stock_uom") or DEFAULT_UOM
-    convs: List[Dict[str, Any]] = [{"uom": stock_uom, "conversion_factor": 1.0}]
-    rows = frappe.get_all(
-        "UOM Conversion Detail",
-        filters={"parenttype": "Item", "parentfield": "uoms", "parent": item_code},
-        fields=["uom", "conversion_factor"],
-        order_by="idx asc",
-    )
-    for r in rows:
-        try:
-            u = str(r.get("uom") or "").strip()
-            f = float(r.get("conversion_factor"))
-        except Exception:
-            continue
-        if u and math.isfinite(f) and f > 0 and not any(c.get("uom") == u for c in convs):
-            convs.append({"uom": u, "conversion_factor": f})
-    return convs
+	"""Return available UOM conversions for an item, including stock_uom with factor 1."""
+	stock_uom = frappe.db.get_value("Item", item_code, "stock_uom") or DEFAULT_UOM
+	convs: List[Dict[str, Any]] = [{"uom": stock_uom, "conversion_factor": 1.0}]
+	rows = frappe.get_all(
+		"UOM Conversion Detail",
+		filters={"parenttype": "Item", "parentfield": "uoms", "parent": item_code},
+		fields=["uom", "conversion_factor"],
+		order_by="idx asc",
+	)
+	for r in rows:
+		try:
+			u = str(r.get("uom") or "").strip()
+			f = float(r.get("conversion_factor"))
+		except Exception:
+			continue
+		if u and math.isfinite(f) and f > 0 and not any(c.get("uom") == u for c in convs):
+			convs.append({"uom": u, "conversion_factor": f})
+	return convs
 
 
 def _attach_alternative_count_groups(rows: List[Dict[str, Any]]) -> None:
-    """Annotate explicit two-way Item Alternative networks without merging stock."""
-    by_code = {str(row.get("item_code") or ""): row for row in rows if row.get("item_code")}
-    codes = sorted(by_code)
-    if len(codes) < 2:
-        return
+	"""Annotate explicit two-way Item Alternative networks without merging stock."""
+	by_code = {str(row.get("item_code") or ""): row for row in rows if row.get("item_code")}
+	codes = sorted(by_code)
+	if len(codes) < 2:
+		return
 
-    forward = frappe.get_all(
-        "Item Alternative",
-        filters={"two_way": 1, "item_code": ["in", codes]},
-        fields=["item_code", "alternative_item_code"],
-    )
-    reverse = frappe.get_all(
-        "Item Alternative",
-        filters={"two_way": 1, "alternative_item_code": ["in", codes]},
-        fields=["item_code", "alternative_item_code"],
-    )
-    graph: Dict[str, Set[str]] = {code: set() for code in codes}
-    seen_edges: Set[Tuple[str, str]] = set()
-    for link in [*(forward or []), *(reverse or [])]:
-        left = str(link.get("item_code") or "")
-        right = str(link.get("alternative_item_code") or "")
-        edge = tuple(sorted((left, right)))
-        if not left or not right or edge in seen_edges:
-            continue
-        seen_edges.add(edge)
-        if left not in by_code or right not in by_code:
-            continue
-        if by_code[left].get("stock_uom") != by_code[right].get("stock_uom"):
-            continue
-        graph[left].add(right)
-        graph[right].add(left)
+	forward = frappe.get_all(
+		"Item Alternative",
+		filters={"two_way": 1, "item_code": ["in", codes]},
+		fields=["item_code", "alternative_item_code"],
+	)
+	reverse = frappe.get_all(
+		"Item Alternative",
+		filters={"two_way": 1, "alternative_item_code": ["in", codes]},
+		fields=["item_code", "alternative_item_code"],
+	)
+	graph: Dict[str, Set[str]] = {code: set() for code in codes}
+	seen_edges: Set[Tuple[str, str]] = set()
+	for link in [*(forward or []), *(reverse or [])]:
+		left = str(link.get("item_code") or "")
+		right = str(link.get("alternative_item_code") or "")
+		edge = tuple(sorted((left, right)))
+		if not left or not right or edge in seen_edges:
+			continue
+		seen_edges.add(edge)
+		if left not in by_code or right not in by_code:
+			continue
+		if by_code[left].get("stock_uom") != by_code[right].get("stock_uom"):
+			continue
+		graph[left].add(right)
+		graph[right].add(left)
 
-    visited: Set[str] = set()
-    for code in codes:
-        if code in visited or not graph[code]:
-            continue
-        pending = [code]
-        component: Set[str] = set()
-        while pending:
-            member = pending.pop()
-            if member in component:
-                continue
-            component.add(member)
-            pending.extend(graph[member] - component)
-        visited.update(component)
+	visited: Set[str] = set()
+	for code in codes:
+		if code in visited or not graph[code]:
+			continue
+		pending = [code]
+		component: Set[str] = set()
+		while pending:
+			member = pending.pop()
+			if member in component:
+				continue
+			component.add(member)
+			pending.extend(graph[member] - component)
+		visited.update(component)
 
-        member_codes = sorted(component)
-        members = [
-            {
-                "item_code": member,
-                "item_name": by_code[member].get("item_name") or member,
-                "brand": by_code[member].get("brand"),
-                "stock_uom": by_code[member].get("stock_uom") or DEFAULT_UOM,
-                "current_qty": float(by_code[member].get("current_qty") or 0),
-                "uoms": by_code[member].get("uoms") or [],
-            }
-            for member in member_codes
-        ]
-        group = {
-            "alternative_group_key": "|".join(member_codes),
-            "linked_items_display": " + ".join(str(member["item_name"]) for member in members),
-            "combined_net_current_qty": sum(
-                float(member["current_qty"]) for member in members
-            ),
-            "linked_items": members,
-        }
-        for member in member_codes:
-            by_code[member].update(group)
+		member_codes = sorted(component)
+		members = [
+			{
+				"item_code": member,
+				"item_name": by_code[member].get("item_name") or member,
+				"brand": by_code[member].get("brand"),
+				"stock_uom": by_code[member].get("stock_uom") or DEFAULT_UOM,
+				"current_qty": float(by_code[member].get("current_qty") or 0),
+				"uoms": by_code[member].get("uoms") or [],
+			}
+			for member in member_codes
+		]
+		group = {
+			"alternative_group_key": "|".join(member_codes),
+			"linked_items_display": " + ".join(str(member["item_name"]) for member in members),
+			"combined_net_current_qty": sum(float(member["current_qty"]) for member in members),
+			"linked_items": members,
+		}
+		for member in member_codes:
+			by_code[member].update(group)
 
 
 @frappe.whitelist()
 def list_warehouses(company: Optional[str] = None) -> List[Dict[str, Any]]:
-    _ensure_manager_access()
-    if not company:
-        company = frappe.defaults.get_user_default("Company") or frappe.db.get_single_value("Global Defaults", "default_company")
-    filters: Dict[str, Any] = {"is_group": 0}
-    if company:
-        filters["company"] = company
-    return frappe.get_all("Warehouse", filters=filters, fields=["name", "company"], order_by="name asc")
+	_ensure_manager_access()
+	if not company:
+		company = frappe.defaults.get_user_default("Company") or frappe.db.get_single_value(
+			"Global Defaults", "default_company"
+		)
+	filters: Dict[str, Any] = {"is_group": 0}
+	if company:
+		filters["company"] = company
+	return frappe.get_all("Warehouse", filters=filters, fields=["name", "company"], order_by="name asc")
 
 
 @frappe.whitelist()
-def list_item_groups(
-    search: Optional[str] = None, warehouse: Optional[str] = None
-) -> List[Dict[str, Any]]:
-    """Item groups worth offering as a count category.
+def list_item_groups(search: Optional[str] = None, warehouse: Optional[str] = None) -> List[Dict[str, Any]]:
+	"""Item groups worth offering as a count category.
 
-    Two things this deliberately does that the old leaf-only listing did not:
+	Two things this deliberately does that the old leaf-only listing did not:
 
-    * **Only groups that contain something countable.** A group earns a place
-      here when its subtree holds at least one enabled, non-variant *stock*
-      item. Several groups on this site hold nothing but non-stock rows --
-      Bundles, Assets, Services, Label Printing -- and offering them as count
-      categories only ever produced an empty sheet.
-    * **Group nodes, not just leaves.** ``Materials`` can now be picked to count
-      Raw Material + Packaging + Labels + Sub Assemblies in one pass, because
-      :func:`list_items_for_count` expands a chosen group to its descendants.
+	* **Only groups that contain something countable.** A group earns a place
+	  here when its subtree holds at least one enabled, non-variant *stock*
+	  item. Several groups on this site hold nothing but non-stock rows --
+	  Bundles, Assets, Services, Label Printing -- and offering them as count
+	  categories only ever produced an empty sheet.
+	* **Group nodes, not just leaves.** ``Materials`` can now be picked to count
+	  Raw Material + Packaging + Labels + Sub Assemblies in one pass, because
+	  :func:`list_items_for_count` expands a chosen group to its descendants.
 
-    Passing ``warehouse`` narrows the list to categories that warehouse's count
-    profile actually covers, so the picker never offers a category that would
-    come back empty there.
-    """
-    _ensure_manager_access()
+	Passing ``warehouse`` narrows the list to categories that warehouse's count
+	profile actually covers, so the picker never offers a category that would
+	come back empty there.
+	"""
+	_ensure_manager_access()
 
-    item_filters: Dict[str, Any] = {"disabled": 0, "has_variants": 0, "is_stock_item": 1}
-    if warehouse:
-        allowed_codes = _resolve_count_item_codes(warehouse)
-        if allowed_codes is not None:
-            if not allowed_codes:
-                return []
-            item_filters["name"] = ["in", allowed_codes]
+	item_filters: Dict[str, Any] = {"disabled": 0, "has_variants": 0, "is_stock_item": 1}
+	if warehouse:
+		allowed_codes = _resolve_count_item_codes(warehouse)
+		if allowed_codes is not None:
+			if not allowed_codes:
+				return []
+			item_filters["name"] = ["in", allowed_codes]
 
-    populated = set(frappe.get_all("Item", filters=item_filters, pluck="item_group") or [])
-    if not populated:
-        return []
+	populated = set(frappe.get_all("Item", filters=item_filters, pluck="item_group") or [])
+	if not populated:
+		return []
 
-    groups = frappe.get_all(
-        "Item Group",
-        fields=["name", "item_group_name", "is_group", "lft", "rgt"],
-        order_by="lft asc",
-        limit=QUERY_LIMITS.DEFAULT_LIST,
-    )
-    bounds = {g["name"]: (g["lft"], g["rgt"]) for g in groups}
+	groups = frappe.get_all(
+		"Item Group",
+		fields=["name", "item_group_name", "is_group", "lft", "rgt"],
+		order_by="lft asc",
+		limit=QUERY_LIMITS.DEFAULT_LIST,
+	)
+	bounds = {g["name"]: (g["lft"], g["rgt"]) for g in groups}
 
-    like = f"%{search}%".lower() if search else None
-    out: List[Dict[str, Any]] = []
-    for g in groups:
-        # Keep a group when any populated group sits inside its span -- that is
-        # true for the populated leaf itself and for every ancestor above it.
-        covered = [
-            name
-            for name in populated
-            if name in bounds and g["lft"] <= bounds[name][0] and bounds[name][1] <= g["rgt"]
-        ]
-        if not covered:
-            continue
-        if like and like.strip("%") not in f"{g['name']} {g['item_group_name'] or ''}".lower():
-            continue
-        out.append(
-            {
-                "name": g["name"],
-                "item_group_name": g["item_group_name"],
-                "is_group": int(g["is_group"] or 0),
-                "item_count": frappe.db.count(
-                    "Item", dict(item_filters, item_group=["in", covered])
-                ),
-            }
-        )
-    return out
+	like = f"%{search}%".lower() if search else None
+	out: List[Dict[str, Any]] = []
+	for g in groups:
+		# Keep a group when any populated group sits inside its span -- that is
+		# true for the populated leaf itself and for every ancestor above it.
+		covered = [
+			name
+			for name in populated
+			if name in bounds and g["lft"] <= bounds[name][0] and bounds[name][1] <= g["rgt"]
+		]
+		if not covered:
+			continue
+		if like and like.strip("%") not in f"{g['name']} {g['item_group_name'] or ''}".lower():
+			continue
+		out.append(
+			{
+				"name": g["name"],
+				"item_group_name": g["item_group_name"],
+				"is_group": int(g["is_group"] or 0),
+				"item_count": frappe.db.count("Item", dict(item_filters, item_group=["in", covered])),
+			}
+		)
+	return out
 
 
 def _warehouse_count_profile_is_available() -> bool:
-    try:
-        return bool(frappe.db.exists("DocType", "Warehouse Count Profile"))
-    except Exception:
-        return False
+	try:
+		return bool(frappe.db.exists("DocType", "Warehouse Count Profile"))
+	except Exception:
+		return False
 
 
 def _get_active_warehouse_count_profile_name(warehouse: str) -> Optional[str]:
-    if not warehouse or not _warehouse_count_profile_is_available():
-        return None
-    names = frappe.get_all(
-        "Warehouse Count Profile",
-        filters={"warehouse": warehouse, "enabled": 1},
-        pluck="name",
-        limit=1,
-    )
-    return names[0] if names else None
+	if not warehouse or not _warehouse_count_profile_is_available():
+		return None
+	names = frappe.get_all(
+		"Warehouse Count Profile",
+		filters={"warehouse": warehouse, "enabled": 1},
+		pluck="name",
+		limit=1,
+	)
+	return names[0] if names else None
 
 
 def _expand_item_groups(item_groups: List[str], include_child_groups: bool) -> List[str]:
-    normalized = [group.strip() for group in item_groups if group and group.strip()]
-    if not include_child_groups or not normalized:
-        return list(dict.fromkeys(normalized))
+	normalized = [group.strip() for group in item_groups if group and group.strip()]
+	if not include_child_groups or not normalized:
+		return list(dict.fromkeys(normalized))
 
-    expanded: List[str] = []
-    for group in normalized:
-        bounds = frappe.db.get_value("Item Group", group, ["lft", "rgt"], as_dict=True)
-        if not bounds:
-            continue
-        descendants = frappe.get_all(
-            "Item Group",
-            filters={
-                "lft": [">=", bounds.get("lft")],
-                "rgt": ["<=", bounds.get("rgt")],
-            },
-            pluck="name",
-        )
-        expanded.extend(descendants or [group])
-    return list(dict.fromkeys(expanded))
+	expanded: List[str] = []
+	for group in normalized:
+		bounds = frappe.db.get_value("Item Group", group, ["lft", "rgt"], as_dict=True)
+		if not bounds:
+			continue
+		descendants = frappe.get_all(
+			"Item Group",
+			filters={
+				"lft": [">=", bounds.get("lft")],
+				"rgt": ["<=", bounds.get("rgt")],
+			},
+			pluck="name",
+		)
+		expanded.extend(descendants or [group])
+	return list(dict.fromkeys(expanded))
 
 
 def _get_enabled_profile_item_groups(profile_doc: Any) -> List[str]:
-    rows = getattr(profile_doc, "item_groups", []) or []
-    return [
-        str(row.item_group).strip()
-        for row in rows
-        if getattr(row, "item_group", None) and int(getattr(row, "enabled", 1) or 0)
-    ]
+	rows = getattr(profile_doc, "item_groups", []) or []
+	return [
+		str(row.item_group).strip()
+		for row in rows
+		if getattr(row, "item_group", None) and int(getattr(row, "enabled", 1) or 0)
+	]
 
 
 def _get_enabled_profile_item_exceptions(profile_doc: Any) -> Tuple[Set[str], Set[str]]:
-    includes: Set[str] = set()
-    excludes: Set[str] = set()
-    rows = getattr(profile_doc, "item_exceptions", []) or []
-    for row in rows:
-        if not int(getattr(row, "enabled", 1) or 0):
-            continue
-        item_code = str(getattr(row, "item_code", "") or "").strip()
-        action = str(getattr(row, "action", "") or "").strip().title()
-        if not item_code or action not in {"Include", "Exclude"}:
-            continue
-        if action == "Include":
-            includes.add(item_code)
-        else:
-            excludes.add(item_code)
-    return includes, excludes
+	includes: Set[str] = set()
+	excludes: Set[str] = set()
+	rows = getattr(profile_doc, "item_exceptions", []) or []
+	for row in rows:
+		if not int(getattr(row, "enabled", 1) or 0):
+			continue
+		item_code = str(getattr(row, "item_code", "") or "").strip()
+		action = str(getattr(row, "action", "") or "").strip().title()
+		if not item_code or action not in {"Include", "Exclude"}:
+			continue
+		if action == "Include":
+			includes.add(item_code)
+		else:
+			excludes.add(item_code)
+	return includes, excludes
 
 
 def _resolve_count_item_codes(warehouse: str) -> Optional[List[str]]:
-    profile_name = _get_active_warehouse_count_profile_name(warehouse)
-    if not profile_name:
-        return None
+	profile_name = _get_active_warehouse_count_profile_name(warehouse)
+	if not profile_name:
+		return None
 
-    profile_doc = frappe.get_cached_doc("Warehouse Count Profile", profile_name)
-    allowed_groups = _expand_item_groups(
-        _get_enabled_profile_item_groups(profile_doc),
-        bool(getattr(profile_doc, "include_child_groups", 0)),
-    )
-    included_items, excluded_items = _get_enabled_profile_item_exceptions(profile_doc)
+	profile_doc = frappe.get_cached_doc("Warehouse Count Profile", profile_name)
+	allowed_groups = _expand_item_groups(
+		_get_enabled_profile_item_groups(profile_doc),
+		bool(getattr(profile_doc, "include_child_groups", 0)),
+	)
+	included_items, excluded_items = _get_enabled_profile_item_exceptions(profile_doc)
 
-    allowed_codes: Set[str] = set()
-    if allowed_groups:
-        allowed_codes.update(
-            frappe.get_all(
-                "Item",
-                filters={
-                    "item_group": ["in", allowed_groups],
-                    "disabled": 0,
-                    "has_variants": 0,
-                    "is_stock_item": 1,
-                },
-                pluck="name",
-            ),
-        )
-    if included_items:
-        allowed_codes.update(
-            frappe.get_all(
-                "Item",
-                filters={
-                    "name": ["in", sorted(included_items)],
-                    "disabled": 0,
-                    "has_variants": 0,
-                    "is_stock_item": 1,
-                },
-                pluck="name",
-            ),
-        )
+	allowed_codes: Set[str] = set()
+	if allowed_groups:
+		allowed_codes.update(
+			frappe.get_all(
+				"Item",
+				filters={
+					"item_group": ["in", allowed_groups],
+					"disabled": 0,
+					"has_variants": 0,
+					"is_stock_item": 1,
+				},
+				pluck="name",
+			),
+		)
+	if included_items:
+		allowed_codes.update(
+			frappe.get_all(
+				"Item",
+				filters={
+					"name": ["in", sorted(included_items)],
+					"disabled": 0,
+					"has_variants": 0,
+					"is_stock_item": 1,
+				},
+				pluck="name",
+			),
+		)
 
-    allowed_codes.difference_update(excluded_items)
-    return sorted(allowed_codes)
+	allowed_codes.difference_update(excluded_items)
+	return sorted(allowed_codes)
 
 
 def _get_bin_qty_map(warehouse: str, item_codes: List[str]) -> Dict[str, float]:
-    if not item_codes:
-        return {}
-    ph = ",".join(["%s"] * len(item_codes))
-    sql = f"""
+	if not item_codes:
+		return {}
+	ph = ",".join(["%s"] * len(item_codes))
+	sql = f"""
         SELECT b.item_code, COALESCE(SUM(b.actual_qty), 0) AS qty
         FROM `tabBin` b
         WHERE b.warehouse = %s AND b.item_code IN ({ph})
         GROUP BY b.item_code
     """
-    rows = frappe.db.sql(sql, [warehouse] + item_codes, as_dict=True)  # type: ignore
-    out: Dict[str, float] = {}
-    for r in rows:
-        out[str(r.get("item_code"))] = float(r.get("qty") or 0)
-    return out
+	rows = frappe.db.sql(sql, [warehouse] + item_codes, as_dict=True)  # type: ignore
+	out: Dict[str, float] = {}
+	for r in rows:
+		out[str(r.get("item_code"))] = float(r.get("qty") or 0)
+	return out
 
 
 def _first_positive(value: Any) -> Optional[float]:
-    """A usable rate, or None. Zero, negative and NaN are not usable rates."""
-    if value is None:
-        return None
-    try:
-        rate = float(value)
-    except Exception:
-        return None
-    return rate if math.isfinite(rate) and rate > 0 else None
+	"""A usable rate, or None. Zero, negative and NaN are not usable rates."""
+	if value is None:
+		return None
+	try:
+		rate = float(value)
+	except Exception:
+		return None
+	return rate if math.isfinite(rate) and rate > 0 else None
 
 
 def _safe_log(title: str) -> str:
-    """Record the current exception without ever becoming the failure.
+	"""Record the current exception without ever becoming the failure.
 
-    `frappe.log_error` can raise on its own -- `capture_exception` reads System
-    Settings outside its own try -- and every handler here exists to explain a
-    failure, not to replace one. Unguarded, it swapped the operator's refusal
-    message for "DocType Error Log not found". Returns the traceback so a
-    caller in debug mode can still hand it back.
-    """
-    try:
-        tb = frappe.get_traceback()
-    except Exception:
-        tb = ""
-    try:
-        frappe.log_error(tb, title[:140])
-    except Exception:
-        pass
-    return tb
+	`frappe.log_error` can raise on its own -- `capture_exception` reads System
+	Settings outside its own try -- and every handler here exists to explain a
+	failure, not to replace one. Unguarded, it swapped the operator's refusal
+	message for "DocType Error Log not found". Returns the traceback so a
+	caller in debug mode can still hand it back.
+	"""
+	try:
+		tb = frappe.get_traceback()
+	except Exception:
+		tb = ""
+	try:
+		frappe.log_error(tb, title[:140])
+	except Exception:
+		pass
+	return tb
 
 
 def _log_valuation_source_failure(item_code: str, label: str) -> None:
-    """A source that errored must not look like a source that found nothing."""
-    _safe_log(f"jarz_pos valuation source failed: {label} for {item_code}")
+	"""A source that errored must not look like a source that found nothing."""
+	_safe_log(f"jarz_pos valuation source failed: {label} for {item_code}")
 
 
 def _sle_valuation(item_code: str, warehouse: Optional[str]) -> Optional[float]:
-    filters: Dict[str, Any] = {"item_code": item_code, "is_cancelled": 0}
-    if warehouse:
-        filters["warehouse"] = warehouse
-    rows = frappe.get_all(
-        "Stock Ledger Entry",
-        filters=filters,
-        fields=["valuation_rate"],
-        order_by="posting_date desc, posting_time desc, creation desc",
-        limit=1,
-    )
-    return _first_positive(rows[0].get("valuation_rate") if rows else None)
+	filters: Dict[str, Any] = {"item_code": item_code, "is_cancelled": 0}
+	if warehouse:
+		filters["warehouse"] = warehouse
+	rows = frappe.get_all(
+		"Stock Ledger Entry",
+		filters=filters,
+		fields=["valuation_rate"],
+		order_by="posting_date desc, posting_time desc, creation desc",
+		limit=1,
+	)
+	return _first_positive(rows[0].get("valuation_rate") if rows else None)
 
 
 def _item_field_valuation(item_code: str, fieldname: str) -> Optional[float]:
-    return _first_positive(frappe.db.get_value("Item", item_code, fieldname))
+	return _first_positive(frappe.db.get_value("Item", item_code, fieldname))
 
 
 def _item_price_valuation(item_code: str, buying: bool) -> Optional[float]:
-    rows = frappe.get_all(
-        "Item Price",
-        filters={"item_code": item_code, "buying" if buying else "selling": 1},
-        fields=["price_list_rate"],
-        order_by="modified desc",
-        limit=1,
-    )
-    return _first_positive(rows[0].get("price_list_rate") if rows else None)
+	rows = frappe.get_all(
+		"Item Price",
+		filters={"item_code": item_code, "buying" if buying else "selling": 1},
+		fields=["price_list_rate"],
+		order_by="modified desc",
+		limit=1,
+	)
+	return _first_positive(rows[0].get("price_list_rate") if rows else None)
 
 
 def _bom_unit_cost(item_code: str) -> Optional[float]:
-    """Unit cost of the item's own recipe, the way ERPNext computes it.
+	"""Unit cost of the item's own recipe, the way ERPNext computes it.
 
-    `base_total_cost`, not `total_cost`: the former is in company currency,
-    the latter in the BOM's own. `docstatus: 1` because `is_active` defaults
-    to 1 on a BOM, so a draft recipe -- which already carries a computed
-    `total_cost` from `validate` -- would otherwise become the valuation basis
-    for a stock increase that moves the GL.
-    """
-    rows = frappe.get_all(
-        "BOM",
-        filters={"item": item_code, "is_active": 1, "docstatus": 1},
-        fields=["base_total_cost", "quantity"],
-        order_by="is_default desc, modified desc",
-        limit=1,
-    )
-    if not rows:
-        return None
-    produced = _first_positive(rows[0].get("quantity"))
-    if produced is None:
-        return None
-    return _first_positive(float(rows[0].get("base_total_cost") or 0) / produced)
+	`base_total_cost`, not `total_cost`: the former is in company currency,
+	the latter in the BOM's own. `docstatus: 1` because `is_active` defaults
+	to 1 on a BOM, so a draft recipe -- which already carries a computed
+	`total_cost` from `validate` -- would otherwise become the valuation basis
+	for a stock increase that moves the GL.
+	"""
+	rows = frappe.get_all(
+		"BOM",
+		filters={"item": item_code, "is_active": 1, "docstatus": 1},
+		fields=["base_total_cost", "quantity"],
+		order_by="is_default desc, modified desc",
+		limit=1,
+	)
+	if not rows:
+		return None
+	produced = _first_positive(rows[0].get("quantity"))
+	if produced is None:
+		return None
+	return _first_positive(float(rows[0].get("base_total_cost") or 0) / produced)
 
 
 # The single valuation chain, used by both the count sheet and the submit. It
@@ -422,650 +418,664 @@ def _bom_unit_cost(item_code: str) -> Optional[float]:
 # to stock adjustment. Selling price stays last, purely so a count is never
 # refused outright when nothing else exists.
 def _resolve_item_valuation(item_code: str, warehouse: str) -> Optional[float]:
-    sources: Tuple[Tuple[str, Any], ...] = (
-        ("stock ledger, this warehouse", lambda: _sle_valuation(item_code, warehouse)),
-        ("stock ledger, any warehouse", lambda: _sle_valuation(item_code, None)),
-        ("item valuation rate", lambda: _item_field_valuation(item_code, "valuation_rate")),
-        ("item standard rate", lambda: _item_field_valuation(item_code, "standard_rate")),
-        ("last purchase rate", lambda: _item_field_valuation(item_code, "last_purchase_rate")),
-        ("buying item price", lambda: _item_price_valuation(item_code, True)),
-        ("active BOM unit cost", lambda: _bom_unit_cost(item_code)),
-        ("selling item price", lambda: _item_price_valuation(item_code, False)),
-    )
-    for label, source in sources:
-        try:
-            rate = source()
-        except Exception:
-            # One failing source must not forfeit the ones below it, and an
-            # infrastructure failure must not read as "this item has no rate".
-            _log_valuation_source_failure(item_code, label)
-            continue
-        if rate is not None:
-            return rate
-    return None
+	sources: Tuple[Tuple[str, Any], ...] = (
+		("stock ledger, this warehouse", lambda: _sle_valuation(item_code, warehouse)),
+		("stock ledger, any warehouse", lambda: _sle_valuation(item_code, None)),
+		("item valuation rate", lambda: _item_field_valuation(item_code, "valuation_rate")),
+		("item standard rate", lambda: _item_field_valuation(item_code, "standard_rate")),
+		("last purchase rate", lambda: _item_field_valuation(item_code, "last_purchase_rate")),
+		("buying item price", lambda: _item_price_valuation(item_code, True)),
+		("active BOM unit cost", lambda: _bom_unit_cost(item_code)),
+		("selling item price", lambda: _item_price_valuation(item_code, False)),
+	)
+	for label, source in sources:
+		try:
+			rate = source()
+		except Exception:
+			# One failing source must not forfeit the ones below it, and an
+			# infrastructure failure must not read as "this item has no rate".
+			_log_valuation_source_failure(item_code, label)
+			continue
+		if rate is not None:
+			return rate
+	return None
 
 
 @frappe.whitelist()
 def list_items_for_count(
-    warehouse: str,
-    search: Optional[str] = None,
-    item_group: Optional[str] = None,
-    limit: int = 500,
+	warehouse: str,
+	search: Optional[str] = None,
+	item_group: Optional[str] = None,
+	limit: int = 500,
 ) -> List[Dict[str, Any]]:
-    """List items to count in a warehouse with current qty and UOM conversions.
+	"""List items to count in a warehouse with current qty and UOM conversions.
 
-    We include non-variant, enabled items, optionally filtered by group/search.
-    """
-    _ensure_manager_access()
-    if not warehouse:
-        frappe.throw(_("warehouse is required"))
+	We include non-variant, enabled items, optionally filtered by group/search.
+	"""
+	_ensure_manager_access()
+	if not warehouse:
+		frappe.throw(_("warehouse is required"))
 
-    # is_stock_item is the filter that was missing. Without it a warehouse with
-    # no count profile listed every enabled item on the site -- 190 rows, of
-    # which 83 were non-stock (Bundles, Assets, Services, Label Printing). Those
-    # can never hold stock and a Stock Reconciliation rejects them outright, so
-    # they were pure noise on every sheet.
-    filters: Dict[str, Any] = {"disabled": 0, "has_variants": 0, "is_stock_item": 1}
-    allowed_codes = _resolve_count_item_codes(warehouse)
-    if allowed_codes is not None:
-        if not allowed_codes:
-            return []
-        filters["name"] = ["in", allowed_codes]
-    if item_group:
-        # Expanded to descendants, so picking "Materials" counts Raw Material,
-        # Packaging, Labels and Sub Assemblies together instead of matching a
-        # group node that directly holds no items and returning nothing.
-        expanded = _expand_item_groups([item_group], True)
-        if not expanded:
-            return []
-        filters["item_group"] = ["in", expanded]
-    or_filters: List[Any] = []
-    if search:
-        like = f"%{search}%"
-        or_filters = [["Item", "name", "like", like], ["Item", "item_name", "like", like]]
-    fields = [
-        "name as item_code",
-        "item_name",
-        "item_group",
-        "brand",
-        "stock_uom",
-        "has_batch_no",
-        "has_serial_no",
-    ]
-    # Alphabetical, not "modified desc": the limit means the sort decides which
-    # rows survive the cut, and a sheet whose contents shuffle whenever someone
-    # edits an item is not a sheet anyone can walk a shelf with.
-    items = frappe.get_all("Item", filters=filters, or_filters=or_filters, fields=fields, order_by="item_name asc", limit=limit)
-    codes = [it["item_code"] for it in items]
-    qty_map = _get_bin_qty_map(warehouse, codes)
+	# is_stock_item is the filter that was missing. Without it a warehouse with
+	# no count profile listed every enabled item on the site -- 190 rows, of
+	# which 83 were non-stock (Bundles, Assets, Services, Label Printing). Those
+	# can never hold stock and a Stock Reconciliation rejects them outright, so
+	# they were pure noise on every sheet.
+	filters: Dict[str, Any] = {"disabled": 0, "has_variants": 0, "is_stock_item": 1}
+	allowed_codes = _resolve_count_item_codes(warehouse)
+	if allowed_codes is not None:
+		if not allowed_codes:
+			return []
+		filters["name"] = ["in", allowed_codes]
+	if item_group:
+		# Expanded to descendants, so picking "Materials" counts Raw Material,
+		# Packaging, Labels and Sub Assemblies together instead of matching a
+		# group node that directly holds no items and returning nothing.
+		expanded = _expand_item_groups([item_group], True)
+		if not expanded:
+			return []
+		filters["item_group"] = ["in", expanded]
+	or_filters: List[Any] = []
+	if search:
+		like = f"%{search}%"
+		or_filters = [["Item", "name", "like", like], ["Item", "item_name", "like", like]]
+	fields = [
+		"name as item_code",
+		"item_name",
+		"item_group",
+		"brand",
+		"stock_uom",
+		"has_batch_no",
+		"has_serial_no",
+	]
+	# Alphabetical, not "modified desc": the limit means the sort decides which
+	# rows survive the cut, and a sheet whose contents shuffle whenever someone
+	# edits an item is not a sheet anyone can walk a shelf with.
+	items = frappe.get_all(
+		"Item", filters=filters, or_filters=or_filters, fields=fields, order_by="item_name asc", limit=limit
+	)
+	codes = [it["item_code"] for it in items]
+	qty_map = _get_bin_qty_map(warehouse, codes)
 
-    out: List[Dict[str, Any]] = []
-    for it in items:
-        code = it["item_code"]
-        stock_uom = it.get("stock_uom") or DEFAULT_UOM
-        # Attempt to provide valuation info for the UI (optional)
-        val = _resolve_item_valuation(code, warehouse)  # may be None
-        out.append({
-            "item_code": code,
-            "item_name": it.get("item_name") or code,
-            "item_group": it.get("item_group"),
-            "brand": it.get("brand"),
-            "stock_uom": stock_uom,
-            "has_batch_no": bool(it.get("has_batch_no") or 0),
-            "has_serial_no": bool(it.get("has_serial_no") or 0),
-            "current_qty": float(qty_map.get(code, 0)),
-            "uoms": _get_uom_conversions(code),
-            "valuation_rate": val,
-        })
-    _attach_alternative_count_groups(out)
-    return out
+	out: List[Dict[str, Any]] = []
+	for it in items:
+		code = it["item_code"]
+		stock_uom = it.get("stock_uom") or DEFAULT_UOM
+		# Attempt to provide valuation info for the UI (optional)
+		val = _resolve_item_valuation(code, warehouse)  # may be None
+		out.append(
+			{
+				"item_code": code,
+				"item_name": it.get("item_name") or code,
+				"item_group": it.get("item_group"),
+				"brand": it.get("brand"),
+				"stock_uom": stock_uom,
+				"has_batch_no": bool(it.get("has_batch_no") or 0),
+				"has_serial_no": bool(it.get("has_serial_no") or 0),
+				"current_qty": float(qty_map.get(code, 0)),
+				"uoms": _get_uom_conversions(code),
+				"valuation_rate": val,
+			}
+		)
+	_attach_alternative_count_groups(out)
+	return out
 
 
 def _to_stock_qty(item_code: str, qty: Any, uom: Optional[str]) -> float:
-    try:
-        value = float(0 if qty is None or qty == "" else qty)
-    except (TypeError, ValueError):
-        frappe.throw(_("Counted quantity for Item {0} must be a number").format(item_code))
-    if not math.isfinite(value) or value < 0:
-        frappe.throw(
-            _("Counted quantity for Item {0} must be a finite, non-negative number").format(
-                item_code
-            )
-        )
+	try:
+		value = float(0 if qty is None or qty == "" else qty)
+	except (TypeError, ValueError):
+		frappe.throw(_("Counted quantity for Item {0} must be a number").format(item_code))
+	if not math.isfinite(value) or value < 0:
+		frappe.throw(
+			_("Counted quantity for Item {0} must be a finite, non-negative number").format(item_code)
+		)
 
-    stock_uom = frappe.db.get_value("Item", item_code, "stock_uom") or DEFAULT_UOM
-    normalized_uom = str(uom or stock_uom).strip() or stock_uom
-    if normalized_uom == stock_uom:
-        return value
+	stock_uom = frappe.db.get_value("Item", item_code, "stock_uom") or DEFAULT_UOM
+	normalized_uom = str(uom or stock_uom).strip() or stock_uom
+	if normalized_uom == stock_uom:
+		return value
 
-    rows = frappe.get_all(
-        "UOM Conversion Detail",
-        filters={
-            "parenttype": "Item",
-            "parentfield": "uoms",
-            "parent": item_code,
-            "uom": normalized_uom,
-        },
-        fields=["conversion_factor"],
-        limit=1,
-    )
-    if not rows:
-        frappe.throw(
-            _("UOM {0} is not configured for Item {1}").format(normalized_uom, item_code)
-        )
-    try:
-        factor = float(rows[0].get("conversion_factor"))
-    except (TypeError, ValueError):
-        factor = 0.0
-    if not math.isfinite(factor) or factor <= 0:
-        frappe.throw(
-            _("UOM {0} has an invalid conversion factor for Item {1}").format(
-                normalized_uom, item_code
-            )
-        )
+	rows = frappe.get_all(
+		"UOM Conversion Detail",
+		filters={
+			"parenttype": "Item",
+			"parentfield": "uoms",
+			"parent": item_code,
+			"uom": normalized_uom,
+		},
+		fields=["conversion_factor"],
+		limit=1,
+	)
+	if not rows:
+		frappe.throw(_("UOM {0} is not configured for Item {1}").format(normalized_uom, item_code))
+	try:
+		factor = float(rows[0].get("conversion_factor"))
+	except (TypeError, ValueError):
+		factor = 0.0
+	if not math.isfinite(factor) or factor <= 0:
+		frappe.throw(
+			_("UOM {0} has an invalid conversion factor for Item {1}").format(normalized_uom, item_code)
+		)
 
-    stock_qty = value * factor
-    if not math.isfinite(stock_qty):
-        frappe.throw(_("Converted quantity for Item {0} is too large").format(item_code))
-    return stock_qty
+	stock_qty = value * factor
+	if not math.isfinite(stock_qty):
+		frappe.throw(_("Converted quantity for Item {0} is too large").format(item_code))
+	return stock_qty
 
 
 def _normalize_count_lines(
-    lines: List[Dict[str, Any]],
+	lines: List[Dict[str, Any]],
 ) -> Tuple[
-    Dict[str, float],
-    Dict[str, Optional[float]],
-    Dict[str, Optional[str]],
-    Dict[str, Optional[str]],
+	Dict[str, float],
+	Dict[str, Optional[float]],
+	Dict[str, Optional[str]],
+	Dict[str, Optional[str]],
 ]:
-    """Convert count components to one stock-UOM total per item.
+	"""Convert count components to one stock-UOM total per item.
 
-    A physical count may contain the same item more than once in different UOMs,
-    for example ``4 Box`` plus ``1.5 Kg``.  Stock Reconciliation needs one row
-    per item, so every component is converted and summed before the document is
-    built.  Legacy callers that send one row per item keep the same behavior.
-    """
-    counted: Dict[str, float] = {}
-    provided_vr: Dict[str, Optional[float]] = {}
-    provided_batch: Dict[str, Optional[str]] = {}
-    provided_serials: Dict[str, Optional[str]] = {}
+	A physical count may contain the same item more than once in different UOMs,
+	for example ``4 Box`` plus ``1.5 Kg``.  Stock Reconciliation needs one row
+	per item, so every component is converted and summed before the document is
+	built.  Legacy callers that send one row per item keep the same behavior.
+	"""
+	counted: Dict[str, float] = {}
+	provided_vr: Dict[str, Optional[float]] = {}
+	provided_batch: Dict[str, Optional[str]] = {}
+	provided_serials: Dict[str, Optional[str]] = {}
 
-    for line in lines:
-        if not isinstance(line, dict):
-            frappe.throw(_("Each line must be an object"))
-        code = str(line.get("item_code") or line.get("item") or "").strip()
-        if not code:
-            frappe.throw(_("Missing item_code in a line"))
+	for line in lines:
+		if not isinstance(line, dict):
+			frappe.throw(_("Each line must be an object"))
+		code = str(line.get("item_code") or line.get("item") or "").strip()
+		if not code:
+			frappe.throw(_("Missing item_code in a line"))
 
-        raw_qty = line.get("counted_qty")
-        if raw_qty is None:
-            raw_qty = line.get("qty")
-        component_qty = _to_stock_qty(code, raw_qty, line.get("uom"))
-        total = counted.get(code, 0.0) + component_qty
-        if not math.isfinite(total):
-            frappe.throw(_("Converted quantity for Item {0} is too large").format(code))
-        counted[code] = total
+		raw_qty = line.get("counted_qty")
+		if raw_qty is None:
+			raw_qty = line.get("qty")
+		component_qty = _to_stock_qty(code, raw_qty, line.get("uom"))
+		total = counted.get(code, 0.0) + component_qty
+		if not math.isfinite(total):
+			frappe.throw(_("Converted quantity for Item {0} is too large").format(code))
+		counted[code] = total
 
-        if line.get("valuation_rate") is not None:
-            try:
-                valuation_rate = float(line.get("valuation_rate"))
-            except (TypeError, ValueError):
-                valuation_rate = None
-            existing_rate = provided_vr.get(code)
-            if (
-                existing_rate is not None
-                and valuation_rate is not None
-                and existing_rate != valuation_rate
-            ):
-                frappe.throw(
-                    _("Count components for Item {0} have conflicting valuation rates").format(code)
-                )
-            if valuation_rate is not None:
-                provided_vr[code] = valuation_rate
-            else:
-                provided_vr.setdefault(code, None)
-        else:
-            provided_vr.setdefault(code, None)
+		if line.get("valuation_rate") is not None:
+			try:
+				valuation_rate = float(line.get("valuation_rate"))
+			except (TypeError, ValueError):
+				valuation_rate = None
+			existing_rate = provided_vr.get(code)
+			if existing_rate is not None and valuation_rate is not None and existing_rate != valuation_rate:
+				frappe.throw(_("Count components for Item {0} have conflicting valuation rates").format(code))
+			if valuation_rate is not None:
+				provided_vr[code] = valuation_rate
+			else:
+				provided_vr.setdefault(code, None)
+		else:
+			provided_vr.setdefault(code, None)
 
-        batch_no = line.get("batch_no")
-        if batch_no:
-            batch_no = str(batch_no)
-            existing_batch = provided_batch.get(code)
-            if existing_batch and existing_batch != batch_no:
-                frappe.throw(
-                    _("Count components for Item {0} have conflicting batch numbers").format(code)
-                )
-            provided_batch[code] = batch_no
-        else:
-            provided_batch.setdefault(code, None)
+		batch_no = line.get("batch_no")
+		if batch_no:
+			batch_no = str(batch_no)
+			existing_batch = provided_batch.get(code)
+			if existing_batch and existing_batch != batch_no:
+				frappe.throw(_("Count components for Item {0} have conflicting batch numbers").format(code))
+			provided_batch[code] = batch_no
+		else:
+			provided_batch.setdefault(code, None)
 
-        serial_no = line.get("serial_no") or line.get("serial_nos")
-        if serial_no:
-            serial_no = str(serial_no)
-            existing_serials = provided_serials.get(code)
-            if existing_serials and existing_serials != serial_no:
-                frappe.throw(
-                    _("Count components for Item {0} have conflicting serial numbers").format(code)
-                )
-            provided_serials[code] = serial_no
-        else:
-            provided_serials.setdefault(code, None)
+		serial_no = line.get("serial_no") or line.get("serial_nos")
+		if serial_no:
+			serial_no = str(serial_no)
+			existing_serials = provided_serials.get(code)
+			if existing_serials and existing_serials != serial_no:
+				frappe.throw(_("Count components for Item {0} have conflicting serial numbers").format(code))
+			provided_serials[code] = serial_no
+		else:
+			provided_serials.setdefault(code, None)
 
-    return counted, provided_vr, provided_batch, provided_serials
+	return counted, provided_vr, provided_batch, provided_serials
 
 
 def _current_valuation_rate(
-    item_code: str, warehouse: str, posting_date: Any, posting_time: Any
+	item_code: str, warehouse: str, posting_date: Any, posting_time: Any
 ) -> Optional[float]:
-    """The rate ERPNext will copy onto a row that does not state one.
+	"""The rate ERPNext will copy onto a row that does not state one.
 
-    A FIFO consumption can leave a remainder valued below zero (production
-    2026-10-05: 42 of 43 Lotus Large jars took 1,747.62 out of a 1,740.46
-    balance, leaving 1 jar at -7.16), and Stock Reconciliation then refuses
-    the row with "Negative Valuation Rate is not allowed".
-    """
-    try:
-        from erpnext.stock.utils import get_stock_balance
+	A FIFO consumption can leave a remainder valued below zero (production
+	2026-10-05: 42 of 43 Lotus Large jars took 1,747.62 out of a 1,740.46
+	balance, leaving 1 jar at -7.16), and Stock Reconciliation then refuses
+	the row with "Negative Valuation Rate is not allowed".
+	"""
+	try:
+		from erpnext.stock.utils import get_stock_balance
 
-        balance = get_stock_balance(
-            item_code, warehouse, posting_date, posting_time, with_valuation_rate=True
-        )
-        return float(balance[1] or 0)
-    except Exception:
-        _safe_log(f"jarz_pos current valuation probe failed for {item_code}")
-        return None
+		balance = get_stock_balance(
+			item_code, warehouse, posting_date, posting_time, with_valuation_rate=True
+		)
+		return float(balance[1] or 0)
+	except Exception:
+		_safe_log(f"jarz_pos current valuation probe failed for {item_code}")
+		return None
 
 
 def _format_inventory_qty(value: float) -> str:
-    text = f"{float(value):.3f}"
-    return text.rstrip("0").rstrip(".")
+	text = f"{float(value):.3f}"
+	return text.rstrip("0").rstrip(".")
 
 
 def _build_missing_valuation_rate_message(
-    item_code: str,
-    warehouse: str,
-    current_qty: float,
-    counted_qty: float,
+	item_code: str,
+	warehouse: str,
+	current_qty: float,
+	counted_qty: float,
 ) -> str:
-    item_name = frappe.db.get_value("Item", item_code, "item_name")
-    item_label = item_code
-    if item_name and item_name != item_code:
-        item_label = f"{item_code} ({item_name})"
+	item_name = frappe.db.get_value("Item", item_code, "item_name")
+	item_label = item_code
+	if item_name and item_name != item_code:
+		item_label = f"{item_code} ({item_name})"
 
-    return _(
-        "Cannot increase stock for Item {0} in Warehouse {1} from {2} to {3} because no valuation rate could be resolved. Tried: stock ledger entries, the item's valuation and standard rates, its last purchase rate, item prices, and a submitted active BOM. Set the Item's Valuation Rate, add a Buying Item Price, or submit the item's BOM, then count again."
-    ).format(
-        item_label,
-        warehouse,
-        _format_inventory_qty(current_qty),
-        _format_inventory_qty(counted_qty),
-    )
+	return _(
+		"Cannot increase stock for Item {0} in Warehouse {1} from {2} to {3} because no valuation rate could be resolved. Tried: stock ledger entries, the item's valuation and standard rates, its last purchase rate, item prices, and a submitted active BOM. Set the Item's Valuation Rate, add a Buying Item Price, or submit the item's BOM, then count again."
+	).format(
+		item_label,
+		warehouse,
+		_format_inventory_qty(current_qty),
+		_format_inventory_qty(counted_qty),
+	)
 
 
 def _normalize_inventory_error_text(message: Any) -> str:
-    return " ".join(strip_html(str(message or "")).split())
+	return " ".join(strip_html(str(message or "")).split())
 
 
 def _build_negative_stock_submission_message(error: Exception) -> str:
-    return _(
-        "Cannot submit this inventory count because the selected posting date would make a later stock movement go negative. {0} Try a later posting date or increase the counted quantity for the affected item."
-    ).format(_normalize_inventory_error_text(error))
+	return _(
+		"Cannot submit this inventory count because the selected posting date would make a later stock movement go negative. {0} Try a later posting date or increase the counted quantity for the affected item."
+	).format(_normalize_inventory_error_text(error))
 
 
 @frappe.whitelist()
 def submit_reconciliation(
-    warehouse: str,
-    posting_date: Optional[str],
-    lines: Any,
-    enforce_all: int = 1,
-    debug: int = 0,
+	warehouse: str,
+	posting_date: Optional[str],
+	lines: Any,
+	enforce_all: int = 1,
+	debug: int = 0,
 ) -> Dict[str, Any]:
-    """Create a Stock Reconciliation for counted items.
+	"""Create a Stock Reconciliation for counted items.
 
-    lines: list[{item_code, counted_qty, uom?}]
-    The same item_code may appear more than once; its converted quantities are added.
-    If enforce_all=1, require that each item from list_items_for_count(warehouse) is present in lines.
-    Only differences are added to the reconciliation to reduce noise.
-    """
-    # Normalize debug flag early so we can honor it for all failures
-    try:
-        debug_flag = int(debug or 0)
-    except Exception:
-        debug_flag = 0
+	lines: list[{item_code, counted_qty, uom?}]
+	The same item_code may appear more than once; its converted quantities are added.
+	If enforce_all=1, require that each item from list_items_for_count(warehouse) is present in lines.
+	Only differences are added to the reconciliation to reduce noise.
+	"""
+	# Normalize debug flag early so we can honor it for all failures
+	try:
+		debug_flag = int(debug or 0)
+	except Exception:
+		debug_flag = 0
 
-    try:
-        _ensure_manager_access()
+	try:
+		_ensure_manager_access()
 
-        # Parse lines if JSON string
-        import json
-        if isinstance(lines, str):
-            try:
-                lines = json.loads(lines)
-            except Exception:
-                frappe.throw(_("Invalid JSON for lines"))
+		# Parse lines if JSON string
+		import json
 
-        if not isinstance(lines, list) or not lines:
-            frappe.throw(_("lines must be a non-empty list"))
-        if not warehouse:
-            frappe.throw(_("warehouse is required"))
+		if isinstance(lines, str):
+			try:
+				lines = json.loads(lines)
+			except Exception:
+				frappe.throw(_("Invalid JSON for lines"))
 
-        counted, provided_vr, provided_batch, provided_serials = _normalize_count_lines(lines)
+		if not isinstance(lines, list) or not lines:
+			frappe.throw(_("lines must be a non-empty list"))
+		if not warehouse:
+			frappe.throw(_("warehouse is required"))
 
-        # Enforce all items counted (subset: items matching the search criteria we expose)
-        if int(enforce_all or 0):
-            expected = list_items_for_count(warehouse=warehouse)  # type: ignore
-            expected_codes = {e["item_code"] for e in expected}
-            missing = [c for c in expected_codes if c not in counted]
-            if missing:
-                frappe.throw(_("You must count all items in this warehouse. Missing: {0}").format(
-                    ", ".join(sorted(missing)[:10]) + (" ..." if len(missing) > 10 else "")
-                ))
+		counted, provided_vr, provided_batch, provided_serials = _normalize_count_lines(lines)
 
-        # Current quantities
-        cur_qty_map = _get_bin_qty_map(warehouse, list(counted.keys()))
+		# Enforce all items counted (subset: items matching the search criteria we expose)
+		if int(enforce_all or 0):
+			expected = list_items_for_count(warehouse=warehouse)  # type: ignore
+			expected_codes = {e["item_code"] for e in expected}
+			missing = [c for c in expected_codes if c not in counted]
+			if missing:
+				frappe.throw(
+					_("You must count all items in this warehouse. Missing: {0}").format(
+						", ".join(sorted(missing)[:10]) + (" ..." if len(missing) > 10 else "")
+					)
+				)
 
-        # Create Stock Reconciliation only for differences
-        sr = frappe.new_doc("Stock Reconciliation")
-        # Set company from warehouse to align with stock rules across environments
-        wh_company = frappe.db.get_value("Warehouse", warehouse, "company")
-        if wh_company:
-            sr.company = wh_company
-        if posting_date:
-            # ``posting_date`` may carry a time ("YYYY-MM-DD HH:MM:SS"); a
-            # date-only value keeps behaving exactly as it did before.
-            apply_stock_posting_datetime(sr, posting_date)
-        else:
-            from frappe.utils import today
-            sr.posting_date = today()
-        sr.set_posting_time = 1
-        sr.purpose = "Stock Reconciliation"
-        # Ensure accounting defaults to avoid validation failures on some sites
-        if sr.company:
-            comp = frappe.get_all(
-                "Company",
-                filters={"name": sr.company},
-                fields=["stock_adjustment_account", "cost_center"],
-                limit=1,
-            )
-            if comp:
-                diff_acct = comp[0].get("stock_adjustment_account")
-                if diff_acct:
-                    try:
-                        sr.difference_account = diff_acct
-                    except Exception:
-                        pass
-                cc = comp[0].get("cost_center")
-                if cc:
-                    try:
-                        sr.cost_center = cc
-                    except Exception:
-                        pass
+		# Current quantities
+		cur_qty_map = _get_bin_qty_map(warehouse, list(counted.keys()))
 
-        diffs = 0
-        # Allow zero valuation flag: some sites may not have this field; default to False
-        allow_zero_val = False
-        try:
-            _allow_zero_val = frappe.db.get_single_value("Stock Settings", "allow_zero_valuation_rate")
-            allow_zero_val = bool(_allow_zero_val or 0)
-        except Exception:
-            allow_zero_val = False
-        for code, counted_stock_qty in counted.items():
-            current = float(cur_qty_map.get(code, 0))
-            if abs(counted_stock_qty - current) < 1e-9:
-                continue
-            # If we're increasing stock and ERPNext may require valuation_rate, attempt to provide it
-            row: Dict[str, Any] = {
-                "item_code": code,
-                "warehouse": warehouse,
-                "qty": counted_stock_qty,
-            }
+		# Create Stock Reconciliation only for differences
+		sr = frappe.new_doc("Stock Reconciliation")
+		# Set company from warehouse to align with stock rules across environments
+		wh_company = frappe.db.get_value("Warehouse", warehouse, "company")
+		if wh_company:
+			sr.company = wh_company
+		if posting_date:
+			# ``posting_date`` may carry a time ("YYYY-MM-DD HH:MM:SS"); a
+			# date-only value keeps behaving exactly as it did before.
+			apply_stock_posting_datetime(sr, posting_date)
+		else:
+			from frappe.utils import today
 
-            is_increase = counted_stock_qty > current
-            if is_increase:
-                # Prefer client-provided valuation_rate if valid (> 0)
-                vr = provided_vr.get(code)
-                if vr is not None and float(vr) <= 0:
-                    vr = None
-                if vr is None:
-                    vr = _resolve_item_valuation(code, warehouse)
-                # If zero or negative, treat as missing unless zero valuation is allowed
-                if vr is not None and float(vr) <= 0:
-                    vr = None if not allow_zero_val else 0.0
-                if vr is None and allow_zero_val:
-                    vr = 0.0
-                if vr is None:
-                    # Keep the failure user-facing, but explain which item/warehouse increase caused it.
-                    frappe.throw(
-                        _build_missing_valuation_rate_message(
-                            item_code=code,
-                            warehouse=warehouse,
-                            current_qty=current,
-                            counted_qty=counted_stock_qty,
-                        )
-                    )
-                row["valuation_rate"] = float(vr)
-            else:
-                # A decrease states no rate, so ERPNext keeps the current one --
-                # and refuses the whole count if that rate has gone negative.
-                current_rate = _current_valuation_rate(
-                    code,
-                    warehouse,
-                    getattr(sr, "posting_date", None),
-                    getattr(sr, "posting_time", None),
-                )
-                if current_rate is not None and current_rate < 0:
-                    vr = _resolve_item_valuation(code, warehouse)
-                    if vr is None:
-                        frappe.throw(
-                            _(
-                                "Item {0} in Warehouse {1} is valued at a negative rate ({2}) and no positive valuation rate could be resolved. Set the Item's Valuation Rate, then count again."
-                            ).format(code, warehouse, current_rate)
-                        )
-                    row["valuation_rate"] = float(vr)
+			sr.posting_date = today()
+		sr.set_posting_time = 1
+		sr.purpose = "Stock Reconciliation"
+		# Ensure accounting defaults to avoid validation failures on some sites
+		if sr.company:
+			comp = frappe.get_all(
+				"Company",
+				filters={"name": sr.company},
+				fields=["stock_adjustment_account", "cost_center"],
+				limit=1,
+			)
+			if comp:
+				diff_acct = comp[0].get("stock_adjustment_account")
+				if diff_acct:
+					try:
+						sr.difference_account = diff_acct
+					except Exception:
+						pass
+				cc = comp[0].get("cost_center")
+				if cc:
+					try:
+						sr.cost_center = cc
+					except Exception:
+						pass
 
-            # Handle batch/serial requirements
-            has_batch = bool(frappe.db.get_value("Item", code, "has_batch_no") or 0)
-            has_serial = bool(frappe.db.get_value("Item", code, "has_serial_no") or 0)
-            if has_serial and is_increase:
-                # For increases, serial numbers are mandatory and cannot be auto-generated safely here
-                serials = provided_serials.get(code)
-                if not serials:
-                    frappe.throw(_(
-                        "Serial No is required for Item {0}. Please provide serial_no/serial_nos in the submitted lines."
-                    ).format(code))
-                row["serial_no"] = serials
-            if has_batch and is_increase:
-                bno = provided_batch.get(code)
-                if not bno:
-                    # Try reuse any existing batch for this item; else create a simple batch
-                    ex = frappe.get_all("Batch", filters={"item": code}, fields=["name"], limit=1)
-                    if ex:
-                        bno = ex[0]["name"]
-                    else:
-                        from frappe.utils import today
-                        b = frappe.new_doc("Batch")
-                        b.item = code
-                        b.batch_id = f"AUTO-{code}-{today()}"
-                        b.insert(ignore_permissions=True)
-                        bno = b.name
-                row["batch_no"] = bno
+		diffs = 0
+		# Allow zero valuation flag: some sites may not have this field; default to False
+		allow_zero_val = False
+		try:
+			_allow_zero_val = frappe.db.get_single_value("Stock Settings", "allow_zero_valuation_rate")
+			allow_zero_val = bool(_allow_zero_val or 0)
+		except Exception:
+			allow_zero_val = False
+		for code, counted_stock_qty in counted.items():
+			current = float(cur_qty_map.get(code, 0))
+			if abs(counted_stock_qty - current) < 1e-9:
+				continue
+			# If we're increasing stock and ERPNext may require valuation_rate, attempt to provide it
+			row: Dict[str, Any] = {
+				"item_code": code,
+				"warehouse": warehouse,
+				"qty": counted_stock_qty,
+			}
 
-            sr.append("items", row)
-            diffs += 1
+			is_increase = counted_stock_qty > current
+			if is_increase:
+				# Prefer client-provided valuation_rate if valid (> 0)
+				vr = provided_vr.get(code)
+				if vr is not None and float(vr) <= 0:
+					vr = None
+				if vr is None:
+					vr = _resolve_item_valuation(code, warehouse)
+				# If zero or negative, treat as missing unless zero valuation is allowed
+				if vr is not None and float(vr) <= 0:
+					vr = None if not allow_zero_val else 0.0
+				if vr is None and allow_zero_val:
+					vr = 0.0
+				if vr is None:
+					# Keep the failure user-facing, but explain which item/warehouse increase caused it.
+					frappe.throw(
+						_build_missing_valuation_rate_message(
+							item_code=code,
+							warehouse=warehouse,
+							current_qty=current,
+							counted_qty=counted_stock_qty,
+						)
+					)
+				row["valuation_rate"] = float(vr)
+			else:
+				# A decrease states no rate, so ERPNext keeps the current one --
+				# and refuses the whole count if that rate has gone negative.
+				current_rate = _current_valuation_rate(
+					code,
+					warehouse,
+					getattr(sr, "posting_date", None),
+					getattr(sr, "posting_time", None),
+				)
+				if current_rate is not None and current_rate < 0:
+					vr = _resolve_item_valuation(code, warehouse)
+					if vr is None:
+						frappe.throw(
+							_(
+								"Item {0} in Warehouse {1} is valued at a negative rate ({2}) and no positive valuation rate could be resolved. Set the Item's Valuation Rate, then count again."
+							).format(code, warehouse, current_rate)
+						)
+					row["valuation_rate"] = float(vr)
 
-        if diffs == 0:
-            return {"ok": True, "stock_reconciliation": None, "message": "No differences found"}
+			# Handle batch/serial requirements
+			has_batch = bool(frappe.db.get_value("Item", code, "has_batch_no") or 0)
+			has_serial = bool(frappe.db.get_value("Item", code, "has_serial_no") or 0)
+			if has_serial and is_increase:
+				# For increases, serial numbers are mandatory and cannot be auto-generated safely here
+				serials = provided_serials.get(code)
+				if not serials:
+					frappe.throw(
+						_(
+							"Serial No is required for Item {0}. Please provide serial_no/serial_nos in the submitted lines."
+						).format(code)
+					)
+				row["serial_no"] = serials
+			if has_batch and is_increase:
+				bno = provided_batch.get(code)
+				if not bno:
+					# Try reuse any existing batch for this item; else create a simple batch
+					ex = frappe.get_all("Batch", filters={"item": code}, fields=["name"], limit=1)
+					if ex:
+						bno = ex[0]["name"]
+					else:
+						from frappe.utils import today
 
-        # Save & submit
-        try:
-            sr.flags.ignore_permissions = True
-            sr.insert()
-            sr.flags.ignore_permissions = True
-            sr.submit()
-            frappe.db.commit()
-        except Exception as e:
-            tb = _safe_log("jarz_pos.submit_reconciliation")
-            if debug_flag:
-                return {"ok": False, "error": str(e), "traceback": tb}
-            if e.__class__.__name__.endswith("NegativeStockError"):
-                frappe.throw(_build_negative_stock_submission_message(e))
-            frappe.throw(_(f"Submit reconciliation failed: {e}"))
+						b = frappe.new_doc("Batch")
+						b.item = code
+						b.batch_id = f"AUTO-{code}-{today()}"
+						b.insert(ignore_permissions=True)
+						bno = b.name
+				row["batch_no"] = bno
 
-        return {"ok": True, "stock_reconciliation": sr.name, "differences": diffs}
+			sr.append("items", row)
+			diffs += 1
 
-    except Exception as e:
-        tb = _safe_log("jarz_pos.submit_reconciliation")
-        if debug_flag:
-            return {"ok": False, "error": str(e), "traceback": tb}
-        # Re-raise to preserve HTTP error semantics when not debugging
-        raise
+		if diffs == 0:
+			return {"ok": True, "stock_reconciliation": None, "message": "No differences found"}
+
+		# Save & submit
+		try:
+			sr.flags.ignore_permissions = True
+			sr.insert()
+			sr.flags.ignore_permissions = True
+			sr.submit()
+			frappe.db.commit()
+		except Exception as e:
+			tb = _safe_log("jarz_pos.submit_reconciliation")
+			if debug_flag:
+				return {"ok": False, "error": str(e), "traceback": tb}
+			if e.__class__.__name__.endswith("NegativeStockError"):
+				frappe.throw(_build_negative_stock_submission_message(e))
+			frappe.throw(_(f"Submit reconciliation failed: {e}"))
+
+		return {"ok": True, "stock_reconciliation": sr.name, "differences": diffs}
+
+	except Exception as e:
+		tb = _safe_log("jarz_pos.submit_reconciliation")
+		if debug_flag:
+			return {"ok": False, "error": str(e), "traceback": tb}
+		# Re-raise to preserve HTTP error semantics when not debugging
+		raise
 
 
 @frappe.whitelist()
 def list_reconciliations(
-    limit: Any = 30,
-    page: Any = 0,
-    warehouse: Optional[str] = None,
-    from_date: Optional[str] = None,
-    to_date: Optional[str] = None,
-    search: Optional[str] = None,
+	limit: Any = 30,
+	page: Any = 0,
+	warehouse: Optional[str] = None,
+	from_date: Optional[str] = None,
+	to_date: Optional[str] = None,
+	search: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Return submitted Stock Reconciliations — the count history.
+	"""Return submitted Stock Reconciliations — the count history.
 
-    :func:`submit_reconciliation` posts only the *differences*, so the
-    reconciliation is the record of what a count actually changed.  Without
-    this the counter had no way to answer "did last week's count go through,
-    and what did it move?" from inside the app.
+	:func:`submit_reconciliation` posts only the *differences*, so the
+	reconciliation is the record of what a count actually changed.  Without
+	this the counter had no way to answer "did last week's count go through,
+	and what did it move?" from inside the app.
 
-    ``warehouse`` matches the reconciliation's own warehouse when it has one
-    and otherwise the warehouse on its lines; ``search`` matches the document
-    name or any item code / item name counted on it.
-    """
-    _ensure_manager_access()
-    limit = max(1, min(cint(limit) or 30, 200))
-    start = max(0, cint(page)) * limit
+	``warehouse`` matches the reconciliation's own warehouse when it has one
+	and otherwise the warehouse on its lines; ``search`` matches the document
+	name or any item code / item name counted on it.
+	"""
+	_ensure_manager_access()
+	limit = max(1, min(cint(limit) or 30, 200))
+	start = max(0, cint(page)) * limit
 
-    filters: Dict[str, Any] = {"docstatus": 1, "purpose": "Stock Reconciliation"}
-    if from_date and to_date:
-        filters["posting_date"] = ["between", [getdate(from_date), getdate(to_date)]]
-    elif from_date:
-        filters["posting_date"] = [">=", getdate(from_date)]
-    elif to_date:
-        filters["posting_date"] = ["<=", getdate(to_date)]
+	filters: Dict[str, Any] = {"docstatus": 1, "purpose": "Stock Reconciliation"}
+	if from_date and to_date:
+		filters["posting_date"] = ["between", [getdate(from_date), getdate(to_date)]]
+	elif from_date:
+		filters["posting_date"] = [">=", getdate(from_date)]
+	elif to_date:
+		filters["posting_date"] = ["<=", getdate(to_date)]
 
-    allowed_parents: Optional[Set[str]] = None
+	allowed_parents: Optional[Set[str]] = None
 
-    def _restrict(names: Set[str]) -> None:
-        nonlocal allowed_parents
-        allowed_parents = names if allowed_parents is None else (allowed_parents & names)
+	def _restrict(names: Set[str]) -> None:
+		nonlocal allowed_parents
+		allowed_parents = names if allowed_parents is None else (allowed_parents & names)
 
-    if warehouse:
-        # The header's `set_warehouse` is only populated when every line shares
-        # one warehouse, so matching on the child rows is what actually finds a
-        # count. Both are checked because a header-only match is still a match.
-        by_child = {
-            row["parent"]
-            for row in frappe.get_all(
-                "Stock Reconciliation Item",
-                filters={"warehouse": warehouse},
-                fields=["parent"],
-                limit_page_length=0,
-            )
-        }
-        by_header = {
-            row["name"]
-            for row in frappe.get_all(
-                "Stock Reconciliation",
-                filters={"set_warehouse": warehouse},
-                fields=["name"],
-                limit_page_length=0,
-            )
-        }
-        _restrict(by_child | by_header)
+	if warehouse:
+		# The header's `set_warehouse` is only populated when every line shares
+		# one warehouse, so matching on the child rows is what actually finds a
+		# count. Both are checked because a header-only match is still a match.
+		by_child = {
+			row["parent"]
+			for row in frappe.get_all(
+				"Stock Reconciliation Item",
+				filters={"warehouse": warehouse},
+				fields=["parent"],
+				limit_page_length=0,
+			)
+		}
+		by_header = {
+			row["name"]
+			for row in frappe.get_all(
+				"Stock Reconciliation",
+				filters={"set_warehouse": warehouse},
+				fields=["name"],
+				limit_page_length=0,
+			)
+		}
+		_restrict(by_child | by_header)
 
-    search = (search or "").strip()
-    if search:
-        like = f"%{search}%"
-        by_name = {
-            row["name"]
-            for row in frappe.get_all(
-                "Stock Reconciliation",
-                filters={**{k: v for k, v in filters.items() if k != "name"}, "name": ["like", like]},
-                fields=["name"],
-                limit_page_length=0,
-            )
-        }
-        by_item = {
-            row["parent"]
-            for row in frappe.get_all(
-                "Stock Reconciliation Item",
-                or_filters=[["item_code", "like", like], ["item_name", "like", like]],
-                fields=["parent"],
-                limit_page_length=0,
-            )
-        }
-        _restrict(by_name | by_item)
+	search = (search or "").strip()
+	if search:
+		like = f"%{search}%"
+		by_name = {
+			row["name"]
+			for row in frappe.get_all(
+				"Stock Reconciliation",
+				filters={**{k: v for k, v in filters.items() if k != "name"}, "name": ["like", like]},
+				fields=["name"],
+				limit_page_length=0,
+			)
+		}
+		by_item = {
+			row["parent"]
+			for row in frappe.get_all(
+				"Stock Reconciliation Item",
+				or_filters=[["item_code", "like", like], ["item_name", "like", like]],
+				fields=["parent"],
+				limit_page_length=0,
+			)
+		}
+		_restrict(by_name | by_item)
 
-    if allowed_parents is not None:
-        if not allowed_parents:
-            return {"counts": [], "total": 0}
-        filters["name"] = ["in", sorted(allowed_parents)]
+	if allowed_parents is not None:
+		if not allowed_parents:
+			return {"counts": [], "total": 0}
+		filters["name"] = ["in", sorted(allowed_parents)]
 
-    total = frappe.db.count("Stock Reconciliation", filters=filters)
-    entries = frappe.get_all(
-        "Stock Reconciliation",
-        filters=filters,
-        fields=[
-            "name", "posting_date", "posting_time", "set_warehouse",
-            "difference_amount", "company", "owner", "creation",
-        ],
-        order_by="posting_date desc, posting_time desc, creation desc",
-        limit_page_length=limit,
-        limit_start=start,
-    )
+	total = frappe.db.count("Stock Reconciliation", filters=filters)
+	entries = frappe.get_all(
+		"Stock Reconciliation",
+		filters=filters,
+		fields=[
+			"name",
+			"posting_date",
+			"posting_time",
+			"set_warehouse",
+			"difference_amount",
+			"company",
+			"owner",
+			"creation",
+		],
+		order_by="posting_date desc, posting_time desc, creation desc",
+		limit_page_length=limit,
+		limit_start=start,
+	)
 
-    names = [e["name"] for e in entries]
-    lines_by_parent: Dict[str, List[Dict[str, Any]]] = {name: [] for name in names}
-    if names:
-        for row in frappe.get_all(
-            "Stock Reconciliation Item",
-            filters={"parent": ["in", names]},
-            fields=[
-                "parent", "item_code", "item_name", "warehouse", "qty",
-                "current_qty", "valuation_rate", "current_valuation_rate",
-                "amount", "current_amount",
-            ],
-            order_by="parent asc, idx asc",
-            limit_page_length=0,
-        ):
-            current = float(row.get("current_qty") or 0)
-            counted = float(row.get("qty") or 0)
-            # The line stores before and after; the operator wants the delta,
-            # which is the only number that says what the count corrected.
-            row["qty_difference"] = counted - current
-            lines_by_parent.setdefault(row["parent"], []).append(row)
+	names = [e["name"] for e in entries]
+	lines_by_parent: Dict[str, List[Dict[str, Any]]] = {name: [] for name in names}
+	if names:
+		for row in frappe.get_all(
+			"Stock Reconciliation Item",
+			filters={"parent": ["in", names]},
+			fields=[
+				"parent",
+				"item_code",
+				"item_name",
+				"warehouse",
+				"qty",
+				"current_qty",
+				"valuation_rate",
+				"current_valuation_rate",
+				"amount",
+				"current_amount",
+			],
+			order_by="parent asc, idx asc",
+			limit_page_length=0,
+		):
+			current = float(row.get("current_qty") or 0)
+			counted = float(row.get("qty") or 0)
+			# The line stores before and after; the operator wants the delta,
+			# which is the only number that says what the count corrected.
+			row["qty_difference"] = counted - current
+			lines_by_parent.setdefault(row["parent"], []).append(row)
 
-    owners = {e["owner"] for e in entries if e.get("owner")}
-    full_names = {
-        row["name"]: row.get("full_name") or row["name"]
-        for row in frappe.get_all(
-            "User", filters={"name": ["in", list(owners)]}, fields=["name", "full_name"]
-        )
-    } if owners else {}
+	owners = {e["owner"] for e in entries if e.get("owner")}
+	full_names = (
+		{
+			row["name"]: row.get("full_name") or row["name"]
+			for row in frappe.get_all(
+				"User", filters={"name": ["in", list(owners)]}, fields=["name", "full_name"]
+			)
+		}
+		if owners
+		else {}
+	)
 
-    out: List[Dict[str, Any]] = []
-    for entry in entries:
-        lines = lines_by_parent.get(entry["name"], [])
-        warehouses = sorted({(ln.get("warehouse") or "") for ln in lines} - {""})
-        out.append({
-            **entry,
-            "owner_name": full_names.get(entry.get("owner"), entry.get("owner")),
-            "warehouse": entry.get("set_warehouse") or (warehouses[0] if len(warehouses) == 1 else None),
-            "warehouses": warehouses,
-            "item_count": len(lines),
-            "increase_count": sum(1 for ln in lines if ln["qty_difference"] > 0),
-            "decrease_count": sum(1 for ln in lines if ln["qty_difference"] < 0),
-            "items": lines,
-        })
+	out: List[Dict[str, Any]] = []
+	for entry in entries:
+		lines = lines_by_parent.get(entry["name"], [])
+		warehouses = sorted({(ln.get("warehouse") or "") for ln in lines} - {""})
+		out.append(
+			{
+				**entry,
+				"owner_name": full_names.get(entry.get("owner"), entry.get("owner")),
+				"warehouse": entry.get("set_warehouse") or (warehouses[0] if len(warehouses) == 1 else None),
+				"warehouses": warehouses,
+				"item_count": len(lines),
+				"increase_count": sum(1 for ln in lines if ln["qty_difference"] > 0),
+				"decrease_count": sum(1 for ln in lines if ln["qty_difference"] < 0),
+				"items": lines,
+			}
+		)
 
-    return {"counts": out, "total": total}
+	return {"counts": out, "total": total}

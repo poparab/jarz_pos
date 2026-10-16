@@ -118,9 +118,7 @@ def _existing_item_groups(groups):
 			if frappe.db.exists("Item Group", group):
 				present.append(group)
 		except Exception:
-			_logger().error(
-				f"Failed to check Item Group '{group}' existence", exc_info=True
-			)
+			_logger().error(f"Failed to check Item Group '{group}' existence", exc_info=True)
 	return present
 
 
@@ -147,9 +145,7 @@ def _items_for_groups(groups):
 			or []
 		)
 	except Exception:
-		_logger().error(
-			f"Failed to enumerate items for groups {list(groups)}", exc_info=True
-		)
+		_logger().error(f"Failed to enumerate items for groups {list(groups)}", exc_info=True)
 		return []
 
 
@@ -240,9 +236,7 @@ def _ensure_item_price(item_code, rate, currency, log, summary):
 					# bury the created/updated lines that actually need reading.
 					summary["unchanged"] += 1
 					continue
-				frappe.db.set_value(
-					"Item Price", row["name"], "price_list_rate", rate, update_modified=True
-				)
+				frappe.db.set_value("Item Price", row["name"], "price_list_rate", rate, update_modified=True)
 				log["updated"].append(f"{label}: {current} -> {rate}")
 				summary["item_prices_updated"] += 1
 			return
@@ -364,9 +358,7 @@ def ensure_employee_price_list_rates():
 			logger.info("Employee pricing created: " + "; ".join(log["created"]))
 		_report_drift(log)
 		if not log["created"] and not log["updated"]:
-			logger.info(
-				f"Employee pricing already correct: {summary['unchanged']} rate(s) verified"
-			)
+			logger.info(f"Employee pricing already correct: {summary['unchanged']} rate(s) verified")
 		if summary["skipped"]:
 			logger.warning("Employee pricing skipped: " + "; ".join(summary["skipped"]))
 

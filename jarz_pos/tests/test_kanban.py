@@ -78,12 +78,8 @@ class TestKanbanAPI(unittest.TestCase):
 
 	def test_apply_invoice_filters_amount_bounds(self):
 		"""Zero is a real lower bound, and an upper bound alone must still apply."""
-		self.assertEqual(
-			apply_invoice_filters({"amountFrom": 0})["grand_total"], [">=", 0.0]
-		)
-		self.assertEqual(
-			apply_invoice_filters({"amountTo": 500})["grand_total"], ["<=", 500.0]
-		)
+		self.assertEqual(apply_invoice_filters({"amountFrom": 0})["grand_total"], [">=", 0.0])
+		self.assertEqual(apply_invoice_filters({"amountTo": 500})["grand_total"], ["<=", 500.0])
 		self.assertEqual(
 			apply_invoice_filters({"amountFrom": 100, "amountTo": 500})["grand_total"],
 			["between", [100.0, 500.0]],

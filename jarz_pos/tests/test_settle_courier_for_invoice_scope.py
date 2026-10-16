@@ -53,17 +53,11 @@ class TestSettleCourierForInvoiceScope(unittest.TestCase):
 		start("jarz_pos.utils.access_control.ensure_open_shift_for_invoice")
 
 		self.preview = start("jarz_pos.api.invoices.get_invoice_settlement_preview")
-		self.collected = start(
-			"jarz_pos.services.delivery_handling.settle_courier_collected_payment"
-		)
-		self.paid = start(
-			"jarz_pos.services.delivery_handling.settle_single_invoice_paid"
-		)
+		self.collected = start("jarz_pos.services.delivery_handling.settle_courier_collected_payment")
+		self.paid = start("jarz_pos.services.delivery_handling.settle_single_invoice_paid")
 
 		# The two party-wide sweeps. These must never fire.
-		self.sweep_party = start(
-			"jarz_pos.services.delivery_handling.settle_delivery_party"
-		)
+		self.sweep_party = start("jarz_pos.services.delivery_handling.settle_delivery_party")
 		self.sweep_legacy = start("jarz_pos.services.delivery_handling.settle_courier")
 
 		self.get_doc = start("frappe.get_doc")
@@ -95,9 +89,7 @@ class TestSettleCourierForInvoiceScope(unittest.TestCase):
 
 		result = self._call(pos_profile="Main POS")
 
-		self.collected.assert_called_once_with(
-			"ACC-SINV-0001", "Main POS", "Employee", "EMP-001"
-		)
+		self.collected.assert_called_once_with("ACC-SINV-0001", "Main POS", "Employee", "EMP-001")
 		self.paid.assert_not_called()
 		self.assertNoPartyWideSweep()
 		self.assertEqual(result["journal_entry"], "JE-001")
@@ -114,9 +106,7 @@ class TestSettleCourierForInvoiceScope(unittest.TestCase):
 
 		result = self._call(pos_profile="Main POS")
 
-		self.paid.assert_called_once_with(
-			"ACC-SINV-0001", "Main POS", "Employee", "EMP-001"
-		)
+		self.paid.assert_called_once_with("ACC-SINV-0001", "Main POS", "Employee", "EMP-001")
 		self.collected.assert_not_called()
 		self.assertNoPartyWideSweep()
 		self.assertEqual(result["journal_entry"], "JE-002")
@@ -150,16 +140,12 @@ class TestSettleCourierForInvoiceScope(unittest.TestCase):
 
 		self._call(pos_profile=None)
 
-		self.paid.assert_called_once_with(
-			"ACC-SINV-0001", "Main POS", "Employee", "EMP-001"
-		)
+		self.paid.assert_called_once_with("ACC-SINV-0001", "Main POS", "Employee", "EMP-001")
 		self.assertNoPartyWideSweep()
 
 	def test_legacy_label_only_rows_refuse_instead_of_sweeping(self):
 		"""A row with no party can only be settled label-wide — refuse, don't widen."""
-		self.get_all.return_value = [
-			_ct(party_type=None, party=None, courier="Legacy Courier")
-		]
+		self.get_all.return_value = [_ct(party_type=None, party=None, courier="Legacy Courier")]
 
 		with self.assertRaises(frappe.ValidationError):
 			self._call(pos_profile="Main POS")
@@ -218,9 +204,7 @@ class TestSettleCourierForInvoiceScope(unittest.TestCase):
 
 		self._call(pos_profile="Main POS")
 
-		self.preview.assert_called_once_with(
-			"ACC-SINV-0001", party_type="Employee", party="EMP-001"
-		)
+		self.preview.assert_called_once_with("ACC-SINV-0001", party_type="Employee", party="EMP-001")
 
 
 if __name__ == "__main__":

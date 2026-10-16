@@ -35,29 +35,31 @@ class TestExpenseAPI(unittest.TestCase):
 			],
 		]
 
-		with patch("jarz_pos.api.expenses.frappe", mock_frappe), \
-				 patch("jarz_pos.api.expenses._is_manager", return_value=True), \
-				 patch("jarz_pos.api.expenses._default_company", return_value="Jarz"), \
-				 patch("jarz_pos.api.expenses._manager_pos_profiles", return_value=["Nasr city"]), \
-				 patch(
-				 	"jarz_pos.api.expenses._pos_profile_accounts",
-				 	return_value=[
-				 		PaymentSource(
-				 			account="Nasr city - J",
-				 			label="Nasr city",
-				 			category="pos_profile",
-				 			balance=25,
-				 			pos_profile="Nasr city",
-				 		)
-				 	],
-				 ), \
-				 patch("jarz_pos.api.expenses._balance_on", return_value=0), \
-				 patch("jarz_pos.api.expenses._account_label_map", return_value={}), \
-				 patch("jarz_pos.api.expenses._load_months", return_value=["2024-06"]), \
-				 patch("jarz_pos.api.expenses._month_label", side_effect=lambda month: month), \
-				 patch("jarz_pos.api.expenses.getdate", return_value=date(2024, 6, 1)), \
-				 patch("jarz_pos.api.expenses._collect_expenses", return_value=[]), \
-				 patch("jarz_pos.api.expenses._indirect_expense_accounts", return_value=[]):
+		with (
+			patch("jarz_pos.api.expenses.frappe", mock_frappe),
+			patch("jarz_pos.api.expenses._is_manager", return_value=True),
+			patch("jarz_pos.api.expenses._default_company", return_value="Jarz"),
+			patch("jarz_pos.api.expenses._manager_pos_profiles", return_value=["Nasr city"]),
+			patch(
+				"jarz_pos.api.expenses._pos_profile_accounts",
+				return_value=[
+					PaymentSource(
+						account="Nasr city - J",
+						label="Nasr city",
+						category="pos_profile",
+						balance=25,
+						pos_profile="Nasr city",
+					)
+				],
+			),
+			patch("jarz_pos.api.expenses._balance_on", return_value=0),
+			patch("jarz_pos.api.expenses._account_label_map", return_value={}),
+			patch("jarz_pos.api.expenses._load_months", return_value=["2024-06"]),
+			patch("jarz_pos.api.expenses._month_label", side_effect=lambda month: month),
+			patch("jarz_pos.api.expenses.getdate", return_value=date(2024, 6, 1)),
+			patch("jarz_pos.api.expenses._collect_expenses", return_value=[]),
+			patch("jarz_pos.api.expenses._indirect_expense_accounts", return_value=[]),
+		):
 			result = get_expense_bootstrap()
 
 		payment_sources = result["payment_sources"]
@@ -80,12 +82,17 @@ class TestExpenseAPI(unittest.TestCase):
 		mock_frappe.session.user = "staff@example.com"
 		mock_frappe.get_doc.side_effect = _get_doc
 
-		with patch("jarz_pos.api.expenses.frappe", mock_frappe), \
-				 patch("jarz_pos.api.expenses._is_manager", return_value=False), \
-				 patch("jarz_pos.api.expenses._default_company", return_value="Jarz"), \
-				 patch("jarz_pos.api.expenses.get_pos_profiles", return_value=[{"name": "Dokki", "allow_delivery_partner": False}]), \
-				 patch("jarz_pos.api.expenses._resolve_named_account", return_value="Cash - J"), \
-				 patch("jarz_pos.api.expenses._serialize_expense", return_value={"name": "JER-0001"}):
+		with (
+			patch("jarz_pos.api.expenses.frappe", mock_frappe),
+			patch("jarz_pos.api.expenses._is_manager", return_value=False),
+			patch("jarz_pos.api.expenses._default_company", return_value="Jarz"),
+			patch(
+				"jarz_pos.api.expenses.get_pos_profiles",
+				return_value=[{"name": "Dokki", "allow_delivery_partner": False}],
+			),
+			patch("jarz_pos.api.expenses._resolve_named_account", return_value="Cash - J"),
+			patch("jarz_pos.api.expenses._serialize_expense", return_value={"name": "JER-0001"}),
+		):
 			result = create_expense(
 				amount=25,
 				reason_account="Indirect Expenses - J",

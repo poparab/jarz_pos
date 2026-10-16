@@ -173,15 +173,15 @@ STATUS_PROCESSING = "processing"
 #: so a future data migration does not silently drop every order into
 #: ``processing``.
 _STATE_TO_STATUS: Dict[str, str] = {
-    "recieved": STATUS_RECEIVED,
-    "received": STATUS_RECEIVED,
-    "in_progress": STATUS_PREPARING,
-    "ready": STATUS_READY,
-    "out_for_delivery": STATUS_ON_THE_WAY,
-    "delivered": STATUS_DELIVERED,
-    "cancelled": STATUS_CANCELLED,
-    "canceled": STATUS_CANCELLED,
-    "returned": STATUS_RETURNED,
+	"recieved": STATUS_RECEIVED,
+	"received": STATUS_RECEIVED,
+	"in_progress": STATUS_PREPARING,
+	"ready": STATUS_READY,
+	"out_for_delivery": STATUS_ON_THE_WAY,
+	"delivered": STATUS_DELIVERED,
+	"cancelled": STATUS_CANCELLED,
+	"canceled": STATUS_CANCELLED,
+	"returned": STATUS_RETURNED,
 }
 
 #: ``code -> (english, arabic)``.
@@ -193,14 +193,14 @@ _STATE_TO_STATUS: Dict[str, str] = {
 #: the browser is the only version that works for a link forwarded to somebody
 #: whose phone is set to the other language.
 STATUS_LABELS: Dict[str, Tuple[str, str]] = {
-    STATUS_RECEIVED: ("We have your order", "استلمنا طلبك"),
-    STATUS_PREPARING: ("Preparing your order", "جاري تحضير طلبك"),
-    STATUS_READY: ("Ready to leave the branch", "جاهز للخروج من الفرع"),
-    STATUS_ON_THE_WAY: ("On the way to you", "في الطريق إليك"),
-    STATUS_DELIVERED: ("Delivered", "تم التسليم"),
-    STATUS_CANCELLED: ("Cancelled", "تم إلغاء الطلب"),
-    STATUS_RETURNED: ("Returned", "تم إرجاع الطلب"),
-    STATUS_PROCESSING: ("Processing your order", "جاري معالجة طلبك"),
+	STATUS_RECEIVED: ("We have your order", "استلمنا طلبك"),
+	STATUS_PREPARING: ("Preparing your order", "جاري تحضير طلبك"),
+	STATUS_READY: ("Ready to leave the branch", "جاهز للخروج من الفرع"),
+	STATUS_ON_THE_WAY: ("On the way to you", "في الطريق إليك"),
+	STATUS_DELIVERED: ("Delivered", "تم التسليم"),
+	STATUS_CANCELLED: ("Cancelled", "تم إلغاء الطلب"),
+	STATUS_RETURNED: ("Returned", "تم إرجاع الطلب"),
+	STATUS_PROCESSING: ("Processing your order", "جاري معالجة طلبك"),
 }
 
 #: Statuses that start the TTL clock. Cancelled and Returned are included
@@ -211,10 +211,10 @@ TERMINAL_STATUSES = frozenset({STATUS_DELIVERED, STATUS_CANCELLED, STATUS_RETURN
 
 #: Board-state aliases in the order ``api.kanban`` probes them.
 _STATE_FIELD_ALIASES = (
-    "custom_sales_invoice_state",
-    "sales_invoice_state",
-    "custom_state",
-    "state",
+	"custom_sales_invoice_state",
+	"sales_invoice_state",
+	"custom_state",
+	"state",
 )
 
 #: The exact key set of a successful :func:`resolve_public_status` payload.
@@ -224,27 +224,27 @@ _STATE_FIELD_ALIASES = (
 #: the risk on a public endpoint is not a deliberate leak, it is a convenient
 #: ``**invoice_dict`` somebody adds on a Friday.
 PUBLIC_STATUS_KEYS: Tuple[str, ...] = (
-    "success",
-    "status",
-    "status_label_en",
-    "status_label_ar",
-    "courier_first_name",
-    "courier_phone",
-    "courier_latitude",
-    "courier_longitude",
-    "courier_updated_at",
-    "destination_latitude",
-    "destination_longitude",
-    "item_count",
-    "total_qty",
-    "order_total",
-    "currency",
-    "poll_interval_sec",
-    "eta_minutes",
-    "eta_at",
-    "eta_window",
-    "eta_basis",
-    "delivery_code",
+	"success",
+	"status",
+	"status_label_en",
+	"status_label_ar",
+	"courier_first_name",
+	"courier_phone",
+	"courier_latitude",
+	"courier_longitude",
+	"courier_updated_at",
+	"destination_latitude",
+	"destination_longitude",
+	"item_count",
+	"total_qty",
+	"order_total",
+	"currency",
+	"poll_interval_sec",
+	"eta_minutes",
+	"eta_at",
+	"eta_window",
+	"eta_basis",
+	"delivery_code",
 )
 
 #: The single public failure payload. One string for "no such token", "expired",
@@ -254,927 +254,907 @@ RATE_LIMITED_ERROR = "too many requests"
 
 
 def not_found() -> Dict[str, Any]:
-    """The generic public failure. Never says which of the reasons applied."""
-    return {"success": False, "error": NOT_FOUND_ERROR}
+	"""The generic public failure. Never says which of the reasons applied."""
+	return {"success": False, "error": NOT_FOUND_ERROR}
 
 
 def rate_limited() -> Dict[str, Any]:
-    """Public failure for a token being polled too hard.
+	"""Public failure for a token being polled too hard.
 
-    Distinct from :func:`not_found` on purpose and safely so: the limiter runs
-    *before* any lookup, so this answer reveals nothing about whether the token
-    exists.
-    """
-    return {"success": False, "error": RATE_LIMITED_ERROR}
+	Distinct from :func:`not_found` on purpose and safely so: the limiter runs
+	*before* any lookup, so this answer reveals nothing about whether the token
+	exists.
+	"""
+	return {"success": False, "error": RATE_LIMITED_ERROR}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Settings
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def tracking_enabled() -> bool:
-    """Master switch (``Jarz POS Settings.enable_customer_tracking``). Off by default."""
-    try:
-        return bool(int(frappe.db.get_single_value("Jarz POS Settings", "enable_customer_tracking") or 0))
-    except Exception:
-        return False
+	"""Master switch (``Jarz POS Settings.enable_customer_tracking``). Off by default."""
+	try:
+		return bool(int(frappe.db.get_single_value("Jarz POS Settings", "enable_customer_tracking") or 0))
+	except Exception:
+		return False
 
 
 def expose_courier_phone() -> bool:
-    """Whether the courier's number may appear on the customer page. Off by default."""
-    try:
-        return bool(
-            int(
-                frappe.db.get_single_value(
-                    "Jarz POS Settings", "expose_courier_phone_to_customer"
-                )
-                or 0
-            )
-        )
-    except Exception:
-        return False
+	"""Whether the courier's number may appear on the customer page. Off by default."""
+	try:
+		return bool(
+			int(frappe.db.get_single_value("Jarz POS Settings", "expose_courier_phone_to_customer") or 0)
+		)
+	except Exception:
+		return False
 
 
 def tracking_link_ttl_hours() -> int:
-    """Hours a link keeps working past a terminal state. ``0`` means never expire.
+	"""Hours a link keeps working past a terminal state. ``0`` means never expire.
 
-    Read through ``single_int`` rather than ``frappe.db.get_single_value``. The
-    latter casts an ``Int`` through ``cint()``, so a field nobody has ever set
-    comes back as ``0`` — and the ``raw in (None, "")`` guard that used to sit
-    here could therefore never fire. The effective TTL was 0 on every site,
-    ``_is_expired`` returned ``False`` for every link, and customer tracking
-    links never expired at all despite the declared 24-hour default. With
-    ``expose_courier_phone_to_customer`` on, that left a courier's mobile number
-    on a permanently live public URL.
+	Read through ``single_int`` rather than ``frappe.db.get_single_value``. The
+	latter casts an ``Int`` through ``cint()``, so a field nobody has ever set
+	comes back as ``0`` — and the ``raw in (None, "")`` guard that used to sit
+	here could therefore never fire. The effective TTL was 0 on every site,
+	``_is_expired`` returned ``False`` for every link, and customer tracking
+	links never expired at all despite the declared 24-hour default. With
+	``expose_courier_phone_to_customer`` on, that left a courier's mobile number
+	on a permanently live public URL.
 
-    An explicit 0 still means "never expire" — that is a real choice an operator
-    can make, and it is why the default cannot simply be applied to any zero.
-    """
-    return max(0, single_int("Jarz POS Settings", "tracking_link_ttl_hours", DEFAULT_TTL_HOURS))
+	An explicit 0 still means "never expire" — that is a real choice an operator
+	can make, and it is why the default cannot simply be applied to any zero.
+	"""
+	return max(0, single_int("Jarz POS Settings", "tracking_link_ttl_hours", DEFAULT_TTL_HOURS))
 
 
 def delivery_code_required() -> bool:
-    """Whether the courier must type the customer's code (``require_delivery_code``).
+	"""Whether the courier must type the customer's code (``require_delivery_code``).
 
-    ``single_flag`` with an explicit default: Singles ignore JSON defaults, and a
-    guest-facing page must read "off" for a field nobody has ever saved.
-    """
-    return single_flag("Jarz POS Settings", "require_delivery_code", False)
+	``single_flag`` with an explicit default: Singles ignore JSON defaults, and a
+	guest-facing page must read "off" for a field nobody has ever saved.
+	"""
+	return single_flag("Jarz POS Settings", "require_delivery_code", False)
 
 
 def eta_dwell_minutes() -> int:
-    """Minutes added per intermediate stop (``courier_eta_dwell_minutes``)."""
-    return max(
-        0,
-        single_int("Jarz POS Settings", "courier_eta_dwell_minutes", DEFAULT_ETA_DWELL_MINUTES),
-    )
+	"""Minutes added per intermediate stop (``courier_eta_dwell_minutes``)."""
+	return max(
+		0,
+		single_int("Jarz POS Settings", "courier_eta_dwell_minutes", DEFAULT_ETA_DWELL_MINUTES),
+	)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Schema helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def token_field_present() -> bool:
-    """True when this site has migrated :data:`TOKEN_FIELD`.
 
-    Checked before every write so a deployment that lands ahead of ``bench
-    migrate`` mints nothing rather than raising inside an OFD transition — a
-    tracking link is a nice-to-have and must never be able to fail a dispatch.
-    """
-    try:
-        return bool(frappe.get_meta("Sales Invoice").get_field(TOKEN_FIELD))
-    except Exception:
-        return False
+def token_field_present() -> bool:
+	"""True when this site has migrated :data:`TOKEN_FIELD`.
+
+	Checked before every write so a deployment that lands ahead of ``bench
+	migrate`` mints nothing rather than raising inside an OFD transition — a
+	tracking link is a nice-to-have and must never be able to fail a dispatch.
+	"""
+	try:
+		return bool(frappe.get_meta("Sales Invoice").get_field(TOKEN_FIELD))
+	except Exception:
+		return False
 
 
 def _state_fields_present() -> List[str]:
-    """Whichever board-state aliases this site carries, in probe order."""
-    try:
-        meta = frappe.get_meta("Sales Invoice")
-    except Exception:
-        return [_STATE_FIELD_ALIASES[0]]
-    present = [name for name in _STATE_FIELD_ALIASES if meta.get_field(name)]
-    return present or [_STATE_FIELD_ALIASES[0]]
+	"""Whichever board-state aliases this site carries, in probe order."""
+	try:
+		meta = frappe.get_meta("Sales Invoice")
+	except Exception:
+		return [_STATE_FIELD_ALIASES[0]]
+	present = [name for name in _STATE_FIELD_ALIASES if meta.get_field(name)]
+	return present or [_STATE_FIELD_ALIASES[0]]
 
 
 SLOT_FIELDS = (
-    "custom_delivery_date",
-    "custom_delivery_time_from",
-    "custom_delivery_duration",
+	"custom_delivery_date",
+	"custom_delivery_time_from",
+	"custom_delivery_duration",
 )
 
 
 def _slot_fields_present() -> List[str]:
-    """The delivery-slot columns this site carries. ``get_all`` throws on a missing one."""
-    try:
-        meta = frappe.get_meta("Sales Invoice")
-        return [name for name in SLOT_FIELDS if meta.get_field(name)]
-    except Exception:
-        return []
+	"""The delivery-slot columns this site carries. ``get_all`` throws on a missing one."""
+	try:
+		meta = frappe.get_meta("Sales Invoice")
+		return [name for name in SLOT_FIELDS if meta.get_field(name)]
+	except Exception:
+		return []
 
 
 def _state_key(value: Any) -> str:
-    return str(value or "").strip().lower().replace(" ", "_").replace("-", "_")
+	return str(value or "").strip().lower().replace(" ", "_").replace("-", "_")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Minting
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def new_token() -> str:
-    """A fresh opaque token. ``secrets``, never ``random``."""
-    return secrets.token_urlsafe(TOKEN_BYTES)
+	"""A fresh opaque token. ``secrets``, never ``random``."""
+	return secrets.token_urlsafe(TOKEN_BYTES)
 
 
 def ensure_tracking_token(invoice: Any) -> Optional[str]:
-    """Mint the token for *invoice* if it has none. Idempotent.
+	"""Mint the token for *invoice* if it has none. Idempotent.
 
-    Called from ``events.sales_invoice.mint_tracking_token_on_ofd`` on
-    ``on_update_after_submit``, which is the one place every dispatch path
-    converges: the Kanban drag, the Delivery Trip bulk send and
-    ``delivery_handling.mark_courier_outstanding`` all persist the state through
-    a ``save()`` on the submitted invoice.
+	Called from ``events.sales_invoice.mint_tracking_token_on_ofd`` on
+	``on_update_after_submit``, which is the one place every dispatch path
+	converges: the Kanban drag, the Delivery Trip bulk send and
+	``delivery_handling.mark_courier_outstanding`` all persist the state through
+	a ``save()`` on the submitted invoice.
 
-    **Regenerating is the bug to avoid, not failing to generate.** A customer who
-    already has the link keeps it for the life of the order, so an existing token
-    is returned untouched — including when it was written by an earlier release.
+	**Regenerating is the bug to avoid, not failing to generate.** A customer who
+	already has the link keeps it for the life of the order, so an existing token
+	is returned untouched — including when it was written by an earlier release.
 
-    Writes with ``frappe.db.set_value(..., update_modified=False)`` rather than
-    ``update_submitted_sales_invoice_fields``, deliberately and for two reasons.
-    First, this runs *inside* ``on_update_after_submit``; a nested ``doc.save()``
-    would re-enter the whole hook chain (realtime publish, consumable deduction,
-    CRM follow-up). Second, leaving ``modified`` alone means the copy of the
-    invoice the caller is still holding stays saveable instead of being handed a
-    ``TimestampMismatchError`` — the same reasoning as
-    ``geo_resolution.set_address_pin`` and
-    ``invoice_return._park_return_in_returned_column``.
+	Writes with ``frappe.db.set_value(..., update_modified=False)`` rather than
+	``update_submitted_sales_invoice_fields``, deliberately and for two reasons.
+	First, this runs *inside* ``on_update_after_submit``; a nested ``doc.save()``
+	would re-enter the whole hook chain (realtime publish, consumable deduction,
+	CRM follow-up). Second, leaving ``modified`` alone means the copy of the
+	invoice the caller is still holding stays saveable instead of being handed a
+	``TimestampMismatchError`` — the same reasoning as
+	``geo_resolution.set_address_pin`` and
+	``invoice_return._park_return_in_returned_column``.
 
-    Never raises: it is called from a document event, and a tracking link must
-    not be able to break a dispatch.
-    """
-    try:
-        name = str(getattr(invoice, "name", "") or "").strip()
-        if not name:
-            return None
-        if not token_field_present():
-            return None
+	Never raises: it is called from a document event, and a tracking link must
+	not be able to break a dispatch.
+	"""
+	try:
+		name = str(getattr(invoice, "name", "") or "").strip()
+		if not name:
+			return None
+		if not token_field_present():
+			return None
 
-        existing = str(invoice.get(TOKEN_FIELD) or "").strip()
-        if existing:
-            _index_token(existing, name)
-            return existing
+		existing = str(invoice.get(TOKEN_FIELD) or "").strip()
+		if existing:
+			_index_token(existing, name)
+			return existing
 
-        # Re-read rather than trusting the in-memory doc: this hook can run on a
-        # document loaded before another worker minted the token.
-        stored = str(frappe.db.get_value("Sales Invoice", name, TOKEN_FIELD) or "").strip()
-        if stored:
-            _index_token(stored, name)
-            return stored
+		# Re-read rather than trusting the in-memory doc: this hook can run on a
+		# document loaded before another worker minted the token.
+		stored = str(frappe.db.get_value("Sales Invoice", name, TOKEN_FIELD) or "").strip()
+		if stored:
+			_index_token(stored, name)
+			return stored
 
-        token = new_token()
-        frappe.db.set_value("Sales Invoice", name, TOKEN_FIELD, token, update_modified=False)
-        try:
-            invoice.set(TOKEN_FIELD, token)
-        except Exception:
-            setattr(invoice, TOKEN_FIELD, token)
-        _index_token(token, name)
-        return token
-    except Exception:
-        frappe.log_error(frappe.get_traceback(), "tracking: ensure_tracking_token failed")
-        return None
+		token = new_token()
+		frappe.db.set_value("Sales Invoice", name, TOKEN_FIELD, token, update_modified=False)
+		try:
+			invoice.set(TOKEN_FIELD, token)
+		except Exception:
+			setattr(invoice, TOKEN_FIELD, token)
+		_index_token(token, name)
+		return token
+	except Exception:
+		frappe.log_error(frappe.get_traceback(), "tracking: ensure_tracking_token failed")
+		return None
 
 
 def get_tracking_token(invoice_name: str, *, ensure: bool = False) -> Optional[str]:
-    """The token for *invoice_name*, or ``None``.
+	"""The token for *invoice_name*, or ``None``.
 
-    ``ensure=True`` mints one if the invoice has none. Off by default so a read
-    stays a read: the mint point is the OFD transition, and a caller quietly
-    creating tokens for orders that were never dispatched would hand out links to
-    pages that show nothing.
-    """
-    name = str(invoice_name or "").strip()
-    if not name or not token_field_present():
-        return None
-    try:
-        token = str(frappe.db.get_value("Sales Invoice", name, TOKEN_FIELD) or "").strip()
-    except Exception:
-        frappe.log_error(frappe.get_traceback(), f"tracking: token read failed for {name}")
-        return None
-    if token:
-        return token
-    if not ensure:
-        return None
-    try:
-        return ensure_tracking_token(frappe.get_doc("Sales Invoice", name))
-    except Exception:
-        frappe.log_error(frappe.get_traceback(), f"tracking: token mint failed for {name}")
-        return None
+	``ensure=True`` mints one if the invoice has none. Off by default so a read
+	stays a read: the mint point is the OFD transition, and a caller quietly
+	creating tokens for orders that were never dispatched would hand out links to
+	pages that show nothing.
+	"""
+	name = str(invoice_name or "").strip()
+	if not name or not token_field_present():
+		return None
+	try:
+		token = str(frappe.db.get_value("Sales Invoice", name, TOKEN_FIELD) or "").strip()
+	except Exception:
+		frappe.log_error(frappe.get_traceback(), f"tracking: token read failed for {name}")
+		return None
+	if token:
+		return token
+	if not ensure:
+		return None
+	try:
+		return ensure_tracking_token(frappe.get_doc("Sales Invoice", name))
+	except Exception:
+		frappe.log_error(frappe.get_traceback(), f"tracking: token mint failed for {name}")
+		return None
 
 
 def get_tracking_url(invoice_name: str, *, ensure: bool = False) -> Optional[str]:
-    """Absolute customer tracking URL for *invoice_name*, or ``None``.
+	"""Absolute customer tracking URL for *invoice_name*, or ``None``.
 
-    **This is the seam the WooCommerce app consumes.** Woo needs to put a "track
-    your order" link in a customer email or order note, and it must not have to
-    know the route, the token field or the site URL — all three are jarz_pos
-    implementation detail and all three can change. It calls this and gets a
-    string. Nothing Woo-side is imported here, and nothing here reaches into
-    Woo: the two apps are independent (CLAUDE.md domain isolation) and this
-    function is deliberately usable by anything that can import ``jarz_pos``.
+	**This is the seam the WooCommerce app consumes.** Woo needs to put a "track
+	your order" link in a customer email or order note, and it must not have to
+	know the route, the token field or the site URL — all three are jarz_pos
+	implementation detail and all three can change. It calls this and gets a
+	string. Nothing Woo-side is imported here, and nothing here reaches into
+	Woo: the two apps are independent (CLAUDE.md domain isolation) and this
+	function is deliberately usable by anything that can import ``jarz_pos``.
 
-    Returns ``None`` — not a broken URL — when the order has no token yet, so a
-    caller can tell "not dispatched" from "here is the link".
-    """
-    token = get_tracking_token(invoice_name, ensure=ensure)
-    if not token:
-        return None
-    base = str(get_url() or "").rstrip("/")
-    return f"{base}{TRACKING_ROUTE_PREFIX}/{token}"
+	Returns ``None`` — not a broken URL — when the order has no token yet, so a
+	caller can tell "not dispatched" from "here is the link".
+	"""
+	token = get_tracking_token(invoice_name, ensure=ensure)
+	if not token:
+		return None
+	base = str(get_url() or "").rstrip("/")
+	return f"{base}{TRACKING_ROUTE_PREFIX}/{token}"
 
 
 def delivery_code_for_token(token: Any) -> Optional[str]:
-    """The 4-digit delivery code for *token*, or ``None`` for a blank token.
+	"""The 4-digit delivery code for *token*, or ``None`` for a blank token.
 
-    ``sha256(token + ":delivery-code") mod 10000``, zero-padded. The token is a
-    128-bit secret, so the code cannot be worked out from an invoice number; it
-    can only be read off the customer's own link, which is the point.
-    """
-    text = str(token or "").strip()
-    if not text:
-        return None
-    digest = hashlib.sha256((text + DELIVERY_CODE_SALT).encode()).hexdigest()
-    return "%04d" % (int(digest, 16) % 10000)
+	``sha256(token + ":delivery-code") mod 10000``, zero-padded. The token is a
+	128-bit secret, so the code cannot be worked out from an invoice number; it
+	can only be read off the customer's own link, which is the point.
+	"""
+	text = str(token or "").strip()
+	if not text:
+		return None
+	digest = hashlib.sha256((text + DELIVERY_CODE_SALT).encode()).hexdigest()
+	return "%04d" % (int(digest, 16) % 10000)
 
 
 def delivery_code_for_invoice(invoice_name: str, ensure: bool = True) -> Optional[str]:
-    """The delivery code for *invoice_name*; mints the token when ``ensure``.
+	"""The delivery code for *invoice_name*; mints the token when ``ensure``.
 
-    ``None`` when the invoice has no token and ``ensure`` is false, or on a site
-    that has not migrated the token field. Never raises (see
-    :func:`get_tracking_token`).
-    """
-    return delivery_code_for_token(get_tracking_token(invoice_name, ensure=ensure))
+	``None`` when the invoice has no token and ``ensure`` is false, or on a site
+	that has not migrated the token field. Never raises (see
+	:func:`get_tracking_token`).
+	"""
+	return delivery_code_for_token(get_tracking_token(invoice_name, ensure=ensure))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Token index + rate limit (both cache-backed, both best-effort)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _index_token(token: str, invoice_name: str) -> None:
-    """Remember ``token -> invoice`` so the public read is an O(1) cache hit.
 
-    Best-effort. Losing the index costs one table scan per token (see
-    :func:`_resolve_token_to_invoice`), never correctness — the DB remains the
-    source of truth and every cache hit is re-validated against it.
-    """
-    try:
-        frappe.cache().set_value(
-            f"{_TOKEN_INDEX_PREFIX}{token}",
-            invoice_name,
-            expires_in_sec=_TOKEN_INDEX_TTL_SEC,
-        )
-    except Exception:
-        pass
+def _index_token(token: str, invoice_name: str) -> None:
+	"""Remember ``token -> invoice`` so the public read is an O(1) cache hit.
+
+	Best-effort. Losing the index costs one table scan per token (see
+	:func:`_resolve_token_to_invoice`), never correctness — the DB remains the
+	source of truth and every cache hit is re-validated against it.
+	"""
+	try:
+		frappe.cache().set_value(
+			f"{_TOKEN_INDEX_PREFIX}{token}",
+			invoice_name,
+			expires_in_sec=_TOKEN_INDEX_TTL_SEC,
+		)
+	except Exception:
+		pass
 
 
 def _forget_token(token: str) -> None:
-    try:
-        frappe.cache().delete_value(f"{_TOKEN_INDEX_PREFIX}{token}")
-    except Exception:
-        pass
+	try:
+		frappe.cache().delete_value(f"{_TOKEN_INDEX_PREFIX}{token}")
+	except Exception:
+		pass
 
 
 def consume_rate_budget(token: str) -> bool:
-    """Per-token request budget. ``False`` means "refuse this call".
+	"""Per-token request budget. ``False`` means "refuse this call".
 
-    A Redis counter with a fixed window: ``incrby`` then ``expire`` on first
-    write. The endpoint additionally carries ``frappe.rate_limiter.rate_limit``
-    keyed on (IP, token); this one exists because that decorator only engages
-    for an HTTP request and only bounds a single IP, while a scrape of a leaked
-    link is distributed by nature.
+	A Redis counter with a fixed window: ``incrby`` then ``expire`` on first
+	write. The endpoint additionally carries ``frappe.rate_limiter.rate_limit``
+	keyed on (IP, token); this one exists because that decorator only engages
+	for an HTTP request and only bounds a single IP, while a scrape of a leaked
+	link is distributed by nature.
 
-    **Fails open on a cache error.** Redis being down is an outage, and turning
-    an outage into "nobody can see where their order is" adds a second one.
-    """
-    try:
-        cache = frappe.cache()
-        # ``incrby``/``expire`` come from the raw redis client and do NOT
-        # site-namespace the key, unlike get_value/set_value. ``make_key`` is
-        # what frappe.rate_limiter does for exactly this reason: without it two
-        # sites on one Redis would share one counter.
-        key = cache.make_key(f"{_RATE_KEY_PREFIX}{token}")
-        count = cache.incrby(key, 1)
-        if count is None:
-            return True
-        count = int(count)
-        if count == 1:
-            try:
-                cache.expire(key, RATE_LIMIT_WINDOW_SEC)
-            except Exception:
-                pass
-        return count <= RATE_LIMIT_MAX_REQUESTS
-    except Exception:
-        return True
+	**Fails open on a cache error.** Redis being down is an outage, and turning
+	an outage into "nobody can see where their order is" adds a second one.
+	"""
+	try:
+		cache = frappe.cache()
+		# ``incrby``/``expire`` come from the raw redis client and do NOT
+		# site-namespace the key, unlike get_value/set_value. ``make_key`` is
+		# what frappe.rate_limiter does for exactly this reason: without it two
+		# sites on one Redis would share one counter.
+		key = cache.make_key(f"{_RATE_KEY_PREFIX}{token}")
+		count = cache.incrby(key, 1)
+		if count is None:
+			return True
+		count = int(count)
+		if count == 1:
+			try:
+				cache.expire(key, RATE_LIMIT_WINDOW_SEC)
+			except Exception:
+				pass
+		return count <= RATE_LIMIT_MAX_REQUESTS
+	except Exception:
+		return True
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # The public read
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def _invoice_fields() -> List[str]:
-    """Columns the public read needs. Everything else stays unread on purpose."""
-    fields = [
-        "name",
-        "docstatus",
-        "grand_total",
-        "currency",
-        "shipping_address_name",
-        "customer_address",
-        "custom_courier_party_type",
-        "custom_courier_party",
-        "custom_kanban_profile",
-        "pos_profile",
-        "custom_delivered_at",
-        "modified",
-        TOKEN_FIELD,
-    ]
-    # The leg gate below reads these off the row we already have, so the
-    # privacy check costs no extra query. Appended only when the site has them:
-    # get_all would throw on an unmigrated column and take the page down.
-    if delivery_leg.leg_fields_present():
-        fields.extend(delivery_leg.LEG_FIELDS)
-    fields.extend(_slot_fields_present())
-    fields.extend(_state_fields_present())
-    # De-duplicate while keeping order; a site carrying only the custom alias
-    # would otherwise ask for the same column twice.
-    seen: List[str] = []
-    for field in fields:
-        if field not in seen:
-            seen.append(field)
-    return seen
+	"""Columns the public read needs. Everything else stays unread on purpose."""
+	fields = [
+		"name",
+		"docstatus",
+		"grand_total",
+		"currency",
+		"shipping_address_name",
+		"customer_address",
+		"custom_courier_party_type",
+		"custom_courier_party",
+		"custom_kanban_profile",
+		"pos_profile",
+		"custom_delivered_at",
+		"modified",
+		TOKEN_FIELD,
+	]
+	# The leg gate below reads these off the row we already have, so the
+	# privacy check costs no extra query. Appended only when the site has them:
+	# get_all would throw on an unmigrated column and take the page down.
+	if delivery_leg.leg_fields_present():
+		fields.extend(delivery_leg.LEG_FIELDS)
+	fields.extend(_slot_fields_present())
+	fields.extend(_state_fields_present())
+	# De-duplicate while keeping order; a site carrying only the custom alias
+	# would otherwise ask for the same column twice.
+	seen: List[str] = []
+	for field in fields:
+		if field not in seen:
+			seen.append(field)
+	return seen
 
 
 def _resolve_token_to_invoice(token: str) -> Optional[Dict[str, Any]]:
-    """Load the invoice row a token points at, or ``None``.
+	"""Load the invoice row a token points at, or ``None``.
 
-    Two-step by necessity. :data:`TOKEN_FIELD` is a TEXT column (see its
-    docstring) so it cannot carry a plain B-tree index, which makes the
-    ``WHERE custom_tracking_token = %s`` form a table scan on a table with
-    hundreds of thousands of rows. On a *public, polled* endpoint that is a
-    denial-of-service primitive, not a slow query. So:
+	Two-step by necessity. :data:`TOKEN_FIELD` is a TEXT column (see its
+	docstring) so it cannot carry a plain B-tree index, which makes the
+	``WHERE custom_tracking_token = %s`` form a table scan on a table with
+	hundreds of thousands of rows. On a *public, polled* endpoint that is a
+	denial-of-service primitive, not a slow query. So:
 
-    1. the Redis index gives the invoice name directly, and
-    2. the row is then loaded by primary key and its token compared to the
-       presented one.
+	1. the Redis index gives the invoice name directly, and
+	2. the row is then loaded by primary key and its token compared to the
+	   presented one.
 
-    Step 2 is not redundant. A stale index entry — an amended invoice, a
-    hand-edited field, a token that has since changed — would otherwise let one
-    order's link render another order's data, which is precisely the cross-
-    customer leak this whole module exists to prevent. A mismatch drops the index
-    entry and falls through to the authoritative scan.
-    """
-    fields = _invoice_fields()
+	Step 2 is not redundant. A stale index entry — an amended invoice, a
+	hand-edited field, a token that has since changed — would otherwise let one
+	order's link render another order's data, which is precisely the cross-
+	customer leak this whole module exists to prevent. A mismatch drops the index
+	entry and falls through to the authoritative scan.
+	"""
+	fields = _invoice_fields()
 
-    cached_name = None
-    try:
-        cached_name = frappe.cache().get_value(f"{_TOKEN_INDEX_PREFIX}{token}")
-    except Exception:
-        cached_name = None
-    if isinstance(cached_name, bytes):
-        try:
-            cached_name = cached_name.decode("utf-8")
-        except Exception:
-            cached_name = None
+	cached_name = None
+	try:
+		cached_name = frappe.cache().get_value(f"{_TOKEN_INDEX_PREFIX}{token}")
+	except Exception:
+		cached_name = None
+	if isinstance(cached_name, bytes):
+		try:
+			cached_name = cached_name.decode("utf-8")
+		except Exception:
+			cached_name = None
 
-    if cached_name:
-        row = frappe.db.get_value("Sales Invoice", str(cached_name), fields, as_dict=True)
-        if row and str(row.get(TOKEN_FIELD) or "").strip() == token:
-            return dict(row)
-        _forget_token(token)
+	if cached_name:
+		row = frappe.db.get_value("Sales Invoice", str(cached_name), fields, as_dict=True)
+		if row and str(row.get(TOKEN_FIELD) or "").strip() == token:
+			return dict(row)
+		_forget_token(token)
 
-    row = frappe.db.get_value(
-        "Sales Invoice", {TOKEN_FIELD: token}, fields, as_dict=True
-    )
-    if not row:
-        return None
-    _index_token(token, str(row.get("name") or ""))
-    return dict(row)
+	row = frappe.db.get_value("Sales Invoice", {TOKEN_FIELD: token}, fields, as_dict=True)
+	if not row:
+		return None
+	_index_token(token, str(row.get("name") or ""))
+	return dict(row)
 
 
 def _status_for(row: Dict[str, Any]) -> str:
-    for field in _STATE_FIELD_ALIASES:
-        if field in row and row.get(field):
-            mapped = _STATE_TO_STATUS.get(_state_key(row.get(field)))
-            if mapped:
-                return mapped
-    # A cancelled invoice may carry a stale board state, so docstatus wins over
-    # an unmapped state string.
-    if int(flt(row.get("docstatus"))) == 2:
-        return STATUS_CANCELLED
-    return STATUS_PROCESSING
+	for field in _STATE_FIELD_ALIASES:
+		if field in row and row.get(field):
+			mapped = _STATE_TO_STATUS.get(_state_key(row.get(field)))
+			if mapped:
+				return mapped
+	# A cancelled invoice may carry a stale board state, so docstatus wins over
+	# an unmapped state string.
+	if int(flt(row.get("docstatus"))) == 2:
+		return STATUS_CANCELLED
+	return STATUS_PROCESSING
 
 
 def _terminal_reference_time(row: Dict[str, Any], status: str) -> Any:
-    """When the TTL clock started for a terminal order.
+	"""When the TTL clock started for a terminal order.
 
-    ``custom_delivered_at`` when the courier stamped one, otherwise ``modified``
-    — which is the last time anything touched the order and therefore the best
-    available proxy. ``modified`` can be bumped by an unrelated edit, which only
-    ever *extends* a link's life; erring towards a link that works slightly too
-    long beats one that dies while the customer is still looking at it.
-    """
-    if status == STATUS_DELIVERED and row.get("custom_delivered_at"):
-        return row.get("custom_delivered_at")
-    return row.get("modified")
+	``custom_delivered_at`` when the courier stamped one, otherwise ``modified``
+	— which is the last time anything touched the order and therefore the best
+	available proxy. ``modified`` can be bumped by an unrelated edit, which only
+	ever *extends* a link's life; erring towards a link that works slightly too
+	long beats one that dies while the customer is still looking at it.
+	"""
+	if status == STATUS_DELIVERED and row.get("custom_delivered_at"):
+		return row.get("custom_delivered_at")
+	return row.get("modified")
 
 
 def _is_expired(row: Dict[str, Any], status: str) -> bool:
-    if status not in TERMINAL_STATUSES:
-        return False
-    ttl_hours = tracking_link_ttl_hours()
-    if ttl_hours <= 0:
-        return False
-    reference = _terminal_reference_time(row, status)
-    if not reference:
-        return False
-    try:
-        age_hours = (
-            now_datetime() - get_datetime(reference)
-        ).total_seconds() / 3600.0
-    except Exception:
-        # An unparseable timestamp must not silently make links immortal.
-        frappe.log_error(
-            frappe.get_traceback(), "tracking: could not evaluate link expiry"
-        )
-        return False
-    return age_hours > ttl_hours
+	if status not in TERMINAL_STATUSES:
+		return False
+	ttl_hours = tracking_link_ttl_hours()
+	if ttl_hours <= 0:
+		return False
+	reference = _terminal_reference_time(row, status)
+	if not reference:
+		return False
+	try:
+		age_hours = (now_datetime() - get_datetime(reference)).total_seconds() / 3600.0
+	except Exception:
+		# An unparseable timestamp must not silently make links immortal.
+		frappe.log_error(frappe.get_traceback(), "tracking: could not evaluate link expiry")
+		return False
+	return age_hours > ttl_hours
 
 
 def _destination_pin(row: Dict[str, Any]) -> Tuple[Optional[float], Optional[float]]:
-    """The delivery address's door pin, or ``(None, None)``."""
-    from jarz_pos.utils.geo import is_valid_coordinate
+	"""The delivery address's door pin, or ``(None, None)``."""
+	from jarz_pos.utils.geo import is_valid_coordinate
 
-    address = (
-        str(row.get("shipping_address_name") or "").strip()
-        or str(row.get("customer_address") or "").strip()
-    )
-    if not address:
-        return (None, None)
-    try:
-        pin = frappe.db.get_value(
-            "Address", address, ["custom_latitude", "custom_longitude"], as_dict=True
-        )
-    except Exception:
-        # Geo fields not migrated on this site yet. No pin, no error.
-        return (None, None)
-    if not pin:
-        return (None, None)
-    lat, lng = pin.get("custom_latitude"), pin.get("custom_longitude")
-    if not is_valid_coordinate(lat, lng):
-        return (None, None)
-    return (float(lat), float(lng))
+	address = (
+		str(row.get("shipping_address_name") or "").strip() or str(row.get("customer_address") or "").strip()
+	)
+	if not address:
+		return (None, None)
+	try:
+		pin = frappe.db.get_value("Address", address, ["custom_latitude", "custom_longitude"], as_dict=True)
+	except Exception:
+		# Geo fields not migrated on this site yet. No pin, no error.
+		return (None, None)
+	if not pin:
+		return (None, None)
+	lat, lng = pin.get("custom_latitude"), pin.get("custom_longitude")
+	if not is_valid_coordinate(lat, lng):
+		return (None, None)
+	return (float(lat), float(lng))
 
 
 def _item_summary(invoice_name: str) -> Tuple[int, float]:
-    """``(line_count, total_qty)`` — deliberately no item names or codes.
+	"""``(line_count, total_qty)`` — deliberately no item names or codes.
 
-    "Two items, four units" is enough for a customer to recognise their own
-    order. A basket list on a forwardable public link is a description of
-    somebody's household, and it buys nothing the customer does not already have
-    in their confirmation email.
-    """
-    try:
-        rows = frappe.get_all(
-            "Sales Invoice Item",
-            filters={"parent": invoice_name},
-            fields=["qty"],
-            limit_page_length=0,
-        )
-    except Exception:
-        frappe.log_error(
-            frappe.get_traceback(), f"tracking: item summary failed for {invoice_name}"
-        )
-        return (0, 0.0)
-    total_qty = 0.0
-    for item in rows or []:
-        total_qty += flt(item.get("qty"))
-    return (len(rows or []), round(total_qty, 3))
+	"Two items, four units" is enough for a customer to recognise their own
+	order. A basket list on a forwardable public link is a description of
+	somebody's household, and it buys nothing the customer does not already have
+	in their confirmation email.
+	"""
+	try:
+		rows = frappe.get_all(
+			"Sales Invoice Item",
+			filters={"parent": invoice_name},
+			fields=["qty"],
+			limit_page_length=0,
+		)
+	except Exception:
+		frappe.log_error(frappe.get_traceback(), f"tracking: item summary failed for {invoice_name}")
+		return (0, 0.0)
+	total_qty = 0.0
+	for item in rows or []:
+		total_qty += flt(item.get("qty"))
+	return (len(rows or []), round(total_qty, 3))
 
 
 def _courier_identity(row: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
-    """``(first_name, phone)`` for the assigned courier.
+	"""``(first_name, phone)`` for the assigned courier.
 
-    **First name only, always.** A full name plus a live position is a
-    surveillance package on an employee handed to whoever holds the link; a first
-    name is what the customer needs to greet the person at the door. The phone is
-    additionally gated on ``expose_courier_phone_to_customer`` (default off),
-    because publishing a staff mobile to a forwardable URL is a policy decision.
-    """
-    party_type = str(row.get("custom_courier_party_type") or "").strip()
-    party = str(row.get("custom_courier_party") or "").strip()
-    if not party:
-        return (None, None)
+	**First name only, always.** A full name plus a live position is a
+	surveillance package on an employee handed to whoever holds the link; a first
+	name is what the customer needs to greet the person at the door. The phone is
+	additionally gated on ``expose_courier_phone_to_customer`` (default off),
+	because publishing a staff mobile to a forwardable URL is a policy decision.
+	"""
+	party_type = str(row.get("custom_courier_party_type") or "").strip()
+	party = str(row.get("custom_courier_party") or "").strip()
+	if not party:
+		return (None, None)
 
-    full_name = ""
-    phone = ""
-    try:
-        if party_type == "Supplier":
-            data = frappe.db.get_value(
-                "Supplier", party, ["supplier_name", "mobile_no"], as_dict=True
-            )
-            if data:
-                full_name = str(data.get("supplier_name") or "")
-                phone = str(data.get("mobile_no") or "")
-        else:
-            data = frappe.db.get_value(
-                "Employee", party, ["employee_name", "cell_number"], as_dict=True
-            )
-            if data:
-                full_name = str(data.get("employee_name") or "")
-                phone = str(data.get("cell_number") or "")
-    except Exception:
-        frappe.log_error(
-            frappe.get_traceback(), f"tracking: courier identity failed for {party}"
-        )
-        return (None, None)
+	full_name = ""
+	phone = ""
+	try:
+		if party_type == "Supplier":
+			data = frappe.db.get_value("Supplier", party, ["supplier_name", "mobile_no"], as_dict=True)
+			if data:
+				full_name = str(data.get("supplier_name") or "")
+				phone = str(data.get("mobile_no") or "")
+		else:
+			data = frappe.db.get_value("Employee", party, ["employee_name", "cell_number"], as_dict=True)
+			if data:
+				full_name = str(data.get("employee_name") or "")
+				phone = str(data.get("cell_number") or "")
+	except Exception:
+		frappe.log_error(frappe.get_traceback(), f"tracking: courier identity failed for {party}")
+		return (None, None)
 
-    first_name = (full_name.strip().split() or [""])[0] or None
-    if not expose_courier_phone():
-        phone = ""
-    return (first_name, phone.strip() or None)
+	first_name = (full_name.strip().split() or [""])[0] or None
+	if not expose_courier_phone():
+		phone = ""
+	return (first_name, phone.strip() or None)
 
 
 def courier_location_key(branch: str, party: str) -> str:
-    """The frozen Redis key lane B7 writes and this module reads."""
-    return COURIER_LOCATION_KEY_TEMPLATE.format(
-        branch=str(branch or "").strip(), party=str(party or "").strip()
-    )
+	"""The frozen Redis key lane B7 writes and this module reads."""
+	return COURIER_LOCATION_KEY_TEMPLATE.format(
+		branch=str(branch or "").strip(), party=str(party or "").strip()
+	)
 
 
 def courier_last_known_position(branch: str, party: str) -> Dict[str, Any]:
-    """Last-known courier fix from the cache, or ``{}``.
+	"""Last-known courier fix from the cache, or ``{}``.
 
-    Tolerant by design, because the producer (lane B7) does not exist yet: a
-    dict, a JSON string, or a bare ``"lat,lng"`` all parse, an absent key returns
-    ``{}``, and nothing here raises. Returning ``{}`` is the *expected* path
-    today and the page must render fine on it.
-    """
-    from jarz_pos.utils.geo import is_valid_coordinate
+	Tolerant by design, because the producer (lane B7) does not exist yet: a
+	dict, a JSON string, or a bare ``"lat,lng"`` all parse, an absent key returns
+	``{}``, and nothing here raises. Returning ``{}`` is the *expected* path
+	today and the page must render fine on it.
+	"""
+	from jarz_pos.utils.geo import is_valid_coordinate
 
-    if not party:
-        return {}
-    try:
-        raw = frappe.cache().get_value(courier_location_key(branch, party))
-    except Exception:
-        return {}
-    if not raw:
-        return {}
+	if not party:
+		return {}
+	try:
+		raw = frappe.cache().get_value(courier_location_key(branch, party))
+	except Exception:
+		return {}
+	if not raw:
+		return {}
 
-    if isinstance(raw, bytes):
-        try:
-            raw = raw.decode("utf-8")
-        except Exception:
-            return {}
+	if isinstance(raw, bytes):
+		try:
+			raw = raw.decode("utf-8")
+		except Exception:
+			return {}
 
-    payload: Any = raw
-    if isinstance(raw, str):
-        text = raw.strip()
-        try:
-            payload = json.loads(text)
-        except Exception:
-            parts = [p.strip() for p in text.split(",")]
-            if len(parts) != 2:
-                return {}
-            payload = {"lat": parts[0], "lng": parts[1]}
+	payload: Any = raw
+	if isinstance(raw, str):
+		text = raw.strip()
+		try:
+			payload = json.loads(text)
+		except Exception:
+			parts = [p.strip() for p in text.split(",")]
+			if len(parts) != 2:
+				return {}
+			payload = {"lat": parts[0], "lng": parts[1]}
 
-    if not isinstance(payload, dict):
-        return {}
+	if not isinstance(payload, dict):
+		return {}
 
-    # A mocked fix must never reach a customer. jarz_courier already refuses to
-    # store one, so this should be unreachable — which is exactly why it is here.
-    # This is the LAST hop before a coordinate is rendered on a public page to a
-    # member of the public, and "the writer filters it" is a guarantee that holds
-    # only until someone adds a second writer. Showing a spoofed position to a
-    # customer waiting at their door is not a bug we get to explain away.
-    if payload.get("is_mocked"):
-        return {}
+	# A mocked fix must never reach a customer. jarz_courier already refuses to
+	# store one, so this should be unreachable — which is exactly why it is here.
+	# This is the LAST hop before a coordinate is rendered on a public page to a
+	# member of the public, and "the writer filters it" is a guarantee that holds
+	# only until someone adds a second writer. Showing a spoofed position to a
+	# customer waiting at their door is not a bug we get to explain away.
+	if payload.get("is_mocked"):
+		return {}
 
-    lat = payload.get("lat", payload.get("latitude"))
-    lng = payload.get("lng", payload.get("longitude"))
-    if not is_valid_coordinate(lat, lng):
-        return {}
-    return {
-        "latitude": float(lat),
-        "longitude": float(lng),
-        "updated_at": str(payload.get("ts") or payload.get("updated_at") or "") or None,
-    }
+	lat = payload.get("lat", payload.get("latitude"))
+	lng = payload.get("lng", payload.get("longitude"))
+	if not is_valid_coordinate(lat, lng):
+		return {}
+	return {
+		"latitude": float(lat),
+		"longitude": float(lng),
+		"updated_at": str(payload.get("ts") or payload.get("updated_at") or "") or None,
+	}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Customer ETA
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def _empty_eta() -> Dict[str, Any]:
-    return {"eta_minutes": None, "eta_at": None, "eta_window": None, "eta_basis": None}
+	return {"eta_minutes": None, "eta_at": None, "eta_window": None, "eta_basis": None}
 
 
 def _slot_window(row: Dict[str, Any]) -> Optional[Tuple[_dt.datetime, _dt.datetime]]:
-    """The order's delivery slot as ``(start, end)``, or ``None`` without one.
+	"""The order's delivery slot as ``(start, end)``, or ``None`` without one.
 
-    ``custom_delivery_time_from`` is a Time (arrives as ``timedelta`` from the
-    DB) and ``custom_delivery_duration`` a Duration stored in seconds; a blank or
-    zero duration is read as the one-hour default the order form writes.
-    """
-    day = row.get("custom_delivery_date")
-    start_time = row.get("custom_delivery_time_from")
-    if not day or start_time in (None, ""):
-        return None
-    try:
-        midnight = get_datetime(day).replace(hour=0, minute=0, second=0, microsecond=0)
-        if isinstance(start_time, _dt.timedelta):
-            start = midnight + start_time
-        elif isinstance(start_time, _dt.time):
-            start = midnight.replace(
-                hour=start_time.hour, minute=start_time.minute, second=start_time.second
-            )
-        else:
-            start = get_datetime(f"{midnight.date()} {start_time}")
-        duration = row.get("custom_delivery_duration")
-        if isinstance(duration, _dt.timedelta):
-            seconds = duration.total_seconds()
-        else:
-            seconds = flt(duration)
-        if seconds <= 0:
-            seconds = 3600
-        return (start, start + _dt.timedelta(seconds=seconds))
-    except Exception:
-        return None
+	``custom_delivery_time_from`` is a Time (arrives as ``timedelta`` from the
+	DB) and ``custom_delivery_duration`` a Duration stored in seconds; a blank or
+	zero duration is read as the one-hour default the order form writes.
+	"""
+	day = row.get("custom_delivery_date")
+	start_time = row.get("custom_delivery_time_from")
+	if not day or start_time in (None, ""):
+		return None
+	try:
+		midnight = get_datetime(day).replace(hour=0, minute=0, second=0, microsecond=0)
+		if isinstance(start_time, _dt.timedelta):
+			start = midnight + start_time
+		elif isinstance(start_time, _dt.time):
+			start = midnight.replace(hour=start_time.hour, minute=start_time.minute, second=start_time.second)
+		else:
+			start = get_datetime(f"{midnight.date()} {start_time}")
+		duration = row.get("custom_delivery_duration")
+		if isinstance(duration, _dt.timedelta):
+			seconds = duration.total_seconds()
+		else:
+			seconds = flt(duration)
+		if seconds <= 0:
+			seconds = 3600
+		return (start, start + _dt.timedelta(seconds=seconds))
+	except Exception:
+		return None
 
 
 def _fix_is_fresh(updated_at: Any) -> bool:
-    """False only when the fix carries a readable timestamp older than the cap.
+	"""False only when the fix carries a readable timestamp older than the cap.
 
-    A missing or unreadable timestamp is accepted: the producer's shape is
-    tolerated everywhere else in this module and the ETA must not be stricter
-    than the marker.
-    """
-    if not updated_at:
-        return True
-    try:
-        age = (now_datetime() - get_datetime(updated_at)).total_seconds()
-    except Exception:
-        return True
-    return age <= ETA_MAX_FIX_AGE_SEC
+	A missing or unreadable timestamp is accepted: the producer's shape is
+	tolerated everywhere else in this module and the ETA must not be stricter
+	than the marker.
+	"""
+	if not updated_at:
+		return True
+	try:
+		age = (now_datetime() - get_datetime(updated_at)).total_seconds()
+	except Exception:
+		return True
+	return age <= ETA_MAX_FIX_AGE_SEC
 
 
 def _other_open_stops(row: Dict[str, Any]) -> List[Tuple[float, float]]:
-    """Pins of the courier's OTHER Out-for-Delivery orders (pinned ones only)."""
-    party = str(row.get("custom_courier_party") or "").strip()
-    if not party:
-        return []
-    try:
-        stops = frappe.get_all(
-            "Sales Invoice",
-            filters={
-                "docstatus": 1,
-                "custom_courier_party": party,
-                _state_fields_present()[0]: _STATE_OUT_FOR_DELIVERY,
-                "name": ["!=", str(row.get("name") or "")],
-            },
-            fields=["name", "shipping_address_name", "customer_address"],
-            limit_page_length=ETA_MAX_OTHER_STOPS,
-        )
-    except Exception:
-        return []
-    pins: List[Tuple[float, float]] = []
-    for stop in stops or []:
-        lat, lng = _destination_pin(stop)
-        if lat is not None and lng is not None:
-            pins.append((lat, lng))
-    return pins
+	"""Pins of the courier's OTHER Out-for-Delivery orders (pinned ones only)."""
+	party = str(row.get("custom_courier_party") or "").strip()
+	if not party:
+		return []
+	try:
+		stops = frappe.get_all(
+			"Sales Invoice",
+			filters={
+				"docstatus": 1,
+				"custom_courier_party": party,
+				_state_fields_present()[0]: _STATE_OUT_FOR_DELIVERY,
+				"name": ["!=", str(row.get("name") or "")],
+			},
+			fields=["name", "shipping_address_name", "customer_address"],
+			limit_page_length=ETA_MAX_OTHER_STOPS,
+		)
+	except Exception:
+		return []
+	pins: List[Tuple[float, float]] = []
+	for stop in stops or []:
+		lat, lng = _destination_pin(stop)
+		if lat is not None and lng is not None:
+			pins.append((lat, lng))
+	return pins
 
 
 def _live_eta(
-    row: Dict[str, Any], destination: Tuple[Optional[float], Optional[float]], fix: Dict[str, Any]
+	row: Dict[str, Any], destination: Tuple[Optional[float], Optional[float]], fix: Dict[str, Any]
 ) -> Optional[Dict[str, Any]]:
-    """OSRM drive time courier -> nearer open stops -> this door, or ``None``.
+	"""OSRM drive time courier -> nearer open stops -> this door, or ``None``.
 
-    Greedy nearest-first: from wherever the courier is "now", take the closest
-    other open stop while it is closer than this destination, charging
-    ``courier_eta_dwell_minutes`` at each; then drive to the destination. One
-    OSRM ``table`` call covers all of it.
-    """
-    from jarz_pos.services import osrm_client
-    from jarz_pos.services.route_planner import RoutePoint
+	Greedy nearest-first: from wherever the courier is "now", take the closest
+	other open stop while it is closer than this destination, charging
+	``courier_eta_dwell_minutes`` at each; then drive to the destination. One
+	OSRM ``table`` call covers all of it.
+	"""
+	from jarz_pos.services import osrm_client
+	from jarz_pos.services.route_planner import RoutePoint
 
-    dest_lat, dest_lng = destination
-    if dest_lat is None or dest_lng is None:
-        return None
-    if not osrm_client.is_enabled():
-        return None
+	dest_lat, dest_lng = destination
+	if dest_lat is None or dest_lng is None:
+		return None
+	if not osrm_client.is_enabled():
+		return None
 
-    points = [
-        RoutePoint(key="courier", lat=fix["latitude"], lng=fix["longitude"]),
-        RoutePoint(key="destination", lat=dest_lat, lng=dest_lng),
-    ]
-    for index, (lat, lng) in enumerate(_other_open_stops(row)):
-        points.append(RoutePoint(key=f"stop{index}", lat=lat, lng=lng))
+	points = [
+		RoutePoint(key="courier", lat=fix["latitude"], lng=fix["longitude"]),
+		RoutePoint(key="destination", lat=dest_lat, lng=dest_lng),
+	]
+	for index, (lat, lng) in enumerate(_other_open_stops(row)):
+		points.append(RoutePoint(key=f"stop{index}", lat=lat, lng=lng))
 
-    matrix = osrm_client.table(points)
-    if not matrix:
-        return None
-    seconds = matrix.durations_s
+	matrix = osrm_client.table(points)
+	if not matrix:
+		return None
+	seconds = matrix.durations_s
 
-    here, total = 0, 0.0
-    remaining = list(range(2, len(points)))
-    dwell_sec = eta_dwell_minutes() * 60
-    while remaining:
-        nearest = min(remaining, key=lambda i: seconds[here][i])
-        if seconds[here][nearest] >= seconds[here][1]:
-            break
-        total += seconds[here][nearest] + dwell_sec
-        here = nearest
-        remaining.remove(nearest)
-    total += seconds[here][1]
+	here, total = 0, 0.0
+	remaining = list(range(2, len(points)))
+	dwell_sec = eta_dwell_minutes() * 60
+	while remaining:
+		nearest = min(remaining, key=lambda i: seconds[here][i])
+		if seconds[here][nearest] >= seconds[here][1]:
+			break
+		total += seconds[here][nearest] + dwell_sec
+		here = nearest
+		remaining.remove(nearest)
+	total += seconds[here][1]
 
-    minutes = max(1, int(round(total / 60.0)))
-    arrival = now_datetime() + _dt.timedelta(minutes=minutes)
-    return {
-        "eta_minutes": minutes,
-        "eta_at": arrival.isoformat(),
-        "eta_window": None,
-        "eta_basis": "live",
-    }
+	minutes = max(1, int(round(total / 60.0)))
+	arrival = now_datetime() + _dt.timedelta(minutes=minutes)
+	return {
+		"eta_minutes": minutes,
+		"eta_at": arrival.isoformat(),
+		"eta_window": None,
+		"eta_basis": "live",
+	}
 
 
 def resolve_eta(
-    row: Dict[str, Any],
-    status: str,
-    destination: Tuple[Optional[float], Optional[float]],
-    fix: Optional[Dict[str, Any]] = None,
+	row: Dict[str, Any],
+	status: str,
+	destination: Tuple[Optional[float], Optional[float]],
+	fix: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """The four ``eta_*`` keys for one order. Never raises.
+	"""The four ``eta_*`` keys for one order. Never raises.
 
-    ``live`` while the order is out and the courier has a fresh server-side fix
-    and OSRM answers; otherwise ``slot`` (the delivery window, while it has not
-    already ended); otherwise all ``None``. A delivered / cancelled / returned
-    order has no ETA. The live result is cached :data:`ETA_CACHE_TTL_SEC` per
-    invoice.
+	``live`` while the order is out and the courier has a fresh server-side fix
+	and OSRM answers; otherwise ``slot`` (the delivery window, while it has not
+	already ended); otherwise all ``None``. A delivered / cancelled / returned
+	order has no ETA. The live result is cached :data:`ETA_CACHE_TTL_SEC` per
+	invoice.
 
-    The courier's fix is read here even when the live map is withheld from this
-    customer (the leg gate): a drive-time that includes the courier's other
-    stops is exactly what a customer who is not next in line needs, and a number
-    of minutes does not disclose a position.
-    """
-    empty = _empty_eta()
-    try:
-        if status in TERMINAL_STATUSES:
-            return empty
-        name = str(row.get("name") or "")
+	The courier's fix is read here even when the live map is withheld from this
+	customer (the leg gate): a drive-time that includes the courier's other
+	stops is exactly what a customer who is not next in line needs, and a number
+	of minutes does not disclose a position.
+	"""
+	empty = _empty_eta()
+	try:
+		if status in TERMINAL_STATUSES:
+			return empty
+		name = str(row.get("name") or "")
 
-        if status == STATUS_ON_THE_WAY and name:
-            cache = frappe.cache()
-            cached = None
-            try:
-                cached = cache.get_value(f"{_ETA_KEY_PREFIX}{name}")
-            except Exception:
-                cached = None
-            if isinstance(cached, dict) and cached.get("eta_basis") == "live":
-                return {**empty, **cached}
+		if status == STATUS_ON_THE_WAY and name:
+			cache = frappe.cache()
+			cached = None
+			try:
+				cached = cache.get_value(f"{_ETA_KEY_PREFIX}{name}")
+			except Exception:
+				cached = None
+			if isinstance(cached, dict) and cached.get("eta_basis") == "live":
+				return {**empty, **cached}
 
-            if not fix:
-                fix = courier_last_known_position(
-                    str(row.get("custom_kanban_profile") or row.get("pos_profile") or ""),
-                    str(row.get("custom_courier_party") or ""),
-                )
-            if fix and fix.get("latitude") is not None and _fix_is_fresh(fix.get("updated_at")):
-                live = _live_eta(row, destination, fix)
-                if live:
-                    try:
-                        cache.set_value(
-                            f"{_ETA_KEY_PREFIX}{name}", live, expires_in_sec=ETA_CACHE_TTL_SEC
-                        )
-                    except Exception:
-                        pass
-                    return live
+			if not fix:
+				fix = courier_last_known_position(
+					str(row.get("custom_kanban_profile") or row.get("pos_profile") or ""),
+					str(row.get("custom_courier_party") or ""),
+				)
+			if fix and fix.get("latitude") is not None and _fix_is_fresh(fix.get("updated_at")):
+				live = _live_eta(row, destination, fix)
+				if live:
+					try:
+						cache.set_value(f"{_ETA_KEY_PREFIX}{name}", live, expires_in_sec=ETA_CACHE_TTL_SEC)
+					except Exception:
+						pass
+					return live
 
-        window = _slot_window(row)
-        if window and window[1] > now_datetime():
-            return {
-                "eta_minutes": None,
-                "eta_at": None,
-                "eta_window": {"from": window[0].isoformat(), "to": window[1].isoformat()},
-                "eta_basis": "slot",
-            }
-        return empty
-    except Exception:
-        # The ETA is garnish on a public page; whatever went wrong, the page
-        # still renders its status. log_error itself can raise, so it is wrapped.
-        try:
-            frappe.log_error(frappe.get_traceback(), "tracking: resolve_eta failed")
-        except Exception:
-            pass
-        return empty
+		window = _slot_window(row)
+		if window and window[1] > now_datetime():
+			return {
+				"eta_minutes": None,
+				"eta_at": None,
+				"eta_window": {"from": window[0].isoformat(), "to": window[1].isoformat()},
+				"eta_basis": "slot",
+			}
+		return empty
+	except Exception:
+		# The ETA is garnish on a public page; whatever went wrong, the page
+		# still renders its status. log_error itself can raise, so it is wrapped.
+		try:
+			frappe.log_error(frappe.get_traceback(), "tracking: resolve_eta failed")
+		except Exception:
+			pass
+		return empty
 
 
 def resolve_public_status(token: Any) -> Dict[str, Any]:
-    """Everything the customer page may know about one order.
+	"""Everything the customer page may know about one order.
 
-    The entire public contract of this feature. Returns either the full
-    :data:`PUBLIC_STATUS_KEYS` payload or one of the two failure envelopes; there
-    is no third shape and no partial payload, so the client has exactly two cases
-    to render.
-    """
-    presented = str(token or "").strip()
-    if not presented:
-        return not_found()
+	The entire public contract of this feature. Returns either the full
+	:data:`PUBLIC_STATUS_KEYS` payload or one of the two failure envelopes; there
+	is no third shape and no partial payload, so the client has exactly two cases
+	to render.
+	"""
+	presented = str(token or "").strip()
+	if not presented:
+		return not_found()
 
-    # Order matters: the budget is spent before anything is looked up, so a
-    # caller hammering random tokens cannot use response timing or the
-    # rate-limit boundary to tell a real token from a fake one.
-    if not consume_rate_budget(presented):
-        return rate_limited()
+	# Order matters: the budget is spent before anything is looked up, so a
+	# caller hammering random tokens cannot use response timing or the
+	# rate-limit boundary to tell a real token from a fake one.
+	if not consume_rate_budget(presented):
+		return rate_limited()
 
-    if not tracking_enabled():
-        return not_found()
-    if not token_field_present():
-        return not_found()
+	if not tracking_enabled():
+		return not_found()
+	if not token_field_present():
+		return not_found()
 
-    try:
-        row = _resolve_token_to_invoice(presented)
-    except Exception:
-        frappe.log_error(frappe.get_traceback(), "tracking: token resolution failed")
-        return not_found()
+	try:
+		row = _resolve_token_to_invoice(presented)
+	except Exception:
+		frappe.log_error(frappe.get_traceback(), "tracking: token resolution failed")
+		return not_found()
 
-    if not row:
-        return not_found()
+	if not row:
+		return not_found()
 
-    status = _status_for(row)
-    if _is_expired(row, status):
-        return not_found()
+	status = _status_for(row)
+	if _is_expired(row, status):
+		return not_found()
 
-    label_en, label_ar = STATUS_LABELS.get(status, STATUS_LABELS[STATUS_PROCESSING])
-    destination_lat, destination_lng = _destination_pin(row)
-    item_count, total_qty = _item_summary(str(row.get("name") or ""))
+	label_en, label_ar = STATUS_LABELS.get(status, STATUS_LABELS[STATUS_PROCESSING])
+	destination_lat, destination_lng = _destination_pin(row)
+	item_count, total_qty = _item_summary(str(row.get("name") or ""))
 
-    # Live position ONLY while the order is genuinely out AND this order's leg
-    # is open. Both halves are load-bearing.
-    #
-    # The status check alone is what this used to be, and it leaked: dispatch is
-    # a bulk action (api.trips.send_trip_for_delivery), so three or four orders
-    # from one slot enter STATUS_ON_THE_WAY in the same instant, all assigned to
-    # the same courier. Keyed on (branch, party) with no per-order gate, every
-    # one of those customers was handed the same coordinates — watching the
-    # courier drive to the other addresses first, in visiting order, with the
-    # courier's first name and (where exposed) phone number beside it.
-    #
-    # services.delivery_leg answers the second half: is the courier driving
-    # toward THIS customer right now. See its module docstring for what happens
-    # on a site that has not migrated the leg fields yet.
-    position: Dict[str, Any] = {}
-    show_courier = status == STATUS_ON_THE_WAY and delivery_leg.live_map_gate_open(row)
-    courier_first_name: Optional[str] = None
-    courier_phone: Optional[str] = None
-    if show_courier:
-        position = courier_last_known_position(
-            str(row.get("custom_kanban_profile") or row.get("pos_profile") or ""),
-            str(row.get("custom_courier_party") or ""),
-        )
-        # The identity travels with the position, under the same gate. Naming
-        # the courier to a customer they are not on the way to tells that
-        # customer who is carrying somebody else's order, which is the same
-        # disclosure as the marker and was made on the same terms before.
-        courier_first_name, courier_phone = _courier_identity(row)
+	# Live position ONLY while the order is genuinely out AND this order's leg
+	# is open. Both halves are load-bearing.
+	#
+	# The status check alone is what this used to be, and it leaked: dispatch is
+	# a bulk action (api.trips.send_trip_for_delivery), so three or four orders
+	# from one slot enter STATUS_ON_THE_WAY in the same instant, all assigned to
+	# the same courier. Keyed on (branch, party) with no per-order gate, every
+	# one of those customers was handed the same coordinates — watching the
+	# courier drive to the other addresses first, in visiting order, with the
+	# courier's first name and (where exposed) phone number beside it.
+	#
+	# services.delivery_leg answers the second half: is the courier driving
+	# toward THIS customer right now. See its module docstring for what happens
+	# on a site that has not migrated the leg fields yet.
+	position: Dict[str, Any] = {}
+	show_courier = status == STATUS_ON_THE_WAY and delivery_leg.live_map_gate_open(row)
+	courier_first_name: Optional[str] = None
+	courier_phone: Optional[str] = None
+	if show_courier:
+		position = courier_last_known_position(
+			str(row.get("custom_kanban_profile") or row.get("pos_profile") or ""),
+			str(row.get("custom_courier_party") or ""),
+		)
+		# The identity travels with the position, under the same gate. Naming
+		# the courier to a customer they are not on the way to tells that
+		# customer who is carrying somebody else's order, which is the same
+		# disclosure as the marker and was made on the same terms before.
+		courier_first_name, courier_phone = _courier_identity(row)
 
-    payload = {
-        "success": True,
-        "status": status,
-        "status_label_en": label_en,
-        "status_label_ar": label_ar,
-        "courier_first_name": courier_first_name,
-        "courier_phone": courier_phone,
-        "courier_latitude": position.get("latitude"),
-        "courier_longitude": position.get("longitude"),
-        "courier_updated_at": position.get("updated_at"),
-        "destination_latitude": destination_lat,
-        "destination_longitude": destination_lng,
-        "item_count": item_count,
-        "total_qty": total_qty,
-        "order_total": flt(row.get("grand_total")),
-        "currency": str(row.get("currency") or "") or None,
-        "poll_interval_sec": DEFAULT_POLL_INTERVAL_SEC,
-        # The code is derived from the presented token, so it needs no lookup,
-        # and exists only while the order can still be handed over.
-        "delivery_code": (
-            delivery_code_for_token(presented)
-            if status not in TERMINAL_STATUSES and delivery_code_required()
-            else None
-        ),
-    }
-    payload.update(resolve_eta(row, status, (destination_lat, destination_lng), position or None))
+	payload = {
+		"success": True,
+		"status": status,
+		"status_label_en": label_en,
+		"status_label_ar": label_ar,
+		"courier_first_name": courier_first_name,
+		"courier_phone": courier_phone,
+		"courier_latitude": position.get("latitude"),
+		"courier_longitude": position.get("longitude"),
+		"courier_updated_at": position.get("updated_at"),
+		"destination_latitude": destination_lat,
+		"destination_longitude": destination_lng,
+		"item_count": item_count,
+		"total_qty": total_qty,
+		"order_total": flt(row.get("grand_total")),
+		"currency": str(row.get("currency") or "") or None,
+		"poll_interval_sec": DEFAULT_POLL_INTERVAL_SEC,
+		# The code is derived from the presented token, so it needs no lookup,
+		# and exists only while the order can still be handed over.
+		"delivery_code": (
+			delivery_code_for_token(presented)
+			if status not in TERMINAL_STATUSES and delivery_code_required()
+			else None
+		),
+	}
+	payload.update(resolve_eta(row, status, (destination_lat, destination_lng), position or None))
 
-    # Belt and braces on the allow-list. If a future edit adds a key to the
-    # literal above without adding it to PUBLIC_STATUS_KEYS, it is dropped here
-    # rather than shipped to a guest — the test catches the mistake, this catches
-    # the mistake that reaches production before the test runs.
-    return {key: payload[key] for key in PUBLIC_STATUS_KEYS if key in payload}
+	# Belt and braces on the allow-list. If a future edit adds a key to the
+	# literal above without adding it to PUBLIC_STATUS_KEYS, it is dropped here
+	# rather than shipped to a guest — the test catches the mistake, this catches
+	# the mistake that reaches production before the test runs.
+	return {key: payload[key] for key in PUBLIC_STATUS_KEYS if key in payload}

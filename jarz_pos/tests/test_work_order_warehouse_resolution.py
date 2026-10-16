@@ -22,134 +22,129 @@ import frappe
 
 
 class TestFindCompanyWarehouse(unittest.TestCase):
-    def test_warehouse_type_match_still_wins(self):
-        from jarz_pos.api import manufacturing
+	def test_warehouse_type_match_still_wins(self):
+		from jarz_pos.api import manufacturing
 
-        with patch("jarz_pos.api.manufacturing.frappe") as mock_frappe:
-            mock_frappe.db.get_value.return_value = "Finished Goods - J"
-            self.assertEqual(
-                manufacturing._find_company_warehouse(
-                    "JARZ", "Finished Goods", ["FG", "Finished Goods"]
-                ),
-                "Finished Goods - J",
-            )
+		with patch("jarz_pos.api.manufacturing.frappe") as mock_frappe:
+			mock_frappe.db.get_value.return_value = "Finished Goods - J"
+			self.assertEqual(
+				manufacturing._find_company_warehouse("JARZ", "Finished Goods", ["FG", "Finished Goods"]),
+				"Finished Goods - J",
+			)
 
-    def test_name_hint_match_still_wins(self):
-        """production_planning documents relying on the WIP name hint here."""
-        from jarz_pos.api import manufacturing
+	def test_name_hint_match_still_wins(self):
+		"""production_planning documents relying on the WIP name hint here."""
+		from jarz_pos.api import manufacturing
 
-        with patch("jarz_pos.api.manufacturing.frappe") as mock_frappe:
-            mock_frappe.db.get_value.return_value = None
-            mock_frappe.get_all.return_value = [{"name": "Work In Progress - J"}]
-            self.assertEqual(
-                manufacturing._find_company_warehouse(
-                    "JARZ", "WIP", ["WIP", "Work In Progress"]
-                ),
-                "Work In Progress - J",
-            )
+		with patch("jarz_pos.api.manufacturing.frappe") as mock_frappe:
+			mock_frappe.db.get_value.return_value = None
+			mock_frappe.get_all.return_value = [{"name": "Work In Progress - J"}]
+			self.assertEqual(
+				manufacturing._find_company_warehouse("JARZ", "WIP", ["WIP", "Work In Progress"]),
+				"Work In Progress - J",
+			)
 
-    def test_returns_none_rather_than_an_arbitrary_warehouse(self):
-        """The bug: no type match and no name match used to yield ANY leaf warehouse."""
-        from jarz_pos.api import manufacturing
+	def test_returns_none_rather_than_an_arbitrary_warehouse(self):
+		"""The bug: no type match and no name match used to yield ANY leaf warehouse."""
+		from jarz_pos.api import manufacturing
 
-        with patch("jarz_pos.api.manufacturing.frappe") as mock_frappe:
-            # Nothing matches by type, nothing matches by name. The old code
-            # then ran an unfiltered get_value and returned whatever came back.
-            mock_frappe.db.get_value.return_value = None
-            mock_frappe.get_all.return_value = []
+		with patch("jarz_pos.api.manufacturing.frappe") as mock_frappe:
+			# Nothing matches by type, nothing matches by name. The old code
+			# then ran an unfiltered get_value and returned whatever came back.
+			mock_frappe.db.get_value.return_value = None
+			mock_frappe.get_all.return_value = []
 
-            result = manufacturing._find_company_warehouse(
-                "JARZ", "Finished Goods", ["FG", "Finished Goods"]
-            )
+			result = manufacturing._find_company_warehouse("JARZ", "Finished Goods", ["FG", "Finished Goods"])
 
-        self.assertIsNone(result)
+		self.assertIsNone(result)
 
-    def test_does_not_query_for_an_unfiltered_leaf_warehouse(self):
-        """Stronger than the None check: the catch-all query must not be issued.
+	def test_does_not_query_for_an_unfiltered_leaf_warehouse(self):
+		"""Stronger than the None check: the catch-all query must not be issued.
 
-        A future refactor could reintroduce the fallback and still return None
-        in this mock's shape; asserting the query is never made pins the
-        behaviour rather than one of its outcomes.
-        """
-        from jarz_pos.api import manufacturing
+		A future refactor could reintroduce the fallback and still return None
+		in this mock's shape; asserting the query is never made pins the
+		behaviour rather than one of its outcomes.
+		"""
+		from jarz_pos.api import manufacturing
 
-        calls = []
+		calls = []
 
-        def record_get_value(doctype, filters=None, fieldname=None, **kwargs):
-            calls.append((doctype, filters))
-            return None
+		def record_get_value(doctype, filters=None, fieldname=None, **kwargs):
+			calls.append((doctype, filters))
+			return None
 
-        with patch("jarz_pos.api.manufacturing.frappe") as mock_frappe:
-            mock_frappe.db.get_value.side_effect = record_get_value
-            mock_frappe.get_all.return_value = []
-            manufacturing._find_company_warehouse(
-                "JARZ", "Finished Goods", ["FG", "Finished Goods"]
-            )
+		with patch("jarz_pos.api.manufacturing.frappe") as mock_frappe:
+			mock_frappe.db.get_value.side_effect = record_get_value
+			mock_frappe.get_all.return_value = []
+			manufacturing._find_company_warehouse("JARZ", "Finished Goods", ["FG", "Finished Goods"])
 
-        # The only legitimate Warehouse get_value carries a warehouse_type.
-        for doctype, filters in calls:
-            if doctype != "Warehouse":
-                continue
-            self.assertIn(
-                "warehouse_type",
-                filters or {},
-                f"unfiltered leaf-warehouse lookup reintroduced: {filters!r}",
-            )
+		# The only legitimate Warehouse get_value carries a warehouse_type.
+		for doctype, filters in calls:
+			if doctype != "Warehouse":
+				continue
+			self.assertIn(
+				"warehouse_type",
+				filters or {},
+				f"unfiltered leaf-warehouse lookup reintroduced: {filters!r}",
+			)
 
 
 class TestEnsureWorkOrderRefuses(unittest.TestCase):
-    def test_refuses_and_names_the_missing_warehouse(self):
-        from jarz_pos.api import manufacturing
+	def test_refuses_and_names_the_missing_warehouse(self):
+		from jarz_pos.api import manufacturing
 
-        line = {"item_code": "PIST-CAKE", "bom_name": "BOM-PIST-CAKE", "item_qty": 5}
+		line = {"item_code": "PIST-CAKE", "bom_name": "BOM-PIST-CAKE", "item_qty": 5}
 
-        with patch(
-            "jarz_pos.api.manufacturing._resolve_work_order_warehouses",
-            return_value={"company": "JARZ", "wip_warehouse": "", "fg_warehouse": ""},
-        ), patch(
-            "jarz_pos.api.manufacturing._find_company_warehouse", return_value=None
-        ), patch(
-            "jarz_pos.api.manufacturing.frappe"
-        ) as mock_frappe:
-            mock_frappe.throw.side_effect = frappe.ValidationError
-            mock_frappe._ = lambda text: text
+		with (
+			patch(
+				"jarz_pos.api.manufacturing._resolve_work_order_warehouses",
+				return_value={"company": "JARZ", "wip_warehouse": "", "fg_warehouse": ""},
+			),
+			patch("jarz_pos.api.manufacturing._find_company_warehouse", return_value=None),
+			patch("jarz_pos.api.manufacturing.frappe") as mock_frappe,
+		):
+			mock_frappe.throw.side_effect = frappe.ValidationError
+			mock_frappe._ = lambda text: text
 
-            with self.assertRaises(frappe.ValidationError):
-                manufacturing._ensure_work_order(line, "JARZ", {}, None)
+			with self.assertRaises(frappe.ValidationError):
+				manufacturing._ensure_work_order(line, "JARZ", {}, None)
 
-            # It must refuse BEFORE building the document, not after.
-            mock_frappe.get_doc.assert_not_called()
+			# It must refuse BEFORE building the document, not after.
+			mock_frappe.get_doc.assert_not_called()
 
-        message = str(mock_frappe.throw.call_args.args[0])
-        self.assertIn("WIP", message)
-        self.assertIn("Finished Goods", message)
-        self.assertIn("JARZ", message)
+		message = str(mock_frappe.throw.call_args.args[0])
+		self.assertIn("WIP", message)
+		self.assertIn("Finished Goods", message)
+		self.assertIn("JARZ", message)
 
-    def test_a_resolvable_pair_does_not_refuse(self):
-        from jarz_pos.api import manufacturing
+	def test_a_resolvable_pair_does_not_refuse(self):
+		from jarz_pos.api import manufacturing
 
-        line = {"item_code": "PIST-CAKE", "bom_name": "BOM-PIST-CAKE", "item_qty": 5}
+		line = {"item_code": "PIST-CAKE", "bom_name": "BOM-PIST-CAKE", "item_qty": 5}
 
-        with patch(
-            "jarz_pos.api.manufacturing._resolve_work_order_warehouses",
-            return_value={
-                "company": "JARZ",
-                "wip_warehouse": "Work In Progress - J",
-                "fg_warehouse": "Finished Goods - J",
-            },
-        ), patch("jarz_pos.api.manufacturing.frappe") as mock_frappe:
-            mock_frappe._ = lambda text: text
-            mock_frappe.get_doc.return_value = MagicMock(name="WO")
+		with (
+			patch(
+				"jarz_pos.api.manufacturing._resolve_work_order_warehouses",
+				return_value={
+					"company": "JARZ",
+					"wip_warehouse": "Work In Progress - J",
+					"fg_warehouse": "Finished Goods - J",
+				},
+			),
+			patch("jarz_pos.api.manufacturing.frappe") as mock_frappe,
+		):
+			mock_frappe._ = lambda text: text
+			mock_frappe.get_doc.return_value = MagicMock(name="WO")
 
-            try:
-                manufacturing._ensure_work_order(line, "JARZ", {}, None)
-            except Exception:
-                # The rest of the function is out of scope here; what matters is
-                # that the guard did not fire.
-                pass
+			try:
+				manufacturing._ensure_work_order(line, "JARZ", {}, None)
+			except Exception:
+				# The rest of the function is out of scope here; what matters is
+				# that the guard did not fire.
+				pass
 
-        mock_frappe.throw.assert_not_called()
+		mock_frappe.throw.assert_not_called()
 
 
 if __name__ == "__main__":
-    unittest.main()
+	unittest.main()

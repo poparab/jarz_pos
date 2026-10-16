@@ -247,9 +247,7 @@ def _ensure_item_price(item_code, rate, currency, realign, log, summary):
 					log["kept"].append(f"{label} = {current} (left alone; base is {rate})")
 					summary["kept"] += 1
 					continue
-				frappe.db.set_value(
-					"Item Price", row["name"], "price_list_rate", rate, update_modified=True
-				)
+				frappe.db.set_value("Item Price", row["name"], "price_list_rate", rate, update_modified=True)
 				log["updated"].append(f"{label}: {current} -> {rate}")
 				summary["item_prices_updated"] += 1
 			return
@@ -288,8 +286,7 @@ def _report_realignment(log):
 		return
 	message = (
 		f"B2B base price list realigned (Large={LARGE_RATE}, Medium={MEDIUM_RATE}, "
-		f"Small={SMALL_RATE}): "
-		+ "; ".join(log["updated"])
+		f"Small={SMALL_RATE}): " + "; ".join(log["updated"])
 	)
 	_logger().warning(message)
 	try:

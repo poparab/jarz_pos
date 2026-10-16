@@ -265,8 +265,9 @@ class _StubFrappe:
 @contextmanager
 def _stubbed(stub):
 	"""Run the processor against the stub, with translation as identity."""
-	with patch("jarz_pos.services.bundle_processing.frappe", stub), patch(
-		"jarz_pos.services.bundle_processing._", lambda message: message
+	with (
+		patch("jarz_pos.services.bundle_processing.frappe", stub),
+		patch("jarz_pos.services.bundle_processing._", lambda message: message),
 	):
 		yield
 
@@ -342,9 +343,7 @@ def _expand(selected_items=None, quantity=1, bundle=None, items=None):
 	bundle_doc = bundle if bundle is not None else _indulgence_five_bundle()
 	item_docs = items if items is not None else _indulgence_five_items()
 	stub = _StubFrappe(bundle_doc, item_docs)
-	processor = BundleProcessor(
-		bundle_doc.name, quantity=quantity, selected_items=selected_items
-	)
+	processor = BundleProcessor(bundle_doc.name, quantity=quantity, selected_items=selected_items)
 	with _stubbed(stub):
 		rows = processor.get_invoice_items()
 	return processor, rows
@@ -352,10 +351,7 @@ def _expand(selected_items=None, quantity=1, bundle=None, items=None):
 
 def _child_layout(processor):
 	"""(item, per-bundle qty, group row key) for every expanded child."""
-	return [
-		(entry["item"].name, entry["qty"], entry["item_group_key"])
-		for entry in processor.bundle_items
-	]
+	return [(entry["item"].name, entry["qty"], entry["item_group_key"]) for entry in processor.bundle_items]
 
 
 def _children(rows):
@@ -428,9 +424,7 @@ class TestDuplicateBundleGroupRows(unittest.TestCase):
 		with self.assertRaises(frappe.ValidationError) as caught:
 			_expand({"Large": [_sel(code) for code in self.FIVE_DISTINCT[:4]]})
 
-		self.assertIn(
-			"expected 5 selection(s) from 'Large', received 4", str(caught.exception)
-		)
+		self.assertIn("expected 5 selection(s) from 'Large', received 4", str(caught.exception))
 
 	def test_too_many_selections_still_throws(self):
 		"""Six selections for a five-item bundle must not be silently trimmed."""
@@ -439,9 +433,7 @@ class TestDuplicateBundleGroupRows(unittest.TestCase):
 		with self.assertRaises(frappe.ValidationError) as caught:
 			_expand({"Large": payload})
 
-		self.assertIn(
-			"expected 5 selection(s) from 'Large', received 6", str(caught.exception)
-		)
+		self.assertIn("expected 5 selection(s) from 'Large', received 6", str(caught.exception))
 
 	def test_row_keyed_payload_is_still_validated_against_that_row(self):
 		"""Addressing one row explicitly keeps that row's own quantity as the rule.
@@ -452,9 +444,7 @@ class TestDuplicateBundleGroupRows(unittest.TestCase):
 		with self.assertRaises(frappe.ValidationError) as caught:
 			_expand({"irkm6iq1qc": [_sel(code) for code in self.FIVE_DISTINCT]})
 
-		self.assertIn(
-			"expected 4 selection(s) from 'Large', received 5", str(caught.exception)
-		)
+		self.assertIn("expected 4 selection(s) from 'Large', received 5", str(caught.exception))
 
 	def test_one_item_chosen_five_times_is_split_across_the_rows(self):
 		"""A selection straddling the row boundary is split so both keys are right."""
@@ -479,9 +469,7 @@ class TestDuplicateBundleGroupRows(unittest.TestCase):
 
 	def test_bundle_quantity_multiplies_each_allocation(self):
 		"""Ordering the bundle twice doubles both allocations, not just the first."""
-		processor, rows = _expand(
-			{"Large": [_sel(code) for code in self.FIVE_DISTINCT]}, quantity=2
-		)
+		processor, rows = _expand({"Large": [_sel(code) for code in self.FIVE_DISTINCT]}, quantity=2)
 
 		self.assertEqual(
 			[(row["item_code"], row["qty"]) for row in _children(rows)],
@@ -600,9 +588,7 @@ class TestSingleGroupBundleIsUnaffected(unittest.TestCase):
 		with self.assertRaises(frappe.ValidationError) as caught:
 			self._expand_single({"Medium": [_sel("MED-A"), _sel("MED-B")]})
 
-		self.assertIn(
-			"expected 3 selection(s) from 'Medium', received 2", str(caught.exception)
-		)
+		self.assertIn("expected 3 selection(s) from 'Medium', received 2", str(caught.exception))
 
 
 class TestGroupPlanning(unittest.TestCase):
@@ -627,20 +613,26 @@ class TestGroupPlanning(unittest.TestCase):
 			{"irkm6iq1qc": [_sel("LARGE-A", 4)], "irkqulhim1": [_sel("LARGE-E")]}
 		)._build_group_plans()
 
-		self.assertEqual([[row["key"] for row in plan] for plan in plans], [
-			["irkm6iq1qc"],
-			["irkqulhim1"],
-		])
+		self.assertEqual(
+			[[row["key"] for row in plan] for plan in plans],
+			[
+				["irkm6iq1qc"],
+				["irkqulhim1"],
+			],
+		)
 
 	def test_partially_keyed_duplicate_rows_keep_the_addressed_row_alone(self):
 		plans = self._processor(
 			{"irkm6iq1qc": [_sel("LARGE-A", 4)], "Large": [_sel("LARGE-E")]}
 		)._build_group_plans()
 
-		self.assertEqual([[row["key"] for row in plan] for plan in plans], [
-			["irkm6iq1qc"],
-			["irkqulhim1"],
-		])
+		self.assertEqual(
+			[[row["key"] for row in plan] for plan in plans],
+			[
+				["irkm6iq1qc"],
+				["irkqulhim1"],
+			],
+		)
 
 	def test_unique_groups_are_never_merged(self):
 		bundle = SimpleNamespace(
@@ -654,10 +646,13 @@ class TestGroupPlanning(unittest.TestCase):
 		)
 		plans = self._processor({"Large": [], "Medium": []}, bundle=bundle)._build_group_plans()
 
-		self.assertEqual([[row["key"] for row in plan] for plan in plans], [
-			["row-a"],
-			["row-b"],
-		])
+		self.assertEqual(
+			[[row["key"] for row in plan] for plan in plans],
+			[
+				["row-a"],
+				["row-b"],
+			],
+		)
 
 	def test_allocation_splits_a_straddling_selection(self):
 		processor = self._processor(None)
@@ -672,10 +667,7 @@ class TestGroupPlanning(unittest.TestCase):
 		)
 
 		self.assertEqual(
-			[
-				(a["item_code"], a["qty"], a["group_key"], a["rate"])
-				for a in allocations
-			],
+			[(a["item_code"], a["qty"], a["group_key"], a["rate"]) for a in allocations],
 			[
 				("LARGE-A", 3, "irkm6iq1qc", None),
 				("LARGE-E", 1, "irkm6iq1qc", 133.0),
@@ -688,9 +680,7 @@ class TestGroupPlanning(unittest.TestCase):
 		processor = self._processor(None)
 		plan = [{"key": "row-a", "name": "Large", "quantity": 0}]
 
-		allocations = processor._allocate_selections_to_rows(
-			{"LARGE-A": {"qty": 2, "rate": None}}, plan
-		)
+		allocations = processor._allocate_selections_to_rows({"LARGE-A": {"qty": 2, "rate": None}}, plan)
 
 		self.assertEqual(
 			[(a["item_code"], a["qty"], a["group_key"]) for a in allocations],

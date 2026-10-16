@@ -22,1214 +22,1297 @@ from unittest.mock import patch, MagicMock, PropertyMock
 # Mock helpers
 # ---------------------------------------------------------------------------
 
+
 class _InvoiceDocCapture:
-    """Captures fields and items appended to a Sales Invoice document."""
+	"""Captures fields and items appended to a Sales Invoice document."""
 
-    def __init__(self):
-        self.customer = None
-        self.customer_name = None
-        self.company = None
-        self.pos_profile = None
-        self.custom_kanban_profile = None
-        self.is_pos = 0
-        self.selling_price_list = None
-        self.currency = None
-        self.territory = None
-        self.posting_date = None
-        self.posting_time = None
-        self.sales_partner = None
-        self.custom_is_pickup = 0
-        self.custom_payment_method = None
-        self.custom_delivery_date = None
-        self.custom_delivery_time_from = None
-        self.custom_delivery_duration = None
-        self.remarks = ""
-        self.update_stock = 1
-        self.items = []
-        self.taxes = []
-        self.payments = []
-        self.name = "TEST-INV-001"
-        self.status = "Draft"
-        self.docstatus = 0
-        self.net_total = 0.0
-        self.grand_total = 0.0
-        self.custom_sales_invoice_state = None
+	def __init__(self):
+		self.customer = None
+		self.customer_name = None
+		self.company = None
+		self.pos_profile = None
+		self.custom_kanban_profile = None
+		self.is_pos = 0
+		self.selling_price_list = None
+		self.currency = None
+		self.territory = None
+		self.posting_date = None
+		self.posting_time = None
+		self.sales_partner = None
+		self.custom_is_pickup = 0
+		self.custom_payment_method = None
+		self.custom_delivery_date = None
+		self.custom_delivery_time_from = None
+		self.custom_delivery_duration = None
+		self.remarks = ""
+		self.update_stock = 1
+		self.items = []
+		self.taxes = []
+		self.payments = []
+		self.name = "TEST-INV-001"
+		self.status = "Draft"
+		self.docstatus = 0
+		self.net_total = 0.0
+		self.grand_total = 0.0
+		self.custom_sales_invoice_state = None
 
-    def append(self, child_table, row_or_empty=None):
-        if row_or_empty is None:
-            row_or_empty = {}
-        item = SimpleNamespace()
-        # Copy fields from row dict
-        for k, v in (row_or_empty if isinstance(row_or_empty, dict) else {}).items():
-            setattr(item, k, v)
-        item.get = lambda key, default=None: getattr(item, key, default)
-        if child_table == "items":
-            self.items.append(item)
-        elif child_table == "taxes":
-            self.taxes.append(item)
-        elif child_table == "payments":
-            self.payments.append(item)
-        return item
+	def append(self, child_table, row_or_empty=None):
+		if row_or_empty is None:
+			row_or_empty = {}
+		item = SimpleNamespace()
+		# Copy fields from row dict
+		for k, v in (row_or_empty if isinstance(row_or_empty, dict) else {}).items():
+			setattr(item, k, v)
+		item.get = lambda key, default=None: getattr(item, key, default)
+		if child_table == "items":
+			self.items.append(item)
+		elif child_table == "taxes":
+			self.taxes.append(item)
+		elif child_table == "payments":
+			self.payments.append(item)
+		return item
 
-    def set(self, field, value):
-        setattr(self, field, value)
+	def set(self, field, value):
+		setattr(self, field, value)
 
-    def get(self, field, default=None):
-        return getattr(self, field, default)
+	def get(self, field, default=None):
+		return getattr(self, field, default)
 
-    def save(self, **kwargs):
-        pass
+	def save(self, **kwargs):
+		pass
 
-    def submit(self):
-        self.docstatus = 1
+	def submit(self):
+		self.docstatus = 1
 
-    def run_method(self, method):
-        pass
+	def run_method(self, method):
+		pass
 
-    def db_set(self, field, value, **kwargs):
-        setattr(self, field, value)
-
-
-def _mock_pos_profile(name="Test POS", company="Test Company",
-                       selling_price_list="Standard Selling",
-                       currency="EGP"):
-    """Return a mock POS Profile."""
-    p = MagicMock()
-    p.name = name
-    p.company = company
-    p.selling_price_list = selling_price_list
-    p.currency = currency
-    return p
+	def db_set(self, field, value, **kwargs):
+		setattr(self, field, value)
 
 
-def _mock_customer(name="CUST-001", customer_name="Test Customer",
-                   territory="Cairo", delivery_income=30.0):
-    """Return a mock Customer document."""
-    c = MagicMock()
-    c.name = name
-    c.customer_name = customer_name
-    c.territory = territory
-    c.delivery_income = delivery_income
-    return c
+def _mock_pos_profile(
+	name="Test POS", company="Test Company", selling_price_list="Standard Selling", currency="EGP"
+):
+	"""Return a mock POS Profile."""
+	p = MagicMock()
+	p.name = name
+	p.company = company
+	p.selling_price_list = selling_price_list
+	p.currency = currency
+	return p
+
+
+def _mock_customer(name="CUST-001", customer_name="Test Customer", territory="Cairo", delivery_income=30.0):
+	"""Return a mock Customer document."""
+	c = MagicMock()
+	c.name = name
+	c.customer_name = customer_name
+	c.territory = territory
+	c.delivery_income = delivery_income
+	return c
 
 
 # ===========================================================================
 # TEST: add_items_to_invoice – Item structure verification
 # ===========================================================================
 
+
 class TestAddItemsToInvoice(unittest.TestCase):
-    """Verify that add_items_to_invoice produces correct item fields."""
+	"""Verify that add_items_to_invoice produces correct item fields."""
 
-    def _add_items(self, items):
-        """Run add_items_to_invoice with captures."""
-        inv = _InvoiceDocCapture()
-        logger = MagicMock()
+	def _add_items(self, items):
+		"""Run add_items_to_invoice with captures."""
+		inv = _InvoiceDocCapture()
+		logger = MagicMock()
 
-        with patch("jarz_pos.utils.invoice_utils.frappe") as mf:
-            mf.get_doc.return_value = MagicMock(stock_uom="Unit")
+		with patch("jarz_pos.utils.invoice_utils.frappe") as mf:
+			mf.get_doc.return_value = MagicMock(stock_uom="Unit")
 
-            from jarz_pos.utils.invoice_utils import add_items_to_invoice
-            add_items_to_invoice(inv, items, logger)
+			from jarz_pos.utils.invoice_utils import add_items_to_invoice
 
-        return inv
+			add_items_to_invoice(inv, items, logger)
 
-    def test_basic_item_fields(self):
-        """Items should have item_code, qty, and price_list_rate."""
-        items = [{"item_code": "ITEM-A", "qty": 3, "rate": 50.0}]
-        inv = self._add_items(items)
+		return inv
 
-        self.assertEqual(len(inv.items), 1)
-        item = inv.items[0]
-        self.assertEqual(item.item_code, "ITEM-A")
-        self.assertEqual(item.qty, 3.0)
-        self.assertEqual(item.price_list_rate, 50.0)
+	def test_basic_item_fields(self):
+		"""Items should have item_code, qty, and price_list_rate."""
+		items = [{"item_code": "ITEM-A", "qty": 3, "rate": 50.0}]
+		inv = self._add_items(items)
 
-    def test_discount_percentage_set(self):
-        """discount_percentage should be set on item when provided."""
-        items = [{
-            "item_code": "ITEM-B",
-            "qty": 1,
-            "price_list_rate": 100.0,
-            "discount_percentage": 25.0,
-        }]
-        inv = self._add_items(items)
-        self.assertEqual(inv.items[0].discount_percentage, 25.0)
+		self.assertEqual(len(inv.items), 1)
+		item = inv.items[0]
+		self.assertEqual(item.item_code, "ITEM-A")
+		self.assertEqual(item.qty, 3.0)
+		self.assertEqual(item.price_list_rate, 50.0)
 
-    def test_discount_amount_converted_to_percentage(self):
-        """discount_amount should be converted to discount_percentage."""
-        items = [{
-            "item_code": "ITEM-C",
-            "qty": 1,
-            "price_list_rate": 200.0,
-            "rate": 200.0,
-            "discount_amount": 40.0,  # = 20% of 200
-        }]
-        inv = self._add_items(items)
-        self.assertAlmostEqual(inv.items[0].discount_percentage, 20.0, places=1)
+	def test_discount_percentage_set(self):
+		"""discount_percentage should be set on item when provided."""
+		items = [
+			{
+				"item_code": "ITEM-B",
+				"qty": 1,
+				"price_list_rate": 100.0,
+				"discount_percentage": 25.0,
+			}
+		]
+		inv = self._add_items(items)
+		self.assertEqual(inv.items[0].discount_percentage, 25.0)
 
-    def test_bundle_parent_100_pct_discount(self):
-        """Bundle parent items should have 100% discount → rate=0."""
-        items = [{
-            "item_code": "BUNDLE-PARENT",
-            "qty": 1,
-            "price_list_rate": 500.0,
-            "discount_percentage": 100.0,
-            "is_bundle_parent": True,
-            "bundle_code": "BUNDLE-001",
-        }]
-        inv = self._add_items(items)
-        self.assertEqual(inv.items[0].discount_percentage, 100.0)
-        self.assertTrue(getattr(inv.items[0], "is_bundle_parent", False))
+	def test_discount_amount_converted_to_percentage(self):
+		"""discount_amount should be converted to discount_percentage."""
+		items = [
+			{
+				"item_code": "ITEM-C",
+				"qty": 1,
+				"price_list_rate": 200.0,
+				"rate": 200.0,
+				"discount_amount": 40.0,  # = 20% of 200
+			}
+		]
+		inv = self._add_items(items)
+		self.assertAlmostEqual(inv.items[0].discount_percentage, 20.0, places=1)
 
-    def test_bundle_child_items(self):
-        """Bundle child items should carry bundle_code and partial discount."""
-        items = [
-            {
-                "item_code": "CHILD-A",
-                "qty": 1,
-                "price_list_rate": 200.0,
-                "discount_percentage": 50.0,
-                "is_bundle_child": True,
-                "bundle_code": "BUNDLE-001",
-            },
-            {
-                "item_code": "CHILD-B",
-                "qty": 2,
-                "price_list_rate": 150.0,
-                "discount_percentage": 50.0,
-                "is_bundle_child": True,
-                "bundle_code": "BUNDLE-001",
-            },
-        ]
-        inv = self._add_items(items)
-        for item in inv.items:
-            self.assertEqual(item.discount_percentage, 50.0)
-            self.assertTrue(getattr(item, "is_bundle_child", False))
-            self.assertEqual(getattr(item, "bundle_code", None), "BUNDLE-001")
+	def test_bundle_parent_100_pct_discount(self):
+		"""Bundle parent items should have 100% discount → rate=0."""
+		items = [
+			{
+				"item_code": "BUNDLE-PARENT",
+				"qty": 1,
+				"price_list_rate": 500.0,
+				"discount_percentage": 100.0,
+				"is_bundle_parent": True,
+				"bundle_code": "BUNDLE-001",
+			}
+		]
+		inv = self._add_items(items)
+		self.assertEqual(inv.items[0].discount_percentage, 100.0)
+		self.assertTrue(getattr(inv.items[0], "is_bundle_parent", False))
 
-    def test_multiple_items(self):
-        """Multiple items should all be added."""
-        items = [
-            {"item_code": f"ITEM-{i}", "qty": i, "rate": 10.0 * i}
-            for i in range(1, 6)
-        ]
-        inv = self._add_items(items)
-        self.assertEqual(len(inv.items), 5)
+	def test_bundle_child_items(self):
+		"""Bundle child items should carry bundle_code and partial discount."""
+		items = [
+			{
+				"item_code": "CHILD-A",
+				"qty": 1,
+				"price_list_rate": 200.0,
+				"discount_percentage": 50.0,
+				"is_bundle_child": True,
+				"bundle_code": "BUNDLE-001",
+			},
+			{
+				"item_code": "CHILD-B",
+				"qty": 2,
+				"price_list_rate": 150.0,
+				"discount_percentage": 50.0,
+				"is_bundle_child": True,
+				"bundle_code": "BUNDLE-001",
+			},
+		]
+		inv = self._add_items(items)
+		for item in inv.items:
+			self.assertEqual(item.discount_percentage, 50.0)
+			self.assertTrue(getattr(item, "is_bundle_child", False))
+			self.assertEqual(getattr(item, "bundle_code", None), "BUNDLE-001")
+
+	def test_multiple_items(self):
+		"""Multiple items should all be added."""
+		items = [{"item_code": f"ITEM-{i}", "qty": i, "rate": 10.0 * i} for i in range(1, 6)]
+		inv = self._add_items(items)
+		self.assertEqual(len(inv.items), 5)
 
 
 class TestResolvedRatePreservation(unittest.TestCase):
-    """Native defaults must not replace rates resolved outside Item Price."""
+	"""Native defaults must not replace rates resolved outside Item Price."""
 
-    def _calculate(self, price_list_rate, discount_percentage):
-        row = SimpleNamespace(
-            item_code="CATEGORY-RATE-ITEM",
-            qty=1,
-            price_list_rate=price_list_rate,
-            discount_percentage=discount_percentage,
-            discount_amount=0,
-            rate=price_list_rate,
-            amount=price_list_rate,
-        )
-        invoice = SimpleNamespace(
-            items=[row], flags=SimpleNamespace(), net_total=0, grand_total=0
-        )
+	def _calculate(self, price_list_rate, discount_percentage):
+		row = SimpleNamespace(
+			item_code="CATEGORY-RATE-ITEM",
+			qty=1,
+			price_list_rate=price_list_rate,
+			discount_percentage=discount_percentage,
+			discount_amount=0,
+			rate=price_list_rate,
+			amount=price_list_rate,
+		)
+		invoice = SimpleNamespace(items=[row], flags=SimpleNamespace(), net_total=0, grand_total=0)
 
-        def set_missing_values():
-            # ERPNext v16 does this when there is no matching per-item Item Price,
-            # even though Jarz already resolved a customer/category rate.
-            row.price_list_rate = 0
-            row.discount_percentage = 0
-            row.rate = 0
+		def set_missing_values():
+			# ERPNext v16 does this when there is no matching per-item Item Price,
+			# even though Jarz already resolved a customer/category rate.
+			row.price_list_rate = 0
+			row.discount_percentage = 0
+			row.rate = 0
 
-        def calculate_taxes_and_totals():
-            row.amount = row.rate * row.qty
-            invoice.net_total = row.amount
-            invoice.grand_total = row.amount
+		def calculate_taxes_and_totals():
+			row.amount = row.rate * row.qty
+			invoice.net_total = row.amount
+			invoice.grand_total = row.amount
 
-        invoice.set_missing_values = set_missing_values
-        invoice.calculate_taxes_and_totals = calculate_taxes_and_totals
+		invoice.set_missing_values = set_missing_values
+		invoice.calculate_taxes_and_totals = calculate_taxes_and_totals
 
-        from jarz_pos.services.invoice_creation import _validate_and_calculate_document
+		from jarz_pos.services.invoice_creation import _validate_and_calculate_document
 
-        _validate_and_calculate_document(invoice, MagicMock())
-        return row
+		_validate_and_calculate_document(invoice, MagicMock())
+		return row
 
-    def test_sample_category_rate_survives_with_policy_discount(self):
-        row = self._calculate(price_list_rate=120, discount_percentage=100)
+	def test_sample_category_rate_survives_with_policy_discount(self):
+		row = self._calculate(price_list_rate=120, discount_percentage=100)
 
-        self.assertEqual(row.price_list_rate, 120)
-        self.assertEqual(row.discount_percentage, 100)
-        self.assertEqual(row.rate, 0)
+		self.assertEqual(row.price_list_rate, 120)
+		self.assertEqual(row.discount_percentage, 100)
+		self.assertEqual(row.rate, 0)
 
-    def test_ordinary_category_rate_survives_without_discount(self):
-        row = self._calculate(price_list_rate=77, discount_percentage=0)
+	def test_ordinary_category_rate_survives_without_discount(self):
+		row = self._calculate(price_list_rate=77, discount_percentage=0)
 
-        self.assertEqual(row.price_list_rate, 77)
-        self.assertEqual(row.discount_percentage, 0)
-        self.assertEqual(row.rate, 77)
+		self.assertEqual(row.price_list_rate, 77)
+		self.assertEqual(row.discount_percentage, 0)
+		self.assertEqual(row.rate, 77)
 
-    def test_pricing_survives_insert_reload_and_submit_validation(self):
-        from jarz_pos.services import invoice_creation
+	def test_pricing_survives_insert_reload_and_submit_validation(self):
+		from jarz_pos.services import invoice_creation
 
-        class LifecycleInvoice:
-            def __init__(self):
-                self.items = [
-                    SimpleNamespace(
-                        item_code="SAMPLE",
-                        qty=1,
-                        price_list_rate=120,
-                        discount_percentage=100,
-                        discount_amount=0,
-                        rate=120,
-                        amount=120,
-                    ),
-                    SimpleNamespace(
-                        item_code="ORDINARY",
-                        qty=1,
-                        price_list_rate=77,
-                        discount_percentage=0,
-                        discount_amount=0,
-                        rate=77,
-                        amount=77,
-                    ),
-                ]
-                self.flags = SimpleNamespace()
-                self.net_total = 0
-                self.grand_total = 0
-                self.name = "TEST-LIFECYCLE-INVOICE"
-                self.persisted = None
-                self.lifecycle_snapshots = []
+		class LifecycleInvoice:
+			def __init__(self):
+				self.items = [
+					SimpleNamespace(
+						item_code="SAMPLE",
+						qty=1,
+						price_list_rate=120,
+						discount_percentage=100,
+						discount_amount=0,
+						rate=120,
+						amount=120,
+					),
+					SimpleNamespace(
+						item_code="ORDINARY",
+						qty=1,
+						price_list_rate=77,
+						discount_percentage=0,
+						discount_amount=0,
+						rate=77,
+						amount=77,
+					),
+				]
+				self.flags = SimpleNamespace()
+				self.net_total = 0
+				self.grand_total = 0
+				self.name = "TEST-LIFECYCLE-INVOICE"
+				self.persisted = None
+				self.lifecycle_snapshots = []
 
-            def _native_price_overwrite(self):
-                for row in self.items:
-                    row.price_list_rate = 0
-                    row.discount_percentage = 0
-                    row.rate = 0
+			def _native_price_overwrite(self):
+				for row in self.items:
+					row.price_list_rate = 0
+					row.discount_percentage = 0
+					row.rate = 0
 
-            def _persist(self, event):
-                self.persisted = [
-                    (row.item_code, row.price_list_rate, row.discount_percentage, row.rate)
-                    for row in self.items
-                ]
-                self.lifecycle_snapshots.append((event, self.persisted))
+			def _persist(self, event):
+				self.persisted = [
+					(row.item_code, row.price_list_rate, row.discount_percentage, row.rate)
+					for row in self.items
+				]
+				self.lifecycle_snapshots.append((event, self.persisted))
 
-            def set_missing_values(self):
-                self._native_price_overwrite()
+			def set_missing_values(self):
+				self._native_price_overwrite()
 
-            def calculate_taxes_and_totals(self):
-                for row in self.items:
-                    row.amount = row.qty * row.rate
-                self.net_total = sum(row.amount for row in self.items)
-                self.grand_total = self.net_total
+			def calculate_taxes_and_totals(self):
+				for row in self.items:
+					row.amount = row.qty * row.rate
+				self.net_total = sum(row.amount for row in self.items)
+				self.grand_total = self.net_total
 
-            def insert(self, **kwargs):
-                self._native_price_overwrite()
-                invoice_creation.restore_resolved_item_pricing_on_validate(self)
-                self._persist("insert")
+			def insert(self, **kwargs):
+				self._native_price_overwrite()
+				invoice_creation.restore_resolved_item_pricing_on_validate(self)
+				self._persist("insert")
 
-            def reload(self):
-                if self.persisted:
-                    for row, (_, price_list_rate, discount_percentage, rate) in zip(
-                        self.items, self.persisted, strict=True
-                    ):
-                        row.price_list_rate = price_list_rate
-                        row.discount_percentage = discount_percentage
-                        row.rate = rate
-                self.flags = SimpleNamespace()
+			def reload(self):
+				if self.persisted:
+					for row, (_, price_list_rate, discount_percentage, rate) in zip(
+						self.items, self.persisted, strict=True
+					):
+						row.price_list_rate = price_list_rate
+						row.discount_percentage = discount_percentage
+						row.rate = rate
+				self.flags = SimpleNamespace()
 
-            def submit(self):
-                self._native_price_overwrite()
-                invoice_creation.restore_resolved_item_pricing_on_validate(self)
-                self._persist("submit")
+			def submit(self):
+				self._native_price_overwrite()
+				invoice_creation.restore_resolved_item_pricing_on_validate(self)
+				self._persist("submit")
 
-        invoice = LifecycleInvoice()
-        logger = MagicMock()
-        invoice_creation._validate_and_calculate_document(invoice, logger)
-        invoice_creation._save_document(invoice, None, logger)
-        with patch.object(invoice_creation, "verify_invoice_totals"):
-            invoice_creation._submit_document(invoice, logger)
+		invoice = LifecycleInvoice()
+		logger = MagicMock()
+		invoice_creation._validate_and_calculate_document(invoice, logger)
+		invoice_creation._save_document(invoice, None, logger)
+		with patch.object(invoice_creation, "verify_invoice_totals"):
+			invoice_creation._submit_document(invoice, logger)
 
-        expected = [
-            ("SAMPLE", 120.0, 100.0, 0.0),
-            ("ORDINARY", 77.0, 0.0, 77.0),
-        ]
-        self.assertEqual(invoice.lifecycle_snapshots, [("insert", expected), ("submit", expected)])
+		expected = [
+			("SAMPLE", 120.0, 100.0, 0.0),
+			("ORDINARY", 77.0, 0.0, 77.0),
+		]
+		self.assertEqual(invoice.lifecycle_snapshots, [("insert", expected), ("submit", expected)])
 
 
 # ===========================================================================
 # TEST: Sales Partner Tax Suppression
 # ===========================================================================
 
+
 class TestSalesPartnerTaxSuppression(unittest.TestCase):
-    """Verify that invoices with sales partner have all tax rows suppressed."""
+	"""Verify that invoices with sales partner have all tax rows suppressed."""
 
-    def test_sales_partner_clears_taxes(self):
-        """When sales_partner is set, existing taxes should be cleared."""
-        inv = _InvoiceDocCapture()
-        # Pre-populate some taxes
-        inv.append("taxes", {"charge_type": "Actual", "description": "VAT", "tax_amount": 50.0})
-        inv.append("taxes", {"charge_type": "Actual", "description": "Shipping", "tax_amount": 30.0})
+	def test_sales_partner_clears_taxes(self):
+		"""When sales_partner is set, existing taxes should be cleared."""
+		inv = _InvoiceDocCapture()
+		# Pre-populate some taxes
+		inv.append("taxes", {"charge_type": "Actual", "description": "VAT", "tax_amount": 50.0})
+		inv.append("taxes", {"charge_type": "Actual", "description": "Shipping", "tax_amount": 30.0})
 
-        self.assertEqual(len(inv.taxes), 2)
+		self.assertEqual(len(inv.taxes), 2)
 
-        # Simulate what create_pos_invoice does
-        inv.sales_partner = "PARTNER-A"
-        if inv.sales_partner:
-            inv.set("taxes", [])
+		# Simulate what create_pos_invoice does
+		inv.sales_partner = "PARTNER-A"
+		if inv.sales_partner:
+			inv.set("taxes", [])
 
-        self.assertEqual(len(inv.taxes), 0, "Sales partner invoices should have no tax rows")
+		self.assertEqual(len(inv.taxes), 0, "Sales partner invoices should have no tax rows")
 
-    def test_no_partner_keeps_taxes(self):
-        """When no sales_partner, taxes should remain."""
-        inv = _InvoiceDocCapture()
-        inv.append("taxes", {"charge_type": "Actual", "description": "VAT", "tax_amount": 50.0})
+	def test_no_partner_keeps_taxes(self):
+		"""When no sales_partner, taxes should remain."""
+		inv = _InvoiceDocCapture()
+		inv.append("taxes", {"charge_type": "Actual", "description": "VAT", "tax_amount": 50.0})
 
-        inv.sales_partner = None
-        if not inv.sales_partner:
-            pass  # Don't clear
+		inv.sales_partner = None
+		if not inv.sales_partner:
+			pass  # Don't clear
 
-        self.assertEqual(len(inv.taxes), 1, "Non-partner invoices should keep tax rows")
+		self.assertEqual(len(inv.taxes), 1, "Non-partner invoices should keep tax rows")
 
 
 # ===========================================================================
 # TEST: Pickup Order Shipping Suppression
 # ===========================================================================
 
+
 class TestPickupShippingSuppression(unittest.TestCase):
-    """Verify that pickup orders suppress shipping charges."""
+	"""Verify that pickup orders suppress shipping charges."""
 
-    def test_pickup_suppresses_delivery_charges(self):
-        """Pickup orders should not have delivery charges added."""
-        # Simulating the business rule from create_pos_invoice
-        is_pickup = True
-        partner_tax_suppressed = False
-        free_shipping_waived = False
+	def test_pickup_suppresses_delivery_charges(self):
+		"""Pickup orders should not have delivery charges added."""
+		# Simulating the business rule from create_pos_invoice
+		is_pickup = True
+		partner_tax_suppressed = False
+		free_shipping_waived = False
 
-        # The condition that gates delivery charge insertion:
-        should_add_delivery = not partner_tax_suppressed and not free_shipping_waived and not is_pickup
+		# The condition that gates delivery charge insertion:
+		should_add_delivery = not partner_tax_suppressed and not free_shipping_waived and not is_pickup
 
-        self.assertFalse(should_add_delivery, "Pickup should suppress delivery charges")
+		self.assertFalse(should_add_delivery, "Pickup should suppress delivery charges")
 
-    def test_pickup_sets_flag(self):
-        """Pickup orders should set custom_is_pickup = 1."""
-        inv = _InvoiceDocCapture()
-        is_pickup = True
-        if is_pickup:
-            inv.custom_is_pickup = 1
+	def test_pickup_sets_flag(self):
+		"""Pickup orders should set custom_is_pickup = 1."""
+		inv = _InvoiceDocCapture()
+		is_pickup = True
+		if is_pickup:
+			inv.custom_is_pickup = 1
 
-        self.assertEqual(inv.custom_is_pickup, 1)
+		self.assertEqual(inv.custom_is_pickup, 1)
 
-    def test_pickup_adds_remarks_marker(self):
-        """Pickup orders should add [PICKUP] to remarks."""
-        inv = _InvoiceDocCapture()
-        is_pickup = True
-        if is_pickup:
-            marker = "[PICKUP]"
-            existing = (inv.remarks or "").strip()
-            if marker not in existing:
-                inv.remarks = (existing + "\n" if existing else "") + marker
+	def test_pickup_adds_remarks_marker(self):
+		"""Pickup orders should add [PICKUP] to remarks."""
+		inv = _InvoiceDocCapture()
+		is_pickup = True
+		if is_pickup:
+			marker = "[PICKUP]"
+			existing = (inv.remarks or "").strip()
+			if marker not in existing:
+				inv.remarks = (existing + "\n" if existing else "") + marker
 
-        self.assertIn("[PICKUP]", inv.remarks)
+		self.assertIn("[PICKUP]", inv.remarks)
 
 
 # ===========================================================================
 # TEST: Delivery Charges JSON Construction (Flutter-side logic, verified here)
 # ===========================================================================
 
+
 class TestDeliveryChargesConstruction(unittest.TestCase):
-    """Verify delivery_charges_json construction rules."""
+	"""Verify delivery_charges_json construction rules."""
 
-    def test_delivery_charges_present_for_customer_with_income(self):
-        """Customer with delivery_income should produce delivery_charges_json."""
-        customer = {"name": "CUST-001", "delivery_income": 30.0, "territory": "Cairo"}
-        sales_partner = None
+	def test_delivery_charges_present_for_customer_with_income(self):
+		"""Customer with delivery_income should produce delivery_charges_json."""
+		customer = {"name": "CUST-001", "delivery_income": 30.0, "territory": "Cairo"}
+		sales_partner = None
 
-        partner_active = sales_partner is not None and sales_partner != ""
-        should_add = (
-            not partner_active
-            and customer is not None
-            and customer.get("delivery_income") is not None
-            and customer["delivery_income"] > 0
-        )
-        self.assertTrue(should_add)
+		partner_active = sales_partner is not None and sales_partner != ""
+		should_add = (
+			not partner_active
+			and customer is not None
+			and customer.get("delivery_income") is not None
+			and customer["delivery_income"] > 0
+		)
+		self.assertTrue(should_add)
 
-        charges_json = json.dumps([{
-            "charge_type": "Delivery",
-            "amount": customer["delivery_income"],
-            "description": f"Delivery charge for {customer.get('territory', 'Unknown Territory')}",
-        }])
-        parsed = json.loads(charges_json)
-        self.assertEqual(len(parsed), 1)
-        self.assertEqual(parsed[0]["amount"], 30.0)
+		charges_json = json.dumps(
+			[
+				{
+					"charge_type": "Delivery",
+					"amount": customer["delivery_income"],
+					"description": f"Delivery charge for {customer.get('territory', 'Unknown Territory')}",
+				}
+			]
+		)
+		parsed = json.loads(charges_json)
+		self.assertEqual(len(parsed), 1)
+		self.assertEqual(parsed[0]["amount"], 30.0)
 
-    def test_delivery_charges_suppressed_for_sales_partner(self):
-        """Sales partner active should suppress delivery_charges_json."""
-        customer = {"name": "CUST-002", "delivery_income": 30.0}
-        sales_partner = "PARTNER-A"
+	def test_delivery_charges_suppressed_for_sales_partner(self):
+		"""Sales partner active should suppress delivery_charges_json."""
+		customer = {"name": "CUST-002", "delivery_income": 30.0}
+		sales_partner = "PARTNER-A"
 
-        partner_active = sales_partner is not None and sales_partner != ""
-        should_add = (
-            not partner_active
-            and customer is not None
-            and customer.get("delivery_income") is not None
-            and customer["delivery_income"] > 0
-        )
-        self.assertFalse(should_add, "Sales partner should suppress delivery charges")
+		partner_active = sales_partner is not None and sales_partner != ""
+		should_add = (
+			not partner_active
+			and customer is not None
+			and customer.get("delivery_income") is not None
+			and customer["delivery_income"] > 0
+		)
+		self.assertFalse(should_add, "Sales partner should suppress delivery charges")
 
-    def test_delivery_charges_suppressed_for_zero_income(self):
-        """Zero delivery_income should not produce charges."""
-        customer = {"name": "CUST-003", "delivery_income": 0}
-        should_add = (
-            customer.get("delivery_income") is not None
-            and customer["delivery_income"] > 0
-        )
-        self.assertFalse(should_add)
+	def test_delivery_charges_suppressed_for_zero_income(self):
+		"""Zero delivery_income should not produce charges."""
+		customer = {"name": "CUST-003", "delivery_income": 0}
+		should_add = customer.get("delivery_income") is not None and customer["delivery_income"] > 0
+		self.assertFalse(should_add)
 
-    def test_delivery_charges_suppressed_for_no_customer(self):
-        """No customer should not produce charges."""
-        customer = None
-        should_add = customer is not None and customer.get("delivery_income", 0) > 0
-        self.assertFalse(should_add)
+	def test_delivery_charges_suppressed_for_no_customer(self):
+		"""No customer should not produce charges."""
+		customer = None
+		should_add = customer is not None and customer.get("delivery_income", 0) > 0
+		self.assertFalse(should_add)
 
 
 # ===========================================================================
 # TEST: Free Shipping Bundle Detection
 # ===========================================================================
 
+
 class TestFreeShippingBundleDetection(unittest.TestCase):
-    """Verify that free-shipping bundles trigger shipping waiver."""
+	"""Verify that free-shipping bundles trigger shipping waiver."""
 
-    def test_free_shipping_waiver_logic(self):
-        """When a bundle has free_shipping=1, shipping should be waived."""
-        # Simulate _get_delivery_expense_amount behavior for free-shipping bundle
-        with patch("jarz_pos.services.delivery_handling.frappe") as mf:
-            # Mock invoice with bundle items
-            inv = MagicMock()
-            item1 = MagicMock()
-            item1.item_code = "BUNDLE-PARENT"
-            item1.bundle_code = "FREE-SHIP-BUNDLE"
-            inv.items = [item1]
+	def test_free_shipping_waiver_logic(self):
+		"""When a bundle has free_shipping=1, shipping should be waived."""
+		# Simulate _get_delivery_expense_amount behavior for free-shipping bundle
+		with patch("jarz_pos.services.delivery_handling.frappe") as mf:
+			# Mock invoice with bundle items
+			inv = MagicMock()
+			item1 = MagicMock()
+			item1.item_code = "BUNDLE-PARENT"
+			item1.bundle_code = "FREE-SHIP-BUNDLE"
+			inv.items = [item1]
 
-            # Mock DB: Jarz Bundle has free_shipping=1
-            mf.db.get_table_columns.return_value = ["name", "free_shipping"]
-            mf.get_all.return_value = ["FREE-SHIP-BUNDLE"]  # has free_shipping=1
+			# Mock DB: Jarz Bundle has free_shipping=1
+			mf.db.get_table_columns.return_value = ["name", "free_shipping"]
+			mf.get_all.return_value = ["FREE-SHIP-BUNDLE"]  # has free_shipping=1
 
-            # This simulates the lookup code path
-            bundle_candidates = []
-            for it in inv.items:
-                bcode = getattr(it, "bundle_code", None)
-                if bcode:
-                    bundle_candidates.append(bcode)
+			# This simulates the lookup code path
+			bundle_candidates = []
+			for it in inv.items:
+				bcode = getattr(it, "bundle_code", None)
+				if bcode:
+					bundle_candidates.append(bcode)
 
-            self.assertEqual(len(bundle_candidates), 1)
-            self.assertEqual(bundle_candidates[0], "FREE-SHIP-BUNDLE")
+			self.assertEqual(len(bundle_candidates), 1)
+			self.assertEqual(bundle_candidates[0], "FREE-SHIP-BUNDLE")
 
-    def test_no_bundle_no_waiver(self):
-        """Regular items should not trigger free-shipping waiver."""
-        inv = MagicMock()
-        item1 = MagicMock()
-        item1.item_code = "REGULAR-ITEM"
-        item1.bundle_code = None
-        item1.parent_bundle = None
-        inv.items = [item1]
+	def test_no_bundle_no_waiver(self):
+		"""Regular items should not trigger free-shipping waiver."""
+		inv = MagicMock()
+		item1 = MagicMock()
+		item1.item_code = "REGULAR-ITEM"
+		item1.bundle_code = None
+		item1.parent_bundle = None
+		inv.items = [item1]
 
-        bundle_candidates = []
-        for it in inv.items:
-            bcode = getattr(it, "bundle_code", None) or getattr(it, "parent_bundle", None)
-            if bcode:
-                bundle_candidates.append(bcode)
+		bundle_candidates = []
+		for it in inv.items:
+			bcode = getattr(it, "bundle_code", None) or getattr(it, "parent_bundle", None)
+			if bcode:
+				bundle_candidates.append(bcode)
 
-        self.assertEqual(len(bundle_candidates), 0, "Regular items should have no bundle candidates")
+		self.assertEqual(len(bundle_candidates), 0, "Regular items should have no bundle candidates")
 
 
 # ===========================================================================
 # TEST: Delivery promotion resolution
 # ===========================================================================
 
+
 class TestDeliveryPromotionResolution(unittest.TestCase):
-    """Verify rule matching for the 999 EGP delivery promotion."""
+	"""Verify rule matching for the 999 EGP delivery promotion."""
 
-    def _invoice_with_items(self, items):
-        inv = _InvoiceDocCapture()
-        inv.company = "Jarz Company"
-        inv.pos_profile = "Main POS"
-        logger = MagicMock()
+	def _invoice_with_items(self, items):
+		inv = _InvoiceDocCapture()
+		inv.company = "Jarz Company"
+		inv.pos_profile = "Main POS"
+		logger = MagicMock()
 
-        with patch("jarz_pos.utils.invoice_utils.frappe") as mf:
-            mf.get_doc.return_value = MagicMock(stock_uom="Unit")
+		with patch("jarz_pos.utils.invoice_utils.frappe") as mf:
+			mf.get_doc.return_value = MagicMock(stock_uom="Unit")
 
-            from jarz_pos.utils.invoice_utils import add_items_to_invoice
-            add_items_to_invoice(inv, items, logger)
+			from jarz_pos.utils.invoice_utils import add_items_to_invoice
 
-        return inv
+			add_items_to_invoice(inv, items, logger)
 
-    def _mock_rule(self, minimum_threshold=999.0):
-        rule = MagicMock()
-        rule.rule_name = "Free Delivery >= 999 EGP"
-        rule.rule_type = "Free Delivery"
-        rule.company = None
-        rule.territory = None
-        rule.customer_group = None
-        rule.pos_profile = None
-        rule.threshold_basis = "Merchandise Subtotal"
-        rule.minimum_threshold = minimum_threshold
-        rule.maximum_threshold = 0.0
-        rule.minimum_item_qty = 0.0
-        rule.active_from = None
-        rule.active_to = None
-        rule.is_pickup_allowed = 0
-        rule.apply_to_shipping_income = 1
-        rule.apply_to_legacy_delivery_charges = 1
-        rule.channels = []
-        return rule
+		return inv
 
-    def test_free_delivery_rule_matches_threshold(self):
-        inv = self._invoice_with_items([
-            {"item_code": "ITEM-1", "qty": 2, "price_list_rate": 500.0},
-        ])
-        customer = _mock_customer(territory="Cairo")
-        customer.customer_group = "Retail"
-        pos_profile = _mock_pos_profile(name="Main POS", company="Jarz Company")
+	def _mock_rule(self, minimum_threshold=999.0):
+		rule = MagicMock()
+		rule.rule_name = "Free Delivery >= 999 EGP"
+		rule.rule_type = "Free Delivery"
+		rule.company = None
+		rule.territory = None
+		rule.customer_group = None
+		rule.pos_profile = None
+		rule.threshold_basis = "Merchandise Subtotal"
+		rule.minimum_threshold = minimum_threshold
+		rule.maximum_threshold = 0.0
+		rule.minimum_item_qty = 0.0
+		rule.active_from = None
+		rule.active_to = None
+		rule.is_pickup_allowed = 0
+		rule.apply_to_shipping_income = 1
+		rule.apply_to_legacy_delivery_charges = 1
+		rule.channels = []
+		return rule
 
-        with patch("jarz_pos.services.delivery_promotions.frappe") as mf:
-            mf.db.exists.return_value = True
-            mf.get_all.return_value = ["PROMO-0001"]
-            mf.get_doc.return_value = self._mock_rule()
-            mf.utils.now_datetime.return_value = datetime(2026, 5, 5, 12, 0, 0)
+	def test_free_delivery_rule_matches_threshold(self):
+		inv = self._invoice_with_items(
+			[
+				{"item_code": "ITEM-1", "qty": 2, "price_list_rate": 500.0},
+			]
+		)
+		customer = _mock_customer(territory="Cairo")
+		customer.customer_group = "Retail"
+		pos_profile = _mock_pos_profile(name="Main POS", company="Jarz Company")
 
-            from jarz_pos.services.delivery_promotions import resolve_delivery_promotion
-            decision = resolve_delivery_promotion(inv, customer_doc=customer, pos_profile=pos_profile)
+		with patch("jarz_pos.services.delivery_promotions.frappe") as mf:
+			mf.db.exists.return_value = True
+			mf.get_all.return_value = ["PROMO-0001"]
+			mf.get_doc.return_value = self._mock_rule()
+			mf.utils.now_datetime.return_value = datetime(2026, 5, 5, 12, 0, 0)
 
-        self.assertTrue(decision.matched)
-        self.assertEqual(decision.rule_name, "Free Delivery >= 999 EGP")
-        self.assertTrue(decision.suppress_shipping_income)
-        self.assertTrue(decision.suppress_legacy_delivery_charges)
-        self.assertAlmostEqual(decision.merchandise_subtotal, 1000.0, places=2)
+			from jarz_pos.services.delivery_promotions import resolve_delivery_promotion
 
-    def test_free_delivery_rule_does_not_match_below_threshold(self):
-        inv = self._invoice_with_items([
-            {"item_code": "ITEM-1", "qty": 2, "price_list_rate": 499.0},
-        ])
-        customer = _mock_customer(territory="Cairo")
-        pos_profile = _mock_pos_profile(name="Main POS", company="Jarz Company")
+			decision = resolve_delivery_promotion(inv, customer_doc=customer, pos_profile=pos_profile)
 
-        with patch("jarz_pos.services.delivery_promotions.frappe") as mf:
-            mf.db.exists.return_value = True
-            mf.get_all.return_value = ["PROMO-0001"]
-            mf.get_doc.return_value = self._mock_rule()
-            mf.utils.now_datetime.return_value = datetime(2026, 5, 5, 12, 0, 0)
+		self.assertTrue(decision.matched)
+		self.assertEqual(decision.rule_name, "Free Delivery >= 999 EGP")
+		self.assertTrue(decision.suppress_shipping_income)
+		self.assertTrue(decision.suppress_legacy_delivery_charges)
+		self.assertAlmostEqual(decision.merchandise_subtotal, 1000.0, places=2)
 
-            from jarz_pos.services.delivery_promotions import resolve_delivery_promotion
-            decision = resolve_delivery_promotion(inv, customer_doc=customer, pos_profile=pos_profile)
+	def test_free_delivery_rule_does_not_match_below_threshold(self):
+		inv = self._invoice_with_items(
+			[
+				{"item_code": "ITEM-1", "qty": 2, "price_list_rate": 499.0},
+			]
+		)
+		customer = _mock_customer(territory="Cairo")
+		pos_profile = _mock_pos_profile(name="Main POS", company="Jarz Company")
 
-        self.assertFalse(decision.matched)
-        self.assertFalse(decision.suppress_shipping_income)
-        self.assertFalse(decision.suppress_legacy_delivery_charges)
-        self.assertAlmostEqual(decision.merchandise_subtotal, 998.0, places=2)
+		with patch("jarz_pos.services.delivery_promotions.frappe") as mf:
+			mf.db.exists.return_value = True
+			mf.get_all.return_value = ["PROMO-0001"]
+			mf.get_doc.return_value = self._mock_rule()
+			mf.utils.now_datetime.return_value = datetime(2026, 5, 5, 12, 0, 0)
+
+			from jarz_pos.services.delivery_promotions import resolve_delivery_promotion
+
+			decision = resolve_delivery_promotion(inv, customer_doc=customer, pos_profile=pos_profile)
+
+		self.assertFalse(decision.matched)
+		self.assertFalse(decision.suppress_shipping_income)
+		self.assertFalse(decision.suppress_legacy_delivery_charges)
+		self.assertAlmostEqual(decision.merchandise_subtotal, 998.0, places=2)
 
 
 # ===========================================================================
 # TEST: Delivery promotion invoice integration
 # ===========================================================================
 
+
 class TestDeliveryPromotionInvoiceIntegration(unittest.TestCase):
-    """Verify create_pos_invoice respects resolved delivery promotions."""
+	"""Verify create_pos_invoice respects resolved delivery promotions."""
 
-    def _append_items(self, invoice_doc, processed_items, logger):
-        for item_data in processed_items:
-            row = invoice_doc.append("items", {})
-            row.item_code = item_data["item_code"]
-            row.qty = float(item_data.get("qty", 1) or 1)
-            row.price_list_rate = float(item_data.get("price_list_rate", item_data.get("rate", 0)) or 0)
-            row.discount_percentage = float(item_data.get("discount_percentage", 0) or 0)
+	def _append_items(self, invoice_doc, processed_items, logger):
+		for item_data in processed_items:
+			row = invoice_doc.append("items", {})
+			row.item_code = item_data["item_code"]
+			row.qty = float(item_data.get("qty", 1) or 1)
+			row.price_list_rate = float(item_data.get("price_list_rate", item_data.get("rate", 0)) or 0)
+			row.discount_percentage = float(item_data.get("discount_percentage", 0) or 0)
 
-    def _set_invoice_fields(self, invoice_doc, customer_doc, pos_profile, delivery_datetime, logger):
-        invoice_doc.customer = customer_doc.name
-        invoice_doc.customer_name = customer_doc.customer_name
-        invoice_doc.company = pos_profile.company
-        invoice_doc.pos_profile = pos_profile.name
-        invoice_doc.territory = customer_doc.territory
+	def _set_invoice_fields(self, invoice_doc, customer_doc, pos_profile, delivery_datetime, logger):
+		invoice_doc.customer = customer_doc.name
+		invoice_doc.customer_name = customer_doc.customer_name
+		invoice_doc.company = pos_profile.company
+		invoice_doc.pos_profile = pos_profile.name
+		invoice_doc.territory = customer_doc.territory
 
-    def test_matched_promotion_skips_shipping_tax_insertion(self):
-        inv = _InvoiceDocCapture()
-        customer = _mock_customer(territory="Cairo")
-        pos_profile = _mock_pos_profile(name="Main POS", company="Jarz Company")
-        processed_items = [{"item_code": "ITEM-1", "qty": 2, "price_list_rate": 500.0}]
-        tax_calls = []
+	def test_matched_promotion_skips_shipping_tax_insertion(self):
+		inv = _InvoiceDocCapture()
+		customer = _mock_customer(territory="Cairo")
+		pos_profile = _mock_pos_profile(name="Main POS", company="Jarz Company")
+		processed_items = [{"item_code": "ITEM-1", "qty": 2, "price_list_rate": 500.0}]
+		tax_calls = []
 
-        def _capture_tax_call(invoice_doc, amount, delivery_description=None):
-            tax_calls.append((amount, delivery_description))
+		def _capture_tax_call(invoice_doc, amount, delivery_description=None):
+			tax_calls.append((amount, delivery_description))
 
-        with patch("jarz_pos.services.invoice_creation.validate_cart_data", return_value=[{"item_code": "ITEM-1"}]), \
-             patch("jarz_pos.services.invoice_creation._parse_delivery_charges", return_value=[]), \
-             patch("jarz_pos.services.invoice_creation.validate_delivery_datetime", return_value=None), \
-             patch("jarz_pos.services.invoice_creation.validate_customer", return_value=customer), \
-             patch("jarz_pos.services.invoice_creation.validate_pos_profile", return_value=pos_profile), \
-             patch("jarz_pos.services.invoice_creation._process_cart_items", return_value=processed_items), \
-             patch("jarz_pos.services.invoice_creation._create_invoice_document", return_value=inv), \
-             patch("jarz_pos.services.invoice_creation.set_invoice_fields", side_effect=self._set_invoice_fields), \
-             patch("jarz_pos.services.invoice_creation.add_items_to_invoice", side_effect=self._append_items), \
-             patch("jarz_pos.services.invoice_creation._set_initial_state_for_sales_partner"), \
-             patch("jarz_pos.services.invoice_creation._validate_and_calculate_document"), \
-             patch("jarz_pos.services.invoice_creation._save_document"), \
-             patch("jarz_pos.services.invoice_creation._submit_document"), \
-             patch("jarz_pos.services.invoice_creation._maybe_register_online_payment_to_partner"), \
-             patch("jarz_pos.services.invoice_creation.add_delivery_charges_to_taxes", side_effect=_capture_tax_call), \
-             patch("jarz_pos.services.invoice_creation._delivery_promotions.resolve_delivery_promotion") as resolve_promo, \
-             patch("jarz_pos.services.invoice_creation._delivery_promotions.apply_delivery_promotion_audit") as apply_audit, \
-             patch("jarz_pos.services.invoice_creation.frappe") as mf:
-            from jarz_pos.services.delivery_promotions import DeliveryPromotionDecision
-            resolve_promo.return_value = DeliveryPromotionDecision(
-                matched=True,
-                rule_name="Free Delivery >= 999 EGP",
-                rule_type="Free Delivery",
-                merchandise_subtotal=1000.0,
-                item_qty=2.0,
-                suppress_shipping_income=True,
-                suppress_legacy_delivery_charges=True,
-            )
+		with (
+			patch(
+				"jarz_pos.services.invoice_creation.validate_cart_data",
+				return_value=[{"item_code": "ITEM-1"}],
+			),
+			patch("jarz_pos.services.invoice_creation._parse_delivery_charges", return_value=[]),
+			patch("jarz_pos.services.invoice_creation.validate_delivery_datetime", return_value=None),
+			patch("jarz_pos.services.invoice_creation.validate_customer", return_value=customer),
+			patch("jarz_pos.services.invoice_creation.validate_pos_profile", return_value=pos_profile),
+			patch("jarz_pos.services.invoice_creation._process_cart_items", return_value=processed_items),
+			patch("jarz_pos.services.invoice_creation._create_invoice_document", return_value=inv),
+			patch(
+				"jarz_pos.services.invoice_creation.set_invoice_fields", side_effect=self._set_invoice_fields
+			),
+			patch("jarz_pos.services.invoice_creation.add_items_to_invoice", side_effect=self._append_items),
+			patch("jarz_pos.services.invoice_creation._set_initial_state_for_sales_partner"),
+			patch("jarz_pos.services.invoice_creation._validate_and_calculate_document"),
+			patch("jarz_pos.services.invoice_creation._save_document"),
+			patch("jarz_pos.services.invoice_creation._submit_document"),
+			patch("jarz_pos.services.invoice_creation._maybe_register_online_payment_to_partner"),
+			patch(
+				"jarz_pos.services.invoice_creation.add_delivery_charges_to_taxes",
+				side_effect=_capture_tax_call,
+			),
+			patch(
+				"jarz_pos.services.invoice_creation._delivery_promotions.resolve_delivery_promotion"
+			) as resolve_promo,
+			patch(
+				"jarz_pos.services.invoice_creation._delivery_promotions.apply_delivery_promotion_audit"
+			) as apply_audit,
+			patch("jarz_pos.services.invoice_creation.frappe") as mf,
+		):
+			from jarz_pos.services.delivery_promotions import DeliveryPromotionDecision
 
-            mf.local.site = "test-site"
-            mf.logger.return_value = MagicMock()
-            mf.utils.now.return_value = "2026-05-05 12:00:00"
-            mf.db.exists.side_effect = lambda doctype, name=None: doctype == "Territory" and name == "Cairo"
-            mf.get_doc.return_value = MagicMock(delivery_income=30.0)
-            mf.get_all.return_value = []
+			resolve_promo.return_value = DeliveryPromotionDecision(
+				matched=True,
+				rule_name="Free Delivery >= 999 EGP",
+				rule_type="Free Delivery",
+				merchandise_subtotal=1000.0,
+				item_qty=2.0,
+				suppress_shipping_income=True,
+				suppress_legacy_delivery_charges=True,
+			)
 
-            from jarz_pos.services.invoice_creation import create_pos_invoice
-            create_pos_invoice(cart_json="[]", customer_name=customer.name)
+			mf.local.site = "test-site"
+			mf.logger.return_value = MagicMock()
+			mf.utils.now.return_value = "2026-05-05 12:00:00"
+			mf.db.exists.side_effect = lambda doctype, name=None: doctype == "Territory" and name == "Cairo"
+			mf.get_doc.return_value = MagicMock(delivery_income=30.0)
+			mf.get_all.return_value = []
 
-        self.assertEqual(tax_calls, [], "Matched free-delivery promotion should suppress shipping tax rows")
-        apply_audit.assert_called_once()
+			from jarz_pos.services.invoice_creation import create_pos_invoice
 
-    def test_selected_shipping_address_territory_controls_shipping_income(self):
-        inv = _InvoiceDocCapture()
-        customer = _mock_customer(territory="EGHADAYEQAH")
-        pos_profile = _mock_pos_profile(name="Nasr city", company="Jarz Company")
-        processed_items = [{"item_code": "ITEM-1", "qty": 1, "price_list_rate": 600.0}]
-        tax_calls = []
+			create_pos_invoice(cart_json="[]", customer_name=customer.name)
 
-        def _capture_tax_call(invoice_doc, amount, delivery_description=None):
-            tax_calls.append((amount, delivery_description))
+		self.assertEqual(tax_calls, [], "Matched free-delivery promotion should suppress shipping tax rows")
+		apply_audit.assert_called_once()
 
-        def _get_doc(doctype, name):
-            if doctype == "Territory" and name == "EGNASRCITY":
-                return MagicMock(delivery_income=50.0)
-            return MagicMock()
+	def test_selected_shipping_address_territory_controls_shipping_income(self):
+		inv = _InvoiceDocCapture()
+		customer = _mock_customer(territory="EGHADAYEQAH")
+		pos_profile = _mock_pos_profile(name="Nasr city", company="Jarz Company")
+		processed_items = [{"item_code": "ITEM-1", "qty": 1, "price_list_rate": 600.0}]
+		tax_calls = []
 
-        with patch("jarz_pos.services.invoice_creation.validate_cart_data", return_value=[{"item_code": "ITEM-1"}]), \
-             patch("jarz_pos.services.invoice_creation._parse_delivery_charges", return_value=[]), \
-             patch("jarz_pos.services.invoice_creation.validate_delivery_datetime", return_value=None), \
-             patch("jarz_pos.services.invoice_creation.validate_customer", return_value=customer), \
-             patch("jarz_pos.services.invoice_creation.validate_pos_profile", return_value=pos_profile), \
-             patch("jarz_pos.services.invoice_creation._process_cart_items", return_value=processed_items), \
-             patch("jarz_pos.services.invoice_creation._create_invoice_document", return_value=inv), \
-             patch("jarz_pos.services.invoice_creation.set_invoice_fields", side_effect=self._set_invoice_fields), \
-             patch("jarz_pos.services.invoice_creation.resolve_customer_shipping_address", return_value={"name": "ADDR-NSR", "city": "EGNASRCITY", "state": "EGNASRCITY"}), \
-             patch("jarz_pos.services.invoice_creation.ensure_shipping_address"), \
-             patch("jarz_pos.services.invoice_creation.add_items_to_invoice", side_effect=self._append_items), \
-             patch("jarz_pos.services.invoice_creation._set_initial_state_for_sales_partner"), \
-             patch("jarz_pos.services.invoice_creation._validate_and_calculate_document"), \
-             patch("jarz_pos.services.invoice_creation._save_document"), \
-             patch("jarz_pos.services.invoice_creation._submit_document"), \
-             patch("jarz_pos.services.invoice_creation._maybe_register_online_payment_to_partner"), \
-             patch("jarz_pos.services.invoice_creation.add_delivery_charges_to_taxes", side_effect=_capture_tax_call), \
-             patch("jarz_pos.services.invoice_creation._delivery_promotions.resolve_delivery_promotion") as resolve_promo, \
-             patch("jarz_pos.services.invoice_creation._delivery_promotions.apply_delivery_promotion_audit"), \
-             patch("jarz_pos.services.invoice_creation.frappe") as mf:
-            from jarz_pos.services.delivery_promotions import DeliveryPromotionDecision
+		def _capture_tax_call(invoice_doc, amount, delivery_description=None):
+			tax_calls.append((amount, delivery_description))
 
-            resolve_promo.return_value = DeliveryPromotionDecision()
-            mf.local.site = "test-site"
-            mf.logger.return_value = MagicMock()
-            mf.utils.now.return_value = "2026-05-05 12:00:00"
-            mf.db.exists.side_effect = lambda doctype, name=None: doctype == "Territory" and name == "EGNASRCITY"
-            mf.get_doc.side_effect = _get_doc
-            mf.get_all.return_value = []
+		def _get_doc(doctype, name):
+			if doctype == "Territory" and name == "EGNASRCITY":
+				return MagicMock(delivery_income=50.0)
+			return MagicMock()
 
-            from jarz_pos.services.invoice_creation import create_pos_invoice
-            create_pos_invoice(
-                cart_json="[]",
-                customer_name=customer.name,
-                pos_profile_name=pos_profile.name,
-                shipping_address_name="ADDR-NSR",
-            )
+		with (
+			patch(
+				"jarz_pos.services.invoice_creation.validate_cart_data",
+				return_value=[{"item_code": "ITEM-1"}],
+			),
+			patch("jarz_pos.services.invoice_creation._parse_delivery_charges", return_value=[]),
+			patch("jarz_pos.services.invoice_creation.validate_delivery_datetime", return_value=None),
+			patch("jarz_pos.services.invoice_creation.validate_customer", return_value=customer),
+			patch("jarz_pos.services.invoice_creation.validate_pos_profile", return_value=pos_profile),
+			patch("jarz_pos.services.invoice_creation._process_cart_items", return_value=processed_items),
+			patch("jarz_pos.services.invoice_creation._create_invoice_document", return_value=inv),
+			patch(
+				"jarz_pos.services.invoice_creation.set_invoice_fields", side_effect=self._set_invoice_fields
+			),
+			patch(
+				"jarz_pos.services.invoice_creation.resolve_customer_shipping_address",
+				return_value={"name": "ADDR-NSR", "city": "EGNASRCITY", "state": "EGNASRCITY"},
+			),
+			patch("jarz_pos.services.invoice_creation.ensure_shipping_address"),
+			patch("jarz_pos.services.invoice_creation.add_items_to_invoice", side_effect=self._append_items),
+			patch("jarz_pos.services.invoice_creation._set_initial_state_for_sales_partner"),
+			patch("jarz_pos.services.invoice_creation._validate_and_calculate_document"),
+			patch("jarz_pos.services.invoice_creation._save_document"),
+			patch("jarz_pos.services.invoice_creation._submit_document"),
+			patch("jarz_pos.services.invoice_creation._maybe_register_online_payment_to_partner"),
+			patch(
+				"jarz_pos.services.invoice_creation.add_delivery_charges_to_taxes",
+				side_effect=_capture_tax_call,
+			),
+			patch(
+				"jarz_pos.services.invoice_creation._delivery_promotions.resolve_delivery_promotion"
+			) as resolve_promo,
+			patch("jarz_pos.services.invoice_creation._delivery_promotions.apply_delivery_promotion_audit"),
+			patch("jarz_pos.services.invoice_creation.frappe") as mf,
+		):
+			from jarz_pos.services.delivery_promotions import DeliveryPromotionDecision
 
-        self.assertEqual(inv.territory, "EGNASRCITY")
-        self.assertEqual(inv.customer_address, "ADDR-NSR")
-        self.assertEqual(inv.shipping_address_name, "ADDR-NSR")
-        self.assertEqual(tax_calls, [(50.0, "Shipping Income (EGNASRCITY)")])
+			resolve_promo.return_value = DeliveryPromotionDecision()
+			mf.local.site = "test-site"
+			mf.logger.return_value = MagicMock()
+			mf.utils.now.return_value = "2026-05-05 12:00:00"
+			mf.db.exists.side_effect = (
+				lambda doctype, name=None: doctype == "Territory" and name == "EGNASRCITY"
+			)
+			mf.get_doc.side_effect = _get_doc
+			mf.get_all.return_value = []
 
-    def test_unresolved_shipping_address_territory_is_loud_and_non_blocking(self):
-        inv = _InvoiceDocCapture()
-        customer = _mock_customer(territory=None)
-        pos_profile = _mock_pos_profile(name="Nasr city", company="Jarz Company")
-        processed_items = [{"item_code": "ITEM-1", "qty": 1, "price_list_rate": 600.0}]
-        tax_calls = []
-        logger = MagicMock()
+			from jarz_pos.services.invoice_creation import create_pos_invoice
 
-        def _capture_tax_call(invoice_doc, amount, delivery_description=None):
-            tax_calls.append((amount, delivery_description))
+			create_pos_invoice(
+				cart_json="[]",
+				customer_name=customer.name,
+				pos_profile_name=pos_profile.name,
+				shipping_address_name="ADDR-NSR",
+			)
 
-        with patch("jarz_pos.services.invoice_creation.validate_cart_data", return_value=[{"item_code": "ITEM-1"}]), \
-             patch("jarz_pos.services.invoice_creation._parse_delivery_charges", return_value=[]), \
-             patch("jarz_pos.services.invoice_creation.validate_delivery_datetime", return_value=None), \
-             patch("jarz_pos.services.invoice_creation.validate_customer", return_value=customer), \
-             patch("jarz_pos.services.invoice_creation.validate_pos_profile", return_value=pos_profile), \
-             patch("jarz_pos.services.invoice_creation._process_cart_items", return_value=processed_items), \
-             patch("jarz_pos.services.invoice_creation._create_invoice_document", return_value=inv), \
-             patch("jarz_pos.services.invoice_creation.set_invoice_fields", side_effect=self._set_invoice_fields), \
-             patch(
-                 "jarz_pos.services.invoice_creation.resolve_customer_shipping_address",
-                 return_value={
-                     "name": "ADDR-SHAMS",
-                     "city": "Ain Shams - عين شمس",
-                     "state": "Ain Shams - عين شمس",
-                 },
-             ), \
-             patch("jarz_pos.services.invoice_creation.resolve_order_territory", return_value=None), \
-             patch("jarz_pos.services.invoice_creation.ensure_shipping_address"), \
-             patch("jarz_pos.services.invoice_creation.add_items_to_invoice", side_effect=self._append_items), \
-             patch("jarz_pos.services.invoice_creation._set_initial_state_for_sales_partner"), \
-             patch("jarz_pos.services.invoice_creation._validate_and_calculate_document"), \
-             patch("jarz_pos.services.invoice_creation._save_document"), \
-             patch("jarz_pos.services.invoice_creation._submit_document"), \
-             patch("jarz_pos.services.invoice_creation._maybe_register_online_payment_to_partner"), \
-             patch("jarz_pos.services.invoice_creation.add_delivery_charges_to_taxes", side_effect=_capture_tax_call), \
-             patch("jarz_pos.services.invoice_creation._delivery_promotions.resolve_delivery_promotion") as resolve_promo, \
-             patch("jarz_pos.services.invoice_creation._delivery_promotions.apply_delivery_promotion_audit"), \
-             patch("jarz_pos.services.invoice_creation.frappe") as mf:
-            from jarz_pos.services.delivery_promotions import DeliveryPromotionDecision
+		self.assertEqual(inv.territory, "EGNASRCITY")
+		self.assertEqual(inv.customer_address, "ADDR-NSR")
+		self.assertEqual(inv.shipping_address_name, "ADDR-NSR")
+		self.assertEqual(tax_calls, [(50.0, "Shipping Income (EGNASRCITY)")])
 
-            resolve_promo.return_value = DeliveryPromotionDecision()
-            mf.local.site = "test-site"
-            mf.logger.return_value = logger
-            mf.utils.now.return_value = "2026-05-05 12:00:00"
-            mf.db.exists.return_value = False
-            mf.get_all.return_value = []
+	def test_unresolved_shipping_address_territory_is_loud_and_non_blocking(self):
+		inv = _InvoiceDocCapture()
+		customer = _mock_customer(territory=None)
+		pos_profile = _mock_pos_profile(name="Nasr city", company="Jarz Company")
+		processed_items = [{"item_code": "ITEM-1", "qty": 1, "price_list_rate": 600.0}]
+		tax_calls = []
+		logger = MagicMock()
 
-            from jarz_pos.services.invoice_creation import create_pos_invoice
-            create_pos_invoice(
-                cart_json="[]",
-                customer_name=customer.name,
-                pos_profile_name=pos_profile.name,
-                shipping_address_name="ADDR-SHAMS",
-            )
+		def _capture_tax_call(invoice_doc, amount, delivery_description=None):
+			tax_calls.append((amount, delivery_description))
 
-        self.assertIsNone(inv.territory)
-        self.assertEqual(tax_calls, [])
-        self.assertIn("[UNRESOLVED TERRITORY]", inv.remarks)
-        self.assertIn("city=Ain Shams - عين شمس (address ADDR-SHAMS)", inv.remarks)
-        self.assertTrue(
-            any(
-                "Order territory unresolved; shipping income skipped" in str(call.args[0])
-                for call in logger.warning.call_args_list
-            )
-        )
+		with (
+			patch(
+				"jarz_pos.services.invoice_creation.validate_cart_data",
+				return_value=[{"item_code": "ITEM-1"}],
+			),
+			patch("jarz_pos.services.invoice_creation._parse_delivery_charges", return_value=[]),
+			patch("jarz_pos.services.invoice_creation.validate_delivery_datetime", return_value=None),
+			patch("jarz_pos.services.invoice_creation.validate_customer", return_value=customer),
+			patch("jarz_pos.services.invoice_creation.validate_pos_profile", return_value=pos_profile),
+			patch("jarz_pos.services.invoice_creation._process_cart_items", return_value=processed_items),
+			patch("jarz_pos.services.invoice_creation._create_invoice_document", return_value=inv),
+			patch(
+				"jarz_pos.services.invoice_creation.set_invoice_fields", side_effect=self._set_invoice_fields
+			),
+			patch(
+				"jarz_pos.services.invoice_creation.resolve_customer_shipping_address",
+				return_value={
+					"name": "ADDR-SHAMS",
+					"city": "Ain Shams - عين شمس",
+					"state": "Ain Shams - عين شمس",
+				},
+			),
+			patch("jarz_pos.services.invoice_creation.resolve_order_territory", return_value=None),
+			patch("jarz_pos.services.invoice_creation.ensure_shipping_address"),
+			patch("jarz_pos.services.invoice_creation.add_items_to_invoice", side_effect=self._append_items),
+			patch("jarz_pos.services.invoice_creation._set_initial_state_for_sales_partner"),
+			patch("jarz_pos.services.invoice_creation._validate_and_calculate_document"),
+			patch("jarz_pos.services.invoice_creation._save_document"),
+			patch("jarz_pos.services.invoice_creation._submit_document"),
+			patch("jarz_pos.services.invoice_creation._maybe_register_online_payment_to_partner"),
+			patch(
+				"jarz_pos.services.invoice_creation.add_delivery_charges_to_taxes",
+				side_effect=_capture_tax_call,
+			),
+			patch(
+				"jarz_pos.services.invoice_creation._delivery_promotions.resolve_delivery_promotion"
+			) as resolve_promo,
+			patch("jarz_pos.services.invoice_creation._delivery_promotions.apply_delivery_promotion_audit"),
+			patch("jarz_pos.services.invoice_creation.frappe") as mf,
+		):
+			from jarz_pos.services.delivery_promotions import DeliveryPromotionDecision
+
+			resolve_promo.return_value = DeliveryPromotionDecision()
+			mf.local.site = "test-site"
+			mf.logger.return_value = logger
+			mf.utils.now.return_value = "2026-05-05 12:00:00"
+			mf.db.exists.return_value = False
+			mf.get_all.return_value = []
+
+			from jarz_pos.services.invoice_creation import create_pos_invoice
+
+			create_pos_invoice(
+				cart_json="[]",
+				customer_name=customer.name,
+				pos_profile_name=pos_profile.name,
+				shipping_address_name="ADDR-SHAMS",
+			)
+
+		self.assertIsNone(inv.territory)
+		self.assertEqual(tax_calls, [])
+		self.assertIn("[UNRESOLVED TERRITORY]", inv.remarks)
+		self.assertIn("city=Ain Shams - عين شمس (address ADDR-SHAMS)", inv.remarks)
+		self.assertTrue(
+			any(
+				"Order territory unresolved; shipping income skipped" in str(call.args[0])
+				for call in logger.warning.call_args_list
+			)
+		)
 
 
 # ===========================================================================
 # TEST: Manager pricing support
 # ===========================================================================
 
+
 class TestManagerPricingSupport(unittest.TestCase):
-    """Verify selected price list, manager guard, and regular-line pricing overrides."""
+	"""Verify selected price list, manager guard, and regular-line pricing overrides."""
 
-    def test_process_regular_item_uses_selected_price_list_and_custom_rate_override(self):
-        # FIX 3c: account_utils.get_item_price() is no longer consulted as a second
-        # "fallback" inside _resolve_item_rate — it ran the IDENTICAL query as the
-        # generic Item Price lookup already tried, so it could never legitimately
-        # return anything different in production. With every Item Price / category
-        # lookup returning None, catalog_rate now comes straight from the cart's own
-        # rate (90.0), not from a mocked get_item_price stand-in.
-        with patch("jarz_pos.services.invoice_creation.frappe") as mf:
-            item_doc = MagicMock()
-            item_doc.item_name = "Test Item"
-            item_doc.stock_uom = "Unit"
-            mf.db.exists.return_value = True
-            mf.db.get_value.return_value = None
-            mf.get_doc.return_value = item_doc
+	def test_process_regular_item_uses_selected_price_list_and_custom_rate_override(self):
+		# FIX 3c: account_utils.get_item_price() is no longer consulted as a second
+		# "fallback" inside _resolve_item_rate — it ran the IDENTICAL query as the
+		# generic Item Price lookup already tried, so it could never legitimately
+		# return anything different in production. With every Item Price / category
+		# lookup returning None, catalog_rate now comes straight from the cart's own
+		# rate (90.0), not from a mocked get_item_price stand-in.
+		with patch("jarz_pos.services.invoice_creation.frappe") as mf:
+			item_doc = MagicMock()
+			item_doc.item_name = "Test Item"
+			item_doc.stock_uom = "Unit"
+			mf.db.exists.return_value = True
+			mf.db.get_value.return_value = None
+			mf.get_doc.return_value = item_doc
 
-            from jarz_pos.services.invoice_creation import _process_regular_item
-            result = _process_regular_item(
-                {
-                    "item_code": "ITEM-1",
-                    "qty": 2,
-                    "rate": 90.0,
-                    "custom_rate_override": 110.0,
-                    "discount_percentage": 5.0,
-                },
-                MagicMock(),
-                price_list="B2B A",
-            )
+			from jarz_pos.services.invoice_creation import _process_regular_item
 
-        self.assertEqual(result["price_list_rate"], 110.0)
-        self.assertEqual(result["rate"], 110.0)
-        self.assertEqual(result["original_price_list_rate"], 90.0)
-        self.assertEqual(result["discount_percentage"], 5.0)
+			result = _process_regular_item(
+				{
+					"item_code": "ITEM-1",
+					"qty": 2,
+					"rate": 90.0,
+					"custom_rate_override": 110.0,
+					"discount_percentage": 5.0,
+				},
+				MagicMock(),
+				price_list="B2B A",
+			)
 
-    def test_process_regular_item_prefers_base_rate_over_discounted_zero(self):
-        with patch("jarz_pos.services.invoice_creation.frappe") as mf, patch(
-            "jarz_pos.services.invoice_creation.get_item_price", return_value=None
-        ):
-            mf.db.exists.return_value = True
-            mf.db.get_value.return_value = None
-            mf.get_doc.return_value = MagicMock(
-                item_name="Sample Item", stock_uom="Nos"
-            )
+		self.assertEqual(result["price_list_rate"], 110.0)
+		self.assertEqual(result["rate"], 110.0)
+		self.assertEqual(result["original_price_list_rate"], 90.0)
+		self.assertEqual(result["discount_percentage"], 5.0)
 
-            from jarz_pos.services.invoice_creation import _process_regular_item
+	def test_process_regular_item_prefers_base_rate_over_discounted_zero(self):
+		with (
+			patch("jarz_pos.services.invoice_creation.frappe") as mf,
+			patch("jarz_pos.services.invoice_creation.get_item_price", return_value=None),
+		):
+			mf.db.exists.return_value = True
+			mf.db.get_value.return_value = None
+			mf.get_doc.return_value = MagicMock(item_name="Sample Item", stock_uom="Nos")
 
-            result = _process_regular_item(
-                {
-                    "item_code": "ITEM-SAMPLE",
-                    "qty": 1,
-                    "rate": 0.0,
-                    "price_list_rate": 120.0,
-                },
-                MagicMock(),
-                price_list="Sample",
-                customer="CUSTOMER-1",
-            )
+			from jarz_pos.services.invoice_creation import _process_regular_item
 
-        self.assertEqual(result["price_list_rate"], 120.0)
-        self.assertEqual(result["rate"], 120.0)
+			result = _process_regular_item(
+				{
+					"item_code": "ITEM-SAMPLE",
+					"qty": 1,
+					"rate": 0.0,
+					"price_list_rate": 120.0,
+				},
+				MagicMock(),
+				price_list="Sample",
+				customer="CUSTOMER-1",
+			)
 
-    def test_process_regular_item_keeps_rate_only_fallback(self):
-        with patch("jarz_pos.services.invoice_creation.frappe") as mf, patch(
-            "jarz_pos.services.invoice_creation.get_item_price", return_value=None
-        ):
-            mf.db.exists.return_value = True
-            mf.db.get_value.return_value = None
-            mf.get_doc.return_value = MagicMock(
-                item_name="Ordinary Item", stock_uom="Nos"
-            )
+		self.assertEqual(result["price_list_rate"], 120.0)
+		self.assertEqual(result["rate"], 120.0)
 
-            from jarz_pos.services.invoice_creation import _process_regular_item
+	def test_process_regular_item_keeps_rate_only_fallback(self):
+		with (
+			patch("jarz_pos.services.invoice_creation.frappe") as mf,
+			patch("jarz_pos.services.invoice_creation.get_item_price", return_value=None),
+		):
+			mf.db.exists.return_value = True
+			mf.db.get_value.return_value = None
+			mf.get_doc.return_value = MagicMock(item_name="Ordinary Item", stock_uom="Nos")
 
-            result = _process_regular_item(
-                {"item_code": "ITEM-ORDINARY", "qty": 1, "rate": 77.0},
-                MagicMock(),
-            )
+			from jarz_pos.services.invoice_creation import _process_regular_item
 
-        self.assertEqual(result["price_list_rate"], 77.0)
-        self.assertEqual(result["rate"], 77.0)
+			result = _process_regular_item(
+				{"item_code": "ITEM-ORDINARY", "qty": 1, "rate": 77.0},
+				MagicMock(),
+			)
 
-    def test_create_pos_invoice_rejects_non_manager_pricing_override(self):
-        customer = _mock_customer()
-        pos_profile = _mock_pos_profile(selling_price_list="Retail Default")
+		self.assertEqual(result["price_list_rate"], 77.0)
+		self.assertEqual(result["rate"], 77.0)
 
-        with patch("jarz_pos.services.invoice_creation.validate_cart_data", return_value=[{"item_code": "ITEM-1", "custom_rate_override": 95.0}]), \
-             patch("jarz_pos.services.invoice_creation._parse_delivery_charges", return_value=[]), \
-             patch("jarz_pos.services.invoice_creation.validate_delivery_datetime", return_value=None), \
-             patch("jarz_pos.services.invoice_creation.validate_customer", return_value=customer), \
-             patch("jarz_pos.services.invoice_creation.validate_pos_profile", return_value=pos_profile), \
-             patch("jarz_pos.services.invoice_creation.frappe") as mf:
-            mf.local.site = "test-site"
-            mf.logger.return_value = MagicMock()
-            mf.utils.now.return_value = "2026-05-05 12:00:00"
-            mf.db.exists.return_value = True
-            mf.get_roles.return_value = ["POS User"]
-            mf.session.user = "cashier@example.com"
-            mf.throw.side_effect = PermissionError("manager pricing access required")
+	def test_create_pos_invoice_rejects_non_manager_pricing_override(self):
+		customer = _mock_customer()
+		pos_profile = _mock_pos_profile(selling_price_list="Retail Default")
 
-            from jarz_pos.services.invoice_creation import create_pos_invoice
-            with self.assertRaises(PermissionError):
-                create_pos_invoice(cart_json="[]", customer_name=customer.name, pos_profile_name=pos_profile.name)
+		with (
+			patch(
+				"jarz_pos.services.invoice_creation.validate_cart_data",
+				return_value=[{"item_code": "ITEM-1", "custom_rate_override": 95.0}],
+			),
+			patch("jarz_pos.services.invoice_creation._parse_delivery_charges", return_value=[]),
+			patch("jarz_pos.services.invoice_creation.validate_delivery_datetime", return_value=None),
+			patch("jarz_pos.services.invoice_creation.validate_customer", return_value=customer),
+			patch("jarz_pos.services.invoice_creation.validate_pos_profile", return_value=pos_profile),
+			patch("jarz_pos.services.invoice_creation.frappe") as mf,
+		):
+			mf.local.site = "test-site"
+			mf.logger.return_value = MagicMock()
+			mf.utils.now.return_value = "2026-05-05 12:00:00"
+			mf.db.exists.return_value = True
+			mf.get_roles.return_value = ["POS User"]
+			mf.session.user = "cashier@example.com"
+			mf.throw.side_effect = PermissionError("manager pricing access required")
 
-    def test_create_pos_invoice_stamps_selected_price_list_and_audit_markers(self):
-        inv = _InvoiceDocCapture()
-        customer = _mock_customer()
-        pos_profile = _mock_pos_profile(selling_price_list="Retail Default")
-        processed_items = [
-            {
-                "item_code": "ITEM-1",
-                "qty": 1,
-                "rate": 110.0,
-                "price_list_rate": 110.0,
-                "custom_rate_override": 110.0,
-                "discount_percentage": 10.0,
-            }
-        ]
+			from jarz_pos.services.invoice_creation import create_pos_invoice
 
-        # A Standard order on "B2B A" is refused by the Order Purpose check since the
-        # Price List dropdown was removed (and frappe is mocked here, so that refusal
-        # would be a silent no-op). What is under test is the audit-marker stamping, not
-        # purpose/list consistency (see test_order_purpose_price_list), so the check
-        # stands aside instead of the reserved-list map it used to consult.
-        with patch("jarz_pos.services.invoice_creation.validate_cart_data", return_value=[{"item_code": "ITEM-1", "custom_rate_override": 110.0, "discount_percentage": 10.0}]), \
-             patch("jarz_pos.services.invoice_creation._parse_delivery_charges", return_value=[]), \
-             patch("jarz_pos.services.invoice_creation.validate_delivery_datetime", return_value=None), \
-             patch("jarz_pos.services.invoice_creation.validate_customer", return_value=customer), \
-             patch("jarz_pos.services.invoice_creation.validate_pos_profile", return_value=pos_profile), \
-             patch("jarz_pos.services.invoice_creation._process_cart_items", return_value=processed_items), \
-             patch("jarz_pos.services.invoice_creation._create_invoice_document", return_value=inv), \
-             patch("jarz_pos.services.invoice_creation.set_invoice_fields"), \
-             patch("jarz_pos.services.invoice_creation.add_items_to_invoice"), \
-             patch("jarz_pos.services.invoice_creation._set_initial_state_for_sales_partner"), \
-             patch("jarz_pos.services.invoice_creation._validate_and_calculate_document"), \
-             patch("jarz_pos.services.invoice_creation._save_document"), \
-             patch("jarz_pos.services.invoice_creation._submit_document"), \
-             patch("jarz_pos.services.invoice_creation._maybe_register_online_payment_to_partner"), \
-             patch("jarz_pos.services.invoice_creation._delivery_promotions.resolve_delivery_promotion") as resolve_promo, \
-             patch("jarz_pos.services.invoice_creation._delivery_promotions.apply_delivery_promotion_audit"), \
-             patch("jarz_pos.services.invoice_creation._enforce_order_purpose_price_list"), \
-             patch("jarz_pos.services.invoice_creation.frappe") as mf:
-            from jarz_pos.services.delivery_promotions import DeliveryPromotionDecision
+			with self.assertRaises(PermissionError):
+				create_pos_invoice(
+					cart_json="[]", customer_name=customer.name, pos_profile_name=pos_profile.name
+				)
 
-            resolve_promo.return_value = DeliveryPromotionDecision(
-                matched=False,
-                rule_name=None,
-                rule_type=None,
-                merchandise_subtotal=0.0,
-                item_qty=0.0,
-                suppress_shipping_income=False,
-                suppress_legacy_delivery_charges=False,
-            )
+	def test_create_pos_invoice_stamps_selected_price_list_and_audit_markers(self):
+		inv = _InvoiceDocCapture()
+		customer = _mock_customer()
+		pos_profile = _mock_pos_profile(selling_price_list="Retail Default")
+		processed_items = [
+			{
+				"item_code": "ITEM-1",
+				"qty": 1,
+				"rate": 110.0,
+				"price_list_rate": 110.0,
+				"custom_rate_override": 110.0,
+				"discount_percentage": 10.0,
+			}
+		]
 
-            mf.local.site = "test-site"
-            mf.logger.return_value = MagicMock()
-            mf.utils.now.return_value = "2026-05-05 12:00:00"
-            mf.db.exists.return_value = True
-            mf.get_roles.return_value = ["JARZ Manager"]
-            mf.session.user = "manager@example.com"
-            mf.get_all.return_value = []
+		# A Standard order on "B2B A" is refused by the Order Purpose check since the
+		# Price List dropdown was removed (and frappe is mocked here, so that refusal
+		# would be a silent no-op). What is under test is the audit-marker stamping, not
+		# purpose/list consistency (see test_order_purpose_price_list), so the check
+		# stands aside instead of the reserved-list map it used to consult.
+		with (
+			patch(
+				"jarz_pos.services.invoice_creation.validate_cart_data",
+				return_value=[
+					{"item_code": "ITEM-1", "custom_rate_override": 110.0, "discount_percentage": 10.0}
+				],
+			),
+			patch("jarz_pos.services.invoice_creation._parse_delivery_charges", return_value=[]),
+			patch("jarz_pos.services.invoice_creation.validate_delivery_datetime", return_value=None),
+			patch("jarz_pos.services.invoice_creation.validate_customer", return_value=customer),
+			patch("jarz_pos.services.invoice_creation.validate_pos_profile", return_value=pos_profile),
+			patch("jarz_pos.services.invoice_creation._process_cart_items", return_value=processed_items),
+			patch("jarz_pos.services.invoice_creation._create_invoice_document", return_value=inv),
+			patch("jarz_pos.services.invoice_creation.set_invoice_fields"),
+			patch("jarz_pos.services.invoice_creation.add_items_to_invoice"),
+			patch("jarz_pos.services.invoice_creation._set_initial_state_for_sales_partner"),
+			patch("jarz_pos.services.invoice_creation._validate_and_calculate_document"),
+			patch("jarz_pos.services.invoice_creation._save_document"),
+			patch("jarz_pos.services.invoice_creation._submit_document"),
+			patch("jarz_pos.services.invoice_creation._maybe_register_online_payment_to_partner"),
+			patch(
+				"jarz_pos.services.invoice_creation._delivery_promotions.resolve_delivery_promotion"
+			) as resolve_promo,
+			patch("jarz_pos.services.invoice_creation._delivery_promotions.apply_delivery_promotion_audit"),
+			patch("jarz_pos.services.invoice_creation._enforce_order_purpose_price_list"),
+			patch("jarz_pos.services.invoice_creation.frappe") as mf,
+		):
+			from jarz_pos.services.delivery_promotions import DeliveryPromotionDecision
 
-            from jarz_pos.services.invoice_creation import create_pos_invoice
+			resolve_promo.return_value = DeliveryPromotionDecision(
+				matched=False,
+				rule_name=None,
+				rule_type=None,
+				merchandise_subtotal=0.0,
+				item_qty=0.0,
+				suppress_shipping_income=False,
+				suppress_legacy_delivery_charges=False,
+			)
 
-            create_pos_invoice(
-                cart_json="[]",
-                customer_name=customer.name,
-                pos_profile_name=pos_profile.name,
-                price_list="B2B A",
-                suppress_shipping_income=True,
-            )
+			mf.local.site = "test-site"
+			mf.logger.return_value = MagicMock()
+			mf.utils.now.return_value = "2026-05-05 12:00:00"
+			mf.db.exists.return_value = True
+			mf.get_roles.return_value = ["JARZ Manager"]
+			mf.session.user = "manager@example.com"
+			mf.get_all.return_value = []
 
-        self.assertEqual(inv.selling_price_list, "B2B A")
-        self.assertIn("[PRICE LIST OVERRIDE] B2B A", inv.remarks)
-        self.assertIn("[ZERO SHIPPING OVERRIDE]", inv.remarks)
-        self.assertIn("[CUSTOM LINE PRICING]", inv.remarks)
-        self.assertIn("[LINE DISCOUNTS]", inv.remarks)
+			from jarz_pos.services.invoice_creation import create_pos_invoice
+
+			create_pos_invoice(
+				cart_json="[]",
+				customer_name=customer.name,
+				pos_profile_name=pos_profile.name,
+				price_list="B2B A",
+				suppress_shipping_income=True,
+			)
+
+		self.assertEqual(inv.selling_price_list, "B2B A")
+		self.assertIn("[PRICE LIST OVERRIDE] B2B A", inv.remarks)
+		self.assertIn("[ZERO SHIPPING OVERRIDE]", inv.remarks)
+		self.assertIn("[CUSTOM LINE PRICING]", inv.remarks)
+		self.assertIn("[LINE DISCOUNTS]", inv.remarks)
 
 
 # ===========================================================================
 # TEST: Stock Update suppression for POS Sales Invoices
 # ===========================================================================
 
+
 class TestStockUpdateSuppression(unittest.TestCase):
-    """Verify that POS Sales Invoices never update stock at SI creation."""
+	"""Verify that POS Sales Invoices never update stock at SI creation."""
 
-    def test_sales_partner_disables_stock_update(self):
-        """Sales partner invoices should have update_stock=0."""
-        inv = _InvoiceDocCapture()
-        inv.sales_partner = "PARTNER-A"
+	def test_sales_partner_disables_stock_update(self):
+		"""Sales partner invoices should have update_stock=0."""
+		inv = _InvoiceDocCapture()
+		inv.sales_partner = "PARTNER-A"
 
-        if inv.sales_partner:
-            if hasattr(inv, "update_stock"):
-                inv.update_stock = 0
+		if inv.sales_partner:
+			if hasattr(inv, "update_stock"):
+				inv.update_stock = 0
 
-        self.assertEqual(inv.update_stock, 0)
+		self.assertEqual(inv.update_stock, 0)
 
-    def test_regular_invoice_disables_stock_update(self):
-        """Regular POS invoices should also keep update_stock=0."""
-        inv = _InvoiceDocCapture()
-        inv.sales_partner = None
+	def test_regular_invoice_disables_stock_update(self):
+		"""Regular POS invoices should also keep update_stock=0."""
+		inv = _InvoiceDocCapture()
+		inv.sales_partner = None
 
-        if hasattr(inv, "update_stock"):
-            inv.update_stock = 0
+		if hasattr(inv, "update_stock"):
+			inv.update_stock = 0
 
-        self.assertEqual(inv.update_stock, 0)
+		self.assertEqual(inv.update_stock, 0)
 
 
 # ===========================================================================
 # TEST: Payment Method Validation
 # ===========================================================================
 
+
 class TestPaymentMethodValidation(unittest.TestCase):
-    """Verify payment method validation logic."""
+	"""Verify payment method validation logic."""
 
-    def test_valid_methods(self):
-        """All valid payment methods should pass validation."""
-        allowed = ["Cash", "Instapay", "Mobile Wallet", "Kashier Card", "Kashier Wallet"]
-        for method in allowed:
-            self.assertIn(method, allowed)
+	def test_valid_methods(self):
+		"""All valid payment methods should pass validation."""
+		allowed = ["Cash", "Instapay", "Mobile Wallet", "Kashier Card", "Kashier Wallet"]
+		for method in allowed:
+			self.assertIn(method, allowed)
 
-    def test_invalid_method_rejected(self):
-        """Invalid payment methods should be rejected."""
-        allowed = ["Cash", "Instapay", "Mobile Wallet", "Kashier Card", "Kashier Wallet"]
-        self.assertNotIn("Bitcoin", allowed)
-        self.assertNotIn("", allowed)
-        self.assertNotIn("cash", allowed)  # case-sensitive
+	def test_invalid_method_rejected(self):
+		"""Invalid payment methods should be rejected."""
+		allowed = ["Cash", "Instapay", "Mobile Wallet", "Kashier Card", "Kashier Wallet"]
+		self.assertNotIn("Bitcoin", allowed)
+		self.assertNotIn("", allowed)
+		self.assertNotIn("cash", allowed)  # case-sensitive
 
 
 # ===========================================================================
 # TEST: Initial State for Sales Partner
 # ===========================================================================
 
+
 class TestInitialStateForSalesPartner(unittest.TestCase):
-    """Verify that sales partner invoices start In Progress on kanban."""
+	"""Verify that sales partner invoices start In Progress on kanban."""
 
-    def test_sales_partner_initial_state(self):
-        """Sales partner invoices should start with 'In Progress' state."""
-        # This tests the _set_initial_state_for_sales_partner function behavior
-        inv = _InvoiceDocCapture()
-        inv.sales_partner = "PARTNER-A"
+	def test_sales_partner_initial_state(self):
+		"""Sales partner invoices should start with 'In Progress' state."""
+		# This tests the _set_initial_state_for_sales_partner function behavior
+		inv = _InvoiceDocCapture()
+		inv.sales_partner = "PARTNER-A"
 
-        if inv.sales_partner:
-            inv.custom_sales_invoice_state = "In Progress"
+		if inv.sales_partner:
+			inv.custom_sales_invoice_state = "In Progress"
 
-        self.assertEqual(inv.custom_sales_invoice_state, "In Progress")
+		self.assertEqual(inv.custom_sales_invoice_state, "In Progress")
 
-    def test_regular_invoice_no_initial_state(self):
-        """Regular invoices should not be set to In Progress."""
-        inv = _InvoiceDocCapture()
-        inv.sales_partner = None
+	def test_regular_invoice_no_initial_state(self):
+		"""Regular invoices should not be set to In Progress."""
+		inv = _InvoiceDocCapture()
+		inv.sales_partner = None
 
-        if inv.sales_partner:
-            inv.custom_sales_invoice_state = "In Progress"
+		if inv.sales_partner:
+			inv.custom_sales_invoice_state = "In Progress"
 
-        self.assertIsNone(inv.custom_sales_invoice_state)
+		self.assertIsNone(inv.custom_sales_invoice_state)
 
 
 # ===========================================================================
 # TEST: Cart JSON Construction
 # ===========================================================================
 
+
 class TestCartJsonConstruction(unittest.TestCase):
-    """Verify cart_json structure produced by Flutter for different item types."""
+	"""Verify cart_json structure produced by Flutter for different item types."""
 
-    def test_regular_item_json(self):
-        """Regular item should have item_code, qty, rate, is_bundle=false."""
-        item = {
-            "item_code": "ITEM-001",
-            "qty": 2,
-            "rate": 50.0,
-            "is_bundle": False,
-        }
-        cart_json = json.dumps([item])
-        parsed = json.loads(cart_json)
-        self.assertEqual(parsed[0]["item_code"], "ITEM-001")
-        self.assertEqual(parsed[0]["qty"], 2)
-        self.assertEqual(parsed[0]["rate"], 50.0)
-        self.assertFalse(parsed[0]["is_bundle"])
+	def test_regular_item_json(self):
+		"""Regular item should have item_code, qty, rate, is_bundle=false."""
+		item = {
+			"item_code": "ITEM-001",
+			"qty": 2,
+			"rate": 50.0,
+			"is_bundle": False,
+		}
+		cart_json = json.dumps([item])
+		parsed = json.loads(cart_json)
+		self.assertEqual(parsed[0]["item_code"], "ITEM-001")
+		self.assertEqual(parsed[0]["qty"], 2)
+		self.assertEqual(parsed[0]["rate"], 50.0)
+		self.assertFalse(parsed[0]["is_bundle"])
 
-    def test_bundle_item_json(self):
-        """Bundle item should have is_bundle=true and selected_items map."""
-        item = {
-            "item_code": "BUNDLE-001",
-            "qty": 1,
-            "rate": 250.0,
-            "is_bundle": True,
-            "selected_items": {
-                "Main Course": [
-                    {"id": "FOOD-A", "item_name": "Burger"},
-                ],
-                "Side Dish": [
-                    {"id": "FOOD-B", "item_name": "Fries"},
-                ],
-            },
-        }
-        cart_json = json.dumps([item])
-        parsed = json.loads(cart_json)
-        self.assertTrue(parsed[0]["is_bundle"])
-        self.assertIn("selected_items", parsed[0])
-        self.assertEqual(len(parsed[0]["selected_items"]["Main Course"]), 1)
-        self.assertEqual(len(parsed[0]["selected_items"]["Side Dish"]), 1)
+	def test_bundle_item_json(self):
+		"""Bundle item should have is_bundle=true and selected_items map."""
+		item = {
+			"item_code": "BUNDLE-001",
+			"qty": 1,
+			"rate": 250.0,
+			"is_bundle": True,
+			"selected_items": {
+				"Main Course": [
+					{"id": "FOOD-A", "item_name": "Burger"},
+				],
+				"Side Dish": [
+					{"id": "FOOD-B", "item_name": "Fries"},
+				],
+			},
+		}
+		cart_json = json.dumps([item])
+		parsed = json.loads(cart_json)
+		self.assertTrue(parsed[0]["is_bundle"])
+		self.assertIn("selected_items", parsed[0])
+		self.assertEqual(len(parsed[0]["selected_items"]["Main Course"]), 1)
+		self.assertEqual(len(parsed[0]["selected_items"]["Side Dish"]), 1)
 
-    def test_discount_fields_preserved(self):
-        """Discount fields should be in cart_json when present."""
-        item = {
-            "item_code": "ITEM-002",
-            "qty": 1,
-            "rate": 80.0,
-            "is_bundle": False,
-            "price_list_rate": 100.0,
-            "discount_amount": 20.0,
-            "discount_percentage": 20.0,
-        }
-        cart_json = json.dumps([item])
-        parsed = json.loads(cart_json)
-        self.assertEqual(parsed[0]["price_list_rate"], 100.0)
-        self.assertEqual(parsed[0]["discount_amount"], 20.0)
-        self.assertEqual(parsed[0]["discount_percentage"], 20.0)
+	def test_discount_fields_preserved(self):
+		"""Discount fields should be in cart_json when present."""
+		item = {
+			"item_code": "ITEM-002",
+			"qty": 1,
+			"rate": 80.0,
+			"is_bundle": False,
+			"price_list_rate": 100.0,
+			"discount_amount": 20.0,
+			"discount_percentage": 20.0,
+		}
+		cart_json = json.dumps([item])
+		parsed = json.loads(cart_json)
+		self.assertEqual(parsed[0]["price_list_rate"], 100.0)
+		self.assertEqual(parsed[0]["discount_amount"], 20.0)
+		self.assertEqual(parsed[0]["discount_percentage"], 20.0)
 
-    def test_mixed_cart(self):
-        """Cart with both regular items and bundles."""
-        items = [
-            {"item_code": "ITEM-001", "qty": 2, "rate": 50.0, "is_bundle": False},
-            {
-                "item_code": "BUNDLE-001",
-                "qty": 1,
-                "rate": 300.0,
-                "is_bundle": True,
-                "selected_items": {"Group A": [{"id": "A1"}]},
-            },
-        ]
-        cart_json = json.dumps(items)
-        parsed = json.loads(cart_json)
-        self.assertEqual(len(parsed), 2)
-        self.assertFalse(parsed[0]["is_bundle"])
-        self.assertTrue(parsed[1]["is_bundle"])
+	def test_mixed_cart(self):
+		"""Cart with both regular items and bundles."""
+		items = [
+			{"item_code": "ITEM-001", "qty": 2, "rate": 50.0, "is_bundle": False},
+			{
+				"item_code": "BUNDLE-001",
+				"qty": 1,
+				"rate": 300.0,
+				"is_bundle": True,
+				"selected_items": {"Group A": [{"id": "A1"}]},
+			},
+		]
+		cart_json = json.dumps(items)
+		parsed = json.loads(cart_json)
+		self.assertEqual(len(parsed), 2)
+		self.assertFalse(parsed[0]["is_bundle"])
+		self.assertTrue(parsed[1]["is_bundle"])
 
 
 # ===========================================================================
 # TEST: Delivery slot handling
 # ===========================================================================
 
+
 class TestDeliverySlotHandling(unittest.TestCase):
-    """Verify delivery datetime → custom fields conversion."""
+	"""Verify delivery datetime → custom fields conversion."""
 
-    def test_parse_duration_minutes_heuristic(self):
-        """Small numbers (< 1000) assumed minutes, converted to seconds."""
-        from jarz_pos.services.invoice_creation import _apply_delivery_slot_fields
+	def test_parse_duration_minutes_heuristic(self):
+		"""Small numbers (< 1000) assumed minutes, converted to seconds."""
+		from jarz_pos.services.invoice_creation import _apply_delivery_slot_fields
 
-        inv = _InvoiceDocCapture()
-        with patch("jarz_pos.services.invoice_creation.frappe") as mf:
-            mf.utils.get_datetime.return_value = MagicMock(
-                date=lambda: "2026-03-14",
-                time=lambda: MagicMock(strftime=lambda fmt: "14:00:00")
-            )
-            mf.form_dict = {"delivery_duration": "60"}
+		inv = _InvoiceDocCapture()
+		with patch("jarz_pos.services.invoice_creation.frappe") as mf:
+			mf.utils.get_datetime.return_value = MagicMock(
+				date=lambda: "2026-03-14", time=lambda: MagicMock(strftime=lambda fmt: "14:00:00")
+			)
+			mf.form_dict = {"delivery_duration": "60"}
 
-            _apply_delivery_slot_fields(inv, "2026-03-14 14:00:00")
+			_apply_delivery_slot_fields(inv, "2026-03-14 14:00:00")
 
-        # 60 minutes = 3600 seconds (small number heuristic)
-        self.assertEqual(inv.custom_delivery_duration, 3600)
+		# 60 minutes = 3600 seconds (small number heuristic)
+		self.assertEqual(inv.custom_delivery_duration, 3600)
 
-    def test_parse_duration_hours_suffix(self):
-        """Duration with 'h' suffix should convert hours to seconds."""
-        from jarz_pos.services.invoice_creation import _apply_delivery_slot_fields
+	def test_parse_duration_hours_suffix(self):
+		"""Duration with 'h' suffix should convert hours to seconds."""
+		from jarz_pos.services.invoice_creation import _apply_delivery_slot_fields
 
-        inv = _InvoiceDocCapture()
-        with patch("jarz_pos.services.invoice_creation.frappe") as mf:
-            mf.utils.get_datetime.return_value = MagicMock(
-                date=lambda: "2026-03-14",
-                time=lambda: MagicMock(strftime=lambda fmt: "14:00:00")
-            )
-            mf.form_dict = {"delivery_duration": "2h"}
+		inv = _InvoiceDocCapture()
+		with patch("jarz_pos.services.invoice_creation.frappe") as mf:
+			mf.utils.get_datetime.return_value = MagicMock(
+				date=lambda: "2026-03-14", time=lambda: MagicMock(strftime=lambda fmt: "14:00:00")
+			)
+			mf.form_dict = {"delivery_duration": "2h"}
 
-            _apply_delivery_slot_fields(inv, "2026-03-14 14:00:00")
+			_apply_delivery_slot_fields(inv, "2026-03-14 14:00:00")
 
-        self.assertEqual(inv.custom_delivery_duration, 7200)
+		self.assertEqual(inv.custom_delivery_duration, 7200)
 
-    def test_no_duration_defaults_to_3600(self):
-        """Missing duration should default to 3600 seconds (1 hour)."""
-        from jarz_pos.services.invoice_creation import _apply_delivery_slot_fields
+	def test_no_duration_defaults_to_3600(self):
+		"""Missing duration should default to 3600 seconds (1 hour)."""
+		from jarz_pos.services.invoice_creation import _apply_delivery_slot_fields
 
-        inv = _InvoiceDocCapture()
-        inv.custom_delivery_duration = None
+		inv = _InvoiceDocCapture()
+		inv.custom_delivery_duration = None
 
-        with patch("jarz_pos.services.invoice_creation.frappe") as mf:
-            mf.utils.get_datetime.return_value = MagicMock(
-                date=lambda: "2026-03-14",
-                time=lambda: MagicMock(strftime=lambda fmt: "10:00:00")
-            )
-            mf.form_dict = {}
+		with patch("jarz_pos.services.invoice_creation.frappe") as mf:
+			mf.utils.get_datetime.return_value = MagicMock(
+				date=lambda: "2026-03-14", time=lambda: MagicMock(strftime=lambda fmt: "10:00:00")
+			)
+			mf.form_dict = {}
 
-            _apply_delivery_slot_fields(inv, "2026-03-14 10:00:00")
+			_apply_delivery_slot_fields(inv, "2026-03-14 10:00:00")
 
-        self.assertEqual(inv.custom_delivery_duration, 3600)
+		self.assertEqual(inv.custom_delivery_duration, 3600)
 
 
 if __name__ == "__main__":
-    unittest.main()
+	unittest.main()

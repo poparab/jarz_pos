@@ -53,6 +53,7 @@ class TestResolveDeliveryPartner(unittest.TestCase):
 
 	def test_returns_none_when_no_party(self):
 		from jarz_pos.services.settlement_strategies import _resolve_delivery_partner
+
 		self.assertIsNone(_resolve_delivery_partner(None, None))
 		self.assertIsNone(_resolve_delivery_partner("Employee", None))
 		self.assertIsNone(_resolve_delivery_partner(None, "EMP-001"))
@@ -60,6 +61,7 @@ class TestResolveDeliveryPartner(unittest.TestCase):
 	@patch("jarz_pos.services.settlement_strategies.frappe")
 	def test_returns_partner_when_linked(self, mock_frappe):
 		from jarz_pos.services.settlement_strategies import _resolve_delivery_partner
+
 		mock_frappe.db.get_value.return_value = "Partner A"
 		result = _resolve_delivery_partner("Employee", "EMP-001")
 		self.assertEqual(result, "Partner A")
@@ -68,12 +70,14 @@ class TestResolveDeliveryPartner(unittest.TestCase):
 	@patch("jarz_pos.services.settlement_strategies.frappe")
 	def test_returns_none_when_no_link(self, mock_frappe):
 		from jarz_pos.services.settlement_strategies import _resolve_delivery_partner
+
 		mock_frappe.db.get_value.return_value = None
 		self.assertIsNone(_resolve_delivery_partner("Supplier", "SUP-001"))
 
 	@patch("jarz_pos.services.settlement_strategies.frappe")
 	def test_returns_none_on_exception(self, mock_frappe):
 		from jarz_pos.services.settlement_strategies import _resolve_delivery_partner
+
 		mock_frappe.db.get_value.side_effect = Exception("Field not found")
 		self.assertIsNone(_resolve_delivery_partner("Employee", "EMP-X"))
 
@@ -102,8 +106,12 @@ class TestPartnerDispatch(unittest.TestCase):
 		PARTNER_STRATEGY[("unpaid", "now")] = mock_handler
 		try:
 			result = dispatch_settlement(
-				"INV-P001", mode="now", pos_profile="POS-001",
-				party_type="Employee", party="EMP-001", partner_fee=55.0,
+				"INV-P001",
+				mode="now",
+				pos_profile="POS-001",
+				party_type="Employee",
+				party="EMP-001",
+				partner_fee=55.0,
 			)
 			mock_handler.assert_called_once()
 			# The typed fee has to survive the hop into the handler, or the handler
@@ -131,8 +139,11 @@ class TestPartnerDispatch(unittest.TestCase):
 		with patch("jarz_pos.services.settlement_strategies.handle_unpaid_settle_now") as mock_handler:
 			mock_handler.return_value = {"success": True, "mode": "unpaid_settle_now"}
 			result = dispatch_settlement(
-				"INV-N001", mode="now", pos_profile="POS-001",
-				party_type="Employee", party="EMP-002",
+				"INV-N001",
+				mode="now",
+				pos_profile="POS-001",
+				party_type="Employee",
+				party="EMP-002",
 			)
 			mock_handler.assert_called_once()
 			self.assertEqual(result["mode"], "unpaid_settle_now")
@@ -164,8 +175,12 @@ class TestPartnerDispatch(unittest.TestCase):
 		) as mock_online:
 			mock_online.return_value = {"success": True, "mode": "unpaid_online_deliver_unconfirmed"}
 			result = dispatch_settlement(
-				"INV-IP1", mode="now", pos_profile="POS-001",
-				party_type="Employee", party="EMP-001", partner_fee=40.0,
+				"INV-IP1",
+				mode="now",
+				pos_profile="POS-001",
+				party_type="Employee",
+				party="EMP-001",
+				partner_fee=40.0,
 			)
 			mock_online.assert_called_once()
 			self.assertEqual(mock_online.call_args.kwargs["partner_fee"], 40.0)
@@ -183,6 +198,7 @@ class TestPartnerFeeIsMandatory(unittest.TestCase):
 	@patch("jarz_pos.services.settlement_strategies.frappe")
 	def test_missing_fee_is_refused(self, mock_frappe):
 		from jarz_pos.services.settlement_strategies import _require_partner_fee
+
 		mock_frappe.throw.side_effect = Exception("thrown")
 		inv = MagicMock()
 		inv.name = "INV-1"
@@ -194,6 +210,7 @@ class TestPartnerFeeIsMandatory(unittest.TestCase):
 	@patch("jarz_pos.services.settlement_strategies.frappe")
 	def test_empty_string_is_refused(self, mock_frappe):
 		from jarz_pos.services.settlement_strategies import _require_partner_fee
+
 		mock_frappe.throw.side_effect = Exception("thrown")
 		inv = MagicMock()
 		inv.name = "INV-1"
@@ -203,6 +220,7 @@ class TestPartnerFeeIsMandatory(unittest.TestCase):
 	@patch("jarz_pos.services.settlement_strategies.frappe")
 	def test_negative_fee_is_refused(self, mock_frappe):
 		from jarz_pos.services.settlement_strategies import _require_partner_fee
+
 		mock_frappe.throw.side_effect = Exception("thrown")
 		inv = MagicMock()
 		inv.name = "INV-1"
@@ -212,6 +230,7 @@ class TestPartnerFeeIsMandatory(unittest.TestCase):
 	@patch("jarz_pos.services.settlement_strategies.frappe")
 	def test_accepted_fee_is_persisted_for_reporting(self, mock_frappe):
 		from jarz_pos.services.settlement_strategies import _require_partner_fee
+
 		inv = MagicMock()
 		inv.name = "INV-1"
 		self.assertEqual(_require_partner_fee(inv, "Partner A", "55.4"), 55.4)
@@ -225,6 +244,7 @@ class TestPartnerFeeIsMandatory(unittest.TestCase):
 	def test_zero_fee_is_allowed(self, mock_frappe):
 		"""Zero is a real answer (a free trip); only *absent* is refused."""
 		from jarz_pos.services.settlement_strategies import _require_partner_fee
+
 		inv = MagicMock()
 		inv.name = "INV-1"
 		self.assertEqual(_require_partner_fee(inv, "Partner A", 0), 0.0)
@@ -243,11 +263,13 @@ class TestPartnerLinkTyping(unittest.TestCase):
 
 	def test_real_partner_name_is_accepted(self):
 		from jarz_pos.services.delivery_handling import _partner_link
+
 		self.assertEqual(_partner_link({"delivery_partner": "Deliverk"}), "Deliverk")
 		self.assertEqual(_partner_link({"delivery_partner": "  Deliverk  "}), "Deliverk")
 
 	def test_absent_or_empty_is_no_partner(self):
 		from jarz_pos.services.delivery_handling import _partner_link
+
 		self.assertIsNone(_partner_link({}))
 		self.assertIsNone(_partner_link(None))
 		self.assertIsNone(_partner_link({"delivery_partner": None}))
@@ -255,6 +277,7 @@ class TestPartnerLinkTyping(unittest.TestCase):
 
 	def test_truthy_non_string_is_no_partner(self):
 		from jarz_pos.services.delivery_handling import _partner_link
+
 		# A MagicMock is truthy, and so is its .strip() — the exact shape that made
 		# an ordinary courier look like a partner rider.
 		self.assertIsNone(_partner_link({"delivery_partner": MagicMock()}))
@@ -268,6 +291,7 @@ class TestPartnerCourierTransactionShape(unittest.TestCase):
 	@patch("jarz_pos.services.settlement_strategies.frappe")
 	def test_shipping_amount_is_always_zero(self, mock_frappe):
 		from jarz_pos.services.settlement_strategies import _create_partner_courier_transaction
+
 		captured = {}
 
 		def _get_doc(payload):
@@ -281,8 +305,13 @@ class TestPartnerCourierTransactionShape(unittest.TestCase):
 		inv.name = "INV-1"
 
 		_create_partner_courier_transaction(
-			inv, party_type="Employee", party="EMP-1", delivery_partner="Partner A",
-			order_amount=850.0, partner_fee=55.0, status="Unsettled",
+			inv,
+			party_type="Employee",
+			party="EMP-1",
+			delivery_partner="Partner A",
+			order_amount=850.0,
+			partner_fee=55.0,
+			status="Unsettled",
 		)
 
 		self.assertEqual(captured["amount"], 850.0)
@@ -307,8 +336,17 @@ class TestPartnerCashSettleNow(unittest.TestCase):
 	@patch("jarz_pos.services.settlement_strategies.update_submitted_sales_invoice_state")
 	@patch("jarz_pos.services.settlement_strategies.frappe")
 	def test_full_amount_reaches_the_branch_drawer(
-		self, mock_frappe, mock_state, mock_stamp, mock_ct, mock_dn, mock_fee_je,
-		mock_pe, mock_recv, mock_cash, mock_validate,
+		self,
+		mock_frappe,
+		mock_state,
+		mock_stamp,
+		mock_ct,
+		mock_dn,
+		mock_fee_je,
+		mock_pe,
+		mock_recv,
+		mock_cash,
+		mock_validate,
 	):
 		from jarz_pos.services.settlement_strategies import handle_partner_unpaid_settle_now
 
@@ -327,9 +365,13 @@ class TestPartnerCashSettleNow(unittest.TestCase):
 		mock_ct.return_value = "CT-1"
 
 		result = handle_partner_unpaid_settle_now(
-			inv, pos_profile="POS-001", payment_type="Cash",
-			party_type="Employee", party="EMP-001",
-			delivery_partner="Partner A", partner_fee=55.0,
+			inv,
+			pos_profile="POS-001",
+			payment_type="Cash",
+			party_type="Employee",
+			party="EMP-001",
+			delivery_partner="Partner A",
+			partner_fee=55.0,
 		)
 
 		# The customer's money goes into the BRANCH drawer, in full — not onto a
@@ -363,14 +405,19 @@ class TestPartnerCashSettleNow(unittest.TestCase):
 	@patch("jarz_pos.services.settlement_strategies.frappe")
 	def test_refuses_without_a_fee(self, mock_frappe):
 		from jarz_pos.services.settlement_strategies import handle_partner_unpaid_settle_now
+
 		mock_frappe.throw.side_effect = Exception("thrown")
 		inv = MagicMock()
 		inv.name = "INV-X"
 		with self.assertRaises(Exception):
 			handle_partner_unpaid_settle_now(
-				inv, pos_profile="POS-001", payment_type="Cash",
-				party_type="Employee", party="EMP-001",
-				delivery_partner="Partner A", partner_fee=None,
+				inv,
+				pos_profile="POS-001",
+				payment_type="Cash",
+				party_type="Employee",
+				party="EMP-001",
+				delivery_partner="Partner A",
+				partner_fee=None,
 			)
 
 
@@ -388,15 +435,22 @@ class TestPartnerCashSettleLater(unittest.TestCase):
 		mock_mco.return_value = {"courier_transaction": "CT-2", "amount": 300.0}
 
 		result = handle_partner_unpaid_settle_later(
-			inv, pos_profile="POS-001", payment_type="Cash",
-			party_type="Employee", party="EMP-001",
-			delivery_partner="Partner A", partner_fee=30.0,
+			inv,
+			pos_profile="POS-001",
+			payment_type="Cash",
+			party_type="Employee",
+			party="EMP-001",
+			delivery_partner="Partner A",
+			partner_fee=30.0,
 		)
 
 		# Same function an ordinary courier uses. The fee rides in as the explicit
 		# override, which is the ONLY source the service accepts for a partner.
 		mock_mco.assert_called_once_with(
-			"INV-PUL1", courier=None, party_type="Employee", party="EMP-001",
+			"INV-PUL1",
+			courier=None,
+			party_type="Employee",
+			party="EMP-001",
 			shipping_override=30.0,
 		)
 		self.assertTrue(result["is_partner_order"])
@@ -422,14 +476,19 @@ class TestPartnerPrepaid(unittest.TestCase):
 		mock_ct.return_value = "CT-3"
 
 		result = handler(
-			inv, pos_profile="POS-001", payment_type="Online",
-			party_type="Supplier", party="SUP-001",
-			delivery_partner="Partner B", partner_fee=70.0,
+			inv,
+			pos_profile="POS-001",
+			payment_type="Online",
+			party_type="Supplier",
+			party="SUP-001",
+			delivery_partner="Partner B",
+			partner_fee=70.0,
 		)
 		return result, mock_ct, mock_fee_je
 
 	def test_settle_now_has_no_cash_position(self):
 		from jarz_pos.services.settlement_strategies import handle_partner_paid_settle_now
+
 		result, mock_ct, mock_fee_je = self._run(handle_partner_paid_settle_now)
 
 		ct_kwargs = mock_ct.call_args.kwargs
@@ -445,6 +504,7 @@ class TestPartnerPrepaid(unittest.TestCase):
 	def test_settle_later_is_identical(self):
 		"""There is no cash whose timing could differ, so now and later agree."""
 		from jarz_pos.services.settlement_strategies import handle_partner_paid_settle_later
+
 		result, mock_ct, _ = self._run(handle_partner_paid_settle_later)
 		self.assertEqual(mock_ct.call_args.kwargs["order_amount"], 0)
 		self.assertEqual(mock_ct.call_args.kwargs["status"], "Settled")
@@ -454,6 +514,7 @@ class TestPartnerPrepaid(unittest.TestCase):
 class TestPartnerStrategyDict(unittest.TestCase):
 	def test_all_four_combinations_registered(self):
 		from jarz_pos.services.settlement_strategies import PARTNER_STRATEGY
+
 		for key in (("unpaid", "now"), ("unpaid", "later"), ("paid", "now"), ("paid", "later")):
 			self.assertIn(key, PARTNER_STRATEGY)
 			self.assertTrue(callable(PARTNER_STRATEGY[key]))
@@ -468,9 +529,15 @@ class TestDeliveryPartnerBillingAPI(unittest.TestCase):
 	@patch("jarz_pos.api.delivery_partners.frappe")
 	def test_balances_read_the_fee_column(self, mock_frappe):
 		from jarz_pos.api.delivery_partners import get_delivery_partner_balances
+
 		mock_frappe.db.sql.return_value = [
-			{"delivery_partner": "Partner A", "partner_name": "Partner A",
-			 "order_count": 3, "total_fee": 165.0, "oldest_date": "2026-08-25"},
+			{
+				"delivery_partner": "Partner A",
+				"partner_name": "Partner A",
+				"order_count": 3,
+				"total_fee": 165.0,
+				"oldest_date": "2026-08-25",
+			},
 		]
 		rows = get_delivery_partner_balances()
 		self.assertEqual(rows[0]["total_fee"], 165.0)
@@ -503,7 +570,9 @@ class TestDeliveryPartnerBillingAPI(unittest.TestCase):
 		mock_je.return_value = "JE-SETTLE-1"
 
 		res = settle_delivery_partner(
-			"Partner A", bank_account="Bank - J", courier_transactions=["CT-1", "CT-2"],
+			"Partner A",
+			bank_account="Bank - J",
+			courier_transactions=["CT-1", "CT-2"],
 		)
 
 		self.assertEqual(res["order_count"], 2)
@@ -533,7 +602,8 @@ class TestDeliveryPartnerBillingAPI(unittest.TestCase):
 		mock_je.return_value = "JE-SETTLE-2"
 
 		res = settle_delivery_partner(
-			"Partner A", bank_account="Bank - J",
+			"Partner A",
+			bank_account="Bank - J",
 			extra_charges=[{"description": "Monthly subscription", "amount": 500.0}],
 		)
 
@@ -560,7 +630,8 @@ class TestDeliveryPartnerBillingAPI(unittest.TestCase):
 		mock_je.return_value = "JE-SETTLE-3"
 
 		res = settle_delivery_partner(
-			"Partner A", bank_account="Bank - J",
+			"Partner A",
+			bank_account="Bank - J",
 			extra_charges=[{"description": "Waiting time", "amount": 120.0}],
 		)
 		self.assertEqual(res["total_paid"], 120.0)
@@ -569,6 +640,7 @@ class TestDeliveryPartnerBillingAPI(unittest.TestCase):
 	@patch("jarz_pos.api.delivery_partners.frappe")
 	def test_nothing_to_settle_is_not_an_error(self, mock_frappe):
 		from jarz_pos.api.delivery_partners import settle_delivery_partner
+
 		dp = MagicMock()
 		dp.settlement_account = "Partner A - J"
 		mock_frappe.get_doc.return_value = dp
@@ -582,6 +654,7 @@ class TestDeliveryPartnerBillingAPI(unittest.TestCase):
 	def test_unknown_transaction_is_refused_not_skipped(self, mock_frappe):
 		"""Silently billing fewer trips than were ticked defeats the reconciliation."""
 		from jarz_pos.api.delivery_partners import settle_delivery_partner
+
 		dp = MagicMock()
 		dp.settlement_account = "Partner A - J"
 		mock_frappe.get_doc.return_value = dp
@@ -603,6 +676,7 @@ class TestOrdinaryCourierIsUnaffected(unittest.TestCase):
 
 	def test_summary_still_deducts_an_ordinary_courier_fee(self):
 		from jarz_pos.services.delivery_handling import _summarize_courier_transactions
+
 		rows = [
 			{"amount": 850.0, "shipping_amount": 55.0},
 			{"amount": 300.0, "shipping_amount": 30.0},
@@ -614,6 +688,7 @@ class TestOrdinaryCourierIsUnaffected(unittest.TestCase):
 
 	def test_partner_row_contributes_its_full_amount(self):
 		from jarz_pos.services.delivery_handling import _summarize_courier_transactions
+
 		rows = [{"amount": 850.0, "shipping_amount": 0.0, "partner_fee": 55.0, "is_partner_order": 1}]
 		totals = _summarize_courier_transactions(rows)
 		# Nothing is withheld from a partner rider, so the branch collects all 850.
@@ -623,6 +698,7 @@ class TestOrdinaryCourierIsUnaffected(unittest.TestCase):
 	def test_mixed_batch_nets_correctly(self):
 		"""One rider of each kind settling in the same batch."""
 		from jarz_pos.services.delivery_handling import _summarize_courier_transactions
+
 		rows = [
 			{"amount": 850.0, "shipping_amount": 0.0, "partner_fee": 55.0, "is_partner_order": 1},
 			{"amount": 400.0, "shipping_amount": 40.0},

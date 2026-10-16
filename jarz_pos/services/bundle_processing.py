@@ -15,765 +15,818 @@ from frappe.utils import flt, cint
 
 
 class BundleProcessor:
-    """
-    Handles bundle expansion and pricing logic for POS invoices
-    """
-    
-    def __init__(self, bundle_code, quantity=1, selected_items=None, price_list=None, target_bundle_price=None):
-        self.bundle_code = bundle_code
-        self.quantity = quantity
-        self.bundle_doc = None
-        self.parent_item = None
-        self.bundle_items = []
-        # Expected shape: { group_key_or_group_name: [ {id: item_code, ...}, ... ] }
-        self.selected_items = selected_items or {}
-        self.price_list = price_list
-        self.target_bundle_price = flt(target_bundle_price) if target_bundle_price not in (None, "") else None
-
-    def get_item_rate(self, item_code):
-        """
-        Get the selling rate for an item from price list or standard selling rate
-        """
-        try:
-            if self.price_list:
-                selected_rate = frappe.db.get_value(
-                    "Item Price",
-                    {"item_code": item_code, "price_list": self.price_list},
-                    "price_list_rate",
-                )
-                if selected_rate not in (None, ""):
-                    return flt(selected_rate)
-
-            # First try to get item document and check standard selling rate
-            item_doc = frappe.get_doc("Item", item_code)
-            if item_doc.standard_rate and flt(item_doc.standard_rate) > 0:
-                return flt(item_doc.standard_rate)
-            
-            # Try to get from selling price lists
-            price_list_entries = frappe.get_all("Item Price",
-                filters={
-                    "item_code": item_code,
-                    "selling": 1,
-                    "price_list_rate": [">", 0]
-                },
-                fields=["price_list_rate"],
-                order_by="creation desc",
-                limit=1
-            )
-            
-            if price_list_entries:
-                return flt(price_list_entries[0].price_list_rate)
-            
-            # Last resort: check if item has any valuation rate
-            if item_doc.valuation_rate and flt(item_doc.valuation_rate) > 0:
-                return flt(item_doc.valuation_rate)
-                
-            frappe.log_error(f"No rate found for item: {item_code}, setting default rate of 100", "Bundle Processing")
-            return 100.0  # Default fallback rate
-            
-        except Exception as e:
-            frappe.log_error(f"Error getting rate for {item_code}: {str(e)}", "Bundle Processing")
-            return 100.0  # Default fallback rate
-        
-    def load_bundle(self):
-        """Load bundle document and validate"""
-        try:
-            # Get the bundle document using Frappe API
-            self.bundle_doc = frappe.get_doc("Jarz Bundle", self.bundle_code)
-
-            if not self.bundle_doc:
-                frappe.throw(_("Bundle {0} not found").format(self.bundle_code))
-
-            # Use the erpnext_item field as the parent item (this is the key fix!)
-            if not self.bundle_doc.erpnext_item:
-                frappe.throw(_("Bundle {0} has no ERPNext item configured").format(self.bundle_code))
-
-            # The parent item is the ERPNext item from the bundle
-            self.parent_item = frappe.get_doc("Item", self.bundle_doc.erpnext_item)
-
-            # Load bundle items from the child table (items is the table field).
-            # Rows are grouped into "plans" first: normally one plan per row, but a
-            # bundle that lists the SAME item group on several rows and receives a
-            # name-keyed selection list is expanded as one requirement (see
-            # _build_group_plans) and split back across its rows afterwards.
-            for plan in self._build_group_plans():
-                self._expand_group_plan(plan)
-
-            frappe.log_error(f"Bundle loaded: {self.bundle_code}, ERPNext Item: {self.parent_item.name}, Child Items: {len(self.bundle_items)}", "Bundle Processing")
-
-        except Exception as e:
-            frappe.log_error(f"Bundle loading error: {str(e)}", "Bundle Processing")
-            raise
-
-    def _selection_keys(self):
-        """Return the keys the client used in ``selected_items`` as strings."""
-        if not isinstance(self.selected_items, dict):
-            return set()
-        return {str(key) for key in self.selected_items.keys()}
-
-    def _build_group_plans(self):
-        """Group the bundle's item-group rows into expansion plans.
-
-        A plan is normally a single Jarz Bundle Item Group row and behaves exactly
-        as it always has.  The exception is a bundle that lists the *same* item
-        group on more than one row (e.g. "Jarz Indulgence Five" = ``Large x4`` +
-        ``Large x1``).  A selection list keyed by the group NAME describes the
-        group as a whole and cannot be attributed to one row: validating it row by
-        row rejects the correct payload with "expected 4 selection(s) from 'Large',
-        received 5".  Those rows are therefore merged into ONE plan whose required
-        quantity is the SUM, validated once against the whole list, and then
-        distributed back across the rows in order.
-
-        Rows whose own key appears in ``selected_items`` always stay on their own
-        plan, so a per-row-keyed cart (the path that already works today) is
-        untouched, and so is every bundle whose item groups are unique.
-        """
-        rows = []
-        for item_group_row in self.bundle_doc.items:
-            rows.append({
-                "key": getattr(item_group_row, "name", None),
-                "name": item_group_row.item_group,
-                "quantity": item_group_row.quantity,
-            })
-
-        provided_keys = self._selection_keys()
-
-        occurrences = {}
-        for row in rows:
-            occurrences[row["name"]] = occurrences.get(row["name"], 0) + 1
-
-        plans = []
-        merged_plan_index = {}
-        for row in rows:
-            group_name = row["name"]
-            row_key = row["key"]
-            row_is_keyed = bool(row_key) and str(row_key) in provided_keys
-
-            # Unique group, or the client addressed this exact row: keep it alone.
-            if occurrences.get(group_name, 0) < 2 or row_is_keyed:
-                plans.append([row])
-                continue
-
-            existing = merged_plan_index.get(group_name)
-            if existing is None:
-                merged_plan_index[group_name] = len(plans)
-                plans.append([row])
-            else:
-                plans[existing].append(row)
-
-        return plans
-
-    def _expand_group_plan(self, plan):
-        """Validate one plan's selections and append the resulting child items."""
-        item_group_name = plan[0]["name"]
-        merged = len(plan) > 1
-
-        # A merged plan has no single row key, so it can only be matched by group
-        # name; a single-row plan keeps the row key exactly as before.
-        match_key = None if merged else plan[0]["key"]
-        # Single-row plans pass their quantity through untouched (a blank/zero
-        # quantity keeps its legacy "skip validation" meaning).
-        required_quantity = sum(cint(row["quantity"]) for row in plan) if merged else plan[0]["quantity"]
-
-        # Fetch all candidate items within this group for UI parity and validation
-        items_in_group = frappe.get_all(
-            "Item",
-            filters={
-                "item_group": item_group_name,
-                "disabled": 0,
-                "has_variants": 0,
-            },
-            fields=["name", "item_name", "standard_rate", "stock_uom"],
-            limit=0,
-        )
-
-        if not items_in_group:
-            frappe.throw(f"No available items found in item group '{item_group_name}'")
-
-        # Attempt to honor user-selected items for this group (if provided from client)
-        allowed_codes = {row["name"] for row in items_in_group}
-
-        aggregated_selected = self._aggregate_selected_items(
-            match_key,
-            item_group_name,
-            required_quantity,
-        )
-
-        if aggregated_selected:
-            invalid_codes = [code for code in aggregated_selected.keys() if code not in allowed_codes]
-            if invalid_codes:
-                frappe.throw(_(f"Bundle {self.bundle_code}: invalid selections for group '{item_group_name}': {', '.join(invalid_codes)}"))
-
-            frappe.logger("jarz_pos.bundle").info({
-                "event": "bundle_selections_applied",
-                "bundle": self.bundle_code,
-                "group": item_group_name,
-                "required": required_quantity,
-                "selections": {code: data["qty"] for code, data in aggregated_selected.items()},
-                "merged_group_rows": [row["key"] for row in plan] if merged else None,
-            })
-
-            item_doc_cache = {}
-            for allocation in self._allocate_selections_to_rows(aggregated_selected, plan):
-                item_code = allocation["item_code"]
-                item_doc = item_doc_cache.get(item_code)
-                if item_doc is None:
-                    try:
-                        item_doc = frappe.get_doc("Item", item_code)
-                    except Exception:
-                        frappe.throw(
-                            _(f"Selected item '{item_code}' for bundle {self.bundle_code} could not be found"))
-                    item_doc_cache[item_code] = item_doc
-
-                override_rate = allocation.get("rate")
-                if override_rate is not None:
-                    rate = flt(override_rate)
-                else:
-                    rate = self.get_item_rate(item_doc.name)
-
-                self.bundle_items.append({
-                    'item': item_doc,
-                    'qty': allocation["qty"],
-                    'rate': rate,
-                    'item_group': allocation["group_name"],
-                    'item_group_key': allocation["group_key"],
-                })
-
-            # Skip fallback when selections were provided
-            return
-
-        # No explicit selections provided — fallback to legacy behaviour (first available item).
-        # Each row keeps its own line so a merged plan is indistinguishable from the
-        # per-row expansion this branch has always produced.
-        selected_item = items_in_group[0]
-        item_doc = frappe.get_doc("Item", selected_item['name'])
-        fallback_rate = self.get_item_rate(item_doc.name)
-
-        for row in plan:
-            self.bundle_items.append({
-                'item': item_doc,
-                'qty': row["quantity"],
-                'rate': fallback_rate,
-                'item_group': row["name"],
-                'item_group_key': row["key"],
-            })
-
-    def _allocate_selections_to_rows(self, aggregated, plan):
-        """Spread already-validated selections across a plan's bundle rows.
-
-        For a single-row plan this is a pass-through and returns the aggregated
-        entries in their original order.  For a merged plan the totals are known
-        to match (``_aggregate_selected_items`` enforced it), so this is a pure
-        re-slicing: each row consumes selections until its own quantity is filled.
-        A selection that straddles two rows is split into two allocations — that
-        is what lets every emitted child row carry the bundle group key it really
-        belongs to, which is what the amendment rebuild reads back.
-        """
-        pending = [[code, cint(data["qty"]), data.get("rate")] for code, data in aggregated.items()]
-        allocations = []
-        cursor = 0
-
-        for row in plan:
-            remaining = cint(row["quantity"])
-            while remaining > 0 and cursor < len(pending):
-                entry = pending[cursor]
-                if entry[1] <= 0:
-                    cursor += 1
-                    continue
-                take = min(remaining, entry[1])
-                allocations.append({
-                    "item_code": entry[0],
-                    "qty": take,
-                    "rate": entry[2],
-                    "group_key": row["key"],
-                    "group_name": row["name"],
-                })
-                entry[1] -= take
-                remaining -= take
-                if entry[1] <= 0:
-                    cursor += 1
-
-        # Anything left over means the row quantities did not constrain the total
-        # (a blank/zero row quantity skips validation). Emit the remainder on the
-        # last row rather than silently dropping paid-for selections.
-        last_row = plan[-1]
-        while cursor < len(pending):
-            entry = pending[cursor]
-            if entry[1] > 0:
-                allocations.append({
-                    "item_code": entry[0],
-                    "qty": entry[1],
-                    "rate": entry[2],
-                    "group_key": last_row["key"],
-                    "group_name": last_row["name"],
-                })
-            cursor += 1
-
-        return allocations
-
-    def _aggregate_selected_items(self, item_group_key, item_group_name, required_quantity):
-        """Normalize and validate selected items coming from the client for a given group."""
-        if not self.selected_items:
-            return {}
-
-        matched_key = None
-        for key in self.selected_items.keys():
-            if item_group_key and key == item_group_key:
-                matched_key = key
-                break
-            if key == item_group_name:
-                matched_key = key
-                break
-            if isinstance(key, str) and isinstance(item_group_name, str) and key.lower() == item_group_name.lower():
-                matched_key = key
-                break
-
-        if matched_key is None:
-            return {}
-
-        raw_entries = self.selected_items.get(matched_key) or []
-        if not raw_entries:
-            frappe.throw(_(f"Bundle {self.bundle_code}: no items supplied for required group '{item_group_name}'"))
-
-        aggregated = {}
-        total_selected = 0
-
-        for entry in raw_entries:
-            if not isinstance(entry, dict):
-                continue
-
-            entry_dict = dict(entry)
-            item_code = entry_dict.get("id") or entry_dict.get("item_code") or entry_dict.get("name")
-            if not item_code:
-                continue
-
-            aggregated.setdefault(item_code, {"qty": 0, "rate": None})
-
-            qty_increment = 1
-            for explicit_key in (
-                "selected_quantity",
-                "selection_quantity",
-                "selected_qty",
-                "selected_count",
-                "count",
-            ):
-                value = entry_dict.get(explicit_key)
-                if value in (None, ""):
-                    continue
-                try:
-                    candidate = cint(value)
-                    if candidate > 0:
-                        qty_increment = candidate
-                        break
-                except Exception:
-                    continue
-
-            aggregated[item_code]["qty"] += qty_increment
-
-            price_value = entry_dict.get("price")
-            if price_value is None:
-                price_value = entry_dict.get("rate")
-            if price_value is not None:
-                aggregated[item_code]["rate"] = flt(price_value)
-
-            total_selected += qty_increment
-
-        if not aggregated:
-            frappe.throw(_(f"Bundle {self.bundle_code}: no valid items supplied for group '{item_group_name}'"))
-
-        if required_quantity:
-            required_quantity = cint(required_quantity)
-            if required_quantity and total_selected != required_quantity:
-                log_map = {code: data["qty"] for code, data in aggregated.items()}
-                frappe.logger("jarz_pos.bundle").warning({
-                    "event": "bundle_selection_mismatch",
-                    "bundle": self.bundle_code,
-                    "group": item_group_name,
-                    "required": required_quantity,
-                    "received": total_selected,
-                    "entries": log_map,
-                    "raw_count": len(raw_entries),
-                })
-                frappe.throw(_(f"Bundle {self.bundle_code}: expected {required_quantity} selection(s) from '{item_group_name}', received {total_selected}"))
-
-        return aggregated
-            
-    def calculate_child_discount_percentage(self):
-        """Return uniform discount percentage for child items ensuring bundle price match.
-        Raises if bundle_price > total child gross (cannot inflate price when parent is 100% discounted).
-        """
-        bundle_price = self.target_bundle_price
-        if bundle_price in (None, ""):
-            bundle_price = flt(self.bundle_doc.bundle_price)
-        if bundle_price <= 0:
-            frappe.throw(_(f"Bundle {self.bundle_code} price is not set or invalid"))
-
-        total_child_price = sum([
-            flt(item['rate']) * flt(item['qty']) * self.quantity
-            for item in self.bundle_items
-        ])
-
-        if total_child_price <= 0:
-            frappe.throw(_(f"Bundle {self.bundle_code} has zero total child price"))
-
-        # Allow bundle price to exceed child prices (negative discount = markup)
-        # This supports flexible bundle pricing where selected items may cost less than bundle price
-        if bundle_price > total_child_price + 1e-9:
-            frappe.logger("jarz_pos.bundle").warning({
-                "event": "bundle_price_exceeds_children",
-                "bundle": self.bundle_code,
-                "bundle_price": bundle_price,
-                "child_total": total_child_price,
-                "note": "Bundle price higher than selected items - will apply 0% discount and use bundle price as-is"
-            })
-            # Return 0% discount - children keep their rates, parent becomes the price adjuster
-            return 0.0, total_child_price, bundle_price
-
-        # discount% = ((total_child_price - bundle_price) / total_child_price) * 100
-        discount_percentage = ((total_child_price - bundle_price) / total_child_price) * 100.0
-        discount_percentage = max(0.0, min(100.0, discount_percentage))  # clamp
-
-        return discount_percentage, total_child_price, bundle_price
-
-    def calculate_bundle_discount(self):
-        """
-        Calculate discount percentage for child items
-        Parent gets 100% discount, children get equal discount to match bundle price
-        """
-        # Get bundle target price
-        bundle_price = flt(self.bundle_doc.bundle_price)
-        
-        # Calculate total price of all child items without discount
-        total_child_price = sum([
-            flt(item['rate']) * flt(item['qty']) * self.quantity 
-            for item in self.bundle_items
-        ])
-        
-        if total_child_price == 0:
-            return 0
-            
-        # Calculate discount percentage needed for children
-        # Formula: discount% = ((total_price - target_price) / total_price) * 100
-        discount_percentage = ((total_child_price - bundle_price) / total_child_price) * 100
-        
-        # Ensure discount is not negative
-        calculated_discount = max(0, discount_percentage)
-        
-        frappe.log_error(f"Bundle discount calculation: Bundle price={bundle_price}, Total child price={total_child_price}, Discount={calculated_discount}%", "Bundle Processing")
-        
-        return calculated_discount
-        
-    def get_invoice_items(self):
-        """Get formatted items for invoice following ERPNext discount logic exactly.
-        Key insight: ERPNext prioritizes discount_percentage over discount_amount.
-        For 100% discount (parent): use discount_percentage = 100
-        For partial discount (children): use discount_percentage only, let ERPNext compute discount_amount
-        """
-        if not self.bundle_doc:
-            self.load_bundle()
-
-        invoice_items = []
-
-        # Precision discovery
-        try:
-            rate_precision = frappe.get_precision("Sales Invoice Item", "rate") or 2
-        except Exception:
-            rate_precision = 2
-        try:
-            amount_precision = frappe.get_precision("Sales Invoice Item", "amount") or 2
-        except Exception:
-            amount_precision = 2
-
-        # Parent line – 100% discount via discount_percentage (ERPNext will set rate = 0.0)
-        parent_rate = self.get_item_rate(self.parent_item.name)
-        parent_line = {
-            'item_code': self.parent_item.name,
-            'item_name': self.parent_item.item_name,
-            'description': f"Bundle: {self.parent_item.description or self.parent_item.item_name}",
-            'qty': self.quantity,
-            'rate': flt(parent_rate, rate_precision),  # Include rate for compatibility
-            'price_list_rate': flt(parent_rate, rate_precision),  # CRITICAL: Set price_list_rate
-            'discount_percentage': 100.0,  # CRITICAL: ERPNext will set rate = 0.0 automatically
-            'is_bundle_parent': 1,
-            'bundle_code': self.bundle_code
-        }
-        invoice_items.append(parent_line)
-
-        # Compute uniform percentage for children
-        uniform_pct, total_child_gross, bundle_price = self.calculate_child_discount_percentage()
-
-        # First pass children using discount_percentage only
-        child_lines = []
-        running_children_discounted_total = 0.0
-        for bi in self.bundle_items:
-            unit_rate = flt(bi['rate'], rate_precision)
-            qty_total = flt(bi['qty']) * self.quantity
-            # ERPNext will compute: rate = price_list_rate * (1 - discount_percentage/100)
-            expected_discounted_rate = unit_rate * (1 - uniform_pct / 100.0)
-            line_discounted_total = flt(expected_discounted_rate * qty_total, amount_precision)
-            running_children_discounted_total += line_discounted_total
-            
-            child_lines.append({
-                'item_code': bi['item'].name,
-                'item_name': bi['item'].item_name,
-                'description': bi['item'].description or bi['item'].item_name,
-                'qty': qty_total,
-                'rate': unit_rate,  # Include rate for compatibility
-                'price_list_rate': unit_rate,  # CRITICAL: Set price_list_rate for ERPNext
-                'discount_percentage': uniform_pct,  # CRITICAL: Let ERPNext compute rate and discount_amount
-                'is_bundle_child': 1,
-                'parent_bundle': self.bundle_code,
-                'bundle_group_key': bi.get('item_group_key') or '',
-                'bundle_group_name': bi.get('item_group') or '',
-                '_unit_rate': unit_rate,
-                '_qty_total': qty_total,
-                '_expected_line_total': line_discounted_total
-            })
-
-        # Rounding correction: adjust last child's discount_percentage to hit exact bundle_price
-        # Only apply when uniform_pct > 0 (i.e., when bundle price < child total)
-        # When bundle price > child total (uniform_pct = 0), skip rounding and let parent absorb difference
-        target_children_total = flt(bundle_price, amount_precision)
-        current_children_total = flt(running_children_discounted_total, amount_precision)
-        residual = flt(target_children_total - current_children_total, amount_precision)
-
-        min_step = 1 / (10 ** amount_precision)
-        if child_lines and abs(residual) >= min_step and uniform_pct > 0:
-            last = child_lines[-1]
-            unit_rate = last['_unit_rate']
-            qty_total = last['_qty_total']
-            current_expected_line_total = last['_expected_line_total']
-            
-            # Calculate what the last line total should be to hit exact target
-            desired_last_line_total = flt(current_expected_line_total + residual, amount_precision)
-            desired_last_line_total = min(max(0.0, desired_last_line_total), unit_rate * qty_total)
-            
-            # Calculate required discount percentage for last line
-            if unit_rate > 0 and qty_total > 0:
-                desired_unit_rate = desired_last_line_total / qty_total
-                adjusted_discount_pct = ((unit_rate - desired_unit_rate) / unit_rate) * 100.0
-                adjusted_discount_pct = min(max(0.0, adjusted_discount_pct), 100.0)
-                last['discount_percentage'] = flt(adjusted_discount_pct, 6)  # High precision for percentage
-        
-        # Cleanup helper fields
-        for cl in child_lines:
-            cl.pop('_unit_rate', None)
-            cl.pop('_qty_total', None)
-            cl.pop('_expected_line_total', None)
-
-        invoice_items.extend(child_lines)
-
-        frappe.logger("jarz_pos.bundle").info({
-            'bundle': self.bundle_code,
-            'parent_discount_pct': 100.0,
-            'children_uniform_discount_pct': uniform_pct,
-            'bundle_price_target': bundle_price,
-            'children_total_expected': target_children_total,
-            'residual_adjustment': residual,
-            'approach': 'discount_percentage_only_erpnext_native'
-        })
-        return invoice_items
-
-
-def process_bundle_for_invoice(bundle_identifier, quantity=1, selected_items=None, price_list=None, target_bundle_price=None):
-    """
-    Main function to process bundle for invoice
-    
-    Args:
-        bundle_identifier (str): Could be either:
-            - ERPNext Item code (from bundle.erpnext_item field) 
-            - Jarz Bundle record ID
-        quantity (int): Quantity of bundles
-        selected_items (dict | None): Mapping of bundle item groups to user-selected item codes
-        
-    Returns:
-        list: List of invoice items (parent + children with discounts)
-    """
-    try:
-        frappe.log_error(f"🔍 Processing bundle identifier: '{bundle_identifier}'", "Bundle Processing")
-        
-        bundle_code = None
-        bundle_doc = None
-        
-        # Try to find bundle by erpnext_item first (preferred method)
-        bundle_records = frappe.get_all("Jarz Bundle", 
-            filters={"erpnext_item": bundle_identifier},
-            fields=["name", "bundle_name", "erpnext_item", "bundle_price"],
-            limit=1)
-        
-        if bundle_records:
-            bundle_code = bundle_records[0]["name"]
-            frappe.log_error(f"✅ Found bundle by erpnext_item: {bundle_code} ({bundle_records[0]['bundle_name']})", "Bundle Processing")
-        else:
-            # Try to find it as a direct bundle record ID
-            if frappe.db.exists("Jarz Bundle", bundle_identifier):
-                bundle_code = bundle_identifier
-                bundle_doc = frappe.get_doc("Jarz Bundle", bundle_code)
-                frappe.log_error(f"✅ Found bundle by record ID: {bundle_code} ({bundle_doc.bundle_name})", "Bundle Processing")
-            else:
-                frappe.throw(f"No Jarz Bundle found for identifier '{bundle_identifier}'. Checked both erpnext_item field and bundle record ID.")
-        
-        # Process the bundle using the bundle record ID
-        processor = BundleProcessor(
-            bundle_code,
-            quantity,
-            selected_items=selected_items,
-            price_list=price_list,
-            target_bundle_price=target_bundle_price,
-        )
-        result = processor.get_invoice_items()
-        
-        frappe.log_error(f"✅ Bundle processing complete: {len(result)} items generated", "Bundle Processing")
-        return result
-        
-    except Exception as e:
-        frappe.log_error(f"❌ Bundle processing error for identifier {bundle_identifier}: {str(e)}", "Bundle Processing")
-        raise
+	"""
+	Handles bundle expansion and pricing logic for POS invoices
+	"""
+
+	def __init__(
+		self, bundle_code, quantity=1, selected_items=None, price_list=None, target_bundle_price=None
+	):
+		self.bundle_code = bundle_code
+		self.quantity = quantity
+		self.bundle_doc = None
+		self.parent_item = None
+		self.bundle_items = []
+		# Expected shape: { group_key_or_group_name: [ {id: item_code, ...}, ... ] }
+		self.selected_items = selected_items or {}
+		self.price_list = price_list
+		self.target_bundle_price = flt(target_bundle_price) if target_bundle_price not in (None, "") else None
+
+	def get_item_rate(self, item_code):
+		"""
+		Get the selling rate for an item from price list or standard selling rate
+		"""
+		try:
+			if self.price_list:
+				selected_rate = frappe.db.get_value(
+					"Item Price",
+					{"item_code": item_code, "price_list": self.price_list},
+					"price_list_rate",
+				)
+				if selected_rate not in (None, ""):
+					return flt(selected_rate)
+
+			# First try to get item document and check standard selling rate
+			item_doc = frappe.get_doc("Item", item_code)
+			if item_doc.standard_rate and flt(item_doc.standard_rate) > 0:
+				return flt(item_doc.standard_rate)
+
+			# Try to get from selling price lists
+			price_list_entries = frappe.get_all(
+				"Item Price",
+				filters={"item_code": item_code, "selling": 1, "price_list_rate": [">", 0]},
+				fields=["price_list_rate"],
+				order_by="creation desc",
+				limit=1,
+			)
+
+			if price_list_entries:
+				return flt(price_list_entries[0].price_list_rate)
+
+			# Last resort: check if item has any valuation rate
+			if item_doc.valuation_rate and flt(item_doc.valuation_rate) > 0:
+				return flt(item_doc.valuation_rate)
+
+			frappe.log_error(
+				f"No rate found for item: {item_code}, setting default rate of 100", "Bundle Processing"
+			)
+			return 100.0  # Default fallback rate
+
+		except Exception as e:
+			frappe.log_error(f"Error getting rate for {item_code}: {str(e)}", "Bundle Processing")
+			return 100.0  # Default fallback rate
+
+	def load_bundle(self):
+		"""Load bundle document and validate"""
+		try:
+			# Get the bundle document using Frappe API
+			self.bundle_doc = frappe.get_doc("Jarz Bundle", self.bundle_code)
+
+			if not self.bundle_doc:
+				frappe.throw(_("Bundle {0} not found").format(self.bundle_code))
+
+			# Use the erpnext_item field as the parent item (this is the key fix!)
+			if not self.bundle_doc.erpnext_item:
+				frappe.throw(_("Bundle {0} has no ERPNext item configured").format(self.bundle_code))
+
+			# The parent item is the ERPNext item from the bundle
+			self.parent_item = frappe.get_doc("Item", self.bundle_doc.erpnext_item)
+
+			# Load bundle items from the child table (items is the table field).
+			# Rows are grouped into "plans" first: normally one plan per row, but a
+			# bundle that lists the SAME item group on several rows and receives a
+			# name-keyed selection list is expanded as one requirement (see
+			# _build_group_plans) and split back across its rows afterwards.
+			for plan in self._build_group_plans():
+				self._expand_group_plan(plan)
+
+			frappe.log_error(
+				f"Bundle loaded: {self.bundle_code}, ERPNext Item: {self.parent_item.name}, Child Items: {len(self.bundle_items)}",
+				"Bundle Processing",
+			)
+
+		except Exception as e:
+			frappe.log_error(f"Bundle loading error: {str(e)}", "Bundle Processing")
+			raise
+
+	def _selection_keys(self):
+		"""Return the keys the client used in ``selected_items`` as strings."""
+		if not isinstance(self.selected_items, dict):
+			return set()
+		return {str(key) for key in self.selected_items.keys()}
+
+	def _build_group_plans(self):
+		"""Group the bundle's item-group rows into expansion plans.
+
+		A plan is normally a single Jarz Bundle Item Group row and behaves exactly
+		as it always has.  The exception is a bundle that lists the *same* item
+		group on more than one row (e.g. "Jarz Indulgence Five" = ``Large x4`` +
+		``Large x1``).  A selection list keyed by the group NAME describes the
+		group as a whole and cannot be attributed to one row: validating it row by
+		row rejects the correct payload with "expected 4 selection(s) from 'Large',
+		received 5".  Those rows are therefore merged into ONE plan whose required
+		quantity is the SUM, validated once against the whole list, and then
+		distributed back across the rows in order.
+
+		Rows whose own key appears in ``selected_items`` always stay on their own
+		plan, so a per-row-keyed cart (the path that already works today) is
+		untouched, and so is every bundle whose item groups are unique.
+		"""
+		rows = []
+		for item_group_row in self.bundle_doc.items:
+			rows.append(
+				{
+					"key": getattr(item_group_row, "name", None),
+					"name": item_group_row.item_group,
+					"quantity": item_group_row.quantity,
+				}
+			)
+
+		provided_keys = self._selection_keys()
+
+		occurrences = {}
+		for row in rows:
+			occurrences[row["name"]] = occurrences.get(row["name"], 0) + 1
+
+		plans = []
+		merged_plan_index = {}
+		for row in rows:
+			group_name = row["name"]
+			row_key = row["key"]
+			row_is_keyed = bool(row_key) and str(row_key) in provided_keys
+
+			# Unique group, or the client addressed this exact row: keep it alone.
+			if occurrences.get(group_name, 0) < 2 or row_is_keyed:
+				plans.append([row])
+				continue
+
+			existing = merged_plan_index.get(group_name)
+			if existing is None:
+				merged_plan_index[group_name] = len(plans)
+				plans.append([row])
+			else:
+				plans[existing].append(row)
+
+		return plans
+
+	def _expand_group_plan(self, plan):
+		"""Validate one plan's selections and append the resulting child items."""
+		item_group_name = plan[0]["name"]
+		merged = len(plan) > 1
+
+		# A merged plan has no single row key, so it can only be matched by group
+		# name; a single-row plan keeps the row key exactly as before.
+		match_key = None if merged else plan[0]["key"]
+		# Single-row plans pass their quantity through untouched (a blank/zero
+		# quantity keeps its legacy "skip validation" meaning).
+		required_quantity = sum(cint(row["quantity"]) for row in plan) if merged else plan[0]["quantity"]
+
+		# Fetch all candidate items within this group for UI parity and validation
+		items_in_group = frappe.get_all(
+			"Item",
+			filters={
+				"item_group": item_group_name,
+				"disabled": 0,
+				"has_variants": 0,
+			},
+			fields=["name", "item_name", "standard_rate", "stock_uom"],
+			limit=0,
+		)
+
+		if not items_in_group:
+			frappe.throw(f"No available items found in item group '{item_group_name}'")
+
+		# Attempt to honor user-selected items for this group (if provided from client)
+		allowed_codes = {row["name"] for row in items_in_group}
+
+		aggregated_selected = self._aggregate_selected_items(
+			match_key,
+			item_group_name,
+			required_quantity,
+		)
+
+		if aggregated_selected:
+			invalid_codes = [code for code in aggregated_selected.keys() if code not in allowed_codes]
+			if invalid_codes:
+				frappe.throw(
+					_(
+						f"Bundle {self.bundle_code}: invalid selections for group '{item_group_name}': {', '.join(invalid_codes)}"
+					)
+				)
+
+			frappe.logger("jarz_pos.bundle").info(
+				{
+					"event": "bundle_selections_applied",
+					"bundle": self.bundle_code,
+					"group": item_group_name,
+					"required": required_quantity,
+					"selections": {code: data["qty"] for code, data in aggregated_selected.items()},
+					"merged_group_rows": [row["key"] for row in plan] if merged else None,
+				}
+			)
+
+			item_doc_cache = {}
+			for allocation in self._allocate_selections_to_rows(aggregated_selected, plan):
+				item_code = allocation["item_code"]
+				item_doc = item_doc_cache.get(item_code)
+				if item_doc is None:
+					try:
+						item_doc = frappe.get_doc("Item", item_code)
+					except Exception:
+						frappe.throw(
+							_(f"Selected item '{item_code}' for bundle {self.bundle_code} could not be found")
+						)
+					item_doc_cache[item_code] = item_doc
+
+				override_rate = allocation.get("rate")
+				if override_rate is not None:
+					rate = flt(override_rate)
+				else:
+					rate = self.get_item_rate(item_doc.name)
+
+				self.bundle_items.append(
+					{
+						"item": item_doc,
+						"qty": allocation["qty"],
+						"rate": rate,
+						"item_group": allocation["group_name"],
+						"item_group_key": allocation["group_key"],
+					}
+				)
+
+			# Skip fallback when selections were provided
+			return
+
+		# No explicit selections provided — fallback to legacy behaviour (first available item).
+		# Each row keeps its own line so a merged plan is indistinguishable from the
+		# per-row expansion this branch has always produced.
+		selected_item = items_in_group[0]
+		item_doc = frappe.get_doc("Item", selected_item["name"])
+		fallback_rate = self.get_item_rate(item_doc.name)
+
+		for row in plan:
+			self.bundle_items.append(
+				{
+					"item": item_doc,
+					"qty": row["quantity"],
+					"rate": fallback_rate,
+					"item_group": row["name"],
+					"item_group_key": row["key"],
+				}
+			)
+
+	def _allocate_selections_to_rows(self, aggregated, plan):
+		"""Spread already-validated selections across a plan's bundle rows.
+
+		For a single-row plan this is a pass-through and returns the aggregated
+		entries in their original order.  For a merged plan the totals are known
+		to match (``_aggregate_selected_items`` enforced it), so this is a pure
+		re-slicing: each row consumes selections until its own quantity is filled.
+		A selection that straddles two rows is split into two allocations — that
+		is what lets every emitted child row carry the bundle group key it really
+		belongs to, which is what the amendment rebuild reads back.
+		"""
+		pending = [[code, cint(data["qty"]), data.get("rate")] for code, data in aggregated.items()]
+		allocations = []
+		cursor = 0
+
+		for row in plan:
+			remaining = cint(row["quantity"])
+			while remaining > 0 and cursor < len(pending):
+				entry = pending[cursor]
+				if entry[1] <= 0:
+					cursor += 1
+					continue
+				take = min(remaining, entry[1])
+				allocations.append(
+					{
+						"item_code": entry[0],
+						"qty": take,
+						"rate": entry[2],
+						"group_key": row["key"],
+						"group_name": row["name"],
+					}
+				)
+				entry[1] -= take
+				remaining -= take
+				if entry[1] <= 0:
+					cursor += 1
+
+		# Anything left over means the row quantities did not constrain the total
+		# (a blank/zero row quantity skips validation). Emit the remainder on the
+		# last row rather than silently dropping paid-for selections.
+		last_row = plan[-1]
+		while cursor < len(pending):
+			entry = pending[cursor]
+			if entry[1] > 0:
+				allocations.append(
+					{
+						"item_code": entry[0],
+						"qty": entry[1],
+						"rate": entry[2],
+						"group_key": last_row["key"],
+						"group_name": last_row["name"],
+					}
+				)
+			cursor += 1
+
+		return allocations
+
+	def _aggregate_selected_items(self, item_group_key, item_group_name, required_quantity):
+		"""Normalize and validate selected items coming from the client for a given group."""
+		if not self.selected_items:
+			return {}
+
+		matched_key = None
+		for key in self.selected_items.keys():
+			if item_group_key and key == item_group_key:
+				matched_key = key
+				break
+			if key == item_group_name:
+				matched_key = key
+				break
+			if (
+				isinstance(key, str)
+				and isinstance(item_group_name, str)
+				and key.lower() == item_group_name.lower()
+			):
+				matched_key = key
+				break
+
+		if matched_key is None:
+			return {}
+
+		raw_entries = self.selected_items.get(matched_key) or []
+		if not raw_entries:
+			frappe.throw(
+				_(f"Bundle {self.bundle_code}: no items supplied for required group '{item_group_name}'")
+			)
+
+		aggregated = {}
+		total_selected = 0
+
+		for entry in raw_entries:
+			if not isinstance(entry, dict):
+				continue
+
+			entry_dict = dict(entry)
+			item_code = entry_dict.get("id") or entry_dict.get("item_code") or entry_dict.get("name")
+			if not item_code:
+				continue
+
+			aggregated.setdefault(item_code, {"qty": 0, "rate": None})
+
+			qty_increment = 1
+			for explicit_key in (
+				"selected_quantity",
+				"selection_quantity",
+				"selected_qty",
+				"selected_count",
+				"count",
+			):
+				value = entry_dict.get(explicit_key)
+				if value in (None, ""):
+					continue
+				try:
+					candidate = cint(value)
+					if candidate > 0:
+						qty_increment = candidate
+						break
+				except Exception:
+					continue
+
+			aggregated[item_code]["qty"] += qty_increment
+
+			price_value = entry_dict.get("price")
+			if price_value is None:
+				price_value = entry_dict.get("rate")
+			if price_value is not None:
+				aggregated[item_code]["rate"] = flt(price_value)
+
+			total_selected += qty_increment
+
+		if not aggregated:
+			frappe.throw(
+				_(f"Bundle {self.bundle_code}: no valid items supplied for group '{item_group_name}'")
+			)
+
+		if required_quantity:
+			required_quantity = cint(required_quantity)
+			if required_quantity and total_selected != required_quantity:
+				log_map = {code: data["qty"] for code, data in aggregated.items()}
+				frappe.logger("jarz_pos.bundle").warning(
+					{
+						"event": "bundle_selection_mismatch",
+						"bundle": self.bundle_code,
+						"group": item_group_name,
+						"required": required_quantity,
+						"received": total_selected,
+						"entries": log_map,
+						"raw_count": len(raw_entries),
+					}
+				)
+				frappe.throw(
+					_(
+						f"Bundle {self.bundle_code}: expected {required_quantity} selection(s) from '{item_group_name}', received {total_selected}"
+					)
+				)
+
+		return aggregated
+
+	def calculate_child_discount_percentage(self):
+		"""Return uniform discount percentage for child items ensuring bundle price match.
+		Raises if bundle_price > total child gross (cannot inflate price when parent is 100% discounted).
+		"""
+		bundle_price = self.target_bundle_price
+		if bundle_price in (None, ""):
+			bundle_price = flt(self.bundle_doc.bundle_price)
+		if bundle_price <= 0:
+			frappe.throw(_(f"Bundle {self.bundle_code} price is not set or invalid"))
+
+		total_child_price = sum(
+			[flt(item["rate"]) * flt(item["qty"]) * self.quantity for item in self.bundle_items]
+		)
+
+		if total_child_price <= 0:
+			frappe.throw(_(f"Bundle {self.bundle_code} has zero total child price"))
+
+		# Allow bundle price to exceed child prices (negative discount = markup)
+		# This supports flexible bundle pricing where selected items may cost less than bundle price
+		if bundle_price > total_child_price + 1e-9:
+			frappe.logger("jarz_pos.bundle").warning(
+				{
+					"event": "bundle_price_exceeds_children",
+					"bundle": self.bundle_code,
+					"bundle_price": bundle_price,
+					"child_total": total_child_price,
+					"note": "Bundle price higher than selected items - will apply 0% discount and use bundle price as-is",
+				}
+			)
+			# Return 0% discount - children keep their rates, parent becomes the price adjuster
+			return 0.0, total_child_price, bundle_price
+
+		# discount% = ((total_child_price - bundle_price) / total_child_price) * 100
+		discount_percentage = ((total_child_price - bundle_price) / total_child_price) * 100.0
+		discount_percentage = max(0.0, min(100.0, discount_percentage))  # clamp
+
+		return discount_percentage, total_child_price, bundle_price
+
+	def calculate_bundle_discount(self):
+		"""
+		Calculate discount percentage for child items
+		Parent gets 100% discount, children get equal discount to match bundle price
+		"""
+		# Get bundle target price
+		bundle_price = flt(self.bundle_doc.bundle_price)
+
+		# Calculate total price of all child items without discount
+		total_child_price = sum(
+			[flt(item["rate"]) * flt(item["qty"]) * self.quantity for item in self.bundle_items]
+		)
+
+		if total_child_price == 0:
+			return 0
+
+		# Calculate discount percentage needed for children
+		# Formula: discount% = ((total_price - target_price) / total_price) * 100
+		discount_percentage = ((total_child_price - bundle_price) / total_child_price) * 100
+
+		# Ensure discount is not negative
+		calculated_discount = max(0, discount_percentage)
+
+		frappe.log_error(
+			f"Bundle discount calculation: Bundle price={bundle_price}, Total child price={total_child_price}, Discount={calculated_discount}%",
+			"Bundle Processing",
+		)
+
+		return calculated_discount
+
+	def get_invoice_items(self):
+		"""Get formatted items for invoice following ERPNext discount logic exactly.
+		Key insight: ERPNext prioritizes discount_percentage over discount_amount.
+		For 100% discount (parent): use discount_percentage = 100
+		For partial discount (children): use discount_percentage only, let ERPNext compute discount_amount
+		"""
+		if not self.bundle_doc:
+			self.load_bundle()
+
+		invoice_items = []
+
+		# Precision discovery
+		try:
+			rate_precision = frappe.get_precision("Sales Invoice Item", "rate") or 2
+		except Exception:
+			rate_precision = 2
+		try:
+			amount_precision = frappe.get_precision("Sales Invoice Item", "amount") or 2
+		except Exception:
+			amount_precision = 2
+
+		# Parent line – 100% discount via discount_percentage (ERPNext will set rate = 0.0)
+		parent_rate = self.get_item_rate(self.parent_item.name)
+		parent_line = {
+			"item_code": self.parent_item.name,
+			"item_name": self.parent_item.item_name,
+			"description": f"Bundle: {self.parent_item.description or self.parent_item.item_name}",
+			"qty": self.quantity,
+			"rate": flt(parent_rate, rate_precision),  # Include rate for compatibility
+			"price_list_rate": flt(parent_rate, rate_precision),  # CRITICAL: Set price_list_rate
+			"discount_percentage": 100.0,  # CRITICAL: ERPNext will set rate = 0.0 automatically
+			"is_bundle_parent": 1,
+			"bundle_code": self.bundle_code,
+		}
+		invoice_items.append(parent_line)
+
+		# Compute uniform percentage for children
+		uniform_pct, total_child_gross, bundle_price = self.calculate_child_discount_percentage()
+
+		# First pass children using discount_percentage only
+		child_lines = []
+		running_children_discounted_total = 0.0
+		for bi in self.bundle_items:
+			unit_rate = flt(bi["rate"], rate_precision)
+			qty_total = flt(bi["qty"]) * self.quantity
+			# ERPNext will compute: rate = price_list_rate * (1 - discount_percentage/100)
+			expected_discounted_rate = unit_rate * (1 - uniform_pct / 100.0)
+			line_discounted_total = flt(expected_discounted_rate * qty_total, amount_precision)
+			running_children_discounted_total += line_discounted_total
+
+			child_lines.append(
+				{
+					"item_code": bi["item"].name,
+					"item_name": bi["item"].item_name,
+					"description": bi["item"].description or bi["item"].item_name,
+					"qty": qty_total,
+					"rate": unit_rate,  # Include rate for compatibility
+					"price_list_rate": unit_rate,  # CRITICAL: Set price_list_rate for ERPNext
+					"discount_percentage": uniform_pct,  # CRITICAL: Let ERPNext compute rate and discount_amount
+					"is_bundle_child": 1,
+					"parent_bundle": self.bundle_code,
+					"bundle_group_key": bi.get("item_group_key") or "",
+					"bundle_group_name": bi.get("item_group") or "",
+					"_unit_rate": unit_rate,
+					"_qty_total": qty_total,
+					"_expected_line_total": line_discounted_total,
+				}
+			)
+
+		# Rounding correction: adjust last child's discount_percentage to hit exact bundle_price
+		# Only apply when uniform_pct > 0 (i.e., when bundle price < child total)
+		# When bundle price > child total (uniform_pct = 0), skip rounding and let parent absorb difference
+		target_children_total = flt(bundle_price, amount_precision)
+		current_children_total = flt(running_children_discounted_total, amount_precision)
+		residual = flt(target_children_total - current_children_total, amount_precision)
+
+		min_step = 1 / (10**amount_precision)
+		if child_lines and abs(residual) >= min_step and uniform_pct > 0:
+			last = child_lines[-1]
+			unit_rate = last["_unit_rate"]
+			qty_total = last["_qty_total"]
+			current_expected_line_total = last["_expected_line_total"]
+
+			# Calculate what the last line total should be to hit exact target
+			desired_last_line_total = flt(current_expected_line_total + residual, amount_precision)
+			desired_last_line_total = min(max(0.0, desired_last_line_total), unit_rate * qty_total)
+
+			# Calculate required discount percentage for last line
+			if unit_rate > 0 and qty_total > 0:
+				desired_unit_rate = desired_last_line_total / qty_total
+				adjusted_discount_pct = ((unit_rate - desired_unit_rate) / unit_rate) * 100.0
+				adjusted_discount_pct = min(max(0.0, adjusted_discount_pct), 100.0)
+				last["discount_percentage"] = flt(adjusted_discount_pct, 6)  # High precision for percentage
+
+		# Cleanup helper fields
+		for cl in child_lines:
+			cl.pop("_unit_rate", None)
+			cl.pop("_qty_total", None)
+			cl.pop("_expected_line_total", None)
+
+		invoice_items.extend(child_lines)
+
+		frappe.logger("jarz_pos.bundle").info(
+			{
+				"bundle": self.bundle_code,
+				"parent_discount_pct": 100.0,
+				"children_uniform_discount_pct": uniform_pct,
+				"bundle_price_target": bundle_price,
+				"children_total_expected": target_children_total,
+				"residual_adjustment": residual,
+				"approach": "discount_percentage_only_erpnext_native",
+			}
+		)
+		return invoice_items
+
+
+def process_bundle_for_invoice(
+	bundle_identifier, quantity=1, selected_items=None, price_list=None, target_bundle_price=None
+):
+	"""
+	Main function to process bundle for invoice
+
+	Args:
+	    bundle_identifier (str): Could be either:
+	        - ERPNext Item code (from bundle.erpnext_item field)
+	        - Jarz Bundle record ID
+	    quantity (int): Quantity of bundles
+	    selected_items (dict | None): Mapping of bundle item groups to user-selected item codes
+
+	Returns:
+	    list: List of invoice items (parent + children with discounts)
+	"""
+	try:
+		frappe.log_error(f"🔍 Processing bundle identifier: '{bundle_identifier}'", "Bundle Processing")
+
+		bundle_code = None
+		bundle_doc = None
+
+		# Try to find bundle by erpnext_item first (preferred method)
+		bundle_records = frappe.get_all(
+			"Jarz Bundle",
+			filters={"erpnext_item": bundle_identifier},
+			fields=["name", "bundle_name", "erpnext_item", "bundle_price"],
+			limit=1,
+		)
+
+		if bundle_records:
+			bundle_code = bundle_records[0]["name"]
+			frappe.log_error(
+				f"✅ Found bundle by erpnext_item: {bundle_code} ({bundle_records[0]['bundle_name']})",
+				"Bundle Processing",
+			)
+		else:
+			# Try to find it as a direct bundle record ID
+			if frappe.db.exists("Jarz Bundle", bundle_identifier):
+				bundle_code = bundle_identifier
+				bundle_doc = frappe.get_doc("Jarz Bundle", bundle_code)
+				frappe.log_error(
+					f"✅ Found bundle by record ID: {bundle_code} ({bundle_doc.bundle_name})",
+					"Bundle Processing",
+				)
+			else:
+				frappe.throw(
+					f"No Jarz Bundle found for identifier '{bundle_identifier}'. Checked both erpnext_item field and bundle record ID."
+				)
+
+		# Process the bundle using the bundle record ID
+		processor = BundleProcessor(
+			bundle_code,
+			quantity,
+			selected_items=selected_items,
+			price_list=price_list,
+			target_bundle_price=target_bundle_price,
+		)
+		result = processor.get_invoice_items()
+
+		frappe.log_error(f"✅ Bundle processing complete: {len(result)} items generated", "Bundle Processing")
+		return result
+
+	except Exception as e:
+		frappe.log_error(
+			f"❌ Bundle processing error for identifier {bundle_identifier}: {str(e)}", "Bundle Processing"
+		)
+		raise
 
 
 def validate_bundle_configuration_by_item(bundle_identifier):
-    """
-    Validate bundle configuration by identifier (ERPNext item code or bundle ID)
-    
-    Args:
-        bundle_identifier (str): Could be ERPNext item code or bundle record ID
-        
-    Returns:
-        tuple: (is_valid, message, bundle_code)
-    """
-    try:
-        bundle_code = None
-        
-        # Try to find the bundle by erpnext_item first
-        bundle_records = frappe.get_all("Jarz Bundle", 
-            filters={"erpnext_item": bundle_identifier},
-            fields=["name"],
-            limit=1)
-        
-        if bundle_records:
-            bundle_code = bundle_records[0]["name"]
-        elif frappe.db.exists("Jarz Bundle", bundle_identifier):
-            # Try as direct bundle record ID
-            bundle_code = bundle_identifier
-        else:
-            return False, f"No Jarz Bundle found for identifier '{bundle_identifier}'", None
-            
-        # Use existing validation function
-        is_valid, message = validate_bundle_configuration(bundle_code)
-        return is_valid, message, bundle_code
-        
-    except Exception as e:
-        return False, f"Bundle validation error: {str(e)}", None
+	"""
+	Validate bundle configuration by identifier (ERPNext item code or bundle ID)
+
+	Args:
+	    bundle_identifier (str): Could be ERPNext item code or bundle record ID
+
+	Returns:
+	    tuple: (is_valid, message, bundle_code)
+	"""
+	try:
+		bundle_code = None
+
+		# Try to find the bundle by erpnext_item first
+		bundle_records = frappe.get_all(
+			"Jarz Bundle", filters={"erpnext_item": bundle_identifier}, fields=["name"], limit=1
+		)
+
+		if bundle_records:
+			bundle_code = bundle_records[0]["name"]
+		elif frappe.db.exists("Jarz Bundle", bundle_identifier):
+			# Try as direct bundle record ID
+			bundle_code = bundle_identifier
+		else:
+			return False, f"No Jarz Bundle found for identifier '{bundle_identifier}'", None
+
+		# Use existing validation function
+		is_valid, message = validate_bundle_configuration(bundle_code)
+		return is_valid, message, bundle_code
+
+	except Exception as e:
+		return False, f"Bundle validation error: {str(e)}", None
 
 
 def validate_bundle_configuration(bundle_code):
-    """
-    Validate bundle configuration before processing
-    """
-    try:
-        # Get bundle document using Frappe API
-        bundle_doc = frappe.get_doc("Jarz Bundle", bundle_code)
-        
-        if not bundle_doc:
-            return False, f"Bundle {bundle_code} not found"
-        
-        # Check ERPNext item exists (this is the parent item)
-        if not bundle_doc.erpnext_item:
-            return False, "Bundle has no ERPNext item configured"
-            
-        # Check ERPNext item is valid
-        if not frappe.db.exists("Item", bundle_doc.erpnext_item):
-            return False, f"ERPNext item {bundle_doc.erpnext_item} does not exist"
-            
-        # Check bundle has child items
-        if not bundle_doc.items:
-            return False, "Bundle has no child items configured"
-            
-        # Check all child item groups exist and have items
-        for item_group_row in bundle_doc.items:
-            item_group_name = item_group_row.item_group
-            
-            # Check if item group exists
-            if not frappe.db.exists("Item Group", item_group_name):
-                return False, f"Item group {item_group_name} does not exist"
-            
-            # Check if there are items in this group
-            items_in_group = frappe.get_all("Item",
-                filters={
-                    "item_group": item_group_name,
-                    "disabled": 0
-                },
-                limit=1)
-            
-            if not items_in_group:
-                return False, f"No available items found in item group {item_group_name}"
-                
-        # Check bundle price is set
-        if not bundle_doc.bundle_price or flt(bundle_doc.bundle_price) <= 0:
-            return False, "Bundle price not set or invalid"
-            
-        return True, "Bundle configuration is valid"
-        
-    except Exception as e:
-        return False, f"Bundle validation error: {str(e)}"
+	"""
+	Validate bundle configuration before processing
+	"""
+	try:
+		# Get bundle document using Frappe API
+		bundle_doc = frappe.get_doc("Jarz Bundle", bundle_code)
+
+		if not bundle_doc:
+			return False, f"Bundle {bundle_code} not found"
+
+		# Check ERPNext item exists (this is the parent item)
+		if not bundle_doc.erpnext_item:
+			return False, "Bundle has no ERPNext item configured"
+
+		# Check ERPNext item is valid
+		if not frappe.db.exists("Item", bundle_doc.erpnext_item):
+			return False, f"ERPNext item {bundle_doc.erpnext_item} does not exist"
+
+		# Check bundle has child items
+		if not bundle_doc.items:
+			return False, "Bundle has no child items configured"
+
+		# Check all child item groups exist and have items
+		for item_group_row in bundle_doc.items:
+			item_group_name = item_group_row.item_group
+
+			# Check if item group exists
+			if not frappe.db.exists("Item Group", item_group_name):
+				return False, f"Item group {item_group_name} does not exist"
+
+			# Check if there are items in this group
+			items_in_group = frappe.get_all(
+				"Item", filters={"item_group": item_group_name, "disabled": 0}, limit=1
+			)
+
+			if not items_in_group:
+				return False, f"No available items found in item group {item_group_name}"
+
+		# Check bundle price is set
+		if not bundle_doc.bundle_price or flt(bundle_doc.bundle_price) <= 0:
+			return False, "Bundle price not set or invalid"
+
+		return True, "Bundle configuration is valid"
+
+	except Exception as e:
+		return False, f"Bundle validation error: {str(e)}"
 
 
 # Legacy function for backward compatibility
 def process_bundle_item(bundle_id, bundle_qty, bundle_price, selling_price_list):
-    """
-    Legacy function - redirects to new implementation
-    
-    Args:
-        bundle_id (str): Could be either Jarz Bundle ID or ERPNext Item code
-        bundle_qty (int): Quantity
-        bundle_price (float): Price (not used in new implementation)
-        selling_price_list (str): Price list (not used in new implementation)
-    
-    Returns:
-        list: Processed bundle items
-    """
-    try:
-        # Try to process as ERPNext item first (new way)
-        return process_bundle_for_invoice(bundle_id, bundle_qty)
-    except Exception as e:
-        frappe.log_error(f"Legacy bundle processing failed for {bundle_id}: {str(e)}", "Bundle Processing")
-        
-        # If that fails, try to find if bundle_id is actually a Jarz Bundle record ID
-        try:
-            bundle_doc = frappe.get_doc("Jarz Bundle", bundle_id)
-            if bundle_doc.erpnext_item:
-                return process_bundle_for_invoice(bundle_doc.erpnext_item, bundle_qty)
-        except:
-            pass
-            
-        # If all fails, re-raise the original error
-        raise e
+	"""
+	Legacy function - redirects to new implementation
+
+	Args:
+	    bundle_id (str): Could be either Jarz Bundle ID or ERPNext Item code
+	    bundle_qty (int): Quantity
+	    bundle_price (float): Price (not used in new implementation)
+	    selling_price_list (str): Price list (not used in new implementation)
+
+	Returns:
+	    list: Processed bundle items
+	"""
+	try:
+		# Try to process as ERPNext item first (new way)
+		return process_bundle_for_invoice(bundle_id, bundle_qty)
+	except Exception as e:
+		frappe.log_error(f"Legacy bundle processing failed for {bundle_id}: {str(e)}", "Bundle Processing")
+
+		# If that fails, try to find if bundle_id is actually a Jarz Bundle record ID
+		try:
+			bundle_doc = frappe.get_doc("Jarz Bundle", bundle_id)
+			if bundle_doc.erpnext_item:
+				return process_bundle_for_invoice(bundle_doc.erpnext_item, bundle_qty)
+		except:
+			pass
+
+		# If all fails, re-raise the original error
+		raise e
+
 
 @frappe.whitelist()
 def test_bundle_pricing(bundle_identifier, qty: int = 1):
-    """Utility endpoint to test bundle pricing & rounding.
-    Returns diagnostic info including computed discount percentage and reconciliation.
-    Usage (bench):
-    bench execute jarz_pos.services.bundle_processing.test_bundle_pricing --kwargs '{"bundle_identifier": "ITEM-CODE", "qty": 2}'
-    """
-    processor = BundleProcessor(bundle_identifier, qty)
-    processor.load_bundle()
-    discount_pct, total_child_price, bundle_price = processor.calculate_child_discount_percentage()
-    items = processor.get_invoice_items()
-    child_discounted_sum = 0.0
-    for it in items:
-        if it.get('is_bundle_child'):
-            # emulate ERPNext discounted amount computation
-            line_original = it['rate'] * it['qty']
-            line_discount = line_original * (it.get('discount_percentage', 0) / 100.0)
-            child_discounted_sum += flt(line_original - line_discount, 2)
-    return {
-        'bundle_identifier': bundle_identifier,
-        'qty': qty,
-        'discount_percentage_uniform_base': discount_pct,
-        'bundle_price': bundle_price,
-        'total_child_gross': total_child_price,
-        'children_discounted_sum': flt(child_discounted_sum, 2),
-        'difference': flt(bundle_price - child_discounted_sum, 2),
-        'items_generated': items
-    }
+	"""Utility endpoint to test bundle pricing & rounding.
+	Returns diagnostic info including computed discount percentage and reconciliation.
+	Usage (bench):
+	bench execute jarz_pos.services.bundle_processing.test_bundle_pricing --kwargs '{"bundle_identifier": "ITEM-CODE", "qty": 2}'
+	"""
+	processor = BundleProcessor(bundle_identifier, qty)
+	processor.load_bundle()
+	discount_pct, total_child_price, bundle_price = processor.calculate_child_discount_percentage()
+	items = processor.get_invoice_items()
+	child_discounted_sum = 0.0
+	for it in items:
+		if it.get("is_bundle_child"):
+			# emulate ERPNext discounted amount computation
+			line_original = it["rate"] * it["qty"]
+			line_discount = line_original * (it.get("discount_percentage", 0) / 100.0)
+			child_discounted_sum += flt(line_original - line_discount, 2)
+	return {
+		"bundle_identifier": bundle_identifier,
+		"qty": qty,
+		"discount_percentage_uniform_base": discount_pct,
+		"bundle_price": bundle_price,
+		"total_child_gross": total_child_price,
+		"children_discounted_sum": flt(child_discounted_sum, 2),
+		"difference": flt(bundle_price - child_discounted_sum, 2),
+		"items_generated": items,
+	}

@@ -35,152 +35,160 @@ OPEN_STATUSES = ("Requested", "Printing", "Ready")
 
 
 class JarzLabelPrintOrder(Document):
-    def before_insert(self):
-        if not self.naming_series:
-            self.naming_series = DEFAULT_NAMING_SERIES
-        if not self.requested_by:
-            self.requested_by = frappe.session.user
+	def before_insert(self):
+		if not self.naming_series:
+			self.naming_series = DEFAULT_NAMING_SERIES
+		if not self.requested_by:
+			self.requested_by = frappe.session.user
 
-    def validate(self):
-        from jarz_pos.services import label_stock
+	def validate(self):
+		from jarz_pos.services import label_stock
 
-        self._derive_label_qty()
+		self._derive_label_qty()
 
-        if int(self.qty or 0) <= 0:
-            frappe.throw(_("Order at least one sheet."))
+		if int(self.qty or 0) <= 0:
+			frappe.throw(_("Order at least one sheet."))
 
-        if not self.requested_on:
-            self.requested_on = frappe.utils.today()
+		if not self.requested_on:
+			self.requested_on = frappe.utils.today()
 
-        self.expected_ready_date = label_stock.expected_ready_date(self.requested_on)
-        if not self.is_new():
-            # The bill link is written ONLY by label_stock.link_bill / the
-            # Purchase Invoice hooks. A form carrying an older value (opened
-            # before the bill was submitted or cancelled) must not save it back:
-            # that would silently unbill a billed batch, or re-link a dead one.
-            current = frappe.db.get_value(
-                "Jarz Label Print Order", self.name, ["purchase_invoice", "total_cost"], as_dict=True
-            ) or {}
-            self.purchase_invoice = current.get("purchase_invoice")
-            if self.purchase_invoice:
-                self.total_cost = current.get("total_cost")
-        self.billing_status = "Billed" if self.purchase_invoice else "Unbilled"
+		self.expected_ready_date = label_stock.expected_ready_date(self.requested_on)
+		if not self.is_new():
+			# The bill link is written ONLY by label_stock.link_bill / the
+			# Purchase Invoice hooks. A form carrying an older value (opened
+			# before the bill was submitted or cancelled) must not save it back:
+			# that would silently unbill a billed batch, or re-link a dead one.
+			current = (
+				frappe.db.get_value(
+					"Jarz Label Print Order", self.name, ["purchase_invoice", "total_cost"], as_dict=True
+				)
+				or {}
+			)
+			self.purchase_invoice = current.get("purchase_invoice")
+			if self.purchase_invoice:
+				self.total_cost = current.get("total_cost")
+		self.billing_status = "Billed" if self.purchase_invoice else "Unbilled"
 
-        if self.status == "Received":
-            if not self.received_on:
-                self.received_on = frappe.utils.today()
-            if not int(self.received_qty or 0):
-                # Partial receipts are recorded by editing received_qty before
-                # flipping the status; defaulting to the ordered quantity keeps
-                # the common case one click.
-                self.received_qty = int(self.qty or 0)
-            self._derive_cost_per_label()
-        elif self.status == "Cancelled":
-            if self.purchase_invoice and frappe.db.get_value(
-                "Purchase Invoice", self.purchase_invoice, "docstatus"
-            ) == 1:
-                # The bill already put this batch's cost on the balance sheet.
-                # Cancelling only the batch would leave that money in Labels
-                # Inventory with no labels behind it. Cancelling the bill first
-                # takes the value back out and unlinks it (label_stock hook).
-                frappe.throw(
-                    _(
-                        "This batch is billed on {0}. Cancel that Purchase Invoice "
-                        "first; the batch then returns to Unbilled and can be cancelled."
-                    ).format(self.purchase_invoice)
-                )
-            self.received_qty = 0
-            self.received_on = None
+		if self.status == "Received":
+			if not self.received_on:
+				self.received_on = frappe.utils.today()
+			if not int(self.received_qty or 0):
+				# Partial receipts are recorded by editing received_qty before
+				# flipping the status; defaulting to the ordered quantity keeps
+				# the common case one click.
+				self.received_qty = int(self.qty or 0)
+			self._derive_cost_per_label()
+		elif self.status == "Cancelled":
+			if (
+				self.purchase_invoice
+				and frappe.db.get_value("Purchase Invoice", self.purchase_invoice, "docstatus") == 1
+			):
+				# The bill already put this batch's cost on the balance sheet.
+				# Cancelling only the batch would leave that money in Labels
+				# Inventory with no labels behind it. Cancelling the bill first
+				# takes the value back out and unlinks it (label_stock hook).
+				frappe.throw(
+					_(
+						"This batch is billed on {0}. Cancel that Purchase Invoice "
+						"first; the batch then returns to Unbilled and can be cancelled."
+					).format(self.purchase_invoice)
+				)
+			self.received_qty = 0
+			self.received_on = None
 
-    def _derive_label_qty(self):
-        """Sheets are the ordering unit; labels are the stock unit.
+	def _derive_label_qty(self):
+		"""Sheets are the ordering unit; labels are the stock unit.
 
-        When sheets are given they are authoritative and ``qty`` is recomputed
-        every save (the sheet size may have been corrected). A legacy/direct
-        ``qty`` with no sheets is kept as-is so a Desk user typing labels is not
-        fought with.
-        """
-        from jarz_pos.services import label_stock
+		When sheets are given they are authoritative and ``qty`` is recomputed
+		every save (the sheet size may have been corrected). A legacy/direct
+		``qty`` with no sheets is kept as-is so a Desk user typing labels is not
+		fought with.
+		"""
+		from jarz_pos.services import label_stock
 
-        sheets = int(self.qty_sheets or 0)
-        if sheets < 0:
-            frappe.throw(_("Sheets cannot be negative."))
-        if sheets:
-            row = frappe.db.get_value(
-                "Jarz Customer Label",
-                self.label,
-                ["size", "labels_per_sheet"],
-                as_dict=True,
-            ) or {}
-            self.qty = sheets * label_stock.labels_per_sheet_for(row)
+		sheets = int(self.qty_sheets or 0)
+		if sheets < 0:
+			frappe.throw(_("Sheets cannot be negative."))
+		if sheets:
+			row = (
+				frappe.db.get_value(
+					"Jarz Customer Label",
+					self.label,
+					["size", "labels_per_sheet"],
+					as_dict=True,
+				)
+				or {}
+			)
+			self.qty = sheets * label_stock.labels_per_sheet_for(row)
 
-    def _derive_cost_per_label(self):
-        """Batch cost over labels actually received -- the rate stock books in at.
+	def _derive_cost_per_label(self):
+		"""Batch cost over labels actually received -- the rate stock books in at.
 
-        Uses received_qty, not ordered qty: a printer that delivered short still
-        charged for what they delivered, and the per-label cost must reflect the
-        labels that really exist.
-        """
-        total = float(self.total_cost or 0)
-        received = int(self.received_qty or 0)
-        self.cost_per_label = round(total / received, 4) if total > 0 and received > 0 else 0
+		Uses received_qty, not ordered qty: a printer that delivered short still
+		charged for what they delivered, and the per-label cost must reflect the
+		labels that really exist.
+		"""
+		total = float(self.total_cost or 0)
+		received = int(self.received_qty or 0)
+		self.cost_per_label = round(total / received, 4) if total > 0 and received > 0 else 0
 
-    def on_update(self):
-        self._post_receipt_once()
-        self._refresh_label()
+	def on_update(self):
+		self._post_receipt_once()
+		self._refresh_label()
 
-    def after_insert(self):
-        # A new open order can flip a label from "Reorder Now" to "On Order".
-        self._refresh_label()
+	def after_insert(self):
+		# A new open order can flip a label from "Reorder Now" to "On Order".
+		self._refresh_label()
 
-    def _post_receipt_once(self):
-        """Post the stock-in movement the first time this order reads Received.
+	def _post_receipt_once(self):
+		"""Post the stock-in movement the first time this order reads Received.
 
-        ``post_gl=False`` is deliberate and load-bearing: the batch's value
-        reaches the GL through the supplier's Purchase Invoice (which debits
-        Labels Inventory directly), so mirroring the receipt into a Journal
-        Entry as well would double-count the asset. The movement still CARRIES
-        the value -- that is what keeps ledger value == account balance.
+		``post_gl=False`` is deliberate and load-bearing: the batch's value
+		reaches the GL through the supplier's Purchase Invoice (which debits
+		Labels Inventory directly), so mirroring the receipt into a Journal
+		Entry as well would double-count the asset. The movement still CARRIES
+		the value -- that is what keeps ledger value == account balance.
 
-        An UNBILLED batch is received at zero cost: a quoted price is not on
-        the balance sheet until the bill is, and booking it early let the
-        ledger run ahead of the account. The value arrives with the bill
-        (``label_stock.link_bill``).
-        """
-        from jarz_pos.services import label_stock
+		An UNBILLED batch is received at zero cost: a quoted price is not on
+		the balance sheet until the bill is, and booking it early let the
+		ledger run ahead of the account. The value arrives with the bill
+		(``label_stock.link_bill``).
+		"""
+		from jarz_pos.services import label_stock
 
-        if self.status != "Received":
-            return
-        qty = int(self.received_qty or 0)
-        if qty <= 0:
-            return
-        if frappe.db.exists("Jarz Label Movement", {"print_order": self.name}):
-            return  # already credited
+		if self.status != "Received":
+			return
+		qty = int(self.received_qty or 0)
+		if qty <= 0:
+			return
+		if frappe.db.exists("Jarz Label Movement", {"print_order": self.name}):
+			return  # already credited
 
-        billed = bool(self.purchase_invoice) and frappe.db.get_value(
-            "Purchase Invoice", self.purchase_invoice, "docstatus"
-        ) == 1
-        sheets_note = f" ({self.qty_sheets} sheet(s))" if int(self.qty_sheets or 0) else ""
-        label_stock.post_movement(
-            label=self.label,
-            movement_type="Print Received",
-            qty=qty,
-            posting_date=self.received_on or frappe.utils.today(),
-            print_order=self.name,
-            reference_doctype=self.doctype,
-            reference_name=self.name,
-            unit_cost=float(self.cost_per_label or 0) if billed else 0.0,
-            post_gl=False,
-            remarks=f"Print batch {self.name} received{sheets_note}",
-            refresh=False,
-        )
-        # qty x a 4-decimal unit cost rarely equals the bill to the piastre;
-        # true the batch up to exactly what the PI booked.
-        if billed:
-            label_stock.sync_batch_value(self)
+		billed = (
+			bool(self.purchase_invoice)
+			and frappe.db.get_value("Purchase Invoice", self.purchase_invoice, "docstatus") == 1
+		)
+		sheets_note = f" ({self.qty_sheets} sheet(s))" if int(self.qty_sheets or 0) else ""
+		label_stock.post_movement(
+			label=self.label,
+			movement_type="Print Received",
+			qty=qty,
+			posting_date=self.received_on or frappe.utils.today(),
+			print_order=self.name,
+			reference_doctype=self.doctype,
+			reference_name=self.name,
+			unit_cost=float(self.cost_per_label or 0) if billed else 0.0,
+			post_gl=False,
+			remarks=f"Print batch {self.name} received{sheets_note}",
+			refresh=False,
+		)
+		# qty x a 4-decimal unit cost rarely equals the bill to the piastre;
+		# true the batch up to exactly what the PI booked.
+		if billed:
+			label_stock.sync_batch_value(self)
 
-    def _refresh_label(self):
-        from jarz_pos.services import label_stock
+	def _refresh_label(self):
+		from jarz_pos.services import label_stock
 
-        if self.label:
-            label_stock.refresh_label(self.label)
+		if self.label:
+			label_stock.refresh_label(self.label)

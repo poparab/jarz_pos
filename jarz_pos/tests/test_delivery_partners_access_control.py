@@ -31,132 +31,133 @@ POS_USER_ROLES = ["POS User", "Sales User"]
 
 
 def _boom(*_args, **_kwargs):
-    raise AssertionError("database was touched before the permission gate ran")
+	raise AssertionError("database was touched before the permission gate ran")
 
 
 class TestGuardHelperDirectly(unittest.TestCase):
-    """``_ensure_delivery_partner_access`` in isolation."""
+	"""``_ensure_delivery_partner_access`` in isolation."""
 
-    def _run(self, roles):
-        from jarz_pos.api import delivery_partners
+	def _run(self, roles):
+		from jarz_pos.api import delivery_partners
 
-        with patch.object(delivery_partners, "frappe") as mock_frappe:
-            mock_frappe.PermissionError = PermissionError
-            mock_frappe.throw.side_effect = PermissionError
-            mock_frappe.get_roles.return_value = roles
-            delivery_partners._ensure_delivery_partner_access()
+		with patch.object(delivery_partners, "frappe") as mock_frappe:
+			mock_frappe.PermissionError = PermissionError
+			mock_frappe.throw.side_effect = PermissionError
+			mock_frappe.get_roles.return_value = roles
+			delivery_partners._ensure_delivery_partner_access()
 
-    def test_manager_passes(self):
-        self._run([MANAGER_ROLE])
+	def test_manager_passes(self):
+		self._run([MANAGER_ROLE])
 
-    def test_every_manager_tier_member_passes(self):
-        for role in sorted(ROLES.MANAGER):
-            with self.subTest(role=role):
-                self._run([role])
+	def test_every_manager_tier_member_passes(self):
+		for role in sorted(ROLES.MANAGER):
+			with self.subTest(role=role):
+				self._run([role])
 
-    def test_plain_pos_user_is_refused(self):
-        with self.assertRaises(PermissionError):
-            self._run(POS_USER_ROLES)
+	def test_plain_pos_user_is_refused(self):
+		with self.assertRaises(PermissionError):
+			self._run(POS_USER_ROLES)
 
-    def test_line_manager_alone_is_refused(self):
-        """Deliberately NOT widened to the line-manager tier: no branch owns a partner."""
-        with self.assertRaises(PermissionError):
-            self._run([ROLES.JARZ_LINE_MANAGER, ROLES.JARZ_LINE_MANAGER_ALT])
+	def test_line_manager_alone_is_refused(self):
+		"""Deliberately NOT widened to the line-manager tier: no branch owns a partner."""
+		with self.assertRaises(PermissionError):
+			self._run([ROLES.JARZ_LINE_MANAGER, ROLES.JARZ_LINE_MANAGER_ALT])
 
 
 class _EndpointGuardOrderingMixin:
-    """Shared machinery: run an endpoint under a fully mocked ``frappe``."""
+	"""Shared machinery: run an endpoint under a fully mocked ``frappe``."""
 
-    def _mocked_module(self, roles, *, block_db=False):
-        from jarz_pos.api import delivery_partners
+	def _mocked_module(self, roles, *, block_db=False):
+		from jarz_pos.api import delivery_partners
 
-        patcher = patch.object(delivery_partners, "frappe")
-        mock_frappe = patcher.start()
-        self.addCleanup(patcher.stop)
-        # The accrual helpers have their own real ``frappe``; keep them off the DB.
-        for name in ("unsettled_accruals", "lock_accruals_for_settlement"):
-            p = patch.object(delivery_partners, name, return_value=[])
-            p.start()
-            self.addCleanup(p.stop)
-        p = patch.object(
-            delivery_partners, "split_accrual_names",
-            side_effect=lambda names: (list(names or []), []),
-        )
-        p.start()
-        self.addCleanup(p.stop)
-        mock_frappe.PermissionError = PermissionError
-        mock_frappe.throw.side_effect = PermissionError
-        mock_frappe.get_roles.return_value = roles
-        if block_db:
-            mock_frappe.db.sql.side_effect = _boom
-            mock_frappe.get_all.side_effect = _boom
-            mock_frappe.get_doc.side_effect = _boom
-            mock_frappe.db.get_value.side_effect = _boom
-            mock_frappe.db.set_value.side_effect = _boom
-            mock_frappe.db.commit.side_effect = _boom
-        return delivery_partners, mock_frappe
+		patcher = patch.object(delivery_partners, "frappe")
+		mock_frappe = patcher.start()
+		self.addCleanup(patcher.stop)
+		# The accrual helpers have their own real ``frappe``; keep them off the DB.
+		for name in ("unsettled_accruals", "lock_accruals_for_settlement"):
+			p = patch.object(delivery_partners, name, return_value=[])
+			p.start()
+			self.addCleanup(p.stop)
+		p = patch.object(
+			delivery_partners,
+			"split_accrual_names",
+			side_effect=lambda names: (list(names or []), []),
+		)
+		p.start()
+		self.addCleanup(p.stop)
+		mock_frappe.PermissionError = PermissionError
+		mock_frappe.throw.side_effect = PermissionError
+		mock_frappe.get_roles.return_value = roles
+		if block_db:
+			mock_frappe.db.sql.side_effect = _boom
+			mock_frappe.get_all.side_effect = _boom
+			mock_frappe.get_doc.side_effect = _boom
+			mock_frappe.db.get_value.side_effect = _boom
+			mock_frappe.db.set_value.side_effect = _boom
+			mock_frappe.db.commit.side_effect = _boom
+		return delivery_partners, mock_frappe
 
 
 class TestGetDeliveryPartnerBalancesGate(_EndpointGuardOrderingMixin, unittest.TestCase):
-    def test_pos_user_refused_before_any_db_call(self):
-        module, _mock_frappe = self._mocked_module(POS_USER_ROLES, block_db=True)
-        with self.assertRaises(PermissionError):
-            module.get_delivery_partner_balances()
+	def test_pos_user_refused_before_any_db_call(self):
+		module, _mock_frappe = self._mocked_module(POS_USER_ROLES, block_db=True)
+		with self.assertRaises(PermissionError):
+			module.get_delivery_partner_balances()
 
-    def test_manager_reaches_the_query(self):
-        module, mock_frappe = self._mocked_module([MANAGER_ROLE])
-        mock_frappe.db.sql.return_value = []
-        result = module.get_delivery_partner_balances()
-        self.assertEqual(result, [])
-        mock_frappe.db.sql.assert_called_once()
+	def test_manager_reaches_the_query(self):
+		module, mock_frappe = self._mocked_module([MANAGER_ROLE])
+		mock_frappe.db.sql.return_value = []
+		result = module.get_delivery_partner_balances()
+		self.assertEqual(result, [])
+		mock_frappe.db.sql.assert_called_once()
 
 
 class TestGetDeliveryPartnerUnsettledDetailsGate(_EndpointGuardOrderingMixin, unittest.TestCase):
-    def test_pos_user_refused_before_any_db_call(self):
-        module, _mock_frappe = self._mocked_module(POS_USER_ROLES, block_db=True)
-        with self.assertRaises(PermissionError):
-            module.get_delivery_partner_unsettled_details("Partner A")
+	def test_pos_user_refused_before_any_db_call(self):
+		module, _mock_frappe = self._mocked_module(POS_USER_ROLES, block_db=True)
+		with self.assertRaises(PermissionError):
+			module.get_delivery_partner_unsettled_details("Partner A")
 
-    def test_manager_reaches_the_query(self):
-        module, mock_frappe = self._mocked_module([MANAGER_ROLE])
-        mock_frappe.get_all.return_value = []
-        result = module.get_delivery_partner_unsettled_details("Partner A")
-        self.assertEqual(result, [])
-        mock_frappe.get_all.assert_called_once()
+	def test_manager_reaches_the_query(self):
+		module, mock_frappe = self._mocked_module([MANAGER_ROLE])
+		mock_frappe.get_all.return_value = []
+		result = module.get_delivery_partner_unsettled_details("Partner A")
+		self.assertEqual(result, [])
+		mock_frappe.get_all.assert_called_once()
 
 
 class TestSettleDeliveryPartnerGate(_EndpointGuardOrderingMixin, unittest.TestCase):
-    def test_pos_user_refused_before_touching_the_partner_doc(self):
-        """The gate fires even before the ``delivery_partner is required`` check."""
-        module, mock_frappe = self._mocked_module(POS_USER_ROLES, block_db=True)
-        with self.assertRaises(PermissionError):
-            module.settle_delivery_partner("Partner A")
-        # get_doc is the very next line after the required-field check; proving it
-        # was never reached proves the guard ran first.
-        mock_frappe.get_doc.assert_not_called()
+	def test_pos_user_refused_before_touching_the_partner_doc(self):
+		"""The gate fires even before the ``delivery_partner is required`` check."""
+		module, mock_frappe = self._mocked_module(POS_USER_ROLES, block_db=True)
+		with self.assertRaises(PermissionError):
+			module.settle_delivery_partner("Partner A")
+		# get_doc is the very next line after the required-field check; proving it
+		# was never reached proves the guard ran first.
+		mock_frappe.get_doc.assert_not_called()
 
-    def test_pos_user_refused_even_with_extra_charges_supplied(self):
-        """The exact abuse the review flagged: caller-supplied extra_charges."""
-        module, mock_frappe = self._mocked_module(POS_USER_ROLES, block_db=True)
-        with self.assertRaises(PermissionError):
-            module.settle_delivery_partner(
-                "Partner A",
-                extra_charges=[{"description": "Monthly subscription", "amount": 500.0}],
-            )
-        mock_frappe.get_doc.assert_not_called()
+	def test_pos_user_refused_even_with_extra_charges_supplied(self):
+		"""The exact abuse the review flagged: caller-supplied extra_charges."""
+		module, mock_frappe = self._mocked_module(POS_USER_ROLES, block_db=True)
+		with self.assertRaises(PermissionError):
+			module.settle_delivery_partner(
+				"Partner A",
+				extra_charges=[{"description": "Monthly subscription", "amount": 500.0}],
+			)
+		mock_frappe.get_doc.assert_not_called()
 
-    def test_manager_passes_the_gate_and_reaches_business_logic(self):
-        module, mock_frappe = self._mocked_module([MANAGER_ROLE])
-        dp = MagicMock()
-        dp.settlement_account = "Partner A - J"
-        mock_frappe.get_doc.return_value = dp
-        mock_frappe.get_all.return_value = []  # nothing unbilled
-        mock_frappe.db.get_values.return_value = []
-        result = module.settle_delivery_partner("Partner A")
-        self.assertTrue(result["success"])
-        self.assertEqual(result["order_count"], 0)
-        mock_frappe.get_doc.assert_called_once()
+	def test_manager_passes_the_gate_and_reaches_business_logic(self):
+		module, mock_frappe = self._mocked_module([MANAGER_ROLE])
+		dp = MagicMock()
+		dp.settlement_account = "Partner A - J"
+		mock_frappe.get_doc.return_value = dp
+		mock_frappe.get_all.return_value = []  # nothing unbilled
+		mock_frappe.db.get_values.return_value = []
+		result = module.settle_delivery_partner("Partner A")
+		self.assertTrue(result["success"])
+		self.assertEqual(result["order_count"], 0)
+		mock_frappe.get_doc.assert_called_once()
 
 
 if __name__ == "__main__":
-    unittest.main()
+	unittest.main()

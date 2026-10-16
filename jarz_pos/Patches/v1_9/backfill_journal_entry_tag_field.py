@@ -37,48 +37,46 @@ _TAG_ANYWHERE = re.compile(r"\[JARZ-JE:[^\[\]]{1,220}\]")
 
 
 def execute():
-    if not frappe.db.has_column("Journal Entry", FIELDNAME):
-        # `utils.cleanup.ensure_journal_entry_tag_field` runs in before_migrate,
-        # so this should never happen. Fail loudly rather than silently
-        # recording the patch as done and leaving every legacy entry unstamped.
-        frappe.throw(
-            f"Journal Entry.{FIELDNAME} does not exist. "
-            "ensure_journal_entry_tag_field (before_migrate) must run first; "
-            "re-run `bench migrate` rather than marking this patch complete."
-        )
+	if not frappe.db.has_column("Journal Entry", FIELDNAME):
+		# `utils.cleanup.ensure_journal_entry_tag_field` runs in before_migrate,
+		# so this should never happen. Fail loudly rather than silently
+		# recording the patch as done and leaving every legacy entry unstamped.
+		frappe.throw(
+			f"Journal Entry.{FIELDNAME} does not exist. "
+			"ensure_journal_entry_tag_field (before_migrate) must run first; "
+			"re-run `bench migrate` rather than marking this patch complete."
+		)
 
-    rows = frappe.db.get_all(
-        "Journal Entry",
-        filters={"user_remark": ["like", "%[JARZ-JE:%"], FIELDNAME: ["is", "not set"]},
-        fields=["name", "user_remark"],
-        limit_page_length=0,
-    )
+	rows = frappe.db.get_all(
+		"Journal Entry",
+		filters={"user_remark": ["like", "%[JARZ-JE:%"], FIELDNAME: ["is", "not set"]},
+		fields=["name", "user_remark"],
+		limit_page_length=0,
+	)
 
-    stamped = 0
-    misplaced = []
-    for row in rows:
-        remark = row.get("user_remark") or ""
-        match = _TAG_AT_END.search(remark)
-        if not match:
-            if _TAG_ANYWHERE.search(remark):
-                misplaced.append(row["name"])
-            continue
-        frappe.db.set_value(
-            "Journal Entry", row["name"], FIELDNAME, match.group(1), update_modified=False
-        )
-        stamped += 1
+	stamped = 0
+	misplaced = []
+	for row in rows:
+		remark = row.get("user_remark") or ""
+		match = _TAG_AT_END.search(remark)
+		if not match:
+			if _TAG_ANYWHERE.search(remark):
+				misplaced.append(row["name"])
+			continue
+		frappe.db.set_value("Journal Entry", row["name"], FIELDNAME, match.group(1), update_modified=False)
+		stamped += 1
 
-    frappe.db.commit()
+	frappe.db.commit()
 
-    print(f"[jarz_pos] backfilled {FIELDNAME} on {stamped} of {len(rows)} tagged Journal Entries")
-    if misplaced:
-        # Not an error, and deliberately not copied. A tag that is not at the
-        # end of the remark was either hand-written in Desk or is a leftover of
-        # the forgery the write-side sanitisers now block; either way an
-        # operator should look at it rather than have it silently promoted into
-        # the field the reversal guard trusts.
-        print(
-            "[jarz_pos] NOT backfilled — tag is not at the end of the remark, "
-            f"review by hand: {', '.join(misplaced[:50])}"
-            + (f" (+{len(misplaced) - 50} more)" if len(misplaced) > 50 else "")
-        )
+	print(f"[jarz_pos] backfilled {FIELDNAME} on {stamped} of {len(rows)} tagged Journal Entries")
+	if misplaced:
+		# Not an error, and deliberately not copied. A tag that is not at the
+		# end of the remark was either hand-written in Desk or is a leftover of
+		# the forgery the write-side sanitisers now block; either way an
+		# operator should look at it rather than have it silently promoted into
+		# the field the reversal guard trusts.
+		print(
+			"[jarz_pos] NOT backfilled — tag is not at the end of the remark, "
+			f"review by hand: {', '.join(misplaced[:50])}"
+			+ (f" (+{len(misplaced) - 50} more)" if len(misplaced) > 50 else "")
+		)

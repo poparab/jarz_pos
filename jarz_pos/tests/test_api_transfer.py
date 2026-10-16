@@ -14,11 +14,11 @@ class TestTransferAPI(unittest.TestCase):
 		"""v16 moved ``default_fg_warehouse`` from Manufacturing Settings onto the Company."""
 		from jarz_pos.api import transfer
 
-		with patch.object(
-			transfer.frappe.db, "get_single_value", return_value="JARZ"
-		) as single, patch.object(
-			transfer.frappe.db, "get_value", return_value="Finished Goods - J"
-		) as get_value, patch.object(transfer.frappe.db, "sql") as sql:
+		with (
+			patch.object(transfer.frappe.db, "get_single_value", return_value="JARZ") as single,
+			patch.object(transfer.frappe.db, "get_value", return_value="Finished Goods - J") as get_value,
+			patch.object(transfer.frappe.db, "sql") as sql,
+		):
 			result = transfer._get_default_fg_warehouse()
 
 		self.assertEqual(result, "Finished Goods - J")
@@ -30,9 +30,10 @@ class TestTransferAPI(unittest.TestCase):
 	def test_default_fg_warehouse_uses_the_company_in_hand(self):
 		from jarz_pos.api import transfer
 
-		with patch.object(transfer.frappe.db, "get_single_value") as single, patch.object(
-			transfer.frappe.db, "get_value", return_value="Finished Goods - O"
-		) as get_value:
+		with (
+			patch.object(transfer.frappe.db, "get_single_value") as single,
+			patch.object(transfer.frappe.db, "get_value", return_value="Finished Goods - O") as get_value,
+		):
 			result = transfer._get_default_fg_warehouse("Other Co")
 
 		self.assertEqual(result, "Finished Goods - O")
@@ -42,17 +43,19 @@ class TestTransferAPI(unittest.TestCase):
 	def test_default_fg_warehouse_is_none_without_a_default_company(self):
 		from jarz_pos.api import transfer
 
-		with patch.object(transfer.frappe.db, "get_single_value", return_value=None), patch.object(
-			transfer.frappe.db, "get_value"
-		) as get_value:
+		with (
+			patch.object(transfer.frappe.db, "get_single_value", return_value=None),
+			patch.object(transfer.frappe.db, "get_value") as get_value,
+		):
 			self.assertIsNone(transfer._get_default_fg_warehouse())
 		get_value.assert_not_called()
 
 	def test_default_fg_warehouse_is_none_when_the_company_has_none(self):
 		from jarz_pos.api import transfer
 
-		with patch.object(transfer.frappe.db, "get_single_value", return_value="JARZ"), patch.object(
-			transfer.frappe.db, "get_value", return_value=""
+		with (
+			patch.object(transfer.frappe.db, "get_single_value", return_value="JARZ"),
+			patch.object(transfer.frappe.db, "get_value", return_value=""),
 		):
 			self.assertIsNone(transfer._get_default_fg_warehouse())
 
@@ -60,8 +63,9 @@ class TestTransferAPI(unittest.TestCase):
 		"""The Finished Goods option is an extra; a failed read must not break the list."""
 		from jarz_pos.api import transfer
 
-		with patch.object(transfer.frappe.db, "get_single_value", return_value="JARZ"), patch.object(
-			transfer.frappe.db, "get_value", side_effect=Exception("db down")
+		with (
+			patch.object(transfer.frappe.db, "get_single_value", return_value="JARZ"),
+			patch.object(transfer.frappe.db, "get_value", side_effect=Exception("db down")),
 		):
 			self.assertIsNone(transfer._get_default_fg_warehouse())
 
@@ -89,22 +93,24 @@ class TestTransferAPI(unittest.TestCase):
 		"""Finished Goods warehouse should be selectable even without a POS Profile."""
 		from jarz_pos.api import transfer
 
-		with patch.object(transfer, "_ensure_transfer_access"), \
-			 patch.object(
+		with (
+			patch.object(transfer, "_ensure_transfer_access"),
+			patch.object(
 				transfer.frappe,
 				"get_all",
 				return_value=[{"name": "Dokki", "company": "JARZ", "warehouse": "Stores - Dokki"}],
-			 ), \
-			 patch.object(
+			),
+			patch.object(
 				transfer,
 				"_get_default_fg_warehouse",
 				return_value="Finished Goods - J",
-			 ), \
-			 patch.object(
+			),
+			patch.object(
 				transfer.frappe.db,
 				"get_value",
 				return_value="JARZ",
-			 ):
+			),
+		):
 			result = transfer.list_pos_profiles()
 
 		self.assertTrue(any(row["warehouse"] == "Finished Goods - J" for row in result))
@@ -115,22 +121,26 @@ class TestTransferAPI(unittest.TestCase):
 		"""Do not append a second option when a POS Profile already uses the FG warehouse."""
 		from jarz_pos.api import transfer
 
-		with patch.object(transfer, "_ensure_transfer_access"), \
-			 patch.object(
+		with (
+			patch.object(transfer, "_ensure_transfer_access"),
+			patch.object(
 				transfer.frappe,
 				"get_all",
-				return_value=[{"name": "Finished Goods Branch", "company": "JARZ", "warehouse": "Finished Goods - J"}],
-			 ), \
-			 patch.object(
+				return_value=[
+					{"name": "Finished Goods Branch", "company": "JARZ", "warehouse": "Finished Goods - J"}
+				],
+			),
+			patch.object(
 				transfer,
 				"_get_default_fg_warehouse",
 				return_value="Finished Goods - J",
-			 ), \
-			 patch.object(
+			),
+			patch.object(
 				transfer.frappe.db,
 				"get_value",
 				return_value="JARZ",
-			 ):
+			),
+		):
 			result = transfer.list_pos_profiles()
 
 		self.assertEqual(sum(1 for row in result if row["warehouse"] == "Finished Goods - J"), 1)

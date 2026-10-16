@@ -31,52 +31,56 @@ LOG_DOCTYPE = "Invoice State Log"
 
 
 def _columns() -> list[str]:
-    return [c for c in STATE_COLUMNS if frappe.db.has_column("Sales Invoice", c)]
+	return [c for c in STATE_COLUMNS if frappe.db.has_column("Sales Invoice", c)]
 
 
 def execute() -> None:
-    columns = _columns()
-    if not columns:
-        return
+	columns = _columns()
+	if not columns:
+		return
 
-    # Collect the affected invoices before anything is overwritten.
-    affected: dict[str, str | None] = {}
-    for column in columns:
-        rows = frappe.db.sql(
-            f"SELECT `name`, `pos_profile` FROM `tabSales Invoice` WHERE `{column}` = %s",
-            (OLD_STATE,),
-        )
-        for name, pos_profile in rows:
-            affected.setdefault(name, pos_profile)
+	# Collect the affected invoices before anything is overwritten.
+	affected: dict[str, str | None] = {}
+	for column in columns:
+		rows = frappe.db.sql(
+			f"SELECT `name`, `pos_profile` FROM `tabSales Invoice` WHERE `{column}` = %s",
+			(OLD_STATE,),
+		)
+		for name, pos_profile in rows:
+			affected.setdefault(name, pos_profile)
 
-    if not affected:
-        return
+	if not affected:
+		return
 
-    for column in columns:
-        frappe.db.sql(
-            f"UPDATE `tabSales Invoice` SET `{column}` = %s WHERE `{column}` = %s",
-            (NEW_STATE, OLD_STATE),
-        )
+	for column in columns:
+		frappe.db.sql(
+			f"UPDATE `tabSales Invoice` SET `{column}` = %s WHERE `{column}` = %s",
+			(NEW_STATE, OLD_STATE),
+		)
 
-    if frappe.db.exists("DocType", LOG_DOCTYPE):
-        from jarz_pos.services.state_log import record_state_change
+	if frappe.db.exists("DocType", LOG_DOCTYPE):
+		from jarz_pos.services.state_log import record_state_change
 
-        now = frappe.utils.now_datetime()
-        for name, pos_profile in affected.items():
-            record_state_change(
-                name, OLD_STATE, NEW_STATE, SOURCE, user="Administrator", at=now,
-                pos_profile=pos_profile,
-            )
+		now = frappe.utils.now_datetime()
+		for name, pos_profile in affected.items():
+			record_state_change(
+				name,
+				OLD_STATE,
+				NEW_STATE,
+				SOURCE,
+				user="Administrator",
+				at=now,
+				pos_profile=pos_profile,
+			)
 
-    frappe.db.commit()
-    try:
-        frappe.log_error(
-            message=(
-                f"Converted {len(affected)} invoice(s) from '{OLD_STATE}' to "
-                f"'{NEW_STATE}': {', '.join(sorted(affected)[:50])}"
-                + (" ..." if len(affected) > 50 else "")
-            ),
-            title="Kanban Ready state dropped",
-        )
-    except Exception:  # noqa: BLE001 - an audit note must never abort the migrate
-        pass
+	frappe.db.commit()
+	try:
+		frappe.log_error(
+			message=(
+				f"Converted {len(affected)} invoice(s) from '{OLD_STATE}' to "
+				f"'{NEW_STATE}': {', '.join(sorted(affected)[:50])}" + (" ..." if len(affected) > 50 else "")
+			),
+			title="Kanban Ready state dropped",
+		)
+	except Exception:  # noqa: BLE001 - an audit note must never abort the migrate
+		pass

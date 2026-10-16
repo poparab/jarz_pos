@@ -158,9 +158,7 @@ class TestEnsurePurchaseSetup(unittest.TestCase):
 
 		self.assertEqual(settings.default_purchase_warehouse, RAW)
 		routes = {(r.item_group, r.warehouse) for r in settings.purchase_warehouse_routes}
-		self.assertEqual(
-			routes, {("Raw Material", RAW), ("Consumable", CONSUMABLES)}
-		)
+		self.assertEqual(routes, {("Raw Material", RAW), ("Consumable", CONSUMABLES)})
 		self.assertTrue(settings.saved)
 		self.assertEqual(log["skipped"], [])
 
@@ -183,13 +181,9 @@ class TestEnsurePurchaseSetup(unittest.TestCase):
 		self.assertEqual(log["set"], [])
 
 	def test_existing_route_for_a_group_is_left_alone(self):
-		settings = _Settings(
-			routes=[SimpleNamespace(item_group="Raw Material", warehouse="Retired - J")]
-		)
+		settings = _Settings(routes=[SimpleNamespace(item_group="Raw Material", warehouse="Retired - J")])
 		self._run(settings)
-		raw_routes = [
-			r for r in settings.purchase_warehouse_routes if r.item_group == "Raw Material"
-		]
+		raw_routes = [r for r in settings.purchase_warehouse_routes if r.item_group == "Raw Material"]
 		self.assertEqual(len(raw_routes), 1)
 		self.assertEqual(raw_routes[0].warehouse, "Retired - J")
 
@@ -215,9 +209,7 @@ class TestEnsurePurchaseSetup(unittest.TestCase):
 			self.assertTrue(purchase_setup._warehouse_is_usable(good))
 
 	def test_unavailable_settings_single_does_not_raise(self):
-		with patch.object(
-			purchase_setup.frappe, "get_single", side_effect=Exception("no such doctype")
-		):
+		with patch.object(purchase_setup.frappe, "get_single", side_effect=Exception("no such doctype")):
 			log = purchase_setup.ensure_purchase_setup()
 		self.assertEqual(log["set"], [])
 

@@ -18,26 +18,24 @@ from jarz_pos.services import task_board as tb
 
 
 def _may_rewrite() -> bool:
-    return frappe.session.user == "Administrator" or bool(
-        getattr(frappe.flags, "in_migrate", False)
-    )
+	return frappe.session.user == "Administrator" or bool(getattr(frappe.flags, "in_migrate", False))
 
 
 class JarzTaskEntry(Document):
-    def validate(self):
-        if not self.is_new() and not _may_rewrite():
-            frappe.throw(
-                frappe._("Task log entries cannot be edited once saved."),
-                frappe.PermissionError,
-            )
-        if self.kind not in (tb.KIND_LOG, tb.KIND_COMMENT, tb.KIND_HISTORY):
-            self.kind = tb.KIND_LOG
-        if not self.author:
-            self.author = frappe.session.user
+	def validate(self):
+		if not self.is_new() and not _may_rewrite():
+			frappe.throw(
+				frappe._("Task log entries cannot be edited once saved."),
+				frappe.PermissionError,
+			)
+		if self.kind not in (tb.KIND_LOG, tb.KIND_COMMENT, tb.KIND_HISTORY):
+			self.kind = tb.KIND_LOG
+		if not self.author:
+			self.author = frappe.session.user
 
-    def on_trash(self):
-        if frappe.session.user != "Administrator":
-            frappe.throw(
-                frappe._("Task log entries cannot be deleted."),
-                frappe.PermissionError,
-            )
+	def on_trash(self):
+		if frappe.session.user != "Administrator":
+			frappe.throw(
+				frappe._("Task log entries cannot be deleted."),
+				frappe.PermissionError,
+			)

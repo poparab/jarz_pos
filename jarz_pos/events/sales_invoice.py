@@ -64,6 +64,7 @@ def sync_kanban_profile(doc: Any, method: Optional[str] = None) -> None:
 			current = float(getattr(doc, "custom_shipping_expense", 0) or 0)
 			if current <= 0 and getattr(doc, "territory", None):
 				from jarz_pos.services.delivery_handling import _get_delivery_expense_amount
+
 				expense = _get_delivery_expense_amount(doc) or 0.0
 				if expense > 0:
 					doc.custom_shipping_expense = expense
@@ -73,73 +74,73 @@ def sync_kanban_profile(doc: Any, method: Optional[str] = None) -> None:
 
 
 def _check_flag(doc: Any, fieldname: str) -> int:
-    """Read a 0/1 Check field off a Document as an int. Never raises.
+	"""Read a 0/1 Check field off a Document as an int. Never raises.
 
-    ``getattr(doc, name, 0)`` is NOT safe here and was the bug this replaced.
-    When the instance dict has no entry for the field, attribute lookup falls
-    through to the CLASS, where Frappe's generated property descriptor lives —
-    so ``getattr`` hands back the descriptor OBJECT rather than a value, and
-    ``int()`` on it raises ``TypeError: int() argument must be ... not 'object'``.
-    The caller caught and logged that, which meant the stock suppression this
-    hook exists to enforce was silently skipped on whichever path hit it.
+	``getattr(doc, name, 0)`` is NOT safe here and was the bug this replaced.
+	When the instance dict has no entry for the field, attribute lookup falls
+	through to the CLASS, where Frappe's generated property descriptor lives —
+	so ``getattr`` hands back the descriptor OBJECT rather than a value, and
+	``int()`` on it raises ``TypeError: int() argument must be ... not 'object'``.
+	The caller caught and logged that, which meant the stock suppression this
+	hook exists to enforce was silently skipped on whichever path hit it.
 
-    ``doc.get()`` reads the instance dict and returns None when absent, which is
-    the behaviour the original code assumed ``getattr`` had.
-    """
-    value = None
-    getter = getattr(doc, "get", None)
-    if callable(getter):
-        try:
-            value = getter(fieldname)
-        except Exception:
-            value = None
-    if value is None:
-        # Plain objects (and test doubles) that carry the attribute directly.
-        value = doc.__dict__.get(fieldname) if hasattr(doc, "__dict__") else None
-    if value is None or value == "":
-        return 0
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        # Anything else truthy (a stray object, a "1" that is not numeric) is
-        # treated as set — erring toward RUNNING the suppression, because
-        # skipping it double-books stock while a needless 0 costs nothing.
-        return 1 if value else 0
+	``doc.get()`` reads the instance dict and returns None when absent, which is
+	the behaviour the original code assumed ``getattr`` had.
+	"""
+	value = None
+	getter = getattr(doc, "get", None)
+	if callable(getter):
+		try:
+			value = getter(fieldname)
+		except Exception:
+			value = None
+	if value is None:
+		# Plain objects (and test doubles) that carry the attribute directly.
+		value = doc.__dict__.get(fieldname) if hasattr(doc, "__dict__") else None
+	if value is None or value == "":
+		return 0
+	try:
+		return int(value)
+	except (TypeError, ValueError):
+		# Anything else truthy (a stray object, a "1" that is not numeric) is
+		# treated as set — erring toward RUNNING the suppression, because
+		# skipping it double-books stock while a needless 0 costs nothing.
+		return 1 if value else 0
 
 
 def suppress_pos_invoice_stock_update(doc: Any, method: Optional[str] = None) -> None:
-    """Force ``update_stock = 0`` on every POS Sales Invoice.
+	"""Force ``update_stock = 0`` on every POS Sales Invoice.
 
-    Stock leaves the warehouse through the Delivery Note and nothing else. The
-    entire delivery, settlement and return design depends on that: a return
-    reverses stock with a Sales Return Delivery Note, so an invoice that also
-    moved stock would be reversed once and deducted twice.
+	Stock leaves the warehouse through the Delivery Note and nothing else. The
+	entire delivery, settlement and return design depends on that: a return
+	reverses stock with a Sales Return Delivery Note, so an invoice that also
+	moved stock would be reversed once and deducted twice.
 
-    ``services.invoice_creation`` already sets this before saving, but that only
-    protects the POS API. ERPNext's ``set_pos_fields()`` re-applies the POS
-    Profile's own ``update_stock`` during ``validate`` for *any* document that
-    carries ``is_pos``, and every POS Profile on this site has it enabled. So a
-    document that acquires ``is_pos`` and is then saved through a normal
-    validate — a Woo-initiated amendment is the path that actually did this —
-    silently picks the flag back up and books the stock a second time.
+	``services.invoice_creation`` already sets this before saving, but that only
+	protects the POS API. ERPNext's ``set_pos_fields()`` re-applies the POS
+	Profile's own ``update_stock`` during ``validate`` for *any* document that
+	carries ``is_pos``, and every POS Profile on this site has it enabled. So a
+	document that acquires ``is_pos`` and is then saved through a normal
+	validate — a Woo-initiated amendment is the path that actually did this —
+	silently picks the flag back up and books the stock a second time.
 
-    Enforcing it in ``validate`` closes the hole for every path at once: POS,
-    Woo, amendments, Desk. Non-POS invoices are untouched.
-    """
-    if not doc:
-        return
-    try:
-        if not _check_flag(doc, "is_pos"):
-            return
-        if _check_flag(doc, "update_stock"):
-            doc.update_stock = 0
-            if frappe:
-                frappe.logger().info(
-                    f"jarz_pos: suppressed update_stock on POS invoice {getattr(doc, 'name', '?')}"
-                )
-    except Exception:
-        if frappe:
-            frappe.log_error(frappe.get_traceback(), "suppress_pos_invoice_stock_update failed")
+	Enforcing it in ``validate`` closes the hole for every path at once: POS,
+	Woo, amendments, Desk. Non-POS invoices are untouched.
+	"""
+	if not doc:
+		return
+	try:
+		if not _check_flag(doc, "is_pos"):
+			return
+		if _check_flag(doc, "update_stock"):
+			doc.update_stock = 0
+			if frappe:
+				frappe.logger().info(
+					f"jarz_pos: suppressed update_stock on POS invoice {getattr(doc, 'name', '?')}"
+				)
+	except Exception:
+		if frappe:
+			frappe.log_error(frappe.get_traceback(), "suppress_pos_invoice_stock_update failed")
 
 
 def publish_new_invoice(doc: Any, method: Optional[str] = None) -> None:
@@ -203,7 +204,11 @@ def mark_cancelled_invoice_workflow_fields(doc: Any, method: Optional[str] = Non
 				updates["custom_acceptance_status"] = "Accepted"
 
 			accepted_by = getattr(getattr(frappe, "session", None), "user", None)
-			if meta.get_field("custom_accepted_by") and accepted_by and not getattr(doc, "custom_accepted_by", None):
+			if (
+				meta.get_field("custom_accepted_by")
+				and accepted_by
+				and not getattr(doc, "custom_accepted_by", None)
+			):
 				updates["custom_accepted_by"] = accepted_by
 
 			if meta.get_field("custom_accepted_on") and not getattr(doc, "custom_accepted_on", None):
@@ -277,13 +282,19 @@ def block_cancel_if_dispatched(doc: Any, method: Optional[str] = None) -> None:
 
 	current_state = ""
 	try:
-		current_state = str(
-			doc.get("custom_sales_invoice_state")
-			or doc.get("sales_invoice_state")
-			or doc.get("custom_state")
-			or doc.get("state")
-			or ""
-		).strip().lower().replace(" ", "_").replace("-", "_")
+		current_state = (
+			str(
+				doc.get("custom_sales_invoice_state")
+				or doc.get("sales_invoice_state")
+				or doc.get("custom_state")
+				or doc.get("state")
+				or ""
+			)
+			.strip()
+			.lower()
+			.replace(" ", "_")
+			.replace("-", "_")
+		)
 	except Exception:
 		current_state = ""
 	state_dispatched = current_state in {"out_for_delivery", "delivered", "completed"}
@@ -295,9 +306,7 @@ def block_cancel_if_dispatched(doc: Any, method: Optional[str] = None) -> None:
 		# An UNSETTLED sales-partner transaction is a pending charge with no ledger
 		# behind it, not a settlement artifact; release_unsettled_partner_transactions
 		# (on_cancel) drops it. A settled one still blocks: its fee is in the books.
-		blocker = get_invoice_hard_mutation_blocker(
-			doc, ignore_unsettled_partner_transactions=True
-		)
+		blocker = get_invoice_hard_mutation_blocker(doc, ignore_unsettled_partner_transactions=True)
 	except Exception:
 		blocker = None
 
@@ -326,15 +335,16 @@ def release_unsettled_partner_transactions(doc: Any, method: Optional[str] = Non
 	if not frappe or not doc or not getattr(doc, "name", None):
 		return
 	try:
-		rows = frappe.get_all(
-			"Sales Partner Transactions",
-			filters={"reference_invoice": doc.name, "status": "Unsettled"},
-			pluck="name",
-		) or []
-		for row_name in rows:
-			frappe.delete_doc(
-				"Sales Partner Transactions", row_name, ignore_permissions=True, force=True
+		rows = (
+			frappe.get_all(
+				"Sales Partner Transactions",
+				filters={"reference_invoice": doc.name, "status": "Unsettled"},
+				pluck="name",
 			)
+			or []
+		)
+		for row_name in rows:
+			frappe.delete_doc("Sales Partner Transactions", row_name, ignore_permissions=True, force=True)
 		if rows:
 			frappe.logger().info(
 				f"jarz_pos: released {len(rows)} unsettled partner transaction(s) on cancel of {doc.name}"
@@ -423,4 +433,3 @@ def mint_tracking_token_on_ofd(doc: Any, method: Optional[str] = None) -> None:
 	except Exception:
 		if frappe:
 			frappe.log_error(frappe.get_traceback(), "mint_tracking_token_on_ofd failed")
-

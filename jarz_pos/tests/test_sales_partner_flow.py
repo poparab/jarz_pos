@@ -125,9 +125,9 @@ class TestSalesPartnerInvoiceFlow(unittest.TestCase):
 		self.assertEqual(result["commission_rate"], 0.0)
 		self.assertEqual(result["online_rate"], 0.0)
 
-	@patch('jarz_pos.api.kanban.frappe')
-	@patch('jarz_pos.api.kanban.get_pos_cash_account')
-	@patch('jarz_pos.api.kanban.get_company_receivable_account')
+	@patch("jarz_pos.api.kanban.frappe")
+	@patch("jarz_pos.api.kanban.get_pos_cash_account")
+	@patch("jarz_pos.api.kanban.get_company_receivable_account")
 	def test_cash_payment_entry_creation_for_partner(self, mock_receivable, mock_cash, mock_frappe):
 		"""Test automatic cash payment entry creation for sales partner invoices."""
 		# This tests the _ensure_cash_payment_entry_for_partner function
@@ -177,7 +177,7 @@ class TestSalesPartnerInvoiceFlow(unittest.TestCase):
 
 		self.assertEqual(expected_token, "SPTRN::INV-SP-001")
 
-	@patch('jarz_pos.api.kanban.frappe')
+	@patch("jarz_pos.api.kanban.frappe")
 	def test_sales_partner_transaction_payment_mode_cash(self, mock_frappe):
 		"""Test Sales Partner Transaction payment mode is Cash when cash PE created."""
 		# When cash payment entry is created, payment_mode should be 'Cash'
@@ -187,11 +187,11 @@ class TestSalesPartnerInvoiceFlow(unittest.TestCase):
 
 		# Simulate the logic in kanban.py
 		created_cash_payment_entry = "PE-CASH-001"  # PE was created
-		payment_mode_val = 'Cash' if created_cash_payment_entry else 'Online'
+		payment_mode_val = "Cash" if created_cash_payment_entry else "Online"
 
-		self.assertEqual(payment_mode_val, 'Cash')
+		self.assertEqual(payment_mode_val, "Cash")
 
-	@patch('jarz_pos.api.kanban.frappe')
+	@patch("jarz_pos.api.kanban.frappe")
 	def test_sales_partner_transaction_payment_mode_online(self, mock_frappe):
 		"""Test Sales Partner Transaction payment mode is Online when no cash PE."""
 		# When no cash payment entry is created, payment_mode should be 'Online'
@@ -201,9 +201,9 @@ class TestSalesPartnerInvoiceFlow(unittest.TestCase):
 
 		# Simulate the logic in kanban.py
 		created_cash_payment_entry = None  # No PE created
-		payment_mode_val = 'Cash' if created_cash_payment_entry else 'Online'
+		payment_mode_val = "Cash" if created_cash_payment_entry else "Online"
 
-		self.assertEqual(payment_mode_val, 'Online')
+		self.assertEqual(payment_mode_val, "Online")
 
 	def test_sales_partner_transaction_field_structure(self):
 		"""Test Sales Partner Transaction has expected fields."""
@@ -224,7 +224,7 @@ class TestSalesPartnerInvoiceFlow(unittest.TestCase):
 		for field in expected_fields:
 			self.assertIsNotNone(field)
 
-	@patch('jarz_pos.api.kanban.frappe')
+	@patch("jarz_pos.api.kanban.frappe")
 	def test_ensure_cash_pe_skipped_when_no_sales_partner(self, mock_frappe):
 		"""Test cash PE creation is skipped when invoice has no sales partner."""
 		# Mock invoice without sales partner
@@ -241,7 +241,7 @@ class TestSalesPartnerInvoiceFlow(unittest.TestCase):
 
 		self.assertIsNone(result)
 
-	@patch('jarz_pos.api.kanban.frappe')
+	@patch("jarz_pos.api.kanban.frappe")
 	def test_ensure_cash_pe_skipped_when_no_outstanding(self, mock_frappe):
 		"""Test cash PE creation is skipped when invoice has no outstanding."""
 		# Mock invoice with sales partner but no outstanding
@@ -258,13 +258,11 @@ class TestSalesPartnerInvoiceFlow(unittest.TestCase):
 
 		self.assertIsNone(result)
 
-	@patch('jarz_pos.api.kanban.frappe')
+	@patch("jarz_pos.api.kanban.frappe")
 	def test_ensure_cash_pe_skipped_when_already_paid(self, mock_frappe):
 		"""Test cash PE creation is skipped when PE already exists."""
 		# Mock existing payment entry reference
-		mock_frappe.get_all.return_value = [
-			{"parent": "PE-EXISTING", "allocated_amount": 500.0}
-		]
+		mock_frappe.get_all.return_value = [{"parent": "PE-EXISTING", "allocated_amount": 500.0}]
 
 		mock_inv = MagicMock()
 		mock_inv.name = "INV-001"
@@ -287,7 +285,7 @@ class TestSalesPartnerInvoiceFlow(unittest.TestCase):
 
 		self.assertEqual(PARTNER_FEES_VAT_RATE, 0.14)
 
-	@patch('jarz_pos.services.settlement_strategies.resolve_online_partner_paid_to')
+	@patch("jarz_pos.services.settlement_strategies.resolve_online_partner_paid_to")
 	def test_account_routing_online_partner(self, mock_resolve):
 		"""Test account routing for online payment with sales partner."""
 		from jarz_pos.services.settlement_strategies import _route_paid_to_account

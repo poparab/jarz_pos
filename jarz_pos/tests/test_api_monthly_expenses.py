@@ -229,14 +229,10 @@ class TestUnlinkedByAccount(unittest.TestCase):
 		self.assertEqual(self._unlinked({RENT_DOKKI: 47000}, {}), {RENT_DOKKI: 47000.0})
 
 	def test_gl_fully_explained_by_an_app_payment_leaves_nothing(self):
-		self.assertEqual(
-			self._unlinked({RENT_DOKKI: 47000}, {RENT_DOKKI: 47000}), {RENT_DOKKI: 0.0}
-		)
+		self.assertEqual(self._unlinked({RENT_DOKKI: 47000}, {RENT_DOKKI: 47000}), {RENT_DOKKI: 0.0})
 
 	def test_a_desk_entry_on_top_of_an_app_payment_shows_as_unexplained(self):
-		self.assertEqual(
-			self._unlinked({RENT_DOKKI: 94000}, {RENT_DOKKI: 47000}), {RENT_DOKKI: 47000.0}
-		)
+		self.assertEqual(self._unlinked({RENT_DOKKI: 94000}, {RENT_DOKKI: 47000}), {RENT_DOKKI: 47000.0})
 
 	def test_a_month_with_no_gl_of_its_own_never_goes_negative(self):
 		# August viewed after its rent was paid in September: nothing posted in
@@ -324,9 +320,7 @@ class TestRegistryRowMaths(unittest.TestCase):
 		self.assertEqual(row["payment_status"], "Unpaid")
 
 	def test_partial_payment_leaves_the_rest_outstanding(self):
-		rows, _leftovers = _build(
-			[_item("REC-1")], paid_linked_by_item={"REC-1": 20000}
-		)
+		rows, _leftovers = _build([_item("REC-1")], paid_linked_by_item={"REC-1": 20000})
 		row = rows["REC-1"]
 		self.assertEqual(row["paid_linked"], 20000.0)
 		self.assertEqual(row["paid_unlinked"], 0.0)
@@ -347,9 +341,7 @@ class TestRegistryRowMaths(unittest.TestCase):
 		self.assertFalse(row["inferred"])
 
 	def test_a_desk_posting_is_inferred_onto_the_only_due_item(self):
-		rows, leftovers = _build(
-			[_item("REC-1")], gl_by_account={RENT_DOKKI: 47000}
-		)
+		rows, leftovers = _build([_item("REC-1")], gl_by_account={RENT_DOKKI: 47000})
 		row = rows["REC-1"]
 		self.assertEqual(row["paid_linked"], 0.0)
 		self.assertEqual(row["paid_unlinked"], 47000.0)
@@ -417,9 +409,7 @@ class TestRegistryRowMaths(unittest.TestCase):
 		self.assertFalse(row["can_pay"])
 
 	def test_a_quarterly_item_off_cadence_is_not_due(self):
-		rows, _leftovers = _build(
-			[_item("REC-1", frequency="Quarterly", start_date=date(2026, 3, 1))]
-		)
+		rows, _leftovers = _build([_item("REC-1", frequency="Quarterly", start_date=date(2026, 3, 1))])
 		self.assertEqual(rows["REC-1"]["payment_status"], "Not Due")
 
 	def test_an_account_outside_indirect_expenses_cannot_be_paid_from_here(self):
@@ -478,9 +468,7 @@ class TestPayingAPastMonth(unittest.TestCase):
 	def _index(self, month_key, requests=None):
 		from jarz_pos.api.monthly_expenses import _split_period_requests
 
-		return _split_period_requests(
-			[self.PAYMENT] if requests is None else requests, month_key
-		)
+		return _split_period_requests([self.PAYMENT] if requests is None else requests, month_key)
 
 	def _month(self, month_key, month_start, month_end, gl, requests=None):
 		index = self._index(month_key, requests)
@@ -495,9 +483,7 @@ class TestPayingAPastMonth(unittest.TestCase):
 		return index, rows["REC-1"], leftovers
 
 	def test_august_counts_it_as_paid_even_though_no_august_gl_exists(self):
-		index, row, leftovers = self._month(
-			"2026-08", date(2026, 8, 1), date(2026, 8, 31), gl=0.0
-		)
+		index, row, leftovers = self._month("2026-08", date(2026, 8, 1), date(2026, 8, 31), gl=0.0)
 		self.assertEqual(index["paid_linked_by_item"], {"REC-1": 47000.0})
 		# The JE landed in September, so it explains none of August's ledger.
 		self.assertEqual(index["linked_posted_by_account"], {})
@@ -507,9 +493,7 @@ class TestPayingAPastMonth(unittest.TestCase):
 		self.assertEqual(leftovers, {})
 
 	def test_september_is_still_unpaid_despite_the_september_journal_entry(self):
-		index, row, leftovers = self._month(
-			"2026-09", date(2026, 9, 1), date(2026, 9, 30), gl=47000.0
-		)
+		index, row, leftovers = self._month("2026-09", date(2026, 9, 1), date(2026, 9, 30), gl=47000.0)
 		self.assertEqual(index["paid_linked_by_item"], {})
 		# Posted here, so it explains September's GL and nothing is inferred.
 		self.assertEqual(index["linked_posted_by_account"], {RENT_DOKKI: 47000.0})
@@ -566,9 +550,7 @@ class TestAugustPaidTwiceIsNotReportedAsSettled(unittest.TestCase):
 		return rows["REC-1"], leftovers, gaps
 
 	def test_august_shows_the_double_payment_as_overpaid(self):
-		row, leftovers, _gaps = self._view(
-			"2026-08", date(2026, 8, 1), date(2026, 8, 31), gl=47000.0
-		)
+		row, leftovers, _gaps = self._view("2026-08", date(2026, 8, 1), date(2026, 8, 31), gl=47000.0)
 		# The app payment (period-scoped) plus August's own Desk money, which is
 		# still unexplained because that payment posted in September.
 		self.assertEqual(row["paid_linked"], 47000.0)
@@ -580,9 +562,7 @@ class TestAugustPaidTwiceIsNotReportedAsSettled(unittest.TestCase):
 		self.assertEqual(leftovers, {})
 
 	def test_the_overpayment_is_reported_as_a_gap(self):
-		_row, _leftovers, gaps = self._view(
-			"2026-08", date(2026, 8, 1), date(2026, 8, 31), gl=47000.0
-		)
+		_row, _leftovers, gaps = self._view("2026-08", date(2026, 8, 1), date(2026, 8, 31), gl=47000.0)
 		messages = [g["message"] for g in gaps]
 		self.assertTrue(
 			any("more posted than due" in m for m in messages),
@@ -592,9 +572,7 @@ class TestAugustPaidTwiceIsNotReportedAsSettled(unittest.TestCase):
 	def test_september_does_not_also_claim_the_payment(self):
 		# The same payment must not settle two months. September's own rent is
 		# untouched, and its GL is fully explained by the app payment.
-		row, leftovers, _gaps = self._view(
-			"2026-09", date(2026, 9, 1), date(2026, 9, 30), gl=47000.0
-		)
+		row, leftovers, _gaps = self._view("2026-09", date(2026, 9, 1), date(2026, 9, 30), gl=47000.0)
 		self.assertEqual(row["paid_amount"], 0.0)
 		self.assertEqual(row["paid_unlinked"], 0.0)
 		self.assertEqual(row["remaining"], 47000.0)
@@ -643,9 +621,7 @@ class TestAugustPaidTwiceIsNotReportedAsSettled(unittest.TestCase):
 		# Unpaid while its account is settled.
 		from jarz_pos.api.monthly_expenses import _split_period_requests
 
-		index = _split_period_requests(
-			[_request(expense_kind="Ad-hoc", recurring_expense=None)], "2026-08"
-		)
+		index = _split_period_requests([_request(expense_kind="Ad-hoc", recurring_expense=None)], "2026-08")
 		self.assertEqual(index["linked_posted_by_account"], {})
 		rows, _leftovers = _build(
 			[_item("REC-1")],
@@ -735,9 +711,7 @@ class TestSplitPeriodRequests(unittest.TestCase):
 		# It really did put money on the rent account, so the single due item
 		# should still pick it up via inference — crediting the account here
 		# would cancel that out and the rent would read as unpaid.
-		index = self._index(
-			[_request(expense_kind="Ad-hoc", recurring_expense=None)]
-		)
+		index = self._index([_request(expense_kind="Ad-hoc", recurring_expense=None)])
 		self.assertEqual(index["linked_posted_by_account"], {})
 		self.assertEqual(index["paid_linked_by_item"], {})
 
@@ -749,9 +723,7 @@ class TestSplitPeriodRequests(unittest.TestCase):
 		self.assertEqual(index["paid_linked_by_item"], {})
 
 	def test_an_unrelated_month_is_ignored_entirely(self):
-		index = self._index(
-			[_request(period_month="2026-05", expense_month="2026-05")]
-		)
+		index = self._index([_request(period_month="2026-05", expense_month="2026-05")])
 		self.assertEqual(index["paid_linked_by_item"], {})
 		self.assertEqual(index["linked_posted_by_account"], {})
 
@@ -801,17 +773,13 @@ class TestPayrollRows(unittest.TestCase):
 		self.assertEqual(rows["HR-EMP-00001"]["due_amount"], 6200.0)
 
 	def test_partial_salary_payment_leaves_the_rest(self):
-		rows = self._rows(
-			[_employee()], paid_linked_by_employee={"HR-EMP-00001": 4000}
-		)
+		rows = self._rows([_employee()], paid_linked_by_employee={"HR-EMP-00001": 4000})
 		row = rows["HR-EMP-00001"]
 		self.assertEqual(row["remaining"], 2750.0)
 		self.assertEqual(row["payment_status"], "Partial")
 
 	def test_a_full_salary_payment_settles_the_row(self):
-		rows = self._rows(
-			[_employee()], paid_linked_by_employee={"HR-EMP-00001": 6750}
-		)
+		rows = self._rows([_employee()], paid_linked_by_employee={"HR-EMP-00001": 6750})
 		self.assertEqual(rows["HR-EMP-00001"]["payment_status"], "Paid")
 		self.assertEqual(rows["HR-EMP-00001"]["remaining"], 0.0)
 
@@ -879,15 +847,14 @@ class TestSalarySlipDoublePostGuard(unittest.TestCase):
 		mock_frappe.throw.side_effect = RuntimeError("refused")
 		mock_frappe.session.user = "manager@example.com"
 
-		with patch.object(monthly_expenses, "frappe", mock_frappe), patch.object(
-			monthly_expenses, "_ensure_manager"
-		), patch.object(monthly_expenses, "_require_period_fields"), patch.object(
-			monthly_expenses, "_default_company", return_value="JARZ"
-		), patch.object(
-			monthly_expenses, "_submitted_salary_slips", return_value=slips
-		) as slip_lookup, patch.object(
-			monthly_expenses, "_compute_month"
-		) as compute:
+		with (
+			patch.object(monthly_expenses, "frappe", mock_frappe),
+			patch.object(monthly_expenses, "_ensure_manager"),
+			patch.object(monthly_expenses, "_require_period_fields"),
+			patch.object(monthly_expenses, "_default_company", return_value="JARZ"),
+			patch.object(monthly_expenses, "_submitted_salary_slips", return_value=slips) as slip_lookup,
+			patch.object(monthly_expenses, "_compute_month") as compute,
+		):
 			try:
 				monthly_expenses.pay_salary(
 					"HR-EMP-00001",
@@ -901,9 +868,7 @@ class TestSalarySlipDoublePostGuard(unittest.TestCase):
 		return mock_frappe, slip_lookup, compute, raised
 
 	def test_a_submitted_slip_blocks_the_payment(self):
-		mock_frappe, _lookup, compute, raised = self._pay(
-			{"HR-EMP-00001": {"name": "SAL-SLIP-0001"}}
-		)
+		mock_frappe, _lookup, compute, raised = self._pay({"HR-EMP-00001": {"name": "SAL-SLIP-0001"}})
 		self.assertTrue(raised)
 		mock_frappe.throw.assert_called_once()
 		message = str(mock_frappe.throw.call_args[0][0])
@@ -915,9 +880,7 @@ class TestSalarySlipDoublePostGuard(unittest.TestCase):
 	def test_the_slip_lookup_is_strict_on_the_payment_path(self):
 		# A failed HRMS query must not be read as "no slips" when we are about
 		# to post; that is the whole double-post risk.
-		_frappe, lookup, _compute, _raised = self._pay(
-			{"HR-EMP-00001": {"name": "SAL-SLIP-0001"}}
-		)
+		_frappe, lookup, _compute, _raised = self._pay({"HR-EMP-00001": {"name": "SAL-SLIP-0001"}})
 		self.assertTrue(lookup.call_args.kwargs.get("strict"))
 
 	def test_no_slip_does_not_trip_the_guard(self):
@@ -994,20 +957,22 @@ class TestPayRecurringExpenseWiring(unittest.TestCase):
 		mock_frappe.get_doc.side_effect = _get_doc
 		mock_frappe.throw.side_effect = RuntimeError("refused")
 
-		with patch.object(monthly_expenses, "frappe", mock_frappe), patch.object(
-			monthly_expenses, "_ensure_manager"
-		), patch.object(monthly_expenses, "_require_period_fields"), patch.object(
-			monthly_expenses,
-			"_compute_month",
-			return_value=self._context(due, paid, **row_overrides),
-		), patch.object(
-			monthly_expenses, "_resolve_paying_account", return_value="Cash - J"
-		), patch.object(
-			monthly_expenses,
-			"_guard_overpay",
-			side_effect=lambda *args, **kwargs: guard_calls.append(args) or 0.0,
-		), patch.object(
-			monthly_expenses, "_serialize_expense", return_value={"name": fake_doc.name}
+		with (
+			patch.object(monthly_expenses, "frappe", mock_frappe),
+			patch.object(monthly_expenses, "_ensure_manager"),
+			patch.object(monthly_expenses, "_require_period_fields"),
+			patch.object(
+				monthly_expenses,
+				"_compute_month",
+				return_value=self._context(due, paid, **row_overrides),
+			),
+			patch.object(monthly_expenses, "_resolve_paying_account", return_value="Cash - J"),
+			patch.object(
+				monthly_expenses,
+				"_guard_overpay",
+				side_effect=lambda *args, **kwargs: guard_calls.append(args) or 0.0,
+			),
+			patch.object(monthly_expenses, "_serialize_expense", return_value={"name": fake_doc.name}),
 		):
 			result = monthly_expenses.pay_recurring_expense(
 				"REC-1",
@@ -1064,11 +1029,12 @@ class TestPayRecurringExpenseWiring(unittest.TestCase):
 
 		mock_frappe = MagicMock()
 		mock_frappe.throw.side_effect = RuntimeError("refused")
-		with patch.object(monthly_expenses, "frappe", mock_frappe), patch.object(
-			monthly_expenses, "_ensure_manager"
-		), patch.object(monthly_expenses, "_require_period_fields"), patch.object(
-			monthly_expenses, "_compute_month"
-		) as compute:
+		with (
+			patch.object(monthly_expenses, "frappe", mock_frappe),
+			patch.object(monthly_expenses, "_ensure_manager"),
+			patch.object(monthly_expenses, "_require_period_fields"),
+			patch.object(monthly_expenses, "_compute_month") as compute,
+		):
 			with self.assertRaises(RuntimeError):
 				monthly_expenses.pay_recurring_expense(
 					"REC-1", month=MONTH_KEY, amount=0, paying_account="Cash - J"
@@ -1086,9 +1052,7 @@ class TestPayRecurringExpenseWiring(unittest.TestCase):
 			self._pay(account_payable=False, can_pay=False)
 
 	def test_the_refusal_names_the_offending_account(self):
-		message = self._throw_message(
-			account_payable=False, expense_account="Cost of Goods Sold - J"
-		)
+		message = self._throw_message(account_payable=False, expense_account="Cost of Goods Sold - J")
 		self.assertIn("Cost of Goods Sold - J", message)
 		self.assertIn("Indirect Expenses", message)
 
@@ -1098,14 +1062,16 @@ class TestPayRecurringExpenseWiring(unittest.TestCase):
 		mock_frappe = MagicMock()
 		mock_frappe.session.user = "manager@example.com"
 		mock_frappe.throw.side_effect = RuntimeError("refused")
-		with patch.object(monthly_expenses, "frappe", mock_frappe), patch.object(
-			monthly_expenses, "_ensure_manager"
-		), patch.object(monthly_expenses, "_require_period_fields"), patch.object(
-			monthly_expenses,
-			"_compute_month",
-			return_value=self._context(**row_overrides),
-		), patch.object(
-			monthly_expenses, "_resolve_paying_account", return_value="Cash - J"
+		with (
+			patch.object(monthly_expenses, "frappe", mock_frappe),
+			patch.object(monthly_expenses, "_ensure_manager"),
+			patch.object(monthly_expenses, "_require_period_fields"),
+			patch.object(
+				monthly_expenses,
+				"_compute_month",
+				return_value=self._context(**row_overrides),
+			),
+			patch.object(monthly_expenses, "_resolve_paying_account", return_value="Cash - J"),
 		):
 			try:
 				monthly_expenses.pay_recurring_expense(
@@ -1116,9 +1082,7 @@ class TestPayRecurringExpenseWiring(unittest.TestCase):
 		return str(mock_frappe.throw.call_args[0][0])
 
 	def test_a_paused_expense_is_refused_by_name_not_just_by_the_overpay_guard(self):
-		message = self._throw_message(
-			status="Paused", due_this_month=False, due_amount=0.0, paid_amount=0.0
-		)
+		message = self._throw_message(status="Paused", due_this_month=False, due_amount=0.0, paid_amount=0.0)
 		self.assertIn("not due", message)
 		self.assertIn("Paused", message)
 		self.assertIn("allow_overpay", message)
@@ -1149,24 +1113,20 @@ class TestPayRecurringExpenseWiring(unittest.TestCase):
 		mock_frappe.session.user = "manager@example.com"
 		mock_frappe.get_doc.return_value = _FakeDoc()
 		mock_frappe.throw.side_effect = RuntimeError("refused")
-		mock_frappe.db.get_value.side_effect = lambda *a, **kw: order.append(
-			("lock", a, kw)
-		)
+		mock_frappe.db.get_value.side_effect = lambda *a, **kw: order.append(("lock", a, kw))
 
 		def _compute(*_args, **_kwargs):
 			order.append(("compute", None, None))
 			return self._context()
 
-		with patch.object(monthly_expenses, "frappe", mock_frappe), patch.object(
-			monthly_expenses, "_ensure_manager"
-		), patch.object(monthly_expenses, "_require_period_fields"), patch.object(
-			monthly_expenses, "_compute_month", side_effect=_compute
-		), patch.object(
-			monthly_expenses, "_resolve_paying_account", return_value="Cash - J"
-		), patch.object(
-			monthly_expenses, "_guard_overpay", return_value=0.0
-		), patch.object(
-			monthly_expenses, "_serialize_expense", return_value={}
+		with (
+			patch.object(monthly_expenses, "frappe", mock_frappe),
+			patch.object(monthly_expenses, "_ensure_manager"),
+			patch.object(monthly_expenses, "_require_period_fields"),
+			patch.object(monthly_expenses, "_compute_month", side_effect=_compute),
+			patch.object(monthly_expenses, "_resolve_paying_account", return_value="Cash - J"),
+			patch.object(monthly_expenses, "_guard_overpay", return_value=0.0),
+			patch.object(monthly_expenses, "_serialize_expense", return_value={}),
 		):
 			monthly_expenses.pay_recurring_expense(
 				"REC-1", month=MONTH_KEY, amount=1000, paying_account="Cash - J"
@@ -1214,14 +1174,13 @@ class TestOverpayRefusalReachesTheEndpoint(unittest.TestCase):
 			"summary": {},
 		}
 
-		with patch.object(monthly_expenses, "frappe", mock_frappe), patch.object(
-			monthly_expenses, "_ensure_manager"
-		), patch.object(monthly_expenses, "_require_period_fields"), patch.object(
-			monthly_expenses, "_compute_month", return_value=context
-		), patch.object(
-			monthly_expenses, "_resolve_paying_account", return_value="Cash - J"
-		), patch.object(
-			monthly_expenses, "_serialize_expense", return_value={"name": fake_doc.name}
+		with (
+			patch.object(monthly_expenses, "frappe", mock_frappe),
+			patch.object(monthly_expenses, "_ensure_manager"),
+			patch.object(monthly_expenses, "_require_period_fields"),
+			patch.object(monthly_expenses, "_compute_month", return_value=context),
+			patch.object(monthly_expenses, "_resolve_paying_account", return_value="Cash - J"),
+			patch.object(monthly_expenses, "_serialize_expense", return_value={"name": fake_doc.name}),
 		):
 			try:
 				monthly_expenses.pay_recurring_expense(
@@ -1309,26 +1268,21 @@ class TestPaySalaryWiring(unittest.TestCase):
 		mock_frappe.session.user = "manager@example.com"
 		mock_frappe.get_doc.side_effect = _get_doc
 		mock_frappe.throw.side_effect = RuntimeError("refused")
-		mock_frappe.db.get_value.side_effect = lambda *a, **kw: order.append(
-			("lock", a, kw)
-		)
+		mock_frappe.db.get_value.side_effect = lambda *a, **kw: order.append(("lock", a, kw))
 
 		def _compute(*_args, **_kwargs):
 			order.append(("compute", None, None))
 			return self._context(**context_kwargs)
 
-		with patch.object(monthly_expenses, "frappe", mock_frappe), patch.object(
-			monthly_expenses, "_ensure_manager"
-		), patch.object(monthly_expenses, "_require_period_fields"), patch.object(
-			monthly_expenses, "_default_company", return_value="JARZ"
-		), patch.object(
-			monthly_expenses, "_submitted_salary_slips", return_value=slips or {}
-		), patch.object(
-			monthly_expenses, "_compute_month", side_effect=_compute
-		), patch.object(
-			monthly_expenses, "_resolve_paying_account", return_value="Cash - J"
-		), patch.object(
-			monthly_expenses, "_serialize_expense", return_value={"name": fake_doc.name}
+		with (
+			patch.object(monthly_expenses, "frappe", mock_frappe),
+			patch.object(monthly_expenses, "_ensure_manager"),
+			patch.object(monthly_expenses, "_require_period_fields"),
+			patch.object(monthly_expenses, "_default_company", return_value="JARZ"),
+			patch.object(monthly_expenses, "_submitted_salary_slips", return_value=slips or {}),
+			patch.object(monthly_expenses, "_compute_month", side_effect=_compute),
+			patch.object(monthly_expenses, "_resolve_paying_account", return_value="Cash - J"),
+			patch.object(monthly_expenses, "_serialize_expense", return_value={"name": fake_doc.name}),
 		):
 			try:
 				result = monthly_expenses.pay_salary(
@@ -1371,9 +1325,7 @@ class TestPaySalaryWiring(unittest.TestCase):
 	def test_unattributed_salary_gl_blocks_the_payment(self):
 		# A lump payroll JE booked in Desk is invisible per employee, so
 		# `paid_amount` is 0 for all sixteen and the row guard sees nothing.
-		_result, _captured, doc, mock_frappe, _order, refused = self._pay(
-			unattributed_gl=108000.0
-		)
+		_result, _captured, doc, mock_frappe, _order, refused = self._pay(unattributed_gl=108000.0)
 		self.assertTrue(refused)
 		doc.submit.assert_not_called()
 		message = str(mock_frappe.throw.call_args[0][0])
@@ -1390,9 +1342,7 @@ class TestPaySalaryWiring(unittest.TestCase):
 		doc.submit.assert_called_once()
 
 	def test_salary_gl_within_tolerance_does_not_block(self):
-		_result, _captured, doc, _frappe, _order, refused = self._pay(
-			unattributed_gl=0.4
-		)
+		_result, _captured, doc, _frappe, _order, refused = self._pay(unattributed_gl=0.4)
 		self.assertFalse(refused)
 		doc.submit.assert_called_once()
 
@@ -1460,10 +1410,13 @@ class TestResolvePayingAccount(unittest.TestCase):
 		mock_frappe.throw.side_effect = RuntimeError("refused")
 		mock_frappe.db.get_value.return_value = row
 
-		with patch.object(monthly_expenses, "frappe", mock_frappe), patch.object(
-			monthly_expenses,
-			"_cashlike_accounts",
-			return_value=[_Source(a) for a in cashlike],
+		with (
+			patch.object(monthly_expenses, "frappe", mock_frappe),
+			patch.object(
+				monthly_expenses,
+				"_cashlike_accounts",
+				return_value=[_Source(a) for a in cashlike],
+			),
 		):
 			try:
 				resolved = monthly_expenses._resolve_paying_account(account, "JARZ")
@@ -1496,16 +1449,12 @@ class TestResolvePayingAccount(unittest.TestCase):
 		self.assertIsNone(resolved)
 
 	def test_a_group_account_is_still_refused_first(self):
-		mock_frappe, resolved = self._resolve(
-			"Bank Accounts - J", self._row("Bank Accounts - J", is_group=1)
-		)
+		mock_frappe, resolved = self._resolve("Bank Accounts - J", self._row("Bank Accounts - J", is_group=1))
 		self.assertIsNone(resolved)
 		self.assertIn("group", str(mock_frappe.throw.call_args[0][0]))
 
 	def test_another_companys_account_is_refused(self):
-		mock_frappe, resolved = self._resolve(
-			"Cash - X", self._row("Cash - X", company="OTHER")
-		)
+		mock_frappe, resolved = self._resolve("Cash - X", self._row("Cash - X", company="OTHER"))
 		self.assertIsNone(resolved)
 		self.assertIn("OTHER", str(mock_frappe.throw.call_args[0][0]))
 
@@ -1691,33 +1640,32 @@ class TestComputeMonthWiring(unittest.TestCase):
 				raise RuntimeError("HRMS is not installed")
 			return payroll_raw
 
-		with patch.object(monthly_expenses, "frappe", MagicMock()), patch.object(
-			monthly_expenses,
-			"_month_context",
-			return_value=(month_start, month_end, month, "JARZ", "EGP"),
-		), patch.object(
-			monthly_expenses, "_load_registry", return_value=list(registry)
-		), patch.object(
-			monthly_expenses, "_load_period_requests", return_value=list(requests)
-		), patch.object(
-			monthly_expenses,
-			"_indirect_expense_accounts",
-			return_value=[
-				{"account": RENT_DOKKI, "label": "Rent Dokki"},
-				{"account": self.SALARY, "label": "Salary"},
-			],
-		), patch.object(
-			monthly_expenses, "_payroll_expense_accounts", return_value=[self.SALARY]
-		), patch.object(
-			monthly_expenses,
-			"_gl_posted_by_account",
-			return_value={a: {"amount": v} for a, v in gl.items()},
-		), patch.object(
-			monthly_expenses, "_account_label_map", return_value={}
-		), patch.object(
-			monthly_expenses, "_load_payroll", side_effect=_payroll
-		), patch.object(
-			monthly_expenses, "_submitted_salary_slips", return_value={}
+		with (
+			patch.object(monthly_expenses, "frappe", MagicMock()),
+			patch.object(
+				monthly_expenses,
+				"_month_context",
+				return_value=(month_start, month_end, month, "JARZ", "EGP"),
+			),
+			patch.object(monthly_expenses, "_load_registry", return_value=list(registry)),
+			patch.object(monthly_expenses, "_load_period_requests", return_value=list(requests)),
+			patch.object(
+				monthly_expenses,
+				"_indirect_expense_accounts",
+				return_value=[
+					{"account": RENT_DOKKI, "label": "Rent Dokki"},
+					{"account": self.SALARY, "label": "Salary"},
+				],
+			),
+			patch.object(monthly_expenses, "_payroll_expense_accounts", return_value=[self.SALARY]),
+			patch.object(
+				monthly_expenses,
+				"_gl_posted_by_account",
+				return_value={a: {"amount": v} for a, v in gl.items()},
+			),
+			patch.object(monthly_expenses, "_account_label_map", return_value={}),
+			patch.object(monthly_expenses, "_load_payroll", side_effect=_payroll),
+			patch.object(monthly_expenses, "_submitted_salary_slips", return_value={}),
 		):
 			return monthly_expenses._compute_month(month, "JARZ")
 
@@ -1727,9 +1675,7 @@ class TestComputeMonthWiring(unittest.TestCase):
 	# ── the buckets go where they belong ──────────────────────────────────
 
 	def test_a_linked_payment_credits_its_own_item_and_explains_its_own_gl(self):
-		context = self._compute(
-			requests=[_request()], gl={RENT_DOKKI: 47000.0, self.SALARY: 0.0}
-		)
+		context = self._compute(requests=[_request()], gl={RENT_DOKKI: 47000.0, self.SALARY: 0.0})
 		row = self._registry_row(context)
 		self.assertEqual(row["paid_linked"], 47000.0)
 		self.assertEqual(row["paid_unlinked"], 0.0)
@@ -1748,9 +1694,7 @@ class TestComputeMonthWiring(unittest.TestCase):
 			reason_account=self.SALARY,
 			amount=6750.0,
 		)
-		context = self._compute(
-			requests=[salary_payment], gl={RENT_DOKKI: 0.0, self.SALARY: 6750.0}
-		)
+		context = self._compute(requests=[salary_payment], gl={RENT_DOKKI: 0.0, self.SALARY: 6750.0})
 		payroll = context["payroll"]
 		self.assertEqual(payroll["paid"], 6750.0)
 		self.assertEqual(payroll["remaining"], 0.0)
@@ -1814,9 +1758,7 @@ class TestComputeMonthWiring(unittest.TestCase):
 	# ── H4: HRMS absent must not take the screen down ─────────────────────
 
 	def test_an_hrms_failure_degrades_to_an_empty_payroll_block(self):
-		context = self._compute(
-			gl={RENT_DOKKI: 47000.0, self.SALARY: 0.0}, payroll_raises=True
-		)
+		context = self._compute(gl={RENT_DOKKI: 47000.0, self.SALARY: 0.0}, payroll_raises=True)
 		payroll = context["payroll"]
 		self.assertFalse(payroll["configured"])
 		self.assertFalse(payroll["readable"])
@@ -1829,9 +1771,7 @@ class TestComputeMonthWiring(unittest.TestCase):
 
 	def test_the_registry_half_still_renders_when_hrms_is_absent(self):
 		# The half of the screen that needs no HRMS at all.
-		context = self._compute(
-			gl={RENT_DOKKI: 47000.0, self.SALARY: 0.0}, payroll_raises=True
-		)
+		context = self._compute(gl={RENT_DOKKI: 47000.0, self.SALARY: 0.0}, payroll_raises=True)
 		row = self._registry_row(context)
 		self.assertEqual(row["due_amount"], 47000.0)
 		self.assertEqual(row["payment_status"], "Paid")
@@ -1952,9 +1892,7 @@ def _payroll(employees=None, **kwargs):
 	from jarz_pos.api.monthly_expenses import _build_payroll_rows
 
 	kwargs.setdefault("salary_account", "Salary - J")
-	rows = _build_payroll_rows(
-		[_employee()] if employees is None else employees, **kwargs
-	)
+	rows = _build_payroll_rows([_employee()] if employees is None else employees, **kwargs)
 	return {r["employee"]: r for r in rows}
 
 
@@ -2057,7 +1995,9 @@ class TestPenaltyOnThePayrollRow(unittest.TestCase):
 			penalties_by_employee={
 				"HR-EMP-00001": [
 					_penalty(),
-					_penalty(name="JPEN-00002", unit="Half Days", quantity=1, amount=112.5, equivalent_days=0.5),
+					_penalty(
+						name="JPEN-00002", unit="Half Days", quantity=1, amount=112.5, equivalent_days=0.5
+					),
 				]
 			}
 		)
@@ -2116,15 +2056,15 @@ class TestAdvancesAndOrdersOnThePayrollRow(unittest.TestCase):
 	def test_an_advance_from_another_month_is_still_deducted(self):
 		# ALL-TIME on purpose. The fixture's advance is dated July and the month
 		# under test is August; windowing it would make a real debt disappear.
-		row = _payroll(
-			advances_by_employee={"HR-EMP-00001": [_advance(posting_date=date(2026, 3, 1))]}
-		)["HR-EMP-00001"]
+		row = _payroll(advances_by_employee={"HR-EMP-00001": [_advance(posting_date=date(2026, 3, 1))]})[
+			"HR-EMP-00001"
+		]
 		self.assertEqual(row["advance_total"], 500.0)
 
 	def test_a_claimed_advance_carries_no_balance(self):
-		row = _payroll(
-			advances_by_employee={"HR-EMP-00001": [_advance(paid=500.0, claimed=500.0)]}
-		)["HR-EMP-00001"]
+		row = _payroll(advances_by_employee={"HR-EMP-00001": [_advance(paid=500.0, claimed=500.0)]})[
+			"HR-EMP-00001"
+		]
 		self.assertEqual(row["advance_total"], 0.0)
 		self.assertEqual(row["net_payable"], 6750.0)
 
@@ -2283,9 +2223,7 @@ class TestDeductionsRollUp(unittest.TestCase):
 		self.assertEqual(suspect[0]["total"], 500.0)
 
 	def test_a_real_advance_ledger_is_not_reported(self):
-		deductions = self._deductions(
-			[], advances_by_employee={"HR-EMP-00001": [_advance()]}
-		)
+		deductions = self._deductions([], advances_by_employee={"HR-EMP-00001": [_advance()]})
 		self.assertEqual(deductions["advance_accounts_suspect"], [])
 
 
@@ -2294,11 +2232,7 @@ class TestDeductionGaps(unittest.TestCase):
 		from jarz_pos.api.monthly_expenses import _build_deductions, _build_gaps
 
 		block = _build_deductions([], **deductions)
-		return {
-			g.get("code"): g
-			for g in _build_gaps([], True, {}, {}, block)
-			if g.get("code")
-		}
+		return {g.get("code"): g for g in _build_gaps([], True, {}, {}, block) if g.get("code")}
 
 	def test_zero_employee_purpose_invoices_is_reported_as_a_gap(self):
 		# Production has none, so jar debt legitimately reads zero — and the
@@ -2309,9 +2243,7 @@ class TestDeductionGaps(unittest.TestCase):
 		self.assertIn("Employee Order", gap["message"])
 
 	def test_the_gap_disappears_once_the_flow_is_used(self):
-		self.assertNotIn(
-			"employee_orders_unused", self._gaps(employee_orders_present=True)
-		)
+		self.assertNotIn("employee_orders_unused", self._gaps(employee_orders_present=True))
 
 	def test_a_staff_order_linked_to_nobody_is_surfaced_not_dropped(self):
 		# Staging carried exactly this: one Employee-purpose invoice, 92 EGP
@@ -2350,9 +2282,7 @@ class TestDeductionGaps(unittest.TestCase):
 
 		block = _build_deductions(
 			[],
-			unattributed_orders=[
-				{"name": "ACC-SINV-1", "customer": "X", "outstanding_amount": 92.0}
-			],
+			unattributed_orders=[{"name": "ACC-SINV-1", "customer": "X", "outstanding_amount": 92.0}],
 		)
 		self.assertEqual(block["order_total"], 0.0)
 		self.assertEqual(block["unattributed_order_total"], 92.0)
@@ -2367,9 +2297,9 @@ class TestDeductionGaps(unittest.TestCase):
 		self.assertNotIn("advances_unreadable", self._gaps(advances_readable=True))
 
 	def test_an_advance_on_customer_ar_is_a_warning(self):
-		gap = self._gaps(
-			advances_by_employee={"HR-EMP-00001": [_advance(account="Debtors - J")]}
-		).get("advance_account_is_debtors")
+		gap = self._gaps(advances_by_employee={"HR-EMP-00001": [_advance(account="Debtors - J")]}).get(
+			"advance_account_is_debtors"
+		)
 		self.assertIsNotNone(gap)
 		self.assertIn("Debtors - J", gap["message"])
 
@@ -2395,10 +2325,10 @@ class TestAdvanceBalanceReadsDegradeWithoutHrms(unittest.TestCase):
 		else:
 			mock_frappe.get_all.return_value = list(rows or [])
 
-		with patch.object(monthly_expenses, "frappe", mock_frappe), patch.object(
-			monthly_expenses, "hrms_available", return_value=hrms
-		), patch.object(
-			monthly_expenses, "_advance_has_field", return_value=True
+		with (
+			patch.object(monthly_expenses, "frappe", mock_frappe),
+			patch.object(monthly_expenses, "hrms_available", return_value=hrms),
+			patch.object(monthly_expenses, "_advance_has_field", return_value=True),
 		):
 			return monthly_expenses._load_advances("JARZ")
 
@@ -2429,9 +2359,7 @@ class TestAdvanceBalanceReadsDegradeWithoutHrms(unittest.TestCase):
 		# non-Expense-Claim voucher against the advance). So after settling 500
 		# of 500, BOTH return_amount and custom_jarz_settled_amount read 500.
 		# Subtracting both gives -500; the floor hides that at full settlement.
-		grouped, _readable = self._load(
-			rows=[_advance(paid=500.0, returned=500.0, settled=500.0)]
-		)
+		grouped, _readable = self._load(rows=[_advance(paid=500.0, returned=500.0, settled=500.0)])
 		self.assertEqual(grouped, {})
 
 	def test_a_partial_settlement_does_not_write_off_the_rest(self):
@@ -2441,9 +2369,7 @@ class TestAdvanceBalanceReadsDegradeWithoutHrms(unittest.TestCase):
 		# = 100, quietly writing off 200 the employee still owes.
 		from jarz_pos.api.monthly_expenses import _advance_open_amount
 
-		grouped, _readable = self._load(
-			rows=[_advance(paid=500.0, returned=200.0, settled=200.0)]
-		)
+		grouped, _readable = self._load(rows=[_advance(paid=500.0, returned=200.0, settled=200.0)])
 		self.assertEqual(_advance_open_amount(grouped["HR-EMP-00001"][0]), 300.0)
 
 	def test_rows_still_render_when_advances_cannot_be_read(self):
@@ -2478,13 +2404,12 @@ class TestAdvanceSettlementPlanning(unittest.TestCase):
 		mock_frappe.throw.side_effect = RuntimeError("refused")
 		mock_frappe.db.get_value.side_effect = _get_value
 
-		with patch.object(monthly_expenses, "frappe", mock_frappe), patch.object(
-			monthly_expenses, "_advance_has_field", return_value=True
+		with (
+			patch.object(monthly_expenses, "frappe", mock_frappe),
+			patch.object(monthly_expenses, "_advance_has_field", return_value=True),
 		):
 			try:
-				plan = monthly_expenses._plan_advance_settlements(
-					self.EMPLOYEE, "JARZ", requests
-				)
+				plan = monthly_expenses._plan_advance_settlements(self.EMPLOYEE, "JARZ", requests)
 			except RuntimeError:
 				return mock_frappe, None
 		return mock_frappe, plan
@@ -2664,32 +2589,33 @@ class TestPaySalaryWithSettlements(unittest.TestCase):
 			}
 		]
 
-		with patch.object(monthly_expenses, "frappe", mock_frappe), patch.object(
-			monthly_expenses, "_ensure_manager"
-		), patch.object(monthly_expenses, "_require_period_fields"), patch.object(
-			monthly_expenses, "_default_company", return_value="JARZ"
-		), patch.object(
-			monthly_expenses, "_submitted_salary_slips", return_value={}
-		), patch.object(
-			monthly_expenses, "_compute_month", return_value=self._context(**context_kwargs)
-		), patch.object(
-			monthly_expenses, "_resolve_paying_account", return_value="Cash - J"
-		) as resolve, patch.object(
-			monthly_expenses, "_serialize_expense", return_value={"name": fake_doc.name}
-		), patch.object(
-			monthly_expenses,
-			"_plan_advance_settlements",
-			return_value=(default_advance_plan if advance_plan is None else advance_plan),
-		) as plan_advances, patch.object(
-			monthly_expenses, "_plan_order_settlements", return_value=(order_plan or [])
-		) as plan_orders, patch.object(
-			monthly_expenses,
-			"_post_settlement_journal_entry",
-			return_value="ACC-JV-2026-00042",
-		) as post_je, patch.object(
-			monthly_expenses,
-			"_guard_overpay",
-			side_effect=lambda *args, **kwargs: guard_calls.append(args) or 0.0,
+		with (
+			patch.object(monthly_expenses, "frappe", mock_frappe),
+			patch.object(monthly_expenses, "_ensure_manager"),
+			patch.object(monthly_expenses, "_require_period_fields"),
+			patch.object(monthly_expenses, "_default_company", return_value="JARZ"),
+			patch.object(monthly_expenses, "_submitted_salary_slips", return_value={}),
+			patch.object(monthly_expenses, "_compute_month", return_value=self._context(**context_kwargs)),
+			patch.object(monthly_expenses, "_resolve_paying_account", return_value="Cash - J") as resolve,
+			patch.object(monthly_expenses, "_serialize_expense", return_value={"name": fake_doc.name}),
+			patch.object(
+				monthly_expenses,
+				"_plan_advance_settlements",
+				return_value=(default_advance_plan if advance_plan is None else advance_plan),
+			) as plan_advances,
+			patch.object(
+				monthly_expenses, "_plan_order_settlements", return_value=(order_plan or [])
+			) as plan_orders,
+			patch.object(
+				monthly_expenses,
+				"_post_settlement_journal_entry",
+				return_value="ACC-JV-2026-00042",
+			) as post_je,
+			patch.object(
+				monthly_expenses,
+				"_guard_overpay",
+				side_effect=lambda *args, **kwargs: guard_calls.append(args) or 0.0,
+			),
 		):
 			try:
 				result = monthly_expenses.pay_salary(
@@ -2796,12 +2722,11 @@ class TestSettlementJournalEntryShape(unittest.TestCase):
 		mock_frappe = MagicMock()
 		mock_frappe.new_doc.return_value = je
 
-		with patch.object(monthly_expenses, "frappe", mock_frappe), patch.object(
-			monthly_expenses, "_advance_has_field", return_value=True
-		), patch.object(
-			monthly_expenses, "apply_ledger_posting_datetime"
-		), patch.object(
-			monthly_expenses, "join_posting_datetime", return_value="2026-08-31 12:00:00"
+		with (
+			patch.object(monthly_expenses, "frappe", mock_frappe),
+			patch.object(monthly_expenses, "_advance_has_field", return_value=True),
+			patch.object(monthly_expenses, "apply_ledger_posting_datetime"),
+			patch.object(monthly_expenses, "join_posting_datetime", return_value="2026-08-31 12:00:00"),
 		):
 			name = monthly_expenses._post_settlement_journal_entry(
 				company="JARZ",
@@ -2879,9 +2804,7 @@ class TestSettlementJournalEntryShape(unittest.TestCase):
 		# A remark containing a literal `[JARZ-JE:...]` satisfies every
 		# idempotency lookup in this app — including `_load_settlements`, which
 		# would then credit another employee's month from this entry.
-		_name, je, _frappe = self._post(
-			remarks="[JARZ-JE:SALARY_SETTLEMENT:HR-EMP-99999:2026-08] gotcha"
-		)
+		_name, je, _frappe = self._post(remarks="[JARZ-JE:SALARY_SETTLEMENT:HR-EMP-99999:2026-08] gotcha")
 		self.assertEqual(je.user_remark.count("[JARZ-JE:"), 1)
 		self.assertNotIn("HR-EMP-99999", je.user_remark.split("]")[0])
 
@@ -2956,16 +2879,17 @@ class TestAddEmployeePenaltyWiring(unittest.TestCase):
 			order.append(("compute", None, None))
 			return context
 
-		with patch.object(monthly_expenses, "frappe", mock_frappe), patch.object(
-			monthly_expenses, "_ensure_manager"
-		), patch.object(monthly_expenses, "_require_period_fields"), patch.object(
-			monthly_expenses, "_penalty_doctype_ready", return_value=True
-		), patch.object(
-			monthly_expenses,
-			"_month_context",
-			return_value=(MONTH_START, MONTH_END, MONTH_KEY, "JARZ", "EGP"),
-		), patch.object(
-			monthly_expenses, "_compute_month", side_effect=_compute
+		with (
+			patch.object(monthly_expenses, "frappe", mock_frappe),
+			patch.object(monthly_expenses, "_ensure_manager"),
+			patch.object(monthly_expenses, "_require_period_fields"),
+			patch.object(monthly_expenses, "_penalty_doctype_ready", return_value=True),
+			patch.object(
+				monthly_expenses,
+				"_month_context",
+				return_value=(MONTH_START, MONTH_END, MONTH_KEY, "JARZ", "EGP"),
+			),
+			patch.object(monthly_expenses, "_compute_month", side_effect=_compute),
 		):
 			try:
 				result = monthly_expenses.add_employee_penalty(self.EMPLOYEE, **payload)
@@ -3030,17 +2954,13 @@ class TestAddEmployeePenaltyWiring(unittest.TestCase):
 
 	def test_a_money_penalty_is_still_allowed_off_payroll(self):
 		# The off-payroll escape hatch: no day has a price, but 450 EGP does.
-		out = self._add(
-			unit="Money", quantity=0, amount=450, context=self._context(on_payroll=False)
-		)
+		out = self._add(unit="Money", quantity=0, amount=450, context=self._context(on_payroll=False))
 		self.assertFalse(out["refused"])
 		self.assertEqual(out["captured"]["amount"], 450.0)
 		self.assertEqual(out["captured"]["day_rate"], 0.0)
 
 	def test_penalties_beyond_the_whole_salary_are_refused(self):
-		out = self._add(
-			unit="Days", quantity=1, context=self._context(penalty_total=6700.0)
-		)
+		out = self._add(unit="Days", quantity=1, context=self._context(penalty_total=6700.0))
 		self.assertTrue(out["refused"])
 		out["frappe"].get_doc.assert_not_called()
 		self.assertIn("allow_overpay", str(out["frappe"].throw.call_args[0][0]))
@@ -3085,12 +3005,15 @@ class TestCancelEmployeePenalty(unittest.TestCase):
 		mock_frappe.get_doc.return_value = doc
 		mock_frappe.throw.side_effect = RuntimeError("refused")
 
-		with patch.object(monthly_expenses, "frappe", mock_frappe), patch.object(
-			monthly_expenses, "_ensure_manager"
-		), patch.object(monthly_expenses, "_require_period_fields"), patch.object(
-			monthly_expenses,
-			"_compute_month",
-			return_value={"payroll": {"rows": []}, "summary": {}, "deductions": {}},
+		with (
+			patch.object(monthly_expenses, "frappe", mock_frappe),
+			patch.object(monthly_expenses, "_ensure_manager"),
+			patch.object(monthly_expenses, "_require_period_fields"),
+			patch.object(
+				monthly_expenses,
+				"_compute_month",
+				return_value={"payroll": {"rows": []}, "summary": {}, "deductions": {}},
+			),
 		):
 			try:
 				result = monthly_expenses.cancel_employee_penalty("JPEN-00001", reason)
@@ -3139,15 +3062,11 @@ class TestSettlementReadBack(unittest.TestCase):
 			return monthly_expenses._load_settlements(MONTH_KEY, "JARZ")
 
 	def test_the_employee_and_month_are_read_out_of_the_tag(self):
-		settled = self._load(
-			[("[JARZ-JE:SALARY_SETTLEMENT:HR-EMP-00001:2026-08] salary", 684.0)]
-		)
+		settled = self._load([("[JARZ-JE:SALARY_SETTLEMENT:HR-EMP-00001:2026-08] salary", 684.0)])
 		self.assertEqual(settled, {"HR-EMP-00001": 684.0})
 
 	def test_another_months_settlement_is_not_credited_to_this_one(self):
-		settled = self._load(
-			[("[JARZ-JE:SALARY_SETTLEMENT:HR-EMP-00001:2026-07] salary", 684.0)]
-		)
+		settled = self._load([("[JARZ-JE:SALARY_SETTLEMENT:HR-EMP-00001:2026-07] salary", 684.0)])
 		self.assertEqual(settled, {})
 
 	def test_an_untagged_entry_is_ignored(self):
@@ -3292,64 +3211,65 @@ class TestAccessGateIsShared(unittest.TestCase):
 			)
 
 
-
 class TestAdvancesDueByMonth(unittest.TestCase):
-    """An advance comes off the salary month it was drawn against.
+	"""An advance comes off the salary month it was drawn against.
 
-    7 October, before the 10th's pay day: the cash leaves today's drawer but the
-    advance is September's. It must reduce September's hand-over, and an
-    advance against OCTOBER's salary must not.
-    """
+	7 October, before the 10th's pay day: the cash leaves today's drawer but the
+	advance is September's. It must reduce September's hand-over, and an
+	advance against OCTOBER's salary must not.
+	"""
 
-    def _due(self, rows, month):
-        from jarz_pos.api.monthly_expenses import _advances_due_by_month
+	def _due(self, rows, month):
+		from jarz_pos.api.monthly_expenses import _advances_due_by_month
 
-        return _advances_due_by_month({"EMP-1": rows}, month)
+		return _advances_due_by_month({"EMP-1": rows}, month)
 
-    def test_an_advance_for_a_later_salary_month_is_not_deducted(self):
-        rows = [
-            {"name": "A-SEP", "posting_date": "2026-10-07", "custom_jarz_salary_month": "2026-09"},
-            {"name": "A-OCT", "posting_date": "2026-10-15", "custom_jarz_salary_month": "2026-10"},
-        ]
-        due = self._due(rows, "2026-09")
-        self.assertEqual([r["name"] for r in due["EMP-1"]], ["A-SEP"])
+	def test_an_advance_for_a_later_salary_month_is_not_deducted(self):
+		rows = [
+			{"name": "A-SEP", "posting_date": "2026-10-07", "custom_jarz_salary_month": "2026-09"},
+			{"name": "A-OCT", "posting_date": "2026-10-15", "custom_jarz_salary_month": "2026-10"},
+		]
+		due = self._due(rows, "2026-09")
+		self.assertEqual([r["name"] for r in due["EMP-1"]], ["A-SEP"])
 
-    def test_older_unrecovered_advances_stay_on_the_board(self):
-        rows = [{"name": "A-JUL", "posting_date": "2026-07-03", "custom_jarz_salary_month": "2026-07"}]
-        self.assertEqual(len(self._due(rows, "2026-09")["EMP-1"]), 1)
+	def test_older_unrecovered_advances_stay_on_the_board(self):
+		rows = [{"name": "A-JUL", "posting_date": "2026-07-03", "custom_jarz_salary_month": "2026-07"}]
+		self.assertEqual(len(self._due(rows, "2026-09")["EMP-1"]), 1)
 
-    def test_a_legacy_advance_before_pay_day_stays_on_last_months_board(self):
-        # Filed 2 October, before the field existed: September's salary. A
-        # posting-month fallback would drop it off September three days before
-        # September is paid.
-        rows = [{"name": "A-OLD", "posting_date": "2026-10-02"}]
-        self.assertEqual(len(self._due(rows, "2026-09")["EMP-1"]), 1)
+	def test_a_legacy_advance_before_pay_day_stays_on_last_months_board(self):
+		# Filed 2 October, before the field existed: September's salary. A
+		# posting-month fallback would drop it off September three days before
+		# September is paid.
+		rows = [{"name": "A-OLD", "posting_date": "2026-10-02"}]
+		self.assertEqual(len(self._due(rows, "2026-09")["EMP-1"]), 1)
 
-    def test_a_legacy_advance_after_pay_day_is_this_months(self):
-        rows = [{"name": "A-OLD", "posting_date": "2026-10-15"}]
-        self.assertEqual(self._due(rows, "2026-09"), {})
-        self.assertEqual(len(self._due(rows, "2026-10")["EMP-1"]), 1)
+	def test_a_legacy_advance_after_pay_day_is_this_months(self):
+		rows = [{"name": "A-OLD", "posting_date": "2026-10-15"}]
+		self.assertEqual(self._due(rows, "2026-09"), {})
+		self.assertEqual(len(self._due(rows, "2026-10")["EMP-1"]), 1)
 
-    def test_an_employee_left_with_nothing_drops_out(self):
-        rows = [{"name": "A-OCT", "posting_date": "2026-10-15", "custom_jarz_salary_month": "2026-10"}]
-        self.assertNotIn("EMP-1", self._due(rows, "2026-09"))
+	def test_an_employee_left_with_nothing_drops_out(self):
+		rows = [{"name": "A-OCT", "posting_date": "2026-10-15", "custom_jarz_salary_month": "2026-10"}]
+		self.assertNotIn("EMP-1", self._due(rows, "2026-09"))
 
 
 class TestAdvanceSettlementAllowList(unittest.TestCase):
-    def test_an_advance_not_on_the_row_is_refused_before_anything_is_read(self):
-        from jarz_pos.api import monthly_expenses
+	def test_an_advance_not_on_the_row_is_refused_before_anything_is_read(self):
+		from jarz_pos.api import monthly_expenses
 
-        mock = MagicMock()
-        mock.throw.side_effect = lambda msg, *a, **k: (_ for _ in ()).throw(ValueError(msg))
-        with patch.object(monthly_expenses, "frappe", mock),                 patch.object(monthly_expenses, "_lock_row") as lock:
-            with self.assertRaises(ValueError) as ctx:
-                monthly_expenses._plan_advance_settlements(
-                    "EMP-1", "JARZ", [{"name": "A-OCT", "amount": 100}], ["A-SEP"]
-                )
-        self.assertIn("A-OCT", str(ctx.exception))
-        lock.assert_not_called()
+		mock = MagicMock()
+		mock.throw.side_effect = lambda msg, *a, **k: (_ for _ in ()).throw(ValueError(msg))
+		with (
+			patch.object(monthly_expenses, "frappe", mock),
+			patch.object(monthly_expenses, "_lock_row") as lock,
+		):
+			with self.assertRaises(ValueError) as ctx:
+				monthly_expenses._plan_advance_settlements(
+					"EMP-1", "JARZ", [{"name": "A-OCT", "amount": 100}], ["A-SEP"]
+				)
+		self.assertIn("A-OCT", str(ctx.exception))
+		lock.assert_not_called()
 
 
 if __name__ == "__main__":
 	unittest.main()
-

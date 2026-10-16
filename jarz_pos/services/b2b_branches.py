@@ -50,191 +50,196 @@ _MANAGER_ROLES = {"JARZ Manager", "System Manager", "Administrator"}
 # Small helpers
 # ---------------------------------------------------------------------------
 def _has_column(doctype: str, fieldname: str) -> bool:
-    try:
-        return bool(frappe.db.has_column(doctype, fieldname))
-    except Exception:
-        return False
+	try:
+		return bool(frappe.db.has_column(doctype, fieldname))
+	except Exception:
+		return False
 
 
 def _is_manager() -> bool:
-    roles = set(frappe.get_roles(frappe.session.user) or [])
-    return bool(roles.intersection(_MANAGER_ROLES))
+	roles = set(frappe.get_roles(frappe.session.user) or [])
+	return bool(roles.intersection(_MANAGER_ROLES))
 
 
 def _flt(value: Any) -> float:
-    try:
-        return round(float(value or 0), 2)
-    except (TypeError, ValueError):
-        return 0.0
+	try:
+		return round(float(value or 0), 2)
+	except (TypeError, ValueError):
+		return 0.0
 
 
 def _str_or_none(value: Any) -> Optional[str]:
-    return str(value) if value else None
+	return str(value) if value else None
 
 
 def _norm(value: Any) -> str:
-    return " ".join(str(value or "").split()).strip()
+	return " ".join(str(value or "").split()).strip()
 
 
 # ---------------------------------------------------------------------------
 # Branch book
 # ---------------------------------------------------------------------------
 def customer_branches(customer: str) -> List[Dict[str, Any]]:
-    """The customer's physical branches, as the order flow sees them."""
-    from jarz_pos.api.customer import _build_customer_shipping_address_book
+	"""The customer's physical branches, as the order flow sees them."""
+	from jarz_pos.api.customer import _build_customer_shipping_address_book
 
-    book = _build_customer_shipping_address_book(customer)
-    options = list(book.get("branch_options") or [])
-    coords = _address_coordinates(
-        [o.get("address_name") for o in options if o.get("address_name")]
-    )
-    branches = []
-    for option in options:
-        address_name = option.get("address_name")
-        lat, lng = coords.get(address_name, (None, None))
-        branches.append(
-            {
-                "address_name": address_name,
-                "branch_name": option.get("branch_name") or address_name,
-                "address_line1": option.get("address_line1"),
-                "address_line2": option.get("address_line2"),
-                "city": option.get("city"),
-                "phone": option.get("phone"),
-                "territory": option.get("effective_territory"),
-                "territory_missing": bool(option.get("territory_missing")),
-                "is_primary_address": bool(option.get("is_primary_address")),
-                "latitude": lat,
-                "longitude": lng,
-                "member_address_names": list(option.get("member_address_names") or [address_name]),
-            }
-        )
-    return branches
+	book = _build_customer_shipping_address_book(customer)
+	options = list(book.get("branch_options") or [])
+	coords = _address_coordinates([o.get("address_name") for o in options if o.get("address_name")])
+	branches = []
+	for option in options:
+		address_name = option.get("address_name")
+		lat, lng = coords.get(address_name, (None, None))
+		branches.append(
+			{
+				"address_name": address_name,
+				"branch_name": option.get("branch_name") or address_name,
+				"address_line1": option.get("address_line1"),
+				"address_line2": option.get("address_line2"),
+				"city": option.get("city"),
+				"phone": option.get("phone"),
+				"territory": option.get("effective_territory"),
+				"territory_missing": bool(option.get("territory_missing")),
+				"is_primary_address": bool(option.get("is_primary_address")),
+				"latitude": lat,
+				"longitude": lng,
+				"member_address_names": list(option.get("member_address_names") or [address_name]),
+			}
+		)
+	return branches
 
 
 def _address_coordinates(names: List[str]) -> Dict[str, tuple]:
-    if not names or not (
-        _has_column("Address", "custom_latitude") and _has_column("Address", "custom_longitude")
-    ):
-        return {}
-    rows = frappe.get_all(
-        "Address",
-        filters={"name": ["in", names]},
-        fields=["name", "custom_latitude", "custom_longitude"],
-        limit_page_length=0,
-    ) or []
-    out = {}
-    for row in rows:
-        lat = row.get("custom_latitude")
-        lng = row.get("custom_longitude")
-        if lat or lng:
-            out[row.get("name")] = (lat, lng)
-    return out
+	if not names or not (
+		_has_column("Address", "custom_latitude") and _has_column("Address", "custom_longitude")
+	):
+		return {}
+	rows = (
+		frappe.get_all(
+			"Address",
+			filters={"name": ["in", names]},
+			fields=["name", "custom_latitude", "custom_longitude"],
+			limit_page_length=0,
+		)
+		or []
+	)
+	out = {}
+	for row in rows:
+		lat = row.get("custom_latitude")
+		lng = row.get("custom_longitude")
+		if lat or lng:
+			out[row.get("name")] = (lat, lng)
+	return out
 
 
 def _member_index(branches: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
-    """Address docname -> the branch it belongs to."""
-    index = {}
-    for branch in branches:
-        for member in branch.get("member_address_names") or []:
-            if member:
-                index[member] = branch
-    return index
+	"""Address docname -> the branch it belongs to."""
+	index = {}
+	for branch in branches:
+		for member in branch.get("member_address_names") or []:
+			if member:
+				index[member] = branch
+	return index
 
 
 def _invoice_address(row: Dict[str, Any]) -> str:
-    return str(row.get("shipping_address_name") or row.get("customer_address") or "").strip()
+	return str(row.get("shipping_address_name") or row.get("customer_address") or "").strip()
 
 
 def _branch_for_invoice(row, index):
-    return index.get(_invoice_address(row))
+	return index.get(_invoice_address(row))
 
 
 def tag_invoice_branches(customer: str, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Stamp each invoice row of *customer* with the door it was delivered to.
+	"""Stamp each invoice row of *customer* with the door it was delivered to.
 
-    Sets ``branch`` (the branch's canonical address_name) and ``branch_name``
-    in place; rows need ``shipping_address_name`` / ``customer_address``.
+	Sets ``branch`` (the branch's canonical address_name) and ``branch_name``
+	in place; rows need ``shipping_address_name`` / ``customer_address``.
 
-    An invoice whose address is none of the branches (no address, or an
-    Address no longer in the book) is folded into the shop's ONLY branch when
-    it has exactly one -- there is no other door it could be. With several
-    branches it is tagged ``settlement_schedule.UNASSIGNED_BRANCH``, which the
-    schedule lets fall due on the next delivery to any door: guessing a door
-    would put the debt on the wrong branch, and leaving it as its own door
-    would mean it is never due at all.
+	An invoice whose address is none of the branches (no address, or an
+	Address no longer in the book) is folded into the shop's ONLY branch when
+	it has exactly one -- there is no other door it could be. With several
+	branches it is tagged ``settlement_schedule.UNASSIGNED_BRANCH``, which the
+	schedule lets fall due on the next delivery to any door: guessing a door
+	would put the debt on the wrong branch, and leaving it as its own door
+	would mean it is never due at all.
 
-    Never raises: on failure the rows are left untagged, which the settlement
-    schedule reads as one group -- the whole customer, i.e. the old behaviour.
-    """
-    if not rows:
-        return rows
-    from jarz_pos.services.settlement_schedule import UNASSIGNED_BRANCH
+	Never raises: on failure the rows are left untagged, which the settlement
+	schedule reads as one group -- the whole customer, i.e. the old behaviour.
+	"""
+	if not rows:
+		return rows
+	from jarz_pos.services.settlement_schedule import UNASSIGNED_BRANCH
 
-    try:
-        branches = customer_branches(customer)
-        index = _member_index(branches)
-    except Exception:
-        _log_quietly(f"tag_invoice_branches: {customer}")
-        return rows
-    only = branches[0] if len(branches) == 1 else None
-    for row in rows:
-        branch = index.get(_invoice_address(row)) or only
-        if branch:
-            row["branch"] = branch["address_name"]
-            row["branch_name"] = branch["branch_name"]
-        else:
-            row["branch"] = UNASSIGNED_BRANCH
-            row["branch_name"] = None
-    return rows
+	try:
+		branches = customer_branches(customer)
+		index = _member_index(branches)
+	except Exception:
+		_log_quietly(f"tag_invoice_branches: {customer}")
+		return rows
+	only = branches[0] if len(branches) == 1 else None
+	for row in rows:
+		branch = index.get(_invoice_address(row)) or only
+		if branch:
+			row["branch"] = branch["address_name"]
+			row["branch_name"] = branch["branch_name"]
+		else:
+			row["branch"] = UNASSIGNED_BRANCH
+			row["branch_name"] = None
+	return rows
 
 
 # ---------------------------------------------------------------------------
 # Per-branch invoice separation
 # ---------------------------------------------------------------------------
 def _invoice_fields() -> List[str]:
-    fields = [
-        "name",
-        "posting_date",
-        "grand_total",
-        "outstanding_amount",
-        "status",
-        "is_return",
-        "shipping_address_name",
-        "customer_address",
-    ]
-    for optional in ("woo_order_id", "custom_order_purpose", "custom_payment_method"):
-        if _has_column("Sales Invoice", optional):
-            fields.append(optional)
-    return fields
+	fields = [
+		"name",
+		"posting_date",
+		"grand_total",
+		"outstanding_amount",
+		"status",
+		"is_return",
+		"shipping_address_name",
+		"customer_address",
+	]
+	for optional in ("woo_order_id", "custom_order_purpose", "custom_payment_method"):
+		if _has_column("Sales Invoice", optional):
+			fields.append(optional)
+	return fields
 
 
 def _submitted_invoices(customer: str, limit: Optional[int] = None) -> List[Dict[str, Any]]:
-    return frappe.get_all(
-        "Sales Invoice",
-        filters={"customer": customer, "docstatus": 1},
-        fields=_invoice_fields(),
-        order_by="posting_date desc, creation desc",
-        limit_page_length=limit or 0,
-    ) or []
+	return (
+		frappe.get_all(
+			"Sales Invoice",
+			filters={"customer": customer, "docstatus": 1},
+			fields=_invoice_fields(),
+			order_by="posting_date desc, creation desc",
+			limit_page_length=limit or 0,
+		)
+		or []
+	)
 
 
 def _empty_stats() -> Dict[str, Any]:
-    return {"invoice_count": 0, "total_billed": 0.0, "outstanding": 0.0, "last_order_date": None}
+	return {"invoice_count": 0, "total_billed": 0.0, "outstanding": 0.0, "last_order_date": None}
 
 
 def _add_to_stats(stats: Dict[str, Any], row: Dict[str, Any]) -> None:
-    stats["invoice_count"] += 1
-    stats["total_billed"] = _flt(stats["total_billed"] + _flt(row.get("grand_total")))
-    stats["outstanding"] = _flt(stats["outstanding"] + _flt(row.get("outstanding_amount")))
-    posted = _str_or_none(row.get("posting_date"))
-    if posted and (not stats["last_order_date"] or posted > stats["last_order_date"]):
-        stats["last_order_date"] = posted
+	stats["invoice_count"] += 1
+	stats["total_billed"] = _flt(stats["total_billed"] + _flt(row.get("grand_total")))
+	stats["outstanding"] = _flt(stats["outstanding"] + _flt(row.get("outstanding_amount")))
+	posted = _str_or_none(row.get("posting_date"))
+	if posted and (not stats["last_order_date"] or posted > stats["last_order_date"]):
+		stats["last_order_date"] = posted
 
 
 def _invoice_totals_by_address(customer: str) -> List[Dict[str, Any]]:
-    """Submitted-invoice totals per address the invoice was sent to."""
-    return frappe.db.sql(
-        """SELECT COALESCE(NULLIF(shipping_address_name, ''), customer_address) AS address,
+	"""Submitted-invoice totals per address the invoice was sent to."""
+	return (
+		frappe.db.sql(
+			"""SELECT COALESCE(NULLIF(shipping_address_name, ''), customer_address) AS address,
                   COUNT(*) AS invoice_count,
                   COALESCE(SUM(grand_total), 0) AS total_billed,
                   COALESCE(SUM(outstanding_amount), 0) AS outstanding,
@@ -242,38 +247,40 @@ def _invoice_totals_by_address(customer: str) -> List[Dict[str, Any]]:
            FROM `tabSales Invoice`
            WHERE customer = %s AND docstatus = 1
            GROUP BY COALESCE(NULLIF(shipping_address_name, ''), customer_address)""",
-        (customer,),
-        as_dict=True,
-    ) or []
+			(customer,),
+			as_dict=True,
+		)
+		or []
+	)
 
 
 def account_branches(customer: str) -> Dict[str, Any]:
-    """Branches with their own invoice totals and outstanding balance.
+	"""Branches with their own invoice totals and outstanding balance.
 
-    ``unassigned`` holds invoices whose address is none of the branches (no
-    address at all, or an Address no longer linked to this customer). It is
-    reported rather than folded into a branch: guessing would put a debt on
-    the wrong door.
-    """
-    branches = customer_branches(customer)
-    index = _member_index(branches)
-    stats = {b["address_name"]: _empty_stats() for b in branches}
-    unassigned = _empty_stats()
-    for group in _invoice_totals_by_address(customer):
-        branch = index.get(str(group.get("address") or "").strip())
-        target = stats[branch["address_name"]] if branch else unassigned
-        target["invoice_count"] += int(group.get("invoice_count") or 0)
-        target["total_billed"] = _flt(target["total_billed"] + _flt(group.get("total_billed")))
-        target["outstanding"] = _flt(target["outstanding"] + _flt(group.get("outstanding")))
-        posted = _str_or_none(group.get("last_order_date"))
-        if posted and (not target["last_order_date"] or posted > target["last_order_date"]):
-            target["last_order_date"] = posted
-    for branch in branches:
-        branch.update(stats[branch["address_name"]])
-    return {
-        "branches": branches,
-        "unassigned": unassigned if unassigned["invoice_count"] else None,
-    }
+	``unassigned`` holds invoices whose address is none of the branches (no
+	address at all, or an Address no longer linked to this customer). It is
+	reported rather than folded into a branch: guessing would put a debt on
+	the wrong door.
+	"""
+	branches = customer_branches(customer)
+	index = _member_index(branches)
+	stats = {b["address_name"]: _empty_stats() for b in branches}
+	unassigned = _empty_stats()
+	for group in _invoice_totals_by_address(customer):
+		branch = index.get(str(group.get("address") or "").strip())
+		target = stats[branch["address_name"]] if branch else unassigned
+		target["invoice_count"] += int(group.get("invoice_count") or 0)
+		target["total_billed"] = _flt(target["total_billed"] + _flt(group.get("total_billed")))
+		target["outstanding"] = _flt(target["outstanding"] + _flt(group.get("outstanding")))
+		posted = _str_or_none(group.get("last_order_date"))
+		if posted and (not target["last_order_date"] or posted > target["last_order_date"]):
+			target["last_order_date"] = posted
+	for branch in branches:
+		branch.update(stats[branch["address_name"]])
+	return {
+		"branches": branches,
+		"unassigned": unassigned if unassigned["invoice_count"] else None,
+	}
 
 
 # ---------------------------------------------------------------------------
@@ -292,517 +299,509 @@ SELF_BRANCH_ROW = "__self__"
 AUTO_MATCH_METRES = 150
 
 _MAPS_ROW_FIELDS = (
-    "name",
-    "idx",
-    "branch_name",
-    "area",
-    "region",
-    "governorate",
-    "rating",
-    "reviews",
-    "maps_url",
-    "phone",
-    "address",
-    "latitude",
-    "longitude",
+	"name",
+	"idx",
+	"branch_name",
+	"area",
+	"region",
+	"governorate",
+	"rating",
+	"reviews",
+	"maps_url",
+	"phone",
+	"address",
+	"latitude",
+	"longitude",
 )
 _MAPS_OPTIONAL_FIELDS = ("on_talabat", "linked_address", "match_dismissed")
 
 
 def _float_or_none(value: Any) -> Optional[float]:
-    if value in (None, ""):
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
+	if value in (None, ""):
+		return None
+	try:
+		return float(value)
+	except (TypeError, ValueError):
+		return None
 
 
 def _int_or_none(value: Any) -> Optional[int]:
-    if value in (None, ""):
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
+	if value in (None, ""):
+		return None
+	try:
+		return int(value)
+	except (TypeError, ValueError):
+		return None
 
 
 def _truthy(value: Any) -> bool:
-    try:
-        return bool(int(value or 0))
-    except (TypeError, ValueError):
-        return bool(value)
+	try:
+		return bool(int(value or 0))
+	except (TypeError, ValueError):
+		return bool(value)
 
 
 def _pin(row: Dict[str, Any]) -> Optional[tuple]:
-    lat = _float_or_none(row.get("latitude"))
-    lng = _float_or_none(row.get("longitude"))
-    return (lat, lng) if lat and lng else None
+	lat = _float_or_none(row.get("latitude"))
+	lng = _float_or_none(row.get("longitude"))
+	return (lat, lng) if lat and lng else None
 
 
 def _metres(a: tuple, b: tuple) -> float:
-    """Equirectangular distance, as ``leads._same_branch`` measures it."""
-    import math
+	"""Equirectangular distance, as ``leads._same_branch`` measures it."""
+	import math
 
-    dy = (a[0] - b[0]) * 111_320
-    dx = (a[1] - b[1]) * 111_320 * math.cos(math.radians((a[0] + b[0]) / 2))
-    return math.hypot(dx, dy)
+	dy = (a[0] - b[0]) * 111_320
+	dx = (a[1] - b[1]) * 111_320 * math.cos(math.radians((a[0] + b[0]) / 2))
+	return math.hypot(dx, dy)
 
 
 def _name_key(value: Any) -> str:
-    return "".join(ch for ch in str(value or "").lower() if ch.isalnum())
+	return "".join(ch for ch in str(value or "").lower() if ch.isalnum())
 
 
 def _area_tokens(*values: Any) -> set:
-    """Normalised area labels; "Heliopolis - مصر الجديده" yields both halves."""
-    tokens = set()
-    for value in values:
-        text = _norm(value).lower()
-        if not text:
-            continue
-        tokens.add(text)
-        for part in text.split(" - "):
-            part = _norm(part)
-            if part:
-                tokens.add(part)
-    return tokens
+	"""Normalised area labels; "Heliopolis - مصر الجديده" yields both halves."""
+	tokens = set()
+	for value in values:
+		text = _norm(value).lower()
+		if not text:
+			continue
+		tokens.add(text)
+		for part in text.split(" - "):
+			part = _norm(part)
+			if part:
+				tokens.add(part)
+	return tokens
 
 
 def _log_quietly(title: str) -> None:
-    """``frappe.log_error`` can itself raise; a degraded read must not."""
-    try:
-        # defer_insert: this can run inside a Sales Invoice submit, whose
-        # rollback must not take the Error Log row with it.
-        frappe.log_error(title=title, message=frappe.get_traceback(), defer_insert=True)
-    except Exception:
-        pass
+	"""``frappe.log_error`` can itself raise; a degraded read must not."""
+	try:
+		# defer_insert: this can run inside a Sales Invoice submit, whose
+		# rollback must not take the Error Log row with it.
+		frappe.log_error(title=title, message=frappe.get_traceback(), defer_insert=True)
+	except Exception:
+		pass
 
 
 def _lead_maps_rows(lead: str) -> List[Dict[str, Any]]:
-    """The lead's Jarz Lead Branch rows in idx order. Never raises."""
-    try:
-        fields = list(_MAPS_ROW_FIELDS) + [
-            f for f in _MAPS_OPTIONAL_FIELDS if _has_column("Jarz Lead Branch", f)
-        ]
-        return frappe.get_all(
-            "Jarz Lead Branch",
-            filters={"parenttype": "Lead", "parent": lead, "parentfield": "custom_branches"},
-            fields=fields,
-            order_by="idx asc",
-            limit_page_length=0,
-        ) or []
-    except Exception:
-        _log_quietly(f"b2b_branches: maps rows lookup failed for {lead}")
-        return []
+	"""The lead's Jarz Lead Branch rows in idx order. Never raises."""
+	try:
+		fields = list(_MAPS_ROW_FIELDS) + [
+			f for f in _MAPS_OPTIONAL_FIELDS if _has_column("Jarz Lead Branch", f)
+		]
+		return (
+			frappe.get_all(
+				"Jarz Lead Branch",
+				filters={"parenttype": "Lead", "parent": lead, "parentfield": "custom_branches"},
+				fields=fields,
+				order_by="idx asc",
+				limit_page_length=0,
+			)
+			or []
+		)
+	except Exception:
+		_log_quietly(f"b2b_branches: maps rows lookup failed for {lead}")
+		return []
 
 
 def _lead_self_row(lead: str) -> Optional[Dict[str, Any]]:
-    """A branch-less Lead's own location as one virtual row, or None."""
-    try:
-        from jarz_pos.api.leads import _lead_self_branch
+	"""A branch-less Lead's own location as one virtual row, or None."""
+	try:
+		from jarz_pos.api.leads import _lead_self_branch
 
-        own = _lead_self_branch(frappe.get_doc("Lead", lead))
-    except Exception:
-        _log_quietly(f"b2b_branches: self branch failed for {lead}")
-        return None
-    if not own:
-        return None
-    row = dict(own)
-    row["name"] = SELF_BRANCH_ROW
-    return row
+		own = _lead_self_branch(frappe.get_doc("Lead", lead))
+	except Exception:
+		_log_quietly(f"b2b_branches: self branch failed for {lead}")
+		return None
+	if not own:
+		return None
+	row = dict(own)
+	row["name"] = SELF_BRANCH_ROW
+	return row
 
 
 def _lead_title(lead: Optional[str]) -> Optional[str]:
-    if not lead:
-        return None
-    try:
-        row = frappe.db.get_value("Lead", lead, ["lead_name", "company_name"], as_dict=True) or {}
-    except Exception:
-        row = {}
-    return row.get("lead_name") or row.get("company_name") or lead
+	if not lead:
+		return None
+	try:
+		row = frappe.db.get_value("Lead", lead, ["lead_name", "company_name"], as_dict=True) or {}
+	except Exception:
+		row = {}
+	return row.get("lead_name") or row.get("company_name") or lead
 
 
 def _maps_payload(row: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        "row": row.get("name"),
-        "branch_name": row.get("branch_name"),
-        "area": row.get("area"),
-        "region": row.get("region"),
-        "governorate": row.get("governorate"),
-        # Float/Int columns are NOT NULL: an unrated door is stored as 0, and
-        # the app would show "★0.0" for a place nobody has rated.
-        "rating": _float_or_none(row.get("rating")) or None,
-        "reviews": _int_or_none(row.get("reviews")) or None,
-        "maps_url": row.get("maps_url"),
-        "phone": row.get("phone"),
-        "address": row.get("address"),
-        "latitude": _float_or_none(row.get("latitude")),
-        "longitude": _float_or_none(row.get("longitude")),
-        "on_talabat": _truthy(row.get("on_talabat")),
-    }
+	return {
+		"row": row.get("name"),
+		"branch_name": row.get("branch_name"),
+		"area": row.get("area"),
+		"region": row.get("region"),
+		"governorate": row.get("governorate"),
+		# Float/Int columns are NOT NULL: an unrated door is stored as 0, and
+		# the app would show "★0.0" for a place nobody has rated.
+		"rating": _float_or_none(row.get("rating")) or None,
+		"reviews": _int_or_none(row.get("reviews")) or None,
+		"maps_url": row.get("maps_url"),
+		"phone": row.get("phone"),
+		"address": row.get("address"),
+		"latitude": _float_or_none(row.get("latitude")),
+		"longitude": _float_or_none(row.get("longitude")),
+		"on_talabat": _truthy(row.get("on_talabat")),
+	}
 
 
 def _territory_labels(names: List[str]) -> Dict[str, List[Any]]:
-    """Territory docname -> [name, territory_name, Arabic name]. One query."""
-    names = sorted({n for n in names if n})
-    if not names:
-        return {}
-    fields = ["name", "territory_name"]
-    if _has_column("Territory", "custom_territory_name_ar"):
-        fields.append("custom_territory_name_ar")
-    try:
-        rows = frappe.get_all(
-            "Territory", filters={"name": ["in", names]}, fields=fields, limit_page_length=0
-        ) or []
-    except Exception:
-        return {}
-    return {
-        row.get("name"): [row.get(f) for f in fields]
-        for row in rows
-    }
+	"""Territory docname -> [name, territory_name, Arabic name]. One query."""
+	names = sorted({n for n in names if n})
+	if not names:
+		return {}
+	fields = ["name", "territory_name"]
+	if _has_column("Territory", "custom_territory_name_ar"):
+		fields.append("custom_territory_name_ar")
+	try:
+		rows = (
+			frappe.get_all("Territory", filters={"name": ["in", names]}, fields=fields, limit_page_length=0)
+			or []
+		)
+	except Exception:
+		return {}
+	return {row.get("name"): [row.get(f) for f in fields] for row in rows}
 
 
 def _match_rows(branches: List[Dict[str, Any]], rows: List[Dict[str, Any]]) -> Dict[int, tuple]:
-    """Pair maps rows with address branches. -> {row index: (branch index, how)}.
+	"""Pair maps rows with address branches. -> {row index: (branch index, how)}.
 
-    Each side is used at most once. In order: a hand link; the nearest pins
-    within ``AUTO_MATCH_METRES``; an identical name; an identical area. The name
-    and area rules pair only a match that is unique in BOTH directions among
-    what is still unpaired -- two Sheikh Zayed rows and one Sheikh Zayed address
-    stay apart, because either guess could be the wrong door.
-    """
-    pairs: Dict[int, tuple] = {}
-    taken = set()
-    index = {}
-    for b_idx, branch in enumerate(branches):
-        for member in branch.get("member_address_names") or []:
-            if member:
-                index[member] = b_idx
+	Each side is used at most once. In order: a hand link; the nearest pins
+	within ``AUTO_MATCH_METRES``; an identical name; an identical area. The name
+	and area rules pair only a match that is unique in BOTH directions among
+	what is still unpaired -- two Sheikh Zayed rows and one Sheikh Zayed address
+	stay apart, because either guess could be the wrong door.
+	"""
+	pairs: Dict[int, tuple] = {}
+	taken = set()
+	index = {}
+	for b_idx, branch in enumerate(branches):
+		for member in branch.get("member_address_names") or []:
+			if member:
+				index[member] = b_idx
 
-    # 1. Hand links. First row (by idx) wins a contested branch.
-    for r_idx, row in enumerate(rows):
-        linked = row.get("linked_address")
-        b_idx = index.get(linked) if linked else None
-        if b_idx is not None and b_idx not in taken:
-            pairs[r_idx] = (b_idx, "linked")
-            taken.add(b_idx)
+	# 1. Hand links. First row (by idx) wins a contested branch.
+	for r_idx, row in enumerate(rows):
+		linked = row.get("linked_address")
+		b_idx = index.get(linked) if linked else None
+		if b_idx is not None and b_idx not in taken:
+			pairs[r_idx] = (b_idx, "linked")
+			taken.add(b_idx)
 
-    # 2. Dismissed rows are never auto-matched.
-    def free_rows():
-        return [
-            r for r in range(len(rows))
-            if r not in pairs and not _truthy(rows[r].get("match_dismissed"))
-        ]
+	# 2. Dismissed rows are never auto-matched.
+	def free_rows():
+		return [r for r in range(len(rows)) if r not in pairs and not _truthy(rows[r].get("match_dismissed"))]
 
-    def free_branches():
-        return [b for b in range(len(branches)) if b not in taken]
+	def free_branches():
+		return [b for b in range(len(branches)) if b not in taken]
 
-    # 3. Pins: greedy nearest pairs.
-    candidates = []
-    for r_idx in free_rows():
-        r_pin = _pin(rows[r_idx])
-        if not r_pin:
-            continue
-        for b_idx in free_branches():
-            b_pin = _pin(branches[b_idx])
-            if not b_pin:
-                continue
-            distance = _metres(r_pin, b_pin)
-            if distance <= AUTO_MATCH_METRES:
-                candidates.append((distance, r_idx, b_idx))
-    for _distance, r_idx, b_idx in sorted(candidates):
-        if r_idx in pairs or b_idx in taken:
-            continue
-        pairs[r_idx] = (b_idx, "auto")
-        taken.add(b_idx)
+	# 3. Pins: greedy nearest pairs.
+	candidates = []
+	for r_idx in free_rows():
+		r_pin = _pin(rows[r_idx])
+		if not r_pin:
+			continue
+		for b_idx in free_branches():
+			b_pin = _pin(branches[b_idx])
+			if not b_pin:
+				continue
+			distance = _metres(r_pin, b_pin)
+			if distance <= AUTO_MATCH_METRES:
+				candidates.append((distance, r_idx, b_idx))
+	for _distance, r_idx, b_idx in sorted(candidates):
+		if r_idx in pairs or b_idx in taken:
+			continue
+		pairs[r_idx] = (b_idx, "auto")
+		taken.add(b_idx)
 
-    def unique_pairs(row_keys, branch_keys):
-        """Pair where a row matches exactly one branch and that branch one row."""
-        r_list, b_list = free_rows(), free_branches()
-        row_hits = {
-            r: [b for b in b_list if row_keys(r) & branch_keys(b)] for r in r_list
-        }
-        branch_hits = {
-            b: [r for r in r_list if row_keys(r) & branch_keys(b)] for b in b_list
-        }
-        for r_idx in r_list:
-            hits = row_hits[r_idx]
-            if len(hits) == 1 and len(branch_hits[hits[0]]) == 1:
-                pairs[r_idx] = (hits[0], "auto")
-                taken.add(hits[0])
+	def unique_pairs(row_keys, branch_keys):
+		"""Pair where a row matches exactly one branch and that branch one row."""
+		r_list, b_list = free_rows(), free_branches()
+		row_hits = {r: [b for b in b_list if row_keys(r) & branch_keys(b)] for r in r_list}
+		branch_hits = {b: [r for r in r_list if row_keys(r) & branch_keys(b)] for b in b_list}
+		for r_idx in r_list:
+			hits = row_hits[r_idx]
+			if len(hits) == 1 and len(branch_hits[hits[0]]) == 1:
+				pairs[r_idx] = (hits[0], "auto")
+				taken.add(hits[0])
 
-    # 4. Names.
-    def row_name(r):
-        key = _name_key(rows[r].get("branch_name"))
-        return {key} if key else set()
+	# 4. Names.
+	def row_name(r):
+		key = _name_key(rows[r].get("branch_name"))
+		return {key} if key else set()
 
-    def branch_name(b):
-        key = _name_key(branches[b].get("branch_name"))
-        return {key} if key else set()
+	def branch_name(b):
+		key = _name_key(branches[b].get("branch_name"))
+		return {key} if key else set()
 
-    unique_pairs(row_name, branch_name)
+	unique_pairs(row_name, branch_name)
 
-    # 5. Areas: the maps row's area/region against the address's city and
-    # every label its territory goes by.
-    remaining = free_branches()
-    if free_rows() and remaining:
-        labels = _territory_labels([branches[b].get("territory") for b in remaining])
-        branch_areas = {
-            b: _area_tokens(
-                branches[b].get("city"),
-                branches[b].get("territory"),
-                *labels.get(branches[b].get("territory"), []),
-            )
-            for b in remaining
-        }
-        unique_pairs(
-            lambda r: _area_tokens(rows[r].get("area"), rows[r].get("region")),
-            lambda b: branch_areas.get(b, set()),
-        )
-    return pairs
+	# 5. Areas: the maps row's area/region against the address's city and
+	# every label its territory goes by.
+	remaining = free_branches()
+	if free_rows() and remaining:
+		labels = _territory_labels([branches[b].get("territory") for b in remaining])
+		branch_areas = {
+			b: _area_tokens(
+				branches[b].get("city"),
+				branches[b].get("territory"),
+				*labels.get(branches[b].get("territory"), []),
+			)
+			for b in remaining
+		}
+		unique_pairs(
+			lambda r: _area_tokens(rows[r].get("area"), rows[r].get("region")),
+			lambda b: branch_areas.get(b, set()),
+		)
+	return pairs
 
 
 def _maps_only_entry(row: Dict[str, Any], lead_title: Optional[str]) -> Dict[str, Any]:
-    maps = _maps_payload(row)
-    return {
-        "source": "maps",
-        "address_name": None,
-        "branch_name": maps["branch_name"] or lead_title,
-        "address_line1": maps["address"],
-        "address_line2": None,
-        "city": maps["area"],
-        "phone": maps["phone"],
-        "territory": None,
-        "territory_missing": False,
-        "is_primary_address": False,
-        "latitude": maps["latitude"],
-        "longitude": maps["longitude"],
-        "member_address_names": [],
-        "invoice_count": 0,
-        "total_billed": 0.0,
-        "outstanding": 0.0,
-        "last_order_date": None,
-        "maps": maps,
-        "maps_match": None,
-    }
+	maps = _maps_payload(row)
+	return {
+		"source": "maps",
+		"address_name": None,
+		"branch_name": maps["branch_name"] or lead_title,
+		"address_line1": maps["address"],
+		"address_line2": None,
+		"city": maps["area"],
+		"phone": maps["phone"],
+		"territory": None,
+		"territory_missing": False,
+		"is_primary_address": False,
+		"latitude": maps["latitude"],
+		"longitude": maps["longitude"],
+		"member_address_names": [],
+		"invoice_count": 0,
+		"total_billed": 0.0,
+		"outstanding": 0.0,
+		"last_order_date": None,
+		"maps": maps,
+		"maps_match": None,
+	}
 
 
 def unified_branches(customer: Optional[str], lead: Optional[str]) -> Dict[str, Any]:
-    """Every door of the account once, with delivery and Maps data side by side.
+	"""Every door of the account once, with delivery and Maps data side by side.
 
-    Address branches (with their invoice totals) come first, each carrying the
-    Maps row it was paired with, if any; Maps rows no address was paired with
-    follow as their own entries with zero invoice stats. Returns
-    ``{"branches": [...], "unassigned": <account_branches unassigned> | None}``.
-    """
-    if customer:
-        book = account_branches(customer)
-        branches = list(book.get("branches") or [])
-        unassigned = book.get("unassigned")
-    else:
-        branches, unassigned = [], None
-    for branch in branches:
-        branch["source"] = "address"
-        branch["maps"] = None
-        branch["maps_match"] = None
+	Address branches (with their invoice totals) come first, each carrying the
+	Maps row it was paired with, if any; Maps rows no address was paired with
+	follow as their own entries with zero invoice stats. Returns
+	``{"branches": [...], "unassigned": <account_branches unassigned> | None}``.
+	"""
+	if customer:
+		book = account_branches(customer)
+		branches = list(book.get("branches") or [])
+		unassigned = book.get("unassigned")
+	else:
+		branches, unassigned = [], None
+	for branch in branches:
+		branch["source"] = "address"
+		branch["maps"] = None
+		branch["maps_match"] = None
 
-    rows: List[Dict[str, Any]] = []
-    if lead:
-        try:
-            exists = frappe.db.exists("Lead", lead)
-        except Exception:
-            exists = False
-        if exists:
-            rows = _lead_maps_rows(lead)
-            if not rows:
-                own = _lead_self_row(lead)
-                rows = [own] if own else []
+	rows: List[Dict[str, Any]] = []
+	if lead:
+		try:
+			exists = frappe.db.exists("Lead", lead)
+		except Exception:
+			exists = False
+		if exists:
+			rows = _lead_maps_rows(lead)
+			if not rows:
+				own = _lead_self_row(lead)
+				rows = [own] if own else []
 
-    if not rows:
-        return {"branches": branches, "unassigned": unassigned}
+	if not rows:
+		return {"branches": branches, "unassigned": unassigned}
 
-    pairs = _match_rows(branches, rows)
-    for r_idx, (b_idx, how) in pairs.items():
-        branch = branches[b_idx]
-        maps = _maps_payload(rows[r_idx])
-        branch["maps"] = maps
-        branch["maps_match"] = how
-        if not _pin(branch) and maps["latitude"] and maps["longitude"]:
-            branch["latitude"] = maps["latitude"]
-            branch["longitude"] = maps["longitude"]
+	pairs = _match_rows(branches, rows)
+	for r_idx, (b_idx, how) in pairs.items():
+		branch = branches[b_idx]
+		maps = _maps_payload(rows[r_idx])
+		branch["maps"] = maps
+		branch["maps_match"] = how
+		if not _pin(branch) and maps["latitude"] and maps["longitude"]:
+			branch["latitude"] = maps["latitude"]
+			branch["longitude"] = maps["longitude"]
 
-    title = None
-    for r_idx, row in enumerate(rows):
-        if r_idx in pairs:
-            continue
-        if title is None and not row.get("branch_name"):
-            title = _lead_title(lead)
-        branches.append(_maps_only_entry(row, title))
-    return {"branches": branches, "unassigned": unassigned}
+	title = None
+	for r_idx, row in enumerate(rows):
+		if r_idx in pairs:
+			continue
+		if title is None and not row.get("branch_name"):
+			title = _lead_title(lead)
+		branches.append(_maps_only_entry(row, title))
+	return {"branches": branches, "unassigned": unassigned}
 
 
 def map_invoice(row: Dict[str, Any], index: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
-    from jarz_pos.utils.invoice_utils import normalize_woo_order_id
+	from jarz_pos.utils.invoice_utils import normalize_woo_order_id
 
-    branch = _branch_for_invoice(row, index)
-    return {
-        "name": row.get("name"),
-        "woo_order_id": normalize_woo_order_id(row.get("woo_order_id")),
-        "posting_date": _str_or_none(row.get("posting_date")),
-        "grand_total": row.get("grand_total"),
-        "outstanding_amount": _flt(row.get("outstanding_amount")),
-        "custom_order_purpose": row.get("custom_order_purpose") or "Standard",
-        "custom_payment_method": row.get("custom_payment_method"),
-        "status": row.get("status"),
-        "is_return": bool(row.get("is_return")),
-        "branch_address": branch["address_name"] if branch else None,
-        "branch_name": branch["branch_name"] if branch else None,
-    }
+	branch = _branch_for_invoice(row, index)
+	return {
+		"name": row.get("name"),
+		"woo_order_id": normalize_woo_order_id(row.get("woo_order_id")),
+		"posting_date": _str_or_none(row.get("posting_date")),
+		"grand_total": row.get("grand_total"),
+		"outstanding_amount": _flt(row.get("outstanding_amount")),
+		"custom_order_purpose": row.get("custom_order_purpose") or "Standard",
+		"custom_payment_method": row.get("custom_payment_method"),
+		"status": row.get("status"),
+		"is_return": bool(row.get("is_return")),
+		"branch_address": branch["address_name"] if branch else None,
+		"branch_name": branch["branch_name"] if branch else None,
+	}
 
 
 def account_invoices(customer: str, branch: Optional[str] = None, limit: int = 100) -> Dict[str, Any]:
-    """Every submitted invoice of the customer, optionally for one branch.
+	"""Every submitted invoice of the customer, optionally for one branch.
 
-    All order purposes are listed: a shop's history before it became a B2B
-    account (Standard orders) is still that door's history. ``summary`` is the
-    whole branch, never just the listed page.
-    """
-    branches = customer_branches(customer)
-    index = _member_index(branches)
-    branch = str(branch or "").strip() or None
-    if branch and branch != UNASSIGNED_BRANCH and branch not in {b["address_name"] for b in branches}:
-        frappe.throw("That branch does not belong to this customer.")
+	All order purposes are listed: a shop's history before it became a B2B
+	account (Standard orders) is still that door's history. ``summary`` is the
+	whole branch, never just the listed page.
+	"""
+	branches = customer_branches(customer)
+	index = _member_index(branches)
+	branch = str(branch or "").strip() or None
+	if branch and branch != UNASSIGNED_BRANCH and branch not in {b["address_name"] for b in branches}:
+		frappe.throw("That branch does not belong to this customer.")
 
-    rows = []
-    summary = _empty_stats()
-    for row in _submitted_invoices(customer):
-        owner = _branch_for_invoice(row, index)
-        if branch == UNASSIGNED_BRANCH and owner is not None:
-            continue
-        if branch and branch != UNASSIGNED_BRANCH and (owner or {}).get("address_name") != branch:
-            continue
-        _add_to_stats(summary, row)
-        rows.append(row)
+	rows = []
+	summary = _empty_stats()
+	for row in _submitted_invoices(customer):
+		owner = _branch_for_invoice(row, index)
+		if branch == UNASSIGNED_BRANCH and owner is not None:
+			continue
+		if branch and branch != UNASSIGNED_BRANCH and (owner or {}).get("address_name") != branch:
+			continue
+		_add_to_stats(summary, row)
+		rows.append(row)
 
-    listed = rows[:limit]
-    return {
-        "customer": customer,
-        "branch": branch,
-        "invoices": [map_invoice(row, index) for row in listed],
-        "summary": summary,
-        "truncated": len(rows) > len(listed),
-    }
+	listed = rows[:limit]
+	return {
+		"customer": customer,
+		"branch": branch,
+		"invoices": [map_invoice(row, index) for row in listed],
+		"summary": summary,
+		"truncated": len(rows) > len(listed),
+	}
 
 
 # ---------------------------------------------------------------------------
 # Merge-as-branch: party resolution and plan
 # ---------------------------------------------------------------------------
 def _merged_into(lead: str) -> Optional[str]:
-    if not _has_column("Lead", "custom_merged_into"):
-        return None
-    return frappe.db.get_value("Lead", lead, "custom_merged_into") or None
+	if not _has_column("Lead", "custom_merged_into"):
+		return None
+	return frappe.db.get_value("Lead", lead, "custom_merged_into") or None
 
 
 def _leads_for_customer(customer: str) -> List[str]:
-    """Live (not merged-away) Leads that resolve to this Customer."""
-    names = set(
-        frappe.get_all("Lead", filters={"customer": customer}, pluck="name") or []
-    )
-    converted = frappe.db.get_value("Customer", customer, "lead_name")
-    if converted and frappe.db.exists("Lead", converted):
-        names.add(converted)
-    return sorted(n for n in names if not _merged_into(n))
+	"""Live (not merged-away) Leads that resolve to this Customer."""
+	names = set(frappe.get_all("Lead", filters={"customer": customer}, pluck="name") or [])
+	converted = frappe.db.get_value("Customer", customer, "lead_name")
+	if converted and frappe.db.exists("Lead", converted):
+		names.add(converted)
+	return sorted(n for n in names if not _merged_into(n))
 
 
 def resolve_party(doctype: str, name: str) -> Dict[str, Any]:
-    """{"doctype","name","title","lead","customer"} for a Lead or Customer card."""
-    from jarz_pos.api.crm import _resolve_lead_customer
+	"""{"doctype","name","title","lead","customer"} for a Lead or Customer card."""
+	from jarz_pos.api.crm import _resolve_lead_customer
 
-    doctype = str(doctype or "").strip()
-    name = str(name or "").strip()
-    if doctype not in ("Lead", "Customer"):
-        frappe.throw("Only a Lead or a Customer account can be merged.")
-    if not name or not frappe.db.exists(doctype, name):
-        frappe.throw(f"{doctype} '{name}' not found.")
+	doctype = str(doctype or "").strip()
+	name = str(name or "").strip()
+	if doctype not in ("Lead", "Customer"):
+		frappe.throw("Only a Lead or a Customer account can be merged.")
+	if not name or not frappe.db.exists(doctype, name):
+		frappe.throw(f"{doctype} '{name}' not found.")
 
-    if doctype == "Lead":
-        merged = _merged_into(name)
-        if merged:
-            frappe.throw(f"Lead '{name}' has already been merged into '{merged}'.")
-        row = frappe.db.get_value("Lead", name, ["lead_name", "company_name"], as_dict=True) or {}
-        return {
-            "doctype": "Lead",
-            "name": name,
-            "title": row.get("lead_name") or row.get("company_name") or name,
-            "lead": name,
-            "customer": _resolve_lead_customer(name),
-        }
+	if doctype == "Lead":
+		merged = _merged_into(name)
+		if merged:
+			frappe.throw(f"Lead '{name}' has already been merged into '{merged}'.")
+		row = frappe.db.get_value("Lead", name, ["lead_name", "company_name"], as_dict=True) or {}
+		return {
+			"doctype": "Lead",
+			"name": name,
+			"title": row.get("lead_name") or row.get("company_name") or name,
+			"lead": name,
+			"customer": _resolve_lead_customer(name),
+		}
 
-    row = frappe.db.get_value("Customer", name, ["customer_name", "disabled"], as_dict=True) or {}
-    if int(row.get("disabled") or 0):
-        frappe.throw(f"Customer '{name}' is disabled.")
-    leads = _leads_for_customer(name)
-    return {
-        "doctype": "Customer",
-        "name": name,
-        "title": row.get("customer_name") or name,
-        # Two live Leads on one Customer is an existing duplicate; the merge
-        # does not pick one of them for the user.
-        "lead": leads[0] if len(leads) == 1 else None,
-        "customer": name,
-    }
+	row = frappe.db.get_value("Customer", name, ["customer_name", "disabled"], as_dict=True) or {}
+	if int(row.get("disabled") or 0):
+		frappe.throw(f"Customer '{name}' is disabled.")
+	leads = _leads_for_customer(name)
+	return {
+		"doctype": "Customer",
+		"name": name,
+		"title": row.get("customer_name") or name,
+		# Two live Leads on one Customer is an existing duplicate; the merge
+		# does not pick one of them for the user.
+		"lead": leads[0] if len(leads) == 1 else None,
+		"customer": name,
+	}
 
 
 def build_plan(source: Dict[str, Any], target: Dict[str, Any]) -> Dict[str, Any]:
-    """Decide what a merge will do, without doing any of it."""
-    s_cust, t_cust = source.get("customer"), target.get("customer")
-    s_lead, t_lead = source.get("lead"), target.get("lead")
+	"""Decide what a merge will do, without doing any of it."""
+	s_cust, t_cust = source.get("customer"), target.get("customer")
+	s_lead, t_lead = source.get("lead"), target.get("lead")
 
-    if (source["doctype"], source["name"]) == (target["doctype"], target["name"]):
-        frappe.throw("An account cannot be merged into itself.")
-    same_customer = bool(s_cust and t_cust and s_cust == t_cust)
-    two_customers = bool(s_cust and t_cust and s_cust != t_cust)
-    same_lead = bool(s_lead and t_lead and s_lead == t_lead)
-    if same_customer and not (s_lead and t_lead and not same_lead):
-        frappe.throw("These two cards are already the same account.")
-    if same_lead and not two_customers:
-        frappe.throw("These two cards are already the same account.")
+	if (source["doctype"], source["name"]) == (target["doctype"], target["name"]):
+		frappe.throw("An account cannot be merged into itself.")
+	same_customer = bool(s_cust and t_cust and s_cust == t_cust)
+	two_customers = bool(s_cust and t_cust and s_cust != t_cust)
+	same_lead = bool(s_lead and t_lead and s_lead == t_lead)
+	if same_customer and not (s_lead and t_lead and not same_lead):
+		frappe.throw("These two cards are already the same account.")
+	if same_lead and not two_customers:
+		frappe.throw("These two cards are already the same account.")
 
-    customer_action = None
-    if s_cust and t_cust and s_cust != t_cust:
-        customer_action = "merge_customers"
-    elif s_cust and not t_cust:
-        customer_action = "adopt_source_customer"
-    elif t_cust and not s_cust and s_lead:
-        customer_action = "link_lead_addresses"
+	customer_action = None
+	if s_cust and t_cust and s_cust != t_cust:
+		customer_action = "merge_customers"
+	elif s_cust and not t_cust:
+		customer_action = "adopt_source_customer"
+	elif t_cust and not s_cust and s_lead:
+		customer_action = "link_lead_addresses"
 
-    lead_action = None
-    if s_lead and t_lead and not same_lead:
-        lead_action = "merge_leads"
-    elif s_lead and not t_lead:
-        # Target is a bare Customer: the source Lead stays the board card and
-        # follows the account it now belongs to.
-        lead_action = "relink_source_lead"
+	lead_action = None
+	if s_lead and t_lead and not same_lead:
+		lead_action = "merge_leads"
+	elif s_lead and not t_lead:
+		# Target is a bare Customer: the source Lead stays the board card and
+		# follows the account it now belongs to.
+		lead_action = "relink_source_lead"
 
-    return {
-        "customer_action": customer_action,
-        "lead_action": lead_action,
-        "requires_manager": customer_action == "merge_customers",
-        "final_customer": t_cust or s_cust,
-    }
+	return {
+		"customer_action": customer_action,
+		"lead_action": lead_action,
+		"requires_manager": customer_action == "merge_customers",
+		"final_customer": t_cust or s_cust,
+	}
 
 
 def _structural_use(customer: str) -> Optional[str]:
-    """Why this Customer must never be merged away or absorb another, or None.
+	"""Why this Customer must never be merged away or absorb another, or None.
 
-    ``rename_doc`` rewrites EVERY link to the source, including a POS
-    Profile's walk-in customer and settings defaults: merging such a record
-    into a shop would book every later walk-in sale to that shop's receivable.
-    """
-    if frappe.get_all("POS Profile", filters={"customer": customer}, limit_page_length=1):
-        return "it is the default customer of a POS Profile"
-    if frappe.db.sql(
-        """SELECT 1 FROM `tabSingles` s
+	``rename_doc`` rewrites EVERY link to the source, including a POS
+	Profile's walk-in customer and settings defaults: merging such a record
+	into a shop would book every later walk-in sale to that shop's receivable.
+	"""
+	if frappe.get_all("POS Profile", filters={"customer": customer}, limit_page_length=1):
+		return "it is the default customer of a POS Profile"
+	if frappe.db.sql(
+		"""SELECT 1 FROM `tabSingles` s
            JOIN `tabDocField` f ON f.parent = s.doctype AND f.fieldname = s.field
            WHERE f.fieldtype = 'Link' AND f.options = 'Customer' AND s.value = %s
            UNION
@@ -810,452 +809,467 @@ def _structural_use(customer: str) -> Optional[str]:
            JOIN `tabCustom Field` f ON f.dt = s.doctype AND f.fieldname = s.field
            WHERE f.fieldtype = 'Link' AND f.options = 'Customer' AND s.value = %s
            LIMIT 1""",
-        (customer, customer),
-    ):
-        return "it is a default in a settings page"
-    if _has_column("Customer", "custom_employee") and frappe.db.get_value(
-        "Customer", customer, "custom_employee"
-    ):
-        return "it is an employee's staff account"
-    return None
+		(customer, customer),
+	):
+		return "it is a default in a settings page"
+	if _has_column("Customer", "custom_employee") and frappe.db.get_value(
+		"Customer", customer, "custom_employee"
+	):
+		return "it is an employee's staff account"
+	return None
 
 
 def _label_clash(source: str, target: str) -> List[str]:
-    """Flavours both customers track a printed label for (one ledger each)."""
-    try:
-        if not frappe.db.table_exists("Jarz Customer Label"):
-            return []
-        return [
-            row[0]
-            for row in frappe.db.sql(
-                """SELECT DISTINCT s.item FROM `tabJarz Customer Label` s
+	"""Flavours both customers track a printed label for (one ledger each)."""
+	try:
+		if not frappe.db.table_exists("Jarz Customer Label"):
+			return []
+		return [
+			row[0]
+			for row in frappe.db.sql(
+				"""SELECT DISTINCT s.item FROM `tabJarz Customer Label` s
                    JOIN `tabJarz Customer Label` t ON t.item = s.item
                    WHERE s.customer = %s AND t.customer = %s AND IFNULL(s.item, '') != ''""",
-                (source, target),
-            )
-        ]
-    except Exception:
-        return []
+				(source, target),
+			)
+		]
+	except Exception:
+		return []
 
 
 def _woo_id(customer: str) -> Optional[str]:
-    if not _has_column("Customer", "woo_customer_id"):
-        return None
-    return _norm_woo_id(frappe.db.get_value("Customer", customer, "woo_customer_id"))
+	if not _has_column("Customer", "woo_customer_id"):
+		return None
+	return _norm_woo_id(frappe.db.get_value("Customer", customer, "woo_customer_id"))
 
 
 def _norm_woo_id(value) -> Optional[str]:
-    """A Woo id as the Woo app compares it: positive digits, no leading zeros."""
-    text = str(value if value is not None else "").strip()
-    if not text.isdigit() or int(text) <= 0:
-        return None
-    return str(int(text))
+	"""A Woo id as the Woo app compares it: positive digits, no leading zeros."""
+	text = str(value if value is not None else "").strip()
+	if not text.isdigit() or int(text) <= 0:
+		return None
+	return str(int(text))
 
 
 def customer_merge_blockers(source: str, target: str) -> List[str]:
-    """Reasons a customer merge must not run. Empty means it may."""
-    blockers = []
-    for role, customer in (("source", source), ("target", target)):
-        reason = _structural_use(customer)
-        if reason:
-            blockers.append(f"'{customer}' cannot be merged: {reason}.")
-    clash = _label_clash(source, target)
-    if clash:
-        blockers.append(
-            "Both accounts track printed labels for the same flavour ("
-            + ", ".join(clash[:5])
-            + "). Combine those label records first."
-        )
-    s_woo, t_woo = _woo_id(source), _woo_id(target)
-    if s_woo and t_woo and s_woo != t_woo and not _has_column("Customer", _WOO_ALIAS_FIELD):
-        # Without the Woo app's alias field the source's Woo account would stop
-        # resolving to anyone, and its next order or order update would mint the
-        # duplicate again. With it, the Woo app's merge hook keeps that account
-        # answering for the survivor.
-        blockers.append(
-            "Both accounts are linked to different WooCommerce customers; one link "
-            "would be lost. Resolve that in the Woo integration first."
-        )
-    return blockers
+	"""Reasons a customer merge must not run. Empty means it may."""
+	blockers = []
+	for role, customer in (("source", source), ("target", target)):
+		reason = _structural_use(customer)
+		if reason:
+			blockers.append(f"'{customer}' cannot be merged: {reason}.")
+	clash = _label_clash(source, target)
+	if clash:
+		blockers.append(
+			"Both accounts track printed labels for the same flavour ("
+			+ ", ".join(clash[:5])
+			+ "). Combine those label records first."
+		)
+	s_woo, t_woo = _woo_id(source), _woo_id(target)
+	if s_woo and t_woo and s_woo != t_woo and not _has_column("Customer", _WOO_ALIAS_FIELD):
+		# Without the Woo app's alias field the source's Woo account would stop
+		# resolving to anyone, and its next order or order update would mint the
+		# duplicate again. With it, the Woo app's merge hook keeps that account
+		# answering for the survivor.
+		blockers.append(
+			"Both accounts are linked to different WooCommerce customers; one link "
+			"would be lost. Resolve that in the Woo integration first."
+		)
+	return blockers
 
 
 def _woo_aliases(customer: str) -> List[str]:
-    if not _has_column("Customer", _WOO_ALIAS_FIELD):
-        return []
-    raw = frappe.db.get_value("Customer", customer, _WOO_ALIAS_FIELD) or ""
-    return [n for n in (_norm_woo_id(part) for part in str(raw).split(",")) if n]
+	if not _has_column("Customer", _WOO_ALIAS_FIELD):
+		return []
+	raw = frappe.db.get_value("Customer", customer, _WOO_ALIAS_FIELD) or ""
+	return [n for n in (_norm_woo_id(part) for part in str(raw).split(",")) if n]
 
 
 def _customer_summary(customer: Optional[str]) -> Optional[Dict[str, Any]]:
-    if not customer:
-        return None
-    fields = ["name", "customer_name", "customer_type", "customer_group", "mobile_no"]
-    for optional in ("custom_credit_allowed", "custom_credit_days", "custom_credit_limit_amount", "woo_customer_id"):
-        if _has_column("Customer", optional):
-            fields.append(optional)
-    row = frappe.db.get_value("Customer", customer, fields, as_dict=True) or {}
-    totals = frappe.db.sql(
-        """SELECT COUNT(*) AS invoice_count,
+	if not customer:
+		return None
+	fields = ["name", "customer_name", "customer_type", "customer_group", "mobile_no"]
+	for optional in (
+		"custom_credit_allowed",
+		"custom_credit_days",
+		"custom_credit_limit_amount",
+		"woo_customer_id",
+	):
+		if _has_column("Customer", optional):
+			fields.append(optional)
+	row = frappe.db.get_value("Customer", customer, fields, as_dict=True) or {}
+	totals = frappe.db.sql(
+		"""SELECT COUNT(*) AS invoice_count,
                   COALESCE(SUM(grand_total), 0) AS total_billed,
                   COALESCE(SUM(outstanding_amount), 0) AS outstanding
            FROM `tabSales Invoice` WHERE customer = %s AND docstatus = 1""",
-        (customer,),
-        as_dict=True,
-    )[0]
-    from jarz_pos.utils.customer_address_utils import get_linked_customer_address_names
+		(customer,),
+		as_dict=True,
+	)[0]
+	from jarz_pos.utils.customer_address_utils import get_linked_customer_address_names
 
-    return {
-        "name": customer,
-        "customer_name": row.get("customer_name"),
-        "customer_type": row.get("customer_type"),
-        "mobile_no": row.get("mobile_no"),
-        "credit_allowed": bool(row.get("custom_credit_allowed")),
-        "credit_days": row.get("custom_credit_days"),
-        "credit_limit": row.get("custom_credit_limit_amount"),
-        "woo_customer_id": row.get("woo_customer_id"),
-        "invoice_count": int(totals.get("invoice_count") or 0),
-        "total_billed": _flt(totals.get("total_billed")),
-        "outstanding": _flt(totals.get("outstanding")),
-        "address_count": len(get_linked_customer_address_names(customer) or []),
-    }
+	return {
+		"name": customer,
+		"customer_name": row.get("customer_name"),
+		"customer_type": row.get("customer_type"),
+		"mobile_no": row.get("mobile_no"),
+		"credit_allowed": bool(row.get("custom_credit_allowed")),
+		"credit_days": row.get("custom_credit_days"),
+		"credit_limit": row.get("custom_credit_limit_amount"),
+		"woo_customer_id": row.get("woo_customer_id"),
+		"invoice_count": int(totals.get("invoice_count") or 0),
+		"total_billed": _flt(totals.get("total_billed")),
+		"outstanding": _flt(totals.get("outstanding")),
+		"address_count": len(get_linked_customer_address_names(customer) or []),
+	}
 
 
 def preview(source: Dict[str, Any], target: Dict[str, Any]) -> Dict[str, Any]:
-    plan = build_plan(source, target)
-    s_sum = _customer_summary(source.get("customer"))
-    t_sum = _customer_summary(target.get("customer"))
-    warnings = []
-    blockers = []
-    if plan["customer_action"] == "merge_customers":
-        warnings.append("irreversible_customer_merge")
-        if s_sum and s_sum.get("credit_allowed") and not (t_sum or {}).get("credit_allowed"):
-            warnings.append("credit_terms_carried_over")
-        s_woo_id, t_woo_id = _woo_id(source["customer"]), _woo_id(target["customer"])
-        if s_woo_id and t_woo_id and s_woo_id != t_woo_id:
-            warnings.append("woo_account_kept_as_alias")
-        blockers = customer_merge_blockers(source["customer"], target["customer"])
-    return {
-        "source": {k: source.get(k) for k in ("doctype", "name", "title", "lead", "customer")},
-        "target": {k: target.get(k) for k in ("doctype", "name", "title", "lead", "customer")},
-        "plan": plan,
-        "source_customer": s_sum,
-        "target_customer": t_sum,
-        "can_execute": (_is_manager() or not plan["requires_manager"]) and not blockers,
-        "warnings": warnings,
-        "blockers": blockers,
-    }
+	plan = build_plan(source, target)
+	s_sum = _customer_summary(source.get("customer"))
+	t_sum = _customer_summary(target.get("customer"))
+	warnings = []
+	blockers = []
+	if plan["customer_action"] == "merge_customers":
+		warnings.append("irreversible_customer_merge")
+		if s_sum and s_sum.get("credit_allowed") and not (t_sum or {}).get("credit_allowed"):
+			warnings.append("credit_terms_carried_over")
+		s_woo_id, t_woo_id = _woo_id(source["customer"]), _woo_id(target["customer"])
+		if s_woo_id and t_woo_id and s_woo_id != t_woo_id:
+			warnings.append("woo_account_kept_as_alias")
+		blockers = customer_merge_blockers(source["customer"], target["customer"])
+	return {
+		"source": {k: source.get(k) for k in ("doctype", "name", "title", "lead", "customer")},
+		"target": {k: target.get(k) for k in ("doctype", "name", "title", "lead", "customer")},
+		"plan": plan,
+		"source_customer": s_sum,
+		"target_customer": t_sum,
+		"can_execute": (_is_manager() or not plan["requires_manager"]) and not blockers,
+		"warnings": warnings,
+		"blockers": blockers,
+	}
 
 
 # ---------------------------------------------------------------------------
 # Merge-as-branch: execution
 # ---------------------------------------------------------------------------
 def _snapshot(names: List[str]) -> Dict[str, float]:
-    """Money and row totals that a merge must move but never change."""
-    placeholders = ", ".join(["%s"] * len(names))
-    si = frappe.db.sql(
-        f"""SELECT COUNT(*) AS n,
+	"""Money and row totals that a merge must move but never change."""
+	placeholders = ", ".join(["%s"] * len(names))
+	si = frappe.db.sql(
+		f"""SELECT COUNT(*) AS n,
                    COALESCE(SUM(CASE WHEN docstatus = 1 THEN grand_total END), 0) AS billed,
                    COALESCE(SUM(CASE WHEN docstatus = 1 THEN outstanding_amount END), 0) AS outstanding
             FROM `tabSales Invoice` WHERE customer IN ({placeholders})""",
-        tuple(names),
-        as_dict=True,
-    )[0]
-    gl = frappe.db.sql(
-        f"""SELECT COUNT(*) AS n, COALESCE(SUM(debit), 0) AS debit, COALESCE(SUM(credit), 0) AS credit
+		tuple(names),
+		as_dict=True,
+	)[0]
+	gl = frappe.db.sql(
+		f"""SELECT COUNT(*) AS n, COALESCE(SUM(debit), 0) AS debit, COALESCE(SUM(credit), 0) AS credit
             FROM `tabGL Entry`
             WHERE party_type = 'Customer' AND party IN ({placeholders}) AND is_cancelled = 0""",
-        tuple(names),
-        as_dict=True,
-    )[0]
-    pe = frappe.db.sql(
-        f"""SELECT COUNT(*) AS n, COALESCE(SUM(CASE WHEN docstatus = 1 THEN paid_amount END), 0) AS paid
+		tuple(names),
+		as_dict=True,
+	)[0]
+	pe = frappe.db.sql(
+		f"""SELECT COUNT(*) AS n, COALESCE(SUM(CASE WHEN docstatus = 1 THEN paid_amount END), 0) AS paid
             FROM `tabPayment Entry` WHERE party_type = 'Customer' AND party IN ({placeholders})""",
-        tuple(names),
-        as_dict=True,
-    )[0]
-    ple = frappe.db.sql(
-        f"""SELECT COALESCE(SUM(amount), 0) AS amount FROM `tabPayment Ledger Entry`
+		tuple(names),
+		as_dict=True,
+	)[0]
+	ple = frappe.db.sql(
+		f"""SELECT COALESCE(SUM(amount), 0) AS amount FROM `tabPayment Ledger Entry`
             WHERE party_type = 'Customer' AND party IN ({placeholders}) AND delinked = 0""",
-        tuple(names),
-        as_dict=True,
-    )[0]
-    return {
-        "ple_amount": _flt(ple.get("amount")),
-        "invoices": int(si.get("n") or 0),
-        "billed": _flt(si.get("billed")),
-        "outstanding": _flt(si.get("outstanding")),
-        "gl_rows": int(gl.get("n") or 0),
-        "gl_debit": _flt(gl.get("debit")),
-        "gl_credit": _flt(gl.get("credit")),
-        "payments": int(pe.get("n") or 0),
-        "paid": _flt(pe.get("paid")),
-    }
+		tuple(names),
+		as_dict=True,
+	)[0]
+	return {
+		"ple_amount": _flt(ple.get("amount")),
+		"invoices": int(si.get("n") or 0),
+		"billed": _flt(si.get("billed")),
+		"outstanding": _flt(si.get("outstanding")),
+		"gl_rows": int(gl.get("n") or 0),
+		"gl_debit": _flt(gl.get("debit")),
+		"gl_credit": _flt(gl.get("credit")),
+		"payments": int(pe.get("n") or 0),
+		"paid": _flt(pe.get("paid")),
+	}
 
 
 def _stamp_unaddressed_invoices(source: str) -> int:
-    """Give the source's address-less invoices the source's own door.
+	"""Give the source's address-less invoices the source's own door.
 
-    After the merge they sit on the target's account, where an invoice with no
-    address could no longer be told apart from the target's own. Only rows with
-    NO address at all are touched, and only when the source has exactly one
-    unambiguous door to give them.
-    """
-    from jarz_pos.utils.customer_address_utils import get_linked_customer_address_names
+	After the merge they sit on the target's account, where an invoice with no
+	address could no longer be told apart from the target's own. Only rows with
+	NO address at all are touched, and only when the source has exactly one
+	unambiguous door to give them.
+	"""
+	from jarz_pos.utils.customer_address_utils import get_linked_customer_address_names
 
-    addresses = list(get_linked_customer_address_names(source) or [])
-    if len(addresses) != 1:
-        return 0
-    door = addresses[0]
-    rows = frappe.get_all(
-        "Sales Invoice",
-        filters={
-            "customer": source,
-            "docstatus": ["<", 2],
-            "shipping_address_name": ["is", "not set"],
-            "customer_address": ["is", "not set"],
-        },
-        pluck="name",
-        limit_page_length=0,
-    ) or []
-    for name in rows:
-        frappe.db.set_value("Sales Invoice", name, "shipping_address_name", door, update_modified=False)
-    return len(rows)
+	addresses = list(get_linked_customer_address_names(source) or [])
+	if len(addresses) != 1:
+		return 0
+	door = addresses[0]
+	rows = (
+		frappe.get_all(
+			"Sales Invoice",
+			filters={
+				"customer": source,
+				"docstatus": ["<", 2],
+				"shipping_address_name": ["is", "not set"],
+				"customer_address": ["is", "not set"],
+			},
+			pluck="name",
+			limit_page_length=0,
+		)
+		or []
+	)
+	for name in rows:
+		frappe.db.set_value("Sales Invoice", name, "shipping_address_name", door, update_modified=False)
+	return len(rows)
 
 
 def _title_source_addresses(source: str, branch_name: Optional[str]) -> int:
-    branch_name = _norm(branch_name)
-    if not branch_name:
-        return 0
-    from jarz_pos.utils.customer_address_utils import get_linked_customer_address_names
+	branch_name = _norm(branch_name)
+	if not branch_name:
+		return 0
+	from jarz_pos.utils.customer_address_utils import get_linked_customer_address_names
 
-    names = list(get_linked_customer_address_names(source) or [])
-    # One door, one name. A multi-door source keeps its own titles, and an
-    # Address some other party also uses is never renamed from here.
-    if len(names) != 1:
-        return 0
-    shared = frappe.db.sql(
-        """SELECT COUNT(*) FROM `tabDynamic Link`
+	names = list(get_linked_customer_address_names(source) or [])
+	# One door, one name. A multi-door source keeps its own titles, and an
+	# Address some other party also uses is never renamed from here.
+	if len(names) != 1:
+		return 0
+	shared = frappe.db.sql(
+		"""SELECT COUNT(*) FROM `tabDynamic Link`
            WHERE parenttype = 'Address' AND parent = %s
              AND NOT (link_doctype = 'Customer' AND link_name = %s)""",
-        (names[0], source),
-    )[0][0]
-    if shared:
-        return 0
-    frappe.db.set_value("Address", names[0], "address_title", branch_name[:140], update_modified=False)
-    return 1
+		(names[0], source),
+	)[0][0]
+	if shared:
+		return 0
+	frappe.db.set_value("Address", names[0], "address_title", branch_name[:140], update_modified=False)
+	return 1
 
 
 def _carry_credit_terms(source: str, target: str) -> bool:
-    """A shop allowed on account stays allowed after absorbing its twin."""
-    if not _has_column("Customer", "custom_credit_allowed"):
-        return False
-    s = frappe.db.get_value(
-        "Customer", source,
-        ["custom_credit_allowed", "custom_credit_days", "custom_credit_limit_amount"],
-        as_dict=True,
-    ) or {}
-    t_allowed = frappe.db.get_value("Customer", target, "custom_credit_allowed")
-    if not int(s.get("custom_credit_allowed") or 0) or int(t_allowed or 0):
-        return False
-    frappe.db.set_value(
-        "Customer", target,
-        {
-            "custom_credit_allowed": 1,
-            "custom_credit_days": s.get("custom_credit_days"),
-            "custom_credit_limit_amount": s.get("custom_credit_limit_amount"),
-        },
-        update_modified=False,
-    )
-    return True
+	"""A shop allowed on account stays allowed after absorbing its twin."""
+	if not _has_column("Customer", "custom_credit_allowed"):
+		return False
+	s = (
+		frappe.db.get_value(
+			"Customer",
+			source,
+			["custom_credit_allowed", "custom_credit_days", "custom_credit_limit_amount"],
+			as_dict=True,
+		)
+		or {}
+	)
+	t_allowed = frappe.db.get_value("Customer", target, "custom_credit_allowed")
+	if not int(s.get("custom_credit_allowed") or 0) or int(t_allowed or 0):
+		return False
+	frappe.db.set_value(
+		"Customer",
+		target,
+		{
+			"custom_credit_allowed": 1,
+			"custom_credit_days": s.get("custom_credit_days"),
+			"custom_credit_limit_amount": s.get("custom_credit_limit_amount"),
+		},
+		update_modified=False,
+	)
+	return True
 
 
 def merge_customers(source: str, target: str, branch_name: Optional[str] = None) -> Dict[str, Any]:
-    """Fold Customer ``source`` into ``target`` as one of its branches."""
-    from frappe.model.rename_doc import rename_doc
+	"""Fold Customer ``source`` into ``target`` as one of its branches."""
+	from frappe.model.rename_doc import rename_doc
 
-    blockers = customer_merge_blockers(source, target)
-    if blockers:
-        frappe.throw(" ".join(blockers))
+	blockers = customer_merge_blockers(source, target)
+	if blockers:
+		frappe.throw(" ".join(blockers))
 
-    savepoint = "jarz_b2b_merge_as_branch"
-    frappe.db.savepoint(savepoint)
-    try:
-        return _merge_customers_in_savepoint(rename_doc, source, target, branch_name)
-    except Exception:
-        # Outside a POST request nothing else would undo a half-done merge.
-        frappe.db.rollback(save_point=savepoint)
-        raise
+	savepoint = "jarz_b2b_merge_as_branch"
+	frappe.db.savepoint(savepoint)
+	try:
+		return _merge_customers_in_savepoint(rename_doc, source, target, branch_name)
+	except Exception:
+		# Outside a POST request nothing else would undo a half-done merge.
+		frappe.db.rollback(save_point=savepoint)
+		raise
 
 
 def _merge_customers_in_savepoint(rename_doc, source, target, branch_name):
-    before = _snapshot([source, target])
-    woo_carried = None
-    s_woo, t_woo = _woo_id(source), _woo_id(target)
-    stamped = _stamp_unaddressed_invoices(source)
-    titled = _title_source_addresses(source, branch_name)
-    credit_carried = _carry_credit_terms(source, target)
+	before = _snapshot([source, target])
+	woo_carried = None
+	s_woo, t_woo = _woo_id(source), _woo_id(target)
+	stamped = _stamp_unaddressed_invoices(source)
+	titled = _title_source_addresses(source, branch_name)
+	credit_carried = _carry_credit_terms(source, target)
 
-    # Customer.on_trash (run by the merge's delete of the source) resets the
-    # source's converted Lead to "Interested", and Customer.after_rename
-    # overwrites the target's display name with its docname under
-    # "naming by Customer Name". Neither is part of a merge; put both back.
-    target_display = frappe.db.get_value("Customer", target, "customer_name")
-    source_converted = frappe.db.get_value("Customer", source, "lead_name")
-    lead_names = set(_leads_for_customer(source)) | set(
-        frappe.get_all("Lead", filters={"customer": source}, pluck="name") or []
-    )
-    if source_converted:
-        lead_names.add(source_converted)
-    lead_statuses = {
-        name: frappe.db.get_value("Lead", name, "status") for name in lead_names
-    }
+	# Customer.on_trash (run by the merge's delete of the source) resets the
+	# source's converted Lead to "Interested", and Customer.after_rename
+	# overwrites the target's display name with its docname under
+	# "naming by Customer Name". Neither is part of a merge; put both back.
+	target_display = frappe.db.get_value("Customer", target, "customer_name")
+	source_converted = frappe.db.get_value("Customer", source, "lead_name")
+	lead_names = set(_leads_for_customer(source)) | set(
+		frappe.get_all("Lead", filters={"customer": source}, pluck="name") or []
+	)
+	if source_converted:
+		lead_names.add(source_converted)
+	lead_statuses = {name: frappe.db.get_value("Lead", name, "status") for name in lead_names}
 
-    rename_doc(
-        "Customer", source, target,
-        merge=True, force=True, ignore_permissions=True,
-        show_alert=False, rebuild_search=False,
-    )
+	rename_doc(
+		"Customer",
+		source,
+		target,
+		merge=True,
+		force=True,
+		ignore_permissions=True,
+		show_alert=False,
+		rebuild_search=False,
+	)
 
-    frappe.db.set_value("Customer", target, "customer_name", target_display, update_modified=False)
-    for name, status in lead_statuses.items():
-        if status:
-            frappe.db.set_value("Lead", name, "status", status, update_modified=False)
-    # A Lead tied to the source only through Customer.lead_name now points at a
-    # deleted record; give it the account it belongs to.
-    from jarz_pos.api.crm import _resolve_lead_customer
+	frappe.db.set_value("Customer", target, "customer_name", target_display, update_modified=False)
+	for name, status in lead_statuses.items():
+		if status:
+			frappe.db.set_value("Lead", name, "status", status, update_modified=False)
+	# A Lead tied to the source only through Customer.lead_name now points at a
+	# deleted record; give it the account it belongs to.
+	from jarz_pos.api.crm import _resolve_lead_customer
 
-    for name in lead_names:
-        if (
-            frappe.db.exists("Lead", name)
-            and not frappe.db.get_value("Lead", name, "customer")
-            and not _resolve_lead_customer(name, strict=False)
-        ):
-            frappe.db.set_value("Lead", name, "customer", target, update_modified=False)
-    # The source's Woo binding would vanish with it, and the next Woo order
-    # would recreate the duplicate this merge just removed.
-    if s_woo and not t_woo:
-        frappe.db.set_value("Customer", target, "woo_customer_id", s_woo, update_modified=False)
-        woo_carried = s_woo
+	for name in lead_names:
+		if (
+			frappe.db.exists("Lead", name)
+			and not frappe.db.get_value("Lead", name, "customer")
+			and not _resolve_lead_customer(name, strict=False)
+		):
+			frappe.db.set_value("Lead", name, "customer", target, update_modified=False)
+	# The source's Woo binding would vanish with it, and the next Woo order
+	# would recreate the duplicate this merge just removed.
+	if s_woo and not t_woo:
+		frappe.db.set_value("Customer", target, "woo_customer_id", s_woo, update_modified=False)
+		woo_carried = s_woo
 
-    after = _snapshot([target])
-    drift = [key for key in before if before[key] != after[key]]
-    if frappe.db.exists("Customer", source):
-        drift.append("source_still_present")
-    if (s_woo or t_woo) and not _woo_id(target):
-        drift.append("woo_customer_id")
-    # Every Woo account either side answered for must still answer for the
-    # survivor -- as its own id or as an alias -- or the next Woo event from
-    # it would recreate the duplicate.
-    held = {_woo_id(target), *_woo_aliases(target)}
-    for woo in (s_woo, t_woo):
-        if woo and woo not in held:
-            drift.append(f"woo_customer_id {woo} not carried")
-    if drift:
-        frappe.throw(
-            "Merge stopped: the account totals did not survive the merge unchanged "
-            f"({', '.join(drift)}). Nothing was changed."
-        )
-    return {
-        "stamped_invoices": stamped,
-        "titled_addresses": titled,
-        "credit_terms_carried": credit_carried,
-        "woo_customer_id_carried": woo_carried,
-        "totals": after,
-    }
+	after = _snapshot([target])
+	drift = [key for key in before if before[key] != after[key]]
+	if frappe.db.exists("Customer", source):
+		drift.append("source_still_present")
+	if (s_woo or t_woo) and not _woo_id(target):
+		drift.append("woo_customer_id")
+	# Every Woo account either side answered for must still answer for the
+	# survivor -- as its own id or as an alias -- or the next Woo event from
+	# it would recreate the duplicate.
+	held = {_woo_id(target), *_woo_aliases(target)}
+	for woo in (s_woo, t_woo):
+		if woo and woo not in held:
+			drift.append(f"woo_customer_id {woo} not carried")
+	if drift:
+		frappe.throw(
+			"Merge stopped: the account totals did not survive the merge unchanged "
+			f"({', '.join(drift)}). Nothing was changed."
+		)
+	return {
+		"stamped_invoices": stamped,
+		"titled_addresses": titled,
+		"credit_terms_carried": credit_carried,
+		"woo_customer_id_carried": woo_carried,
+		"totals": after,
+	}
 
 
 def _link_lead_addresses(lead: str, customer: str) -> int:
-    """Attach a Lead's own Addresses to a Customer so they become its branches."""
-    names = frappe.get_all(
-        "Dynamic Link",
-        filters={"parenttype": "Address", "link_doctype": "Lead", "link_name": lead},
-        pluck="parent",
-        limit_page_length=0,
-    ) or []
-    linked = 0
-    for name in dict.fromkeys(names):
-        if not frappe.db.exists("Address", name):
-            continue
-        address = frappe.get_doc("Address", name)
-        if any(
-            l.link_doctype == "Customer" and l.link_name == customer for l in (address.links or [])
-        ):
-            continue
-        address.append("links", {"link_doctype": "Customer", "link_name": customer})
-        if not address.is_shipping_address:
-            address.is_shipping_address = 1
-        address.flags.ignore_permissions = True
-        address.save(ignore_permissions=True)
-        linked += 1
-    return linked
+	"""Attach a Lead's own Addresses to a Customer so they become its branches."""
+	names = (
+		frappe.get_all(
+			"Dynamic Link",
+			filters={"parenttype": "Address", "link_doctype": "Lead", "link_name": lead},
+			pluck="parent",
+			limit_page_length=0,
+		)
+		or []
+	)
+	linked = 0
+	for name in dict.fromkeys(names):
+		if not frappe.db.exists("Address", name):
+			continue
+		address = frappe.get_doc("Address", name)
+		if any(l.link_doctype == "Customer" and l.link_name == customer for l in (address.links or [])):
+			continue
+		address.append("links", {"link_doctype": "Customer", "link_name": customer})
+		if not address.is_shipping_address:
+			address.is_shipping_address = 1
+		address.flags.ignore_permissions = True
+		address.save(ignore_permissions=True)
+		linked += 1
+	return linked
 
 
-def execute(source: Dict[str, Any], target: Dict[str, Any], branch_name: Optional[str] = None) -> Dict[str, Any]:
-    """Run the plan. Raises (and so rolls the request back) on any failure."""
-    plan = build_plan(source, target)
-    if plan["requires_manager"] and not _is_manager():
-        frappe.throw(
-            "Only a manager can merge two customer accounts: it moves every invoice "
-            "and payment and cannot be undone."
-        )
+def execute(
+	source: Dict[str, Any], target: Dict[str, Any], branch_name: Optional[str] = None
+) -> Dict[str, Any]:
+	"""Run the plan. Raises (and so rolls the request back) on any failure."""
+	plan = build_plan(source, target)
+	if plan["requires_manager"] and not _is_manager():
+		frappe.throw(
+			"Only a manager can merge two customer accounts: it moves every invoice "
+			"and payment and cannot be undone."
+		)
 
-    s_cust, t_cust = source.get("customer"), target.get("customer")
-    s_lead, t_lead = source.get("lead"), target.get("lead")
-    result: Dict[str, Any] = {
-        "plan": plan,
-        "customer": plan["final_customer"],
-        "merged_customer": None,
-        "moved_invoices": 0,
-        "stamped_invoices": 0,
-        "linked_addresses": 0,
-        "credit_terms_carried": False,
-        "merged_lead": None,
-    }
+	s_cust, t_cust = source.get("customer"), target.get("customer")
+	s_lead, t_lead = source.get("lead"), target.get("lead")
+	result: Dict[str, Any] = {
+		"plan": plan,
+		"customer": plan["final_customer"],
+		"merged_customer": None,
+		"moved_invoices": 0,
+		"stamped_invoices": 0,
+		"linked_addresses": 0,
+		"credit_terms_carried": False,
+		"merged_lead": None,
+	}
 
-    previous_flag = getattr(frappe.flags, "ignore_woo_outbound", False)
-    # A merge rewrites the Customer link on every moved row; none of that is a
-    # change the Woo store needs to hear about.
-    frappe.flags.ignore_woo_outbound = True
-    try:
-        action = plan["customer_action"]
-        if action == "merge_customers":
-            target_own = int(
-                frappe.db.count("Sales Invoice", {"customer": t_cust, "docstatus": 1}) or 0
-            )
-            source_own = int(
-                frappe.db.count("Sales Invoice", {"customer": s_cust, "docstatus": 1}) or 0
-            )
-            merged = merge_customers(s_cust, t_cust, branch_name)
-            result.update(
-                merged_customer=s_cust,
-                moved_invoices=source_own,
-                stamped_invoices=merged["stamped_invoices"],
-                credit_terms_carried=merged["credit_terms_carried"],
-                totals=merged["totals"],
-                target_invoices_before=target_own,
-            )
-        elif action == "adopt_source_customer":
-            frappe.db.set_value("Lead", t_lead, "customer", s_cust, update_modified=True)
-        elif action == "link_lead_addresses":
-            result["linked_addresses"] = _link_lead_addresses(s_lead, t_cust)
+	previous_flag = getattr(frappe.flags, "ignore_woo_outbound", False)
+	# A merge rewrites the Customer link on every moved row; none of that is a
+	# change the Woo store needs to hear about.
+	frappe.flags.ignore_woo_outbound = True
+	try:
+		action = plan["customer_action"]
+		if action == "merge_customers":
+			target_own = int(frappe.db.count("Sales Invoice", {"customer": t_cust, "docstatus": 1}) or 0)
+			source_own = int(frappe.db.count("Sales Invoice", {"customer": s_cust, "docstatus": 1}) or 0)
+			merged = merge_customers(s_cust, t_cust, branch_name)
+			result.update(
+				merged_customer=s_cust,
+				moved_invoices=source_own,
+				stamped_invoices=merged["stamped_invoices"],
+				credit_terms_carried=merged["credit_terms_carried"],
+				totals=merged["totals"],
+				target_invoices_before=target_own,
+			)
+		elif action == "adopt_source_customer":
+			frappe.db.set_value("Lead", t_lead, "customer", s_cust, update_modified=True)
+		elif action == "link_lead_addresses":
+			result["linked_addresses"] = _link_lead_addresses(s_lead, t_cust)
 
-        lead_action = plan["lead_action"]
-        if lead_action == "merge_leads":
-            from jarz_pos.api.leads import merge_leads
+		lead_action = plan["lead_action"]
+		if lead_action == "merge_leads":
+			from jarz_pos.api.leads import merge_leads
 
-            merge_leads(t_lead, [s_lead])
-            result["merged_lead"] = s_lead
-            # The surviving card must resolve to the surviving account.
-            if plan["final_customer"] and not frappe.db.get_value("Lead", t_lead, "customer"):
-                from jarz_pos.api.crm import _resolve_lead_customer
+			merge_leads(t_lead, [s_lead])
+			result["merged_lead"] = s_lead
+			# The surviving card must resolve to the surviving account.
+			if plan["final_customer"] and not frappe.db.get_value("Lead", t_lead, "customer"):
+				from jarz_pos.api.crm import _resolve_lead_customer
 
-                if _resolve_lead_customer(t_lead, strict=False) != plan["final_customer"]:
-                    frappe.db.set_value(
-                        "Lead", t_lead, "customer", plan["final_customer"], update_modified=True
-                    )
-        elif lead_action == "relink_source_lead":
-            frappe.db.set_value("Lead", s_lead, "customer", t_cust, update_modified=True)
-    finally:
-        frappe.flags.ignore_woo_outbound = previous_flag
+				if _resolve_lead_customer(t_lead, strict=False) != plan["final_customer"]:
+					frappe.db.set_value(
+						"Lead", t_lead, "customer", plan["final_customer"], update_modified=True
+					)
+		elif lead_action == "relink_source_lead":
+			frappe.db.set_value("Lead", s_lead, "customer", t_cust, update_modified=True)
+	finally:
+		frappe.flags.ignore_woo_outbound = previous_flag
 
-    return result
+	return result

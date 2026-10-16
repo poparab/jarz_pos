@@ -23,9 +23,7 @@ def infer_backend_app(
 	path: str | None = None,
 	method_name: str | None = None,
 ) -> str:
-	combined = " ".join(
-		segment for segment in [command, path, method_name] if segment
-	).lower()
+	combined = " ".join(segment for segment in [command, path, method_name] if segment).lower()
 
 	if "jarz_woocommerce_integration" in combined:
 		return "jarz_woocommerce_integration"

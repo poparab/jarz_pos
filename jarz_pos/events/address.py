@@ -37,57 +37,55 @@ from __future__ import annotations
 from typing import Any, Optional
 
 try:  # pragma: no cover - import safety outside a bench
-    import frappe
+	import frappe
 except Exception:
-    frappe = None  # type: ignore
+	frappe = None  # type: ignore
 
 
 def clamp_geo_confidence(doc: Any, method: Optional[str] = None) -> None:
-    """Force ``custom_geo_confidence`` to agree with ``custom_geo_source``.
+	"""Force ``custom_geo_confidence`` to agree with ``custom_geo_source``.
 
-    In-memory only, no queries, never raises. See the module docstring for why
-    each of those three is non-negotiable.
-    """
-    try:
-        # Cheap structural bail-out first: on a site that has not migrated the
-        # geo fields yet this exits before importing anything.
-        if not hasattr(doc, "get"):
-            return
-        if doc.get("custom_geo_source") is None and doc.get("custom_geo_confidence") is None:
-            return
+	In-memory only, no queries, never raises. See the module docstring for why
+	each of those three is non-negotiable.
+	"""
+	try:
+		# Cheap structural bail-out first: on a site that has not migrated the
+		# geo fields yet this exits before importing anything.
+		if not hasattr(doc, "get"):
+			return
+		if doc.get("custom_geo_source") is None and doc.get("custom_geo_confidence") is None:
+			return
 
-        from jarz_pos.utils.geo import (
-            confidence_rank,
-            is_valid_coordinate,
-            normalize_source,
-        )
+		from jarz_pos.utils.geo import (
+			confidence_rank,
+			is_valid_coordinate,
+			normalize_source,
+		)
 
-        source = normalize_source(doc.get("custom_geo_source"))
+		source = normalize_source(doc.get("custom_geo_source"))
 
-        # An unrecognised label is cleared rather than kept: a source the ladder
-        # cannot rank is a source the never-downgrade rule cannot protect, and a
-        # silently unranked pin is worse than no label at all.
-        if str(doc.get("custom_geo_source") or "").strip() and not source:
-            doc.custom_geo_source = None
+		# An unrecognised label is cleared rather than kept: a source the ladder
+		# cannot rank is a source the never-downgrade rule cannot protect, and a
+		# silently unranked pin is worse than no label at all.
+		if str(doc.get("custom_geo_source") or "").strip() and not source:
+			doc.custom_geo_source = None
 
-        latitude = doc.get("custom_latitude")
-        longitude = doc.get("custom_longitude")
-        has_pin = is_valid_coordinate(latitude, longitude)
+		latitude = doc.get("custom_latitude")
+		longitude = doc.get("custom_longitude")
+		has_pin = is_valid_coordinate(latitude, longitude)
 
-        if not has_pin:
-            # No usable position ⇒ no source and no rank. Leaving a source behind
-            # on a blank pin would make the address outrank a genuine later fix.
-            if source:
-                doc.custom_geo_source = None
-            doc.custom_geo_confidence = 0
-            return
+		if not has_pin:
+			# No usable position ⇒ no source and no rank. Leaving a source behind
+			# on a blank pin would make the address outrank a genuine later fix.
+			if source:
+				doc.custom_geo_source = None
+			doc.custom_geo_confidence = 0
+			return
 
-        doc.custom_geo_confidence = confidence_rank(source)
-    except Exception:
-        try:
-            if frappe:
-                frappe.log_error(
-                    frappe.get_traceback(), "Address clamp_geo_confidence failed"
-                )
-        except Exception:
-            pass
+		doc.custom_geo_confidence = confidence_rank(source)
+	except Exception:
+		try:
+			if frappe:
+				frappe.log_error(frappe.get_traceback(), "Address clamp_geo_confidence failed")
+		except Exception:
+			pass

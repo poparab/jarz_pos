@@ -47,24 +47,24 @@ _LOG_THROTTLE_SECONDS = 900
 
 
 def _log(key: str) -> None:
-    """Throttled ``frappe.log_error`` that cannot itself raise (it can; see employee_advances._log)."""
-    try:
-        cache_key = f"jarz_pos:approvals_error:{key}"
-        cache = frappe.cache()
-        if cache.get_value(cache_key):
-            return
-        cache.set_value(cache_key, 1, expires_in_sec=_LOG_THROTTLE_SECONDS)
-        frappe.log_error(
-            title=f"get_pending_approvals: {key} queue failed",
-            message=frappe.get_traceback(),
-        )
-    except Exception:
-        pass
+	"""Throttled ``frappe.log_error`` that cannot itself raise (it can; see employee_advances._log)."""
+	try:
+		cache_key = f"jarz_pos:approvals_error:{key}"
+		cache = frappe.cache()
+		if cache.get_value(cache_key):
+			return
+		cache.set_value(cache_key, 1, expires_in_sec=_LOG_THROTTLE_SECONDS)
+		frappe.log_error(
+			title=f"get_pending_approvals: {key} queue failed",
+			message=frappe.get_traceback(),
+		)
+	except Exception:
+		pass
 
 
 def _month_of(value: Any) -> Optional[str]:
-    text = str(value or "").strip()
-    return text[:7] if len(text) >= 7 else None
+	text = str(value or "").strip()
+	return text[:7] if len(text) >= 7 else None
 
 
 # ── Queues ───────────────────────────────────────────────────────────────────
@@ -75,188 +75,186 @@ def _month_of(value: Any) -> Optional[str]:
 
 
 def _expenses_queue() -> Optional[Dict[str, Any]]:
-    from jarz_pos.api.expenses import _is_manager
+	from jarz_pos.api.expenses import _is_manager
 
-    if not _is_manager():
-        return None
-    # ``status`` rather than docstatus alone: a rejected request stays a draft
-    # (docstatus 0, status "Rejected"), and counting it would badge a request
-    # there is nothing left to do about.
-    filters = {"docstatus": 0, "status": STATUS.PENDING_APPROVAL}
-    count = int(frappe.db.count("Jarz Expense Request", filters=filters) or 0)
-    oldest = None
-    if count:
-        rows = frappe.get_all(
-            "Jarz Expense Request",
-            filters=filters,
-            fields=["expense_month"],
-            order_by="expense_month asc",
-            limit=1,
-        )
-        oldest = _month_of(rows[0].get("expense_month")) if rows else None
-    return {"count": count, "oldest_month": oldest}
+	if not _is_manager():
+		return None
+	# ``status`` rather than docstatus alone: a rejected request stays a draft
+	# (docstatus 0, status "Rejected"), and counting it would badge a request
+	# there is nothing left to do about.
+	filters = {"docstatus": 0, "status": STATUS.PENDING_APPROVAL}
+	count = int(frappe.db.count("Jarz Expense Request", filters=filters) or 0)
+	oldest = None
+	if count:
+		rows = frappe.get_all(
+			"Jarz Expense Request",
+			filters=filters,
+			fields=["expense_month"],
+			order_by="expense_month asc",
+			limit=1,
+		)
+		oldest = _month_of(rows[0].get("expense_month")) if rows else None
+	return {"count": count, "oldest_month": oldest}
 
 
 def _employee_advances_queue() -> Optional[Dict[str, Any]]:
-    from jarz_pos.api.employee_advances import _can_approve, hrms_available
+	from jarz_pos.api.employee_advances import _can_approve, hrms_available
 
-    if not _can_approve() or not hrms_available():
-        return None
-    # A rejection deletes the draft, so every remaining draft is awaiting a
-    # decision — the same reading the Advances screen's pending_count uses.
-    filters = {"docstatus": 0}
-    count = int(frappe.db.count("Employee Advance", filters=filters) or 0)
-    oldest = None
-    if count:
-        rows = frappe.get_all(
-            "Employee Advance",
-            filters=filters,
-            fields=["posting_date"],
-            order_by="posting_date asc",
-            limit=1,
-        )
-        oldest = _month_of(rows[0].get("posting_date")) if rows else None
-    return {"count": count, "oldest_month": oldest}
+	if not _can_approve() or not hrms_available():
+		return None
+	# A rejection deletes the draft, so every remaining draft is awaiting a
+	# decision — the same reading the Advances screen's pending_count uses.
+	filters = {"docstatus": 0}
+	count = int(frappe.db.count("Employee Advance", filters=filters) or 0)
+	oldest = None
+	if count:
+		rows = frappe.get_all(
+			"Employee Advance",
+			filters=filters,
+			fields=["posting_date"],
+			order_by="posting_date asc",
+			limit=1,
+		)
+		oldest = _month_of(rows[0].get("posting_date")) if rows else None
+	return {"count": count, "oldest_month": oldest}
 
 
 def _item_requests_queue() -> Optional[Dict[str, Any]]:
-    from jarz_pos.api import purchase_request
+	from jarz_pos.api import purchase_request
 
-    # Reviewers only: "Accept" is the review action, and a requester's own open
-    # requests are waiting on somebody else, not on them.
-    if not purchase_request._can_review():
-        return None
-    filters: Dict[str, Any] = {
-        "material_request_type": "Purchase",
-        "docstatus": 1,
-        "status": ["in", list(purchase_request.OPEN_STATUSES)],
-    }
-    if purchase_request._has_ack_fields():
-        filters["custom_jarz_acknowledged_at"] = ["is", "not set"]
-    return {"count": int(frappe.db.count("Material Request", filters=filters) or 0)}
+	# Reviewers only: "Accept" is the review action, and a requester's own open
+	# requests are waiting on somebody else, not on them.
+	if not purchase_request._can_review():
+		return None
+	filters: Dict[str, Any] = {
+		"material_request_type": "Purchase",
+		"docstatus": 1,
+		"status": ["in", list(purchase_request.OPEN_STATUSES)],
+	}
+	if purchase_request._has_ack_fields():
+		filters["custom_jarz_acknowledged_at"] = ["is", "not set"]
+	return {"count": int(frappe.db.count("Material Request", filters=filters) or 0)}
 
 
 def _payment_receipts_queue() -> Optional[Dict[str, Any]]:
-    from jarz_pos.api import payment_receipts
+	from jarz_pos.api import payment_receipts
 
-    # The confirm gate with no branch named answers "may this user confirm
-    # anywhere"; the count is then limited to the caller's own branches exactly
-    # as the receipts list is (an empty scope means none, never "all").
-    if not payment_receipts._has_payment_receipt_confirm_access(None):
-        return None
-    scope = payment_receipts._receipt_branch_scope()
-    if not scope:
-        return {"count": 0}
-    count = frappe.db.count(
-        "POS Payment Receipt",
-        filters={
-            "status": payment_receipts.RECEIPT_STATUS_UNCONFIRMED,
-            "pos_profile": ["in", scope],
-        },
-    )
-    return {"count": int(count or 0)}
+	# The confirm gate with no branch named answers "may this user confirm
+	# anywhere"; the count is then limited to the caller's own branches exactly
+	# as the receipts list is (an empty scope means none, never "all").
+	if not payment_receipts._has_payment_receipt_confirm_access(None):
+		return None
+	scope = payment_receipts._receipt_branch_scope()
+	if not scope:
+		return {"count": 0}
+	count = frappe.db.count(
+		"POS Payment Receipt",
+		filters={
+			"status": payment_receipts.RECEIPT_STATUS_UNCONFIRMED,
+			"pos_profile": ["in", scope],
+		},
+	)
+	return {"count": int(count or 0)}
 
 
 def _custom_shipping_queue() -> Optional[Dict[str, Any]]:
-    from jarz_pos.api.custom_shipping import _can_approve_shipping
+	from jarz_pos.api.custom_shipping import _can_approve_shipping
 
-    if not _can_approve_shipping():
-        return None
-    # Mirrors get_pending_custom_shipping_requests, which the Manager Dashboard
-    # lists from: the badge must not count fewer than the list it leads to.
-    count = frappe.db.count(
-        "Custom Shipping Request", filters={"docstatus": 0, "status": "Pending"}
-    )
-    return {"count": int(count or 0)}
+	if not _can_approve_shipping():
+		return None
+	# Mirrors get_pending_custom_shipping_requests, which the Manager Dashboard
+	# lists from: the badge must not count fewer than the list it leads to.
+	count = frappe.db.count("Custom Shipping Request", filters={"docstatus": 0, "status": "Pending"})
+	return {"count": int(count or 0)}
 
 
 def _task_board_viewer():
-    """The caller's Task Board viewer, or None when they are not a board user.
+	"""The caller's Task Board viewer, or None when they are not a board user.
 
-    Same gate the board itself enforces (``api.tasks._require_board``), so a
-    task count never leads to a screen that answers 403.
-    """
-    from jarz_pos.services import task_board
+	Same gate the board itself enforces (``api.tasks._require_board``), so a
+	task count never leads to a screen that answers 403.
+	"""
+	from jarz_pos.services import task_board
 
-    viewer = task_board.get_viewer(frappe.session.user)
-    return viewer if viewer.is_board_user else None
+	viewer = task_board.get_viewer(frappe.session.user)
+	return viewer if viewer.is_board_user else None
 
 
 def _tasks_assigned_queue() -> Optional[Dict[str, Any]]:
-    from jarz_pos.services import task_board
+	from jarz_pos.services import task_board
 
-    viewer = _task_board_viewer()
-    if viewer is None:
-        return None
-    # Two COUNT(*)s: open cards assigned to me + my open subtasks on live cards.
-    return {"count": task_board.count_assigned_open(viewer.user)}
+	viewer = _task_board_viewer()
+	if viewer is None:
+		return None
+	# Two COUNT(*)s: open cards assigned to me + my open subtasks on live cards.
+	return {"count": task_board.count_assigned_open(viewer.user)}
 
 
 def _tasks_review_queue() -> Optional[Dict[str, Any]]:
-    from jarz_pos.services import task_board
+	from jarz_pos.services import task_board
 
-    viewer = _task_board_viewer()
-    if viewer is None:
-        return None
-    # Cards In Review that this caller may approve: the ones they created, or
-    # every one for a full-access user -- exactly set_status's approve rule.
-    return {"count": task_board.count_review_waiting(viewer)}
+	viewer = _task_board_viewer()
+	if viewer is None:
+		return None
+	# Cards In Review that this caller may approve: the ones they created, or
+	# every one for a full-access user -- exactly set_status's approve rule.
+	return {"count": task_board.count_review_waiting(viewer)}
 
 
 def _credit_collections_queue() -> Optional[Dict[str, Any]]:
-    from jarz_pos.api.manager import _has_manager_dashboard_access
-    from jarz_pos.api.settlement_terms import count_collections_needing_attention
+	from jarz_pos.api.manager import _has_manager_dashboard_access
+	from jarz_pos.api.settlement_terms import count_collections_needing_attention
 
-    # The credit-ledger read gate (credit._ensure_credit_ledger_access is this
-    # predicate plus a throw), so the badge never leads to a 403.
-    if not _has_manager_dashboard_access():
-        return None
-    # Customers whose settlement is overdue or due today, in the caller's
-    # branches -- the top of get_collections_due. Cached per user (the badge is
-    # polled every minute and this walks every open credit invoice).
-    return {"count": int(count_collections_needing_attention() or 0)}
+	# The credit-ledger read gate (credit._ensure_credit_ledger_access is this
+	# predicate plus a throw), so the badge never leads to a 403.
+	if not _has_manager_dashboard_access():
+		return None
+	# Customers whose settlement is overdue or due today, in the caller's
+	# branches -- the top of get_collections_due. Cached per user (the badge is
+	# polled every minute and this walks every open credit invoice).
+	return {"count": int(count_collections_needing_attention() or 0)}
 
 
 _QUEUES: List[tuple] = [
-    (Q_EXPENSES, _expenses_queue),
-    (Q_EMPLOYEE_ADVANCES, _employee_advances_queue),
-    (Q_ITEM_REQUESTS, _item_requests_queue),
-    (Q_PAYMENT_RECEIPTS, _payment_receipts_queue),
-    (Q_CUSTOM_SHIPPING, _custom_shipping_queue),
-    (Q_TASKS_ASSIGNED, _tasks_assigned_queue),
-    (Q_TASKS_REVIEW, _tasks_review_queue),
-    (Q_CREDIT_COLLECTIONS, _credit_collections_queue),
+	(Q_EXPENSES, _expenses_queue),
+	(Q_EMPLOYEE_ADVANCES, _employee_advances_queue),
+	(Q_ITEM_REQUESTS, _item_requests_queue),
+	(Q_PAYMENT_RECEIPTS, _payment_receipts_queue),
+	(Q_CUSTOM_SHIPPING, _custom_shipping_queue),
+	(Q_TASKS_ASSIGNED, _tasks_assigned_queue),
+	(Q_TASKS_REVIEW, _tasks_review_queue),
+	(Q_CREDIT_COLLECTIONS, _credit_collections_queue),
 ]
 
 
 @frappe.whitelist()
 def get_pending_approvals() -> Dict[str, Any]:
-    """Counts of everything awaiting the caller's decision.
+	"""Counts of everything awaiting the caller's decision.
 
-    Returns ``{"eligible", "total", "queues": [{"key", "count", ...}]}``.
+	Returns ``{"eligible", "total", "queues": [{"key", "count", ...}]}``.
 
-    ``eligible`` is False when the caller may act on no queue at all — the
-    client stops polling for such a user instead of asking every minute for an
-    answer that cannot change. ``queues`` lists every queue the caller may act
-    on, including ones at zero, in a fixed order.
-    """
-    queues: List[Dict[str, Any]] = []
-    eligible = False
-    for key, build in _QUEUES:
-        try:
-            result = build()
-        except Exception:
-            _log(key)
-            # The caller may well be entitled to this queue; staying eligible
-            # keeps the client polling so the count returns once it recovers.
-            eligible = True
-            continue
-        if result is None:
-            continue
-        eligible = True
-        queues.append({"key": key, **result})
-    return {
-        "eligible": eligible,
-        "total": sum(int(q.get("count") or 0) for q in queues),
-        "queues": queues,
-    }
+	``eligible`` is False when the caller may act on no queue at all — the
+	client stops polling for such a user instead of asking every minute for an
+	answer that cannot change. ``queues`` lists every queue the caller may act
+	on, including ones at zero, in a fixed order.
+	"""
+	queues: List[Dict[str, Any]] = []
+	eligible = False
+	for key, build in _QUEUES:
+		try:
+			result = build()
+		except Exception:
+			_log(key)
+			# The caller may well be entitled to this queue; staying eligible
+			# keeps the client polling so the count returns once it recovers.
+			eligible = True
+			continue
+		if result is None:
+			continue
+		eligible = True
+		queues.append({"key": key, **result})
+	return {
+		"eligible": eligible,
+		"total": sum(int(q.get("count") or 0) for q in queues),
+		"queues": queues,
+	}

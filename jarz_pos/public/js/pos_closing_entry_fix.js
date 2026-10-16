@@ -33,11 +33,20 @@
 	};
 
 	const syncExistingDraftTimestamps = async (frm) => {
-		if (!frm.doc || frm.doc.docstatus !== 0 || frm.doc.amended_from || isNewDoc(frm) || !frm.doc.name) {
+		if (
+			!frm.doc ||
+			frm.doc.docstatus !== 0 ||
+			frm.doc.amended_from ||
+			isNewDoc(frm) ||
+			!frm.doc.name
+		) {
 			return;
 		}
 
-		if (frm.__jarzClosingTimestampSyncInFlight || frm.__jarzClosingTimestampSyncModified === frm.doc.modified) {
+		if (
+			frm.__jarzClosingTimestampSyncInFlight ||
+			frm.__jarzClosingTimestampSyncModified === frm.doc.modified
+		) {
 			return;
 		}
 
@@ -49,8 +58,12 @@
 			}
 
 			let changed = false;
-			const serverPeriodEndDate = trimFractionalSeconds(serverDoc.period_end_date || frm.doc.period_end_date);
-			const serverPostingTime = trimFractionalSeconds(serverDoc.posting_time || frm.doc.posting_time);
+			const serverPeriodEndDate = trimFractionalSeconds(
+				serverDoc.period_end_date || frm.doc.period_end_date
+			);
+			const serverPostingTime = trimFractionalSeconds(
+				serverDoc.posting_time || frm.doc.posting_time
+			);
 
 			if (frm.doc.period_end_date !== serverPeriodEndDate) {
 				frm.doc.period_end_date = serverPeriodEndDate;

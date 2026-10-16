@@ -52,172 +52,172 @@ DELIVER_AT_BRANCH = "Deliver at Branch"
 
 
 class AddressPinRequired(frappe.ValidationError):
-    """Raised for a POS delivery order whose address has no pin-grade location."""
+	"""Raised for a POS delivery order whose address has no pin-grade location."""
 
 
 def pin_required_enabled() -> bool:
-    """Master switch (``Jarz POS Settings.require_address_pin_for_delivery``)."""
-    try:
-        return single_flag("Jarz POS Settings", SETTING_FIELDNAME, False)
-    except Exception:
-        return False
+	"""Master switch (``Jarz POS Settings.require_address_pin_for_delivery``)."""
+	try:
+		return single_flag("Jarz POS Settings", SETTING_FIELDNAME, False)
+	except Exception:
+		return False
 
 
 def pin_fields_are_pin_grade(latitude: Any, longitude: Any, source: Any) -> bool:
-    """True when these three Address values describe a pin-grade location."""
-    from jarz_pos.utils.geo import (
-        SOURCE_POS_LINK,
-        CONFIDENCE_RANK,
-        is_valid_coordinate,
-        normalize_source,
-    )
+	"""True when these three Address values describe a pin-grade location."""
+	from jarz_pos.utils.geo import (
+		SOURCE_POS_LINK,
+		CONFIDENCE_RANK,
+		is_valid_coordinate,
+		normalize_source,
+	)
 
-    if not is_valid_coordinate(latitude, longitude):
-        return False
-    known = normalize_source(source)
-    if not known:
-        # Blank or unrecognised label: a legacy pin. The coordinate is valid, and
-        # nothing says it is a centroid, so it passes.
-        return True
-    return CONFIDENCE_RANK.get(known, 0) >= CONFIDENCE_RANK[SOURCE_POS_LINK]
+	if not is_valid_coordinate(latitude, longitude):
+		return False
+	known = normalize_source(source)
+	if not known:
+		# Blank or unrecognised label: a legacy pin. The coordinate is valid, and
+		# nothing says it is a centroid, so it passes.
+		return True
+	return CONFIDENCE_RANK.get(known, 0) >= CONFIDENCE_RANK[SOURCE_POS_LINK]
 
 
 def address_is_pin_grade(address_name: Optional[str]) -> bool:
-    """True when the named Address carries a pin-grade location."""
-    name = str(address_name or "").strip()
-    if not name:
-        return False
-    row = frappe.db.get_value(
-        "Address",
-        name,
-        ["custom_latitude", "custom_longitude", "custom_geo_source"],
-        as_dict=True,
-    )
-    if not row:
-        return False
-    return pin_fields_are_pin_grade(
-        row.get("custom_latitude"), row.get("custom_longitude"), row.get("custom_geo_source")
-    )
+	"""True when the named Address carries a pin-grade location."""
+	name = str(address_name or "").strip()
+	if not name:
+		return False
+	row = frappe.db.get_value(
+		"Address",
+		name,
+		["custom_latitude", "custom_longitude", "custom_geo_source"],
+		as_dict=True,
+	)
+	if not row:
+		return False
+	return pin_fields_are_pin_grade(
+		row.get("custom_latitude"), row.get("custom_longitude"), row.get("custom_geo_source")
+	)
 
 
 def pin_missing_message() -> str:
-    """The refusal text. Names the fix, not just the problem."""
-    return _(
-        "This delivery order needs a location pin. Paste the customer's Google "
-        "Maps link on the delivery address (or choose a pinned address) before "
-        "saving the order."
-    )
+	"""The refusal text. Names the fix, not just the problem."""
+	return _(
+		"This delivery order needs a location pin. Paste the customer's Google "
+		"Maps link on the delivery address (or choose a pinned address) before "
+		"saving the order."
+	)
 
 
 def pin_exempt(*, pickup: Any = False, woo_order_id: Any = None, deliver_at_branch: Any = False) -> bool:
-    """True when an order needs no pin: it never travels to an address the POS set.
+	"""True when an order needs no pin: it never travels to an address the POS set.
 
-    The single exemption rule (see the module docstring). A commercial policy by
-    itself exempts nothing; only its "Deliver at Branch" fulfilment does.
-    """
-    return bool(_truthy(pickup) or deliver_at_branch is True or str(woo_order_id or "").strip())
+	The single exemption rule (see the module docstring). A commercial policy by
+	itself exempts nothing; only its "Deliver at Branch" fulfilment does.
+	"""
+	return bool(_truthy(pickup) or deliver_at_branch is True or str(woo_order_id or "").strip())
 
 
 def policy_delivers_at_branch(policy_name: Any) -> Optional[bool]:
-    """Whether the named Commercial Policy hands the goods over at the branch.
+	"""Whether the named Commercial Policy hands the goods over at the branch.
 
-    ``False`` for no policy (a Standard order). ``None`` when it cannot be told
-    (record missing, schema behind the code): the caller defers to the check
-    inside invoice creation, which resolves the policy itself.
-    """
-    name = str(policy_name or "").strip()
-    if not name:
-        return False
-    try:
-        row = frappe.db.get_value(
-            "Jarz Commercial Policy", name, ["name", "fulfilment_behavior"], as_dict=True
-        )
-    except Exception:
-        return None
-    if not row:
-        return None
-    return str(row.get("fulfilment_behavior") or "").strip() == DELIVER_AT_BRANCH
+	``False`` for no policy (a Standard order). ``None`` when it cannot be told
+	(record missing, schema behind the code): the caller defers to the check
+	inside invoice creation, which resolves the policy itself.
+	"""
+	name = str(policy_name or "").strip()
+	if not name:
+		return False
+	try:
+		row = frappe.db.get_value(
+			"Jarz Commercial Policy", name, ["name", "fulfilment_behavior"], as_dict=True
+		)
+	except Exception:
+		return None
+	if not row:
+		return None
+	return str(row.get("fulfilment_behavior") or "").strip() == DELIVER_AT_BRANCH
 
 
 def assert_amendment_pin(
-    source_invoice: Any,
-    shipping_address_name: Optional[str] = None,
-    pickup: Any = None,
+	source_invoice: Any,
+	shipping_address_name: Optional[str] = None,
+	pickup: Any = None,
 ) -> None:
-    """Synchronous pre-check for ``submit_invoice_amendment``.
+	"""Synchronous pre-check for ``submit_invoice_amendment``.
 
-    The amendment runs as a job, and a refusal raised inside it is easy to lose
-    on the way back to the app; refusing here, before anything is enqueued, hands
-    the client a real ``AddressPinRequired``. Applies :func:`pin_exempt` to the
-    SOURCE invoice's fields -- the job carries its order purpose and commercial
-    policy over unchanged. A non-Standard order with no stamped policy name (a
-    legacy row) cannot be told here, so it is left to the check inside invoice
-    creation, which sees the resolved policy.
-    """
-    if not pin_required_enabled():
-        return
+	The amendment runs as a job, and a refusal raised inside it is easy to lose
+	on the way back to the app; refusing here, before anything is enqueued, hands
+	the client a real ``AddressPinRequired``. Applies :func:`pin_exempt` to the
+	SOURCE invoice's fields -- the job carries its order purpose and commercial
+	policy over unchanged. A non-Standard order with no stamped policy name (a
+	legacy row) cannot be told here, so it is left to the check inside invoice
+	creation, which sees the resolved policy.
+	"""
+	if not pin_required_enabled():
+		return
 
-    def _get(field: str) -> Any:
-        try:
-            return source_invoice.get(field)
-        except Exception:
-            return None
+	def _get(field: str) -> Any:
+		try:
+			return source_invoice.get(field)
+		except Exception:
+			return None
 
-    policy = str(_get("custom_commercial_policy") or "").strip()
-    purpose = str(_get("custom_order_purpose") or "").strip()
-    if policy:
-        at_branch = policy_delivers_at_branch(policy)
-    elif purpose in ("", "Standard"):
-        at_branch = False
-    else:
-        at_branch = None
-    if at_branch is None:
-        return
+	policy = str(_get("custom_commercial_policy") or "").strip()
+	purpose = str(_get("custom_order_purpose") or "").strip()
+	if policy:
+		at_branch = policy_delivers_at_branch(policy)
+	elif purpose in ("", "Standard"):
+		at_branch = False
+	else:
+		at_branch = None
+	if at_branch is None:
+		return
 
-    address = (
-        str(shipping_address_name or "").strip()
-        or str(_get("shipping_address_name") or "").strip()
-        or str(_get("customer_address") or "").strip()
-    )
-    assert_delivery_pin(
-        address,
-        pickup=_truthy(pickup) or _truthy(_get("custom_is_pickup")),
-        woo_order_id=_get("woo_order_id"),
-        deliver_at_branch=at_branch,
-    )
+	address = (
+		str(shipping_address_name or "").strip()
+		or str(_get("shipping_address_name") or "").strip()
+		or str(_get("customer_address") or "").strip()
+	)
+	assert_delivery_pin(
+		address,
+		pickup=_truthy(pickup) or _truthy(_get("custom_is_pickup")),
+		woo_order_id=_get("woo_order_id"),
+		deliver_at_branch=at_branch,
+	)
 
 
 def _truthy(value: Any) -> bool:
-    if isinstance(value, str):
-        return value.strip().lower() in ("1", "true", "yes", "y", "on")
-    return bool(value)
+	if isinstance(value, str):
+		return value.strip().lower() in ("1", "true", "yes", "y", "on")
+	return bool(value)
 
 
 def assert_delivery_pin(
-    address_name: Optional[str],
-    *,
-    pickup: bool = False,
-    woo_order_id: Any = None,
-    deliver_at_branch: bool = False,
+	address_name: Optional[str],
+	*,
+	pickup: bool = False,
+	woo_order_id: Any = None,
+	deliver_at_branch: bool = False,
 ) -> None:
-    """Raise :class:`AddressPinRequired` when a POS delivery order has no pin.
+	"""Raise :class:`AddressPinRequired` when a POS delivery order has no pin.
 
-    No-op when the switch is off, or :func:`pin_exempt` says the order never
-    travels to a POS-chosen address. A lookup failure
-    (schema behind the code) logs and lets the order through: a quality gate
-    must not take order-taking down.
-    """
-    if pin_exempt(pickup=pickup, woo_order_id=woo_order_id, deliver_at_branch=deliver_at_branch):
-        return
-    if not pin_required_enabled():
-        return
-    try:
-        pinned = address_is_pin_grade(address_name)
-    except Exception:
-        frappe.log_error(
-            frappe.get_traceback(),
-            "delivery_pin_requirement: pin lookup failed, gate skipped",
-        )
-        return
-    if not pinned:
-        frappe.throw(pin_missing_message(), AddressPinRequired)
+	No-op when the switch is off, or :func:`pin_exempt` says the order never
+	travels to a POS-chosen address. A lookup failure
+	(schema behind the code) logs and lets the order through: a quality gate
+	must not take order-taking down.
+	"""
+	if pin_exempt(pickup=pickup, woo_order_id=woo_order_id, deliver_at_branch=deliver_at_branch):
+		return
+	if not pin_required_enabled():
+		return
+	try:
+		pinned = address_is_pin_grade(address_name)
+	except Exception:
+		frappe.log_error(
+			frappe.get_traceback(),
+			"delivery_pin_requirement: pin lookup failed, gate skipped",
+		)
+		return
+	if not pinned:
+		frappe.throw(pin_missing_message(), AddressPinRequired)

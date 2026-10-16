@@ -51,12 +51,12 @@ from typing import Any, Dict, List
 import frappe
 
 from jarz_pos.utils.employee_link import (
-    ADVANCE_DOCTYPE,
-    CUSTOMER_EMPLOYEE_FIELD,
-    F_SALARY_MONTH,
-    F_SETTLED_AMOUNT,
-    F_SETTLED_VIA,
-    hrms_available,
+	ADVANCE_DOCTYPE,
+	CUSTOMER_EMPLOYEE_FIELD,
+	F_SALARY_MONTH,
+	F_SETTLED_AMOUNT,
+	F_SETTLED_VIA,
+	hrms_available,
 )
 
 LOGGER_NAME = "employee_link_setup"
@@ -87,41 +87,41 @@ ADVANCE_ACCOUNT_TYPE = "Receivable"
 #: prefers over name matching. Only created when HRMS is present: a Link field
 #: whose ``options`` name a DocType that does not exist is an invalid field.
 CUSTOMER_FIELDS: List[Dict[str, Any]] = [
-    {
-        "fieldname": CUSTOMER_EMPLOYEE_FIELD,
-        "label": "Employee",
-        "fieldtype": "Link",
-        "options": "Employee",
-        # ``customer_group`` is a core Customer field, so this anchor exists on
-        # every site. Anchoring on one of this app's own fixture fields would
-        # silently drop the field to the bottom of the form on a site where the
-        # fixture has not imported yet.
-        "insert_after": "customer_group",
-        # Indexed on purpose. services.employee_customers takes a LOCKING read
-        # (`WHERE custom_employee = %s FOR UPDATE`) so two cashiers picking the
-        # same employee cannot create two staff customers. Without an index that
-        # read scans, and InnoDB locks every Customer row it scans until commit.
-        # create_custom_fields updates the existing field and updatedb adds the
-        # index on the next migrate.
-        "search_index": 1,
-        # Load-bearing. POS staff carry a User Permission ``Employee = <their own
-        # employee>`` with Apply To All Doctypes, and without this flag Frappe
-        # applies it to this Link twice over: a single permitted value becomes the
-        # user default, so every walk-in customer a cashier created was silently
-        # stamped with THAT cashier's employee (create_new.get_user_default_value);
-        # and every other cashier then failed has_permission on the customer, so
-        # create_pos_invoice refused the order ("No permission for Customer X").
-        # Production 2026-09-07..10: four refused bursts, one order lost, 46
-        # retail customers stamped. The link is a salary join, never an access
-        # scope. create_custom_fields updates the existing field on migrate.
-        "ignore_user_permissions": 1,
-        "module": "jarz pos",
-        "description": (
-            "Staff member this customer account belongs to. Read by "
-            "jarz_pos.utils.employee_link to join POS orders and Employee "
-            "Advances into one per-person balance."
-        ),
-    },
+	{
+		"fieldname": CUSTOMER_EMPLOYEE_FIELD,
+		"label": "Employee",
+		"fieldtype": "Link",
+		"options": "Employee",
+		# ``customer_group`` is a core Customer field, so this anchor exists on
+		# every site. Anchoring on one of this app's own fixture fields would
+		# silently drop the field to the bottom of the form on a site where the
+		# fixture has not imported yet.
+		"insert_after": "customer_group",
+		# Indexed on purpose. services.employee_customers takes a LOCKING read
+		# (`WHERE custom_employee = %s FOR UPDATE`) so two cashiers picking the
+		# same employee cannot create two staff customers. Without an index that
+		# read scans, and InnoDB locks every Customer row it scans until commit.
+		# create_custom_fields updates the existing field and updatedb adds the
+		# index on the next migrate.
+		"search_index": 1,
+		# Load-bearing. POS staff carry a User Permission ``Employee = <their own
+		# employee>`` with Apply To All Doctypes, and without this flag Frappe
+		# applies it to this Link twice over: a single permitted value becomes the
+		# user default, so every walk-in customer a cashier created was silently
+		# stamped with THAT cashier's employee (create_new.get_user_default_value);
+		# and every other cashier then failed has_permission on the customer, so
+		# create_pos_invoice refused the order ("No permission for Customer X").
+		# Production 2026-09-07..10: four refused bursts, one order lost, 46
+		# retail customers stamped. The link is a salary join, never an access
+		# scope. create_custom_fields updates the existing field on migrate.
+		"ignore_user_permissions": 1,
+		"module": "jarz pos",
+		"description": (
+			"Staff member this customer account belongs to. Read by "
+			"jarz_pos.utils.employee_link to join POS orders and Employee "
+			"Advances into one per-person balance."
+		),
+	},
 ]
 
 #: Everything the Jarz advance flow needs that HRMS does not carry — the payout
@@ -134,619 +134,598 @@ CUSTOMER_FIELDS: List[Dict[str, Any]] = [
 #: land together and out of the way instead of interleaving with the accounting
 #: fields.
 ADVANCE_FIELDS: List[Dict[str, Any]] = [
-    {
-        "fieldname": F_SALARY_MONTH,
-        "label": "Salary Month (Jarz)",
-        # Data ``YYYY-MM`` rather than a Date: it names a payroll month, not a
-        # day, and the Monthly Expenses board keys every month on that string.
-        "fieldtype": "Data",
-        "length": 7,
-        # Beside posting_date, not tucked into the collapsed Jarz section: the
-        # two dates are the whole point (cash out today, salary of last month)
-        # and reading one without the other is how they get confused.
-        "insert_after": "posting_date",
-        "in_list_view": 1,
-        "in_standard_filter": 1,
-        # Correctable after approval: it moves no money, it only says which
-        # payslip the advance comes off, and a wrong month must be fixable
-        # without reversing the payout.
-        "allow_on_submit": 1,
-        "module": "jarz pos",
-        "description": (
-            "Salary month (YYYY-MM) this advance is drawn against. The cash posts "
-            "on the posting date; the Monthly Expenses board deducts it from this "
-            "month's salary."
-        ),
-    },
-    {
-        "fieldname": "custom_jarz_paying_account",
-        "label": "Paying Account (Jarz)",
-        "fieldtype": "Link",
-        "options": "Account",
-        "insert_after": "more_info_section",
-        "module": "jarz pos",
-        "description": (
-            "Branch cash/bank account the advance is paid out of. "
-            "approve_employee_advance refuses to pay without it."
-        ),
-    },
-    {
-        "fieldname": "custom_jarz_pos_profile",
-        "label": "Branch (Jarz)",
-        "fieldtype": "Link",
-        "options": "POS Profile",
-        "insert_after": "custom_jarz_paying_account",
-        "module": "jarz pos",
-        "description": "POS Profile (branch) the request was raised from.",
-    },
-    {
-        "fieldname": "custom_jarz_requested_by",
-        "label": "Requested By (Jarz)",
-        "fieldtype": "Link",
-        "options": "User",
-        "insert_after": "custom_jarz_pos_profile",
-        "read_only": 1,
-        "module": "jarz pos",
-        "description": "Line manager who raised the request.",
-    },
-    {
-        "fieldname": "custom_jarz_approved_by",
-        "label": "Approved By (Jarz)",
-        "fieldtype": "Link",
-        "options": "User",
-        "insert_after": "custom_jarz_requested_by",
-        "read_only": 1,
-        "module": "jarz pos",
-        "description": "Manager who approved and released the cash.",
-    },
-    {
-        "fieldname": "custom_jarz_approved_on",
-        "label": "Approved On (Jarz)",
-        "fieldtype": "Datetime",
-        "insert_after": "custom_jarz_approved_by",
-        "read_only": 1,
-        "module": "jarz pos",
-    },
-    {
-        "fieldname": "custom_jarz_payment_entry",
-        "label": "Payment Entry (Jarz)",
-        "fieldtype": "Link",
-        "options": "Payment Entry",
-        "insert_after": "custom_jarz_approved_on",
-        "read_only": 1,
-        # The advance is already submitted by the time the Payment Entry exists,
-        # so without allow_on_submit the write back in approve_employee_advance
-        # would be silently filtered out and the advance would look unpaid to
-        # every screen that reads this field.
-        "allow_on_submit": 1,
-        "module": "jarz pos",
-        "description": "Payment Entry that actually moved the cash out of the branch account.",
-    },
-    {
-        "fieldname": "custom_jarz_posting_time",
-        "label": "Jarz Posting Time",
-        "fieldtype": "Time",
-        "insert_after": "custom_jarz_payment_entry",
-        "module": "jarz pos",
-        # Employee Advance is a ledger document: it has `posting_date` and no
-        # `posting_time`, exactly like Journal Entry and Payment Entry. Same
-        # fieldname as the one utils.cleanup seeds on those two, because it
-        # carries the same thing and utils.posting_datetime reads it by one
-        # constant.
-        #
-        # It exists here, on the ADVANCE, because the request and the payout are
-        # two separate HTTP calls: the operator picks the moment when filing the
-        # request, and the Payment Entry that spends the money is not built until
-        # a manager approves it. Without somewhere to park it in between, the
-        # chosen time has nowhere to survive and the payout falls back to the
-        # wall clock of whenever approval happened to be tapped.
-        "description": (
-            "Time of day the requester chose for this advance. Employee Advance "
-            "has no posting_time column; this carries the choice to the Payment "
-            "Entry raised at approval."
-        ),
-    },
-    {
-        # WHY a jarz-owned column instead of HRMS's own `claimed_amount`:
-        # `EmployeeAdvance.update_claimed_amount` RECOMPUTES claimed_amount from
-        # the Expense Claim Advance rows, so anything written into it by hand is
-        # erased the next time the advance is touched. HRMS's supported route
-        # for recovering an advance from payroll is an `Additional Salary`
-        # consumed by a Salary Slip, and this business has produced zero Salary
-        # Slips ever. Neither is usable, so the recovery is recorded here.
-        #
-        # The fieldname is not spelled literally anywhere else: readers import
-        # `F_SETTLED_AMOUNT` from `jarz_pos.utils.employee_link`, which is also
-        # where `open_advance_balance()` subtracts it.
-        "fieldname": F_SETTLED_AMOUNT,
-        "label": "Settled Amount (Jarz)",
-        "fieldtype": "Currency",
-        "insert_after": "custom_jarz_posting_time",
-        "read_only": 1,
-        # Written back after the advance is already submitted, exactly like
-        # custom_jarz_payment_entry above — without this the write is silently
-        # filtered out and the advance stays open forever on every screen.
-        "allow_on_submit": 1,
-        "module": "jarz pos",
-        "description": (
-            "Part of this advance already recovered from a salary payment on the "
-            "Monthly Expenses board. HRMS's own claimed_amount cannot be used: it "
-            "is recomputed from Expense Claims on every save."
-        ),
-    },
-    {
-        "fieldname": F_SETTLED_VIA,
-        "label": "Settled Via (Jarz)",
-        # Data, not Link: the settling document is a Journal Entry today, and
-        # making it a Link would both hard-couple this column to one DocType and
-        # block the settlement JE from ever being cancelled without first
-        # clearing every advance that references it.
-        "fieldtype": "Data",
-        "insert_after": F_SETTLED_AMOUNT,
-        "read_only": 1,
-        "allow_on_submit": 1,
-        "module": "jarz pos",
-        "description": (
-            "Journal Entry that recovered this advance against a salary payment."
-        ),
-    },
+	{
+		"fieldname": F_SALARY_MONTH,
+		"label": "Salary Month (Jarz)",
+		# Data ``YYYY-MM`` rather than a Date: it names a payroll month, not a
+		# day, and the Monthly Expenses board keys every month on that string.
+		"fieldtype": "Data",
+		"length": 7,
+		# Beside posting_date, not tucked into the collapsed Jarz section: the
+		# two dates are the whole point (cash out today, salary of last month)
+		# and reading one without the other is how they get confused.
+		"insert_after": "posting_date",
+		"in_list_view": 1,
+		"in_standard_filter": 1,
+		# Correctable after approval: it moves no money, it only says which
+		# payslip the advance comes off, and a wrong month must be fixable
+		# without reversing the payout.
+		"allow_on_submit": 1,
+		"module": "jarz pos",
+		"description": (
+			"Salary month (YYYY-MM) this advance is drawn against. The cash posts "
+			"on the posting date; the Monthly Expenses board deducts it from this "
+			"month's salary."
+		),
+	},
+	{
+		"fieldname": "custom_jarz_paying_account",
+		"label": "Paying Account (Jarz)",
+		"fieldtype": "Link",
+		"options": "Account",
+		"insert_after": "more_info_section",
+		"module": "jarz pos",
+		"description": (
+			"Branch cash/bank account the advance is paid out of. "
+			"approve_employee_advance refuses to pay without it."
+		),
+	},
+	{
+		"fieldname": "custom_jarz_pos_profile",
+		"label": "Branch (Jarz)",
+		"fieldtype": "Link",
+		"options": "POS Profile",
+		"insert_after": "custom_jarz_paying_account",
+		"module": "jarz pos",
+		"description": "POS Profile (branch) the request was raised from.",
+	},
+	{
+		"fieldname": "custom_jarz_requested_by",
+		"label": "Requested By (Jarz)",
+		"fieldtype": "Link",
+		"options": "User",
+		"insert_after": "custom_jarz_pos_profile",
+		"read_only": 1,
+		"module": "jarz pos",
+		"description": "Line manager who raised the request.",
+	},
+	{
+		"fieldname": "custom_jarz_approved_by",
+		"label": "Approved By (Jarz)",
+		"fieldtype": "Link",
+		"options": "User",
+		"insert_after": "custom_jarz_requested_by",
+		"read_only": 1,
+		"module": "jarz pos",
+		"description": "Manager who approved and released the cash.",
+	},
+	{
+		"fieldname": "custom_jarz_approved_on",
+		"label": "Approved On (Jarz)",
+		"fieldtype": "Datetime",
+		"insert_after": "custom_jarz_approved_by",
+		"read_only": 1,
+		"module": "jarz pos",
+	},
+	{
+		"fieldname": "custom_jarz_payment_entry",
+		"label": "Payment Entry (Jarz)",
+		"fieldtype": "Link",
+		"options": "Payment Entry",
+		"insert_after": "custom_jarz_approved_on",
+		"read_only": 1,
+		# The advance is already submitted by the time the Payment Entry exists,
+		# so without allow_on_submit the write back in approve_employee_advance
+		# would be silently filtered out and the advance would look unpaid to
+		# every screen that reads this field.
+		"allow_on_submit": 1,
+		"module": "jarz pos",
+		"description": "Payment Entry that actually moved the cash out of the branch account.",
+	},
+	{
+		"fieldname": "custom_jarz_posting_time",
+		"label": "Jarz Posting Time",
+		"fieldtype": "Time",
+		"insert_after": "custom_jarz_payment_entry",
+		"module": "jarz pos",
+		# Employee Advance is a ledger document: it has `posting_date` and no
+		# `posting_time`, exactly like Journal Entry and Payment Entry. Same
+		# fieldname as the one utils.cleanup seeds on those two, because it
+		# carries the same thing and utils.posting_datetime reads it by one
+		# constant.
+		#
+		# It exists here, on the ADVANCE, because the request and the payout are
+		# two separate HTTP calls: the operator picks the moment when filing the
+		# request, and the Payment Entry that spends the money is not built until
+		# a manager approves it. Without somewhere to park it in between, the
+		# chosen time has nowhere to survive and the payout falls back to the
+		# wall clock of whenever approval happened to be tapped.
+		"description": (
+			"Time of day the requester chose for this advance. Employee Advance "
+			"has no posting_time column; this carries the choice to the Payment "
+			"Entry raised at approval."
+		),
+	},
+	{
+		# WHY a jarz-owned column instead of HRMS's own `claimed_amount`:
+		# `EmployeeAdvance.update_claimed_amount` RECOMPUTES claimed_amount from
+		# the Expense Claim Advance rows, so anything written into it by hand is
+		# erased the next time the advance is touched. HRMS's supported route
+		# for recovering an advance from payroll is an `Additional Salary`
+		# consumed by a Salary Slip, and this business has produced zero Salary
+		# Slips ever. Neither is usable, so the recovery is recorded here.
+		#
+		# The fieldname is not spelled literally anywhere else: readers import
+		# `F_SETTLED_AMOUNT` from `jarz_pos.utils.employee_link`, which is also
+		# where `open_advance_balance()` subtracts it.
+		"fieldname": F_SETTLED_AMOUNT,
+		"label": "Settled Amount (Jarz)",
+		"fieldtype": "Currency",
+		"insert_after": "custom_jarz_posting_time",
+		"read_only": 1,
+		# Written back after the advance is already submitted, exactly like
+		# custom_jarz_payment_entry above — without this the write is silently
+		# filtered out and the advance stays open forever on every screen.
+		"allow_on_submit": 1,
+		"module": "jarz pos",
+		"description": (
+			"Part of this advance already recovered from a salary payment on the "
+			"Monthly Expenses board. HRMS's own claimed_amount cannot be used: it "
+			"is recomputed from Expense Claims on every save."
+		),
+	},
+	{
+		"fieldname": F_SETTLED_VIA,
+		"label": "Settled Via (Jarz)",
+		# Data, not Link: the settling document is a Journal Entry today, and
+		# making it a Link would both hard-couple this column to one DocType and
+		# block the settlement JE from ever being cancelled without first
+		# clearing every advance that references it.
+		"fieldtype": "Data",
+		"insert_after": F_SETTLED_AMOUNT,
+		"read_only": 1,
+		"allow_on_submit": 1,
+		"module": "jarz pos",
+		"description": ("Journal Entry that recovered this advance against a salary payment."),
+	},
 ]
 
 
 def _logger():
-    return frappe.logger(LOGGER_NAME, allow_site=True)
+	return frappe.logger(LOGGER_NAME, allow_site=True)
 
 
 def _custom_field_exists(doctype: str, fieldname: str) -> bool:
-    """True when the Custom Field row is already there.
+	"""True when the Custom Field row is already there.
 
-    ``create_custom_fields`` returns nothing, so created-vs-existing has to be
-    observed before the call rather than read off its result.
-    """
-    try:
-        return bool(frappe.db.exists("Custom Field", {"dt": doctype, "fieldname": fieldname}))
-    except Exception:
-        return False
+	``create_custom_fields`` returns nothing, so created-vs-existing has to be
+	observed before the call rather than read off its result.
+	"""
+	try:
+		return bool(frappe.db.exists("Custom Field", {"dt": doctype, "fieldname": fieldname}))
+	except Exception:
+		return False
 
 
 def _ensure_fields(doctype: str, specs: List[Dict[str, Any]], log: Dict[str, List[str]]) -> None:
-    """Create (or bring in line) the given Custom Fields on ``doctype``.
+	"""Create (or bring in line) the given Custom Fields on ``doctype``.
 
-    Uses ``frappe.custom.doctype.custom_field.custom_field.create_custom_fields``
-    — the same helper ``api/test_kanban_setup.py`` reaches for — rather than
-    hand-inserting Custom Field docs, because it also clears the DocType cache
-    and runs ``frappe.db.updatedb`` so the new column is actually queryable in
-    the same migrate rather than one migrate later.
-    """
-    if not frappe.db.exists("DocType", doctype):
-        # Migrate ordering put this seeder ahead of the DocType, or the owning
-        # app is not installed. Not an error — the next migrate picks it up.
-        log.setdefault("skipped", []).append(f"{doctype}: DocType not present")
-        return
+	Uses ``frappe.custom.doctype.custom_field.custom_field.create_custom_fields``
+	— the same helper ``api/test_kanban_setup.py`` reaches for — rather than
+	hand-inserting Custom Field docs, because it also clears the DocType cache
+	and runs ``frappe.db.updatedb`` so the new column is actually queryable in
+	the same migrate rather than one migrate later.
+	"""
+	if not frappe.db.exists("DocType", doctype):
+		# Migrate ordering put this seeder ahead of the DocType, or the owning
+		# app is not installed. Not an error — the next migrate picks it up.
+		log.setdefault("skipped", []).append(f"{doctype}: DocType not present")
+		return
 
-    try:
-        from frappe.custom.doctype.custom_field.custom_field import create_custom_fields
-    except Exception:
-        _logger().error("Could not import create_custom_fields", exc_info=True)
-        return
+	try:
+		from frappe.custom.doctype.custom_field.custom_field import create_custom_fields
+	except Exception:
+		_logger().error("Could not import create_custom_fields", exc_info=True)
+		return
 
-    for spec in specs:
-        fieldname = spec["fieldname"]
-        try:
-            already = _custom_field_exists(doctype, fieldname)
-            # One call per field on purpose: a batched call means one bad spec
-            # takes the whole group down, and these six fields are what the
-            # approve path reads.
-            create_custom_fields({doctype: [dict(spec)]})
-            if already:
-                log["existing"].append(f"{doctype}.{fieldname}")
-            else:
-                log["created"].append(f"{doctype}.{fieldname}")
-        except Exception:
-            _logger().error(
-                f"Failed to ensure Custom Field {doctype}.{fieldname}", exc_info=True
-            )
+	for spec in specs:
+		fieldname = spec["fieldname"]
+		try:
+			already = _custom_field_exists(doctype, fieldname)
+			# One call per field on purpose: a batched call means one bad spec
+			# takes the whole group down, and these six fields are what the
+			# approve path reads.
+			create_custom_fields({doctype: [dict(spec)]})
+			if already:
+				log["existing"].append(f"{doctype}.{fieldname}")
+			else:
+				log["created"].append(f"{doctype}.{fieldname}")
+		except Exception:
+			_logger().error(f"Failed to ensure Custom Field {doctype}.{fieldname}", exc_info=True)
 
 
 def _ensure_customer_employee_field(log: Dict[str, List[str]]) -> None:
-    """Seed ``Customer.custom_employee`` — but only where ``Employee`` exists.
+	"""Seed ``Customer.custom_employee`` — but only where ``Employee`` exists.
 
-    Guarded on HRMS as a whole rather than on the ``Employee`` DocType alone so
-    this module has exactly one "is HRMS here" answer, the one
-    ``utils/employee_link.py`` publishes.
-    """
-    if not hrms_available():
-        log.setdefault("skipped", []).append(
-            f"Customer.{CUSTOMER_EMPLOYEE_FIELD}: HRMS not installed"
-        )
-        return
-    _ensure_fields("Customer", CUSTOMER_FIELDS, log)
+	Guarded on HRMS as a whole rather than on the ``Employee`` DocType alone so
+	this module has exactly one "is HRMS here" answer, the one
+	``utils/employee_link.py`` publishes.
+	"""
+	if not hrms_available():
+		log.setdefault("skipped", []).append(f"Customer.{CUSTOMER_EMPLOYEE_FIELD}: HRMS not installed")
+		return
+	_ensure_fields("Customer", CUSTOMER_FIELDS, log)
 
 
 def _ensure_advance_jarz_fields(log: Dict[str, List[str]]) -> None:
-    """Seed every ``custom_jarz_*`` field on ``Employee Advance``.
+	"""Seed every ``custom_jarz_*`` field on ``Employee Advance``.
 
-    The list has grown past the original six: the payout columns the approve
-    path reads, the posting time, and the two settlement columns the Monthly
-    Expenses board writes when a salary payment recovers an advance.
-    """
-    if not hrms_available():
-        log.setdefault("skipped", []).append(f"{ADVANCE_DOCTYPE}: HRMS not installed")
-        return
-    _ensure_fields(ADVANCE_DOCTYPE, ADVANCE_FIELDS, log)
+	The list has grown past the original six: the payout columns the approve
+	path reads, the posting time, and the two settlement columns the Monthly
+	Expenses board writes when a salary payment recovers an advance.
+	"""
+	if not hrms_available():
+		log.setdefault("skipped", []).append(f"{ADVANCE_DOCTYPE}: HRMS not installed")
+		return
+	_ensure_fields(ADVANCE_DOCTYPE, ADVANCE_FIELDS, log)
 
 
 def _find_advance_account(company: str) -> str:
-    """An existing Receivable ledger usable as ``Employee Advance.advance_account``.
+	"""An existing Receivable ledger usable as ``Employee Advance.advance_account``.
 
-    Deliberately a *lookup*, never a create: a chart-of-accounts node invented by
-    a migrate is a node nobody chose, in a tree an accountant owns. If nothing is
-    found the caller warns by name and the operator creates it.
-    """
-    try:
-        account = frappe.db.get_value(
-            "Account",
-            {
-                "company": company,
-                "is_group": 0,
-                "account_name": ADVANCE_ACCOUNT_NAME,
-                "account_type": ADVANCE_ACCOUNT_TYPE,
-            },
-            "name",
-        )
-        if account:
-            return str(account)
+	Deliberately a *lookup*, never a create: a chart-of-accounts node invented by
+	a migrate is a node nobody chose, in a tree an accountant owns. If nothing is
+	found the caller warns by name and the operator creates it.
+	"""
+	try:
+		account = frappe.db.get_value(
+			"Account",
+			{
+				"company": company,
+				"is_group": 0,
+				"account_name": ADVANCE_ACCOUNT_NAME,
+				"account_type": ADVANCE_ACCOUNT_TYPE,
+			},
+			"name",
+		)
+		if account:
+			return str(account)
 
-        # Fall back to any Receivable ledger whose name reads like an employee
-        # advance account — sites that translated or renamed the node still have
-        # one, and HRMS only cares about the account_type.
-        rows = (
-            frappe.get_all(
-                "Account",
-                filters={
-                    "company": company,
-                    "is_group": 0,
-                    "account_type": ADVANCE_ACCOUNT_TYPE,
-                },
-                or_filters=[
-                    ["Account", "account_name", "like", "%Employee Advance%"],
-                    ["Account", "name", "like", "%Employee Advance%"],
-                ],
-                fields=["name"],
-                order_by="name asc",
-                limit=1,
-            )
-            or []
-        )
-        if rows:
-            return str(rows[0]["name"])
-    except Exception:
-        _logger().error(
-            f"Failed looking up an employee advance account for {company}", exc_info=True
-        )
-    return ""
+		# Fall back to any Receivable ledger whose name reads like an employee
+		# advance account — sites that translated or renamed the node still have
+		# one, and HRMS only cares about the account_type.
+		rows = (
+			frappe.get_all(
+				"Account",
+				filters={
+					"company": company,
+					"is_group": 0,
+					"account_type": ADVANCE_ACCOUNT_TYPE,
+				},
+				or_filters=[
+					["Account", "account_name", "like", "%Employee Advance%"],
+					["Account", "name", "like", "%Employee Advance%"],
+				],
+				fields=["name"],
+				order_by="name asc",
+				limit=1,
+			)
+			or []
+		)
+		if rows:
+			return str(rows[0]["name"])
+	except Exception:
+		_logger().error(f"Failed looking up an employee advance account for {company}", exc_info=True)
+	return ""
 
 
 def _type_unused_advance_account(company: str, log: Dict[str, List[str]]) -> None:
-    """Set ``account_type = Receivable`` on an advance account that has none.
+	"""Set ``account_type = Receivable`` on an advance account that has none.
 
-    ERPNext creates "Employee Advances" under Loans and Advances with NO
-    ``account_type`` on some charts — which is what staging turned out to have on
-    2026-08-29: the node existed, correctly parented, right company, right
-    currency, and HRMS still refused every approval, because
-    ``validate_advance_account_type`` compares against ``"Receivable"`` exactly
-    and an empty type fails it.
+	ERPNext creates "Employee Advances" under Loans and Advances with NO
+	``account_type`` on some charts — which is what staging turned out to have on
+	2026-08-29: the node existed, correctly parented, right company, right
+	currency, and HRMS still refused every approval, because
+	``validate_advance_account_type`` compares against ``"Receivable"`` exactly
+	and an empty type fails it.
 
-    Repointing the Company default at some other Receivable ledger is NOT an
-    option: on this chart the only one is ``Debtors``, and putting staff advances
-    there merges them into customer AR.
+	Repointing the Company default at some other Receivable ledger is NOT an
+	option: on this chart the only one is ``Debtors``, and putting staff advances
+	there merges them into customer AR.
 
-    So the account is typed in place, but ONLY when every one of these holds:
-      * it is a leaf (``is_group = 0``) under the right company,
-      * its ``root_type`` is already ``Asset``,
-      * its ``account_type`` is genuinely empty -- never overwritten,
-      * it has NO GL entries.
+	So the account is typed in place, but ONLY when every one of these holds:
+	  * it is a leaf (``is_group = 0``) under the right company,
+	  * its ``root_type`` is already ``Asset``,
+	  * its ``account_type`` is genuinely empty -- never overwritten,
+	  * it has NO GL entries.
 
-    That last guard is the important one. Typing an empty account is a
-    classification, not a reclassification; doing the same to an account that has
-    already posted would silently change how existing entries are reported. If it
-    has entries, this warns and leaves it alone for an accountant.
-    """
-    try:
-        rows = (
-            frappe.get_all(
-                "Account",
-                filters={
-                    "company": company,
-                    "is_group": 0,
-                    "account_name": ADVANCE_ACCOUNT_NAME,
-                },
-                fields=["name", "account_type", "root_type"],
-                limit_page_length=0,
-            )
-            or []
-        )
-    except Exception:
-        _logger().error(
-            f"Failed looking for an untyped advance account in {company}", exc_info=True
-        )
-        return
+	That last guard is the important one. Typing an empty account is a
+	classification, not a reclassification; doing the same to an account that has
+	already posted would silently change how existing entries are reported. If it
+	has entries, this warns and leaves it alone for an accountant.
+	"""
+	try:
+		rows = (
+			frappe.get_all(
+				"Account",
+				filters={
+					"company": company,
+					"is_group": 0,
+					"account_name": ADVANCE_ACCOUNT_NAME,
+				},
+				fields=["name", "account_type", "root_type"],
+				limit_page_length=0,
+			)
+			or []
+		)
+	except Exception:
+		_logger().error(f"Failed looking for an untyped advance account in {company}", exc_info=True)
+		return
 
-    for row in rows:
-        account = str(row["name"])
-        if str(row.get("account_type") or "").strip():
-            continue  # already typed, whatever the type — not ours to change
-        if str(row.get("root_type") or "").strip() != "Asset":
-            log.setdefault("warnings", []).append(
-                f"{company}: {account} is untyped but its root_type is "
-                f"{row.get('root_type')!r}, not 'Asset' — left alone"
-            )
-            continue
-        try:
-            posted = frappe.db.count("GL Entry", {"account": account, "is_cancelled": 0})
-        except Exception:
-            _logger().error(f"Failed counting GL entries for {account}", exc_info=True)
-            continue
-        if posted:
-            log.setdefault("warnings", []).append(
-                f"{company}: {account} is untyped and has {posted} GL entries — "
-                f"NOT typed automatically; an accountant must set it to "
-                f"{ADVANCE_ACCOUNT_TYPE!r}"
-            )
-            continue
-        try:
-            frappe.db.set_value(
-                "Account", account, "account_type", ADVANCE_ACCOUNT_TYPE,
-                update_modified=False,
-            )
-            log["created"].append(
-                f"{company}: {account} account_type -> {ADVANCE_ACCOUNT_TYPE} "
-                f"(was unset, no GL entries)"
-            )
-        except Exception:
-            _logger().error(f"Failed typing {account} as {ADVANCE_ACCOUNT_TYPE}", exc_info=True)
+	for row in rows:
+		account = str(row["name"])
+		if str(row.get("account_type") or "").strip():
+			continue  # already typed, whatever the type — not ours to change
+		if str(row.get("root_type") or "").strip() != "Asset":
+			log.setdefault("warnings", []).append(
+				f"{company}: {account} is untyped but its root_type is "
+				f"{row.get('root_type')!r}, not 'Asset' — left alone"
+			)
+			continue
+		try:
+			posted = frappe.db.count("GL Entry", {"account": account, "is_cancelled": 0})
+		except Exception:
+			_logger().error(f"Failed counting GL entries for {account}", exc_info=True)
+			continue
+		if posted:
+			log.setdefault("warnings", []).append(
+				f"{company}: {account} is untyped and has {posted} GL entries — "
+				f"NOT typed automatically; an accountant must set it to "
+				f"{ADVANCE_ACCOUNT_TYPE!r}"
+			)
+			continue
+		try:
+			frappe.db.set_value(
+				"Account",
+				account,
+				"account_type",
+				ADVANCE_ACCOUNT_TYPE,
+				update_modified=False,
+			)
+			log["created"].append(
+				f"{company}: {account} account_type -> {ADVANCE_ACCOUNT_TYPE} " f"(was unset, no GL entries)"
+			)
+		except Exception:
+			_logger().error(f"Failed typing {account} as {ADVANCE_ACCOUNT_TYPE}", exc_info=True)
 
 
 def _warn_employee_advance_overrides(company: str, log: Dict[str, List[str]]) -> None:
-    """Name the Employee records whose advance ledger is CUSTOMER receivable.
+	"""Name the Employee records whose advance ledger is CUSTOMER receivable.
 
-    ``Employee Advance.advance_account`` is declared
-    ``fetch_from: employee.employee_advance_account`` with ``fetch_if_empty``, so
-    Frappe fills it at insert from the Employee record and every later
-    ``if not advance_account`` fallback — HRMS's ``before_submit`` included —
-    becomes a no-op. A Company default that is perfectly correct therefore
-    guarantees nothing.
+	``Employee Advance.advance_account`` is declared
+	``fetch_from: employee.employee_advance_account`` with ``fetch_if_empty``, so
+	Frappe fills it at insert from the Employee record and every later
+	``if not advance_account`` fallback — HRMS's ``before_submit`` included —
+	becomes a no-op. A Company default that is perfectly correct therefore
+	guarantees nothing.
 
-    That is not theory. On 2026-09-12 fifteen of twenty-four production Employee
-    records carried ``Debtors - J``, the company's ``default_receivable_account``,
-    typed into the Desk in June; three submitted advances totalling 6,000 EGP were
-    booked into customer AR while the advances ledger held zero GL entries.
+	That is not theory. On 2026-09-12 fifteen of twenty-four production Employee
+	records carried ``Debtors - J``, the company's ``default_receivable_account``,
+	typed into the Desk in June; three submitted advances totalling 6,000 EGP were
+	booked into customer AR while the advances ledger held zero GL entries.
 
-    ``api/employee_advances.py`` now refuses such a value, but it can only do so
-    on the two endpoints it owns. An advance raised directly in the Desk — which
-    is HRMS's own intended flow — still takes whatever the Employee record says.
-    This is the migrate-time detector for the master data itself: it REPORTS and
-    never writes, because clearing a field somebody may have set deliberately is
-    an operator's decision, not a seeder's.
-    """
-    try:
-        if not frappe.db.has_column("Employee", EMPLOYEE_ADVANCE_FIELD):
-            return
+	``api/employee_advances.py`` now refuses such a value, but it can only do so
+	on the two endpoints it owns. An advance raised directly in the Desk — which
+	is HRMS's own intended flow — still takes whatever the Employee record says.
+	This is the migrate-time detector for the master data itself: it REPORTS and
+	never writes, because clearing a field somebody may have set deliberately is
+	an operator's decision, not a seeder's.
+	"""
+	try:
+		if not frappe.db.has_column("Employee", EMPLOYEE_ADVANCE_FIELD):
+			return
 
-        customer_ar = str(
-            frappe.db.get_value("Company", company, "default_receivable_account") or ""
-        ).strip()
-        if not customer_ar:
-            return
+		customer_ar = str(frappe.db.get_value("Company", company, "default_receivable_account") or "").strip()
+		if not customer_ar:
+			return
 
-        rows = frappe.get_all(
-            "Employee",
-            filters={EMPLOYEE_ADVANCE_FIELD: customer_ar, "company": company},
-            fields=["name", "employee_name"],
-            limit=50,
-        ) or []
-        if not rows:
-            return
+		rows = (
+			frappe.get_all(
+				"Employee",
+				filters={EMPLOYEE_ADVANCE_FIELD: customer_ar, "company": company},
+				fields=["name", "employee_name"],
+				limit=50,
+			)
+			or []
+		)
+		if not rows:
+			return
 
-        names = ", ".join(f"{r['name']} ({r['employee_name']})" for r in rows[:10])
-        more = f" and {len(rows) - 10} more" if len(rows) > 10 else ""
-        log.setdefault("warnings", []).append(
-            f"{company}: {len(rows)} Employee record(s) have "
-            f"{EMPLOYEE_ADVANCE_FIELD} = {customer_ar!r}, which is the CUSTOMER "
-            f"receivable account — advances raised for them in the Desk will be "
-            f"booked into customer AR. Clear the field so the Company default "
-            f"applies: {names}{more}"
-        )
-    except Exception:
-        # A detector must never be the thing that aborts a shared migrate.
-        _logger().error(
-            f"Failed to check employee advance-account overrides for {company}", exc_info=True
-        )
+		names = ", ".join(f"{r['name']} ({r['employee_name']})" for r in rows[:10])
+		more = f" and {len(rows) - 10} more" if len(rows) > 10 else ""
+		log.setdefault("warnings", []).append(
+			f"{company}: {len(rows)} Employee record(s) have "
+			f"{EMPLOYEE_ADVANCE_FIELD} = {customer_ar!r}, which is the CUSTOMER "
+			f"receivable account — advances raised for them in the Desk will be "
+			f"booked into customer AR. Clear the field so the Company default "
+			f"applies: {names}{more}"
+		)
+	except Exception:
+		# A detector must never be the thing that aborts a shared migrate.
+		_logger().error(f"Failed to check employee advance-account overrides for {company}", exc_info=True)
 
 
 def _verify_advance_accounts(log: Dict[str, List[str]]) -> None:
-    """Report — and only where it is unambiguous, repair — the advance account.
+	"""Report — and only where it is unambiguous, repair — the advance account.
 
-    ``EmployeeAdvance.before_submit`` falls back to
-    ``Company.default_employee_advance_account`` and throws when it is still
-    empty, and ``validate_advance_account_type`` throws unless that account is
-    ``Receivable``. Both throws land on a manager pressing "approve" with an
-    employee standing in front of them, so the gap is worth naming at migrate
-    time instead of at approval time.
+	``EmployeeAdvance.before_submit`` falls back to
+	``Company.default_employee_advance_account`` and throws when it is still
+	empty, and ``validate_advance_account_type`` throws unless that account is
+	``Receivable``. Both throws land on a manager pressing "approve" with an
+	employee standing in front of them, so the gap is worth naming at migrate
+	time instead of at approval time.
 
-    Three outcomes, all of them loud:
-      * already configured and Receivable -> recorded as existing;
-      * unset but an unambiguous "Employee Advances" Receivable ledger exists ->
-        the Company default is pointed at it;
-      * neither -> a warning naming the company. Nothing is created.
-    """
-    try:
-        if not hrms_available():
-            log.setdefault("skipped", []).append("advance account check: HRMS not installed")
-            return
+	Three outcomes, all of them loud:
+	  * already configured and Receivable -> recorded as existing;
+	  * unset but an unambiguous "Employee Advances" Receivable ledger exists ->
+	    the Company default is pointed at it;
+	  * neither -> a warning naming the company. Nothing is created.
+	"""
+	try:
+		if not hrms_available():
+			log.setdefault("skipped", []).append("advance account check: HRMS not installed")
+			return
 
-        # The Company field is an HRMS Custom Field, so it is absent on a bench
-        # where HRMS was installed after this app — probing beats assuming.
-        try:
-            has_field = bool(frappe.db.has_column("Company", COMPANY_ADVANCE_FIELD))
-        except Exception:
-            has_field = False
-        if not has_field:
-            log.setdefault("warnings", []).append(
-                f"Company.{COMPANY_ADVANCE_FIELD} does not exist; run bench migrate for hrms"
-            )
-            return
+		# The Company field is an HRMS Custom Field, so it is absent on a bench
+		# where HRMS was installed after this app — probing beats assuming.
+		try:
+			has_field = bool(frappe.db.has_column("Company", COMPANY_ADVANCE_FIELD))
+		except Exception:
+			has_field = False
+		if not has_field:
+			log.setdefault("warnings", []).append(
+				f"Company.{COMPANY_ADVANCE_FIELD} does not exist; run bench migrate for hrms"
+			)
+			return
 
-        companies = [row["name"] for row in (frappe.get_all("Company", fields=["name"]) or [])]
-    except Exception:
-        _logger().error("Failed to enumerate companies for the advance-account check", exc_info=True)
-        return
+		companies = [row["name"] for row in (frappe.get_all("Company", fields=["name"]) or [])]
+	except Exception:
+		_logger().error("Failed to enumerate companies for the advance-account check", exc_info=True)
+		return
 
-    for company in companies:
-        try:
-            # Runs FIRST, and before the `configured` read below, because the
-            # common broken shape is a Company default already pointing at an
-            # untyped "Employee Advances" node. Typing it here turns the warning
-            # branch below into the success branch on the same migrate, instead
-            # of reporting a gap that nothing ever closes.
-            _type_unused_advance_account(company, log)
-            _warn_employee_advance_overrides(company, log)
+	for company in companies:
+		try:
+			# Runs FIRST, and before the `configured` read below, because the
+			# common broken shape is a Company default already pointing at an
+			# untyped "Employee Advances" node. Typing it here turns the warning
+			# branch below into the success branch on the same migrate, instead
+			# of reporting a gap that nothing ever closes.
+			_type_unused_advance_account(company, log)
+			_warn_employee_advance_overrides(company, log)
 
-            configured = str(
-                frappe.db.get_value("Company", company, COMPANY_ADVANCE_FIELD) or ""
-            ).strip()
+			configured = str(frappe.db.get_value("Company", company, COMPANY_ADVANCE_FIELD) or "").strip()
 
-            if configured:
-                account_type = str(
-                    frappe.db.get_value("Account", configured, "account_type") or ""
-                ).strip()
-                if account_type == ADVANCE_ACCOUNT_TYPE:
-                    log["existing"].append(f"{company}: advance account {configured}")
-                else:
-                    # Do not "fix" this by repointing: an account someone chose
-                    # deliberately is not ours to replace, and the wrong type is
-                    # a decision to revisit, not a typo to patch.
-                    log.setdefault("warnings", []).append(
-                        f"{company}: {COMPANY_ADVANCE_FIELD} is {configured!r} whose "
-                        f"account_type is {account_type or 'unset'!r}, not "
-                        f"{ADVANCE_ACCOUNT_TYPE!r} — Employee Advance submit will be refused"
-                    )
-                continue
+			if configured:
+				account_type = str(frappe.db.get_value("Account", configured, "account_type") or "").strip()
+				if account_type == ADVANCE_ACCOUNT_TYPE:
+					log["existing"].append(f"{company}: advance account {configured}")
+				else:
+					# Do not "fix" this by repointing: an account someone chose
+					# deliberately is not ours to replace, and the wrong type is
+					# a decision to revisit, not a typo to patch.
+					log.setdefault("warnings", []).append(
+						f"{company}: {COMPANY_ADVANCE_FIELD} is {configured!r} whose "
+						f"account_type is {account_type or 'unset'!r}, not "
+						f"{ADVANCE_ACCOUNT_TYPE!r} — Employee Advance submit will be refused"
+					)
+				continue
 
-            candidate = _find_advance_account(company)
-            if not candidate:
-                log.setdefault("warnings", []).append(
-                    f"{company}: no {ADVANCE_ACCOUNT_TYPE} account named "
-                    f"{ADVANCE_ACCOUNT_NAME!r} exists and "
-                    f"{COMPANY_ADVANCE_FIELD} is unset — create it, then set the "
-                    f"Company default, or every advance approval will be refused"
-                )
-                continue
+			candidate = _find_advance_account(company)
+			if not candidate:
+				log.setdefault("warnings", []).append(
+					f"{company}: no {ADVANCE_ACCOUNT_TYPE} account named "
+					f"{ADVANCE_ACCOUNT_NAME!r} exists and "
+					f"{COMPANY_ADVANCE_FIELD} is unset — create it, then set the "
+					f"Company default, or every advance approval will be refused"
+				)
+				continue
 
-            # db_set, not a full Company save. A full save of Company revalidates
-            # every Link on it, and this app has already been bitten by exactly
-            # that: one dangling Link on Jarz POS Settings silently broke every
-            # later full save of that Single. A migrate-time seeder must not be
-            # able to fail on an unrelated field.
-            frappe.db.set_value(
-                "Company", company, COMPANY_ADVANCE_FIELD, candidate, update_modified=False
-            )
-            log["created"].append(f"{company}: {COMPANY_ADVANCE_FIELD} -> {candidate}")
-        except Exception:
-            _logger().error(
-                f"Failed to verify the employee advance account for {company}", exc_info=True
-            )
+			# db_set, not a full Company save. A full save of Company revalidates
+			# every Link on it, and this app has already been bitten by exactly
+			# that: one dangling Link on Jarz POS Settings silently broke every
+			# later full save of that Single. A migrate-time seeder must not be
+			# able to fail on an unrelated field.
+			frappe.db.set_value("Company", company, COMPANY_ADVANCE_FIELD, candidate, update_modified=False)
+			log["created"].append(f"{company}: {COMPANY_ADVANCE_FIELD} -> {candidate}")
+		except Exception:
+			_logger().error(f"Failed to verify the employee advance account for {company}", exc_info=True)
 
 
 def ensure_employee_link_fields() -> Dict[str, List[str]]:
-    """Idempotently seed the employee-advance schema. Safe on every migrate.
+	"""Idempotently seed the employee-advance schema. Safe on every migrate.
 
-    Never raises. This runs inside the shared ``bench migrate`` that the whole
-    bench depends on; a raising seeder does not fail its own feature, it aborts
-    the migrate for every app on the site.
-    """
-    log: Dict[str, List[str]] = {
-        "created": [],
-        "existing": [],
-        "skipped": [],
-        "warnings": [],
-    }
-    logger = _logger()
+	Never raises. This runs inside the shared ``bench migrate`` that the whole
+	bench depends on; a raising seeder does not fail its own feature, it aborts
+	the migrate for every app on the site.
+	"""
+	log: Dict[str, List[str]] = {
+		"created": [],
+		"existing": [],
+		"skipped": [],
+		"warnings": [],
+	}
+	logger = _logger()
 
-    try:
-        _ensure_customer_employee_field(log)
-        _ensure_advance_jarz_fields(log)
-        # Last: the account check reads Company rows and is pure diagnostics for
-        # the two field seeders above, which is the order an operator reads the
-        # summary in.
-        _verify_advance_accounts(log)
+	try:
+		_ensure_customer_employee_field(log)
+		_ensure_advance_jarz_fields(log)
+		# Last: the account check reads Company rows and is pure diagnostics for
+		# the two field seeders above, which is the order an operator reads the
+		# summary in.
+		_verify_advance_accounts(log)
 
-        if log["created"]:
-            frappe.db.commit()
+		if log["created"]:
+			frappe.db.commit()
 
-        # Logged at ERROR level on purpose. Frappe's default log level off a dev
-        # server is ERROR, so .info() and .warning() are discarded entirely on
-        # staging and production — a seeder summary that exists only at INFO is a
-        # summary nobody will ever read where it matters.
-        logger.error(
-            "employee_link_setup: created=%s existing=%s skipped=%s"
-            % (log["created"], log["existing"], log["skipped"])
-        )
-        for warning in log["warnings"]:
-            logger.error("employee_link_setup WARNING: " + warning)
-    except Exception:
-        # Never let schema seeding break a migrate for the whole bench.
-        logger.error("ensure_employee_link_fields failed unexpectedly", exc_info=True)
+		# Logged at ERROR level on purpose. Frappe's default log level off a dev
+		# server is ERROR, so .info() and .warning() are discarded entirely on
+		# staging and production — a seeder summary that exists only at INFO is a
+		# summary nobody will ever read where it matters.
+		logger.error(
+			"employee_link_setup: created=%s existing=%s skipped=%s"
+			% (log["created"], log["existing"], log["skipped"])
+		)
+		for warning in log["warnings"]:
+			logger.error("employee_link_setup WARNING: " + warning)
+	except Exception:
+		# Never let schema seeding break a migrate for the whole bench.
+		logger.error("ensure_employee_link_fields failed unexpectedly", exc_info=True)
 
-    return log
+	return log
 
 
 def ensure_employee_customers() -> Dict[str, Any]:
-    """Give every Active employee its one staff Customer. Safe on every migrate.
+	"""Give every Active employee its one staff Customer. Safe on every migrate.
 
-    Runs right after :func:`ensure_employee_link_fields`, which creates (and
-    indexes) ``Customer.custom_employee`` — this cannot do anything before that
-    column exists. The work itself lives in
-    ``jarz_pos.services.employee_customers.ensure_customers_for_all_employees``
-    (idempotent: an employee that already has its staff customer is reported as
-    ``existing`` and nothing is written). Customers outside the ``Employee``
-    group that carry a stale link are only REPORTED as conflicts, never changed.
+	Runs right after :func:`ensure_employee_link_fields`, which creates (and
+	indexes) ``Customer.custom_employee`` — this cannot do anything before that
+	column exists. The work itself lives in
+	``jarz_pos.services.employee_customers.ensure_customers_for_all_employees``
+	(idempotent: an employee that already has its staff customer is reported as
+	``existing`` and nothing is written). Customers outside the ``Employee``
+	group that carry a stale link are only REPORTED as conflicts, never changed.
 
-    Never raises: a raising seeder aborts the shared migrate for every app.
-    """
-    logger = _logger()
-    summary: Dict[str, Any] = {}
-    try:
-        if not hrms_available():
-            logger.error("employee_customers: skipped, HRMS not installed")
-            return summary
+	Never raises: a raising seeder aborts the shared migrate for every app.
+	"""
+	logger = _logger()
+	summary: Dict[str, Any] = {}
+	try:
+		if not hrms_available():
+			logger.error("employee_customers: skipped, HRMS not installed")
+			return summary
 
-        # Lazy: keeps this module importable with no top-level service imports.
-        from jarz_pos.services.employee_customers import ensure_customers_for_all_employees
+		# Lazy: keeps this module importable with no top-level service imports.
+		from jarz_pos.services.employee_customers import ensure_customers_for_all_employees
 
-        summary = ensure_customers_for_all_employees() or {}
+		summary = ensure_customers_for_all_employees() or {}
 
-        def _names(key: str) -> List[str]:
-            return [
-                str(item.get("customer") or item.get("employee") or "")
-                for item in (summary.get(key) or [])
-            ]
+		def _names(key: str) -> List[str]:
+			return [
+				str(item.get("customer") or item.get("employee") or "") for item in (summary.get(key) or [])
+			]
 
-        line = (
-            "employee_customers: created=%s adopted=%s existing=%d skipped=%s conflicts=%s"
-            % (
-                _names("created"),
-                _names("adopted"),
-                len(summary.get("existing") or []),
-                summary.get("skipped") or [],
-                summary.get("conflicts") or [],
-            )
-        )
-        # ERROR level for the same reason as ensure_employee_link_fields: .info()
-        # is discarded off a dev server. print() lands in the migrate output.
-        logger.error(line)
-        print(line)
-    except Exception:
-        logger.error("ensure_employee_customers failed unexpectedly", exc_info=True)
+		line = "employee_customers: created=%s adopted=%s existing=%d skipped=%s conflicts=%s" % (
+			_names("created"),
+			_names("adopted"),
+			len(summary.get("existing") or []),
+			summary.get("skipped") or [],
+			summary.get("conflicts") or [],
+		)
+		# ERROR level for the same reason as ensure_employee_link_fields: .info()
+		# is discarded off a dev server. print() lands in the migrate output.
+		logger.error(line)
+		print(line)
+	except Exception:
+		logger.error("ensure_employee_customers failed unexpectedly", exc_info=True)
 
-    return summary
+	return summary

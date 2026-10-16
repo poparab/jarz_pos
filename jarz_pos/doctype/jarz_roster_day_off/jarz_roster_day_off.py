@@ -28,52 +28,52 @@ from frappe.utils import getdate
 
 
 class JarzRosterDayOff(Document):
-    def validate(self):
-        self.validate_not_duplicate()
-        self.validate_cover_is_not_self()
-        self.stamp_author()
+	def validate(self):
+		self.validate_not_duplicate()
+		self.validate_cover_is_not_self()
+		self.stamp_author()
 
-    def validate_not_duplicate(self):
-        """One row per (employee, date).
+	def validate_not_duplicate(self):
+		"""One row per (employee, date).
 
-        Enforced here rather than by a unique index because the pair is the
-        business key but neither column alone is, and a duplicate is a normal
-        user action (tapping "off" twice) that deserves a readable message
-        rather than an IntegrityError.
-        """
-        if not (self.employee and self.off_date):
-            return
+		Enforced here rather than by a unique index because the pair is the
+		business key but neither column alone is, and a duplicate is a normal
+		user action (tapping "off" twice) that deserves a readable message
+		rather than an IntegrityError.
+		"""
+		if not (self.employee and self.off_date):
+			return
 
-        existing = frappe.db.exists(
-            "Jarz Roster Day Off",
-            {
-                "employee": self.employee,
-                "off_date": getdate(self.off_date),
-                "name": ("!=", self.name or ""),
-            },
-        )
-        if existing:
-            frappe.throw(
-                _("{0} is already marked off on {1}.").format(
-                    frappe.bold(self.employee_name or self.employee),
-                    frappe.bold(frappe.format(getdate(self.off_date), {"fieldtype": "Date"})),
-                ),
-                title=_("Already Off"),
-            )
+		existing = frappe.db.exists(
+			"Jarz Roster Day Off",
+			{
+				"employee": self.employee,
+				"off_date": getdate(self.off_date),
+				"name": ("!=", self.name or ""),
+			},
+		)
+		if existing:
+			frappe.throw(
+				_("{0} is already marked off on {1}.").format(
+					frappe.bold(self.employee_name or self.employee),
+					frappe.bold(frappe.format(getdate(self.off_date), {"fieldtype": "Date"})),
+				),
+				title=_("Already Off"),
+			)
 
-    def validate_cover_is_not_self(self):
-        """Nobody covers for themselves.
+	def validate_cover_is_not_self(self):
+		"""Nobody covers for themselves.
 
-        Worth a guard rather than trusting the UI: the covering employee is
-        picked from a list that legitimately contains everyone on the branch,
-        and letting the pair collapse would make the swap below break and
-        re-insert the same person's shift on the same day -- which HRMS answers
-        with an opaque OverlappingShiftError.
-        """
-        if self.covered_by and self.covered_by == self.employee:
-            frappe.throw(_("An employee cannot cover their own day off."))
+		Worth a guard rather than trusting the UI: the covering employee is
+		picked from a list that legitimately contains everyone on the branch,
+		and letting the pair collapse would make the swap below break and
+		re-insert the same person's shift on the same day -- which HRMS answers
+		with an opaque OverlappingShiftError.
+		"""
+		if self.covered_by and self.covered_by == self.employee:
+			frappe.throw(_("An employee cannot cover their own day off."))
 
-    def stamp_author(self):
-        if not self.created_by_user:
-            self.created_by_user = frappe.session.user
-            self.created_by_name = frappe.db.get_value("User", frappe.session.user, "full_name")
+	def stamp_author(self):
+		if not self.created_by_user:
+			self.created_by_user = frappe.session.user
+			self.created_by_name = frappe.db.get_value("User", frappe.session.user, "full_name")

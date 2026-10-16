@@ -8,152 +8,147 @@ from jarz_pos.utils.error_handler import handle_api_error, success_response
 
 @frappe.whitelist(allow_guest=False)
 def ping():
-    """Simple ping endpoint to test connection"""
-    try:
-        return success_response(
-            data={
-                "timestamp": frappe.utils.now(),
-                "user": frappe.session.user,
-                "app_version": "1.0.0"
-            },
-            message="Backend is connected successfully"
-        )
-    except Exception as e:
-        return handle_api_error(e, "Ping Test")
+	"""Simple ping endpoint to test connection"""
+	try:
+		return success_response(
+			data={"timestamp": frappe.utils.now(), "user": frappe.session.user, "app_version": "1.0.0"},
+			message="Backend is connected successfully",
+		)
+	except Exception as e:
+		return handle_api_error(e, "Ping Test")
 
 
 @frappe.whitelist(allow_guest=False)
 def health_check():
-    """Comprehensive health check for the backend"""
-    try:
-        # Test database connection
-        db_test = frappe.db.sql("SELECT 1")[0][0] == 1
-        
-        # Test Redis connection (if available)
-        redis_test = True
-        try:
-            frappe.cache().get("test_key")
-        except Exception:
-            redis_test = False
-            
-        # Get app info
-        app_info = {
-            "app_name": "jarz_pos",
-            "app_version": "1.0.0",
-            "frappe_version": frappe.__version__,
-            "site": frappe.local.site
-        }
-        
-        return {
-            "success": True,
-            "message": "All systems operational",
-            "timestamp": frappe.utils.now(),
-            "user": frappe.session.user,
-            "tests": {
-                "database": db_test,
-                "redis": redis_test
-            },
-            "app_info": app_info
-        }
-        
-    except Exception as e:
-        frappe.log_error(f"Health check failed: {str(e)}", "Health Check Error")
-        return {
-            "success": False,
-            "message": f"Health check failed: {str(e)}",
-            "timestamp": frappe.utils.now(),
-            "user": frappe.session.user
-        }
+	"""Comprehensive health check for the backend"""
+	try:
+		# Test database connection
+		db_test = frappe.db.sql("SELECT 1")[0][0] == 1
+
+		# Test Redis connection (if available)
+		redis_test = True
+		try:
+			frappe.cache().get("test_key")
+		except Exception:
+			redis_test = False
+
+		# Get app info
+		app_info = {
+			"app_name": "jarz_pos",
+			"app_version": "1.0.0",
+			"frappe_version": frappe.__version__,
+			"site": frappe.local.site,
+		}
+
+		return {
+			"success": True,
+			"message": "All systems operational",
+			"timestamp": frappe.utils.now(),
+			"user": frappe.session.user,
+			"tests": {"database": db_test, "redis": redis_test},
+			"app_info": app_info,
+		}
+
+	except Exception as e:
+		frappe.log_error(f"Health check failed: {str(e)}", "Health Check Error")
+		return {
+			"success": False,
+			"message": f"Health check failed: {str(e)}",
+			"timestamp": frappe.utils.now(),
+			"user": frappe.session.user,
+		}
 
 
 @frappe.whitelist(allow_guest=False)
 def get_backend_info():
-    """Get detailed backend information"""
-    return {
-        "success": True,
-        "data": {
-            "app_name": "Jarz POS",
-            "app_version": "1.0.0",
-            "frappe_version": frappe.__version__,
-            "site": frappe.local.site,
-            "user": frappe.session.user,
-            "user_full_name": frappe.get_value("User", frappe.session.user, "full_name"),
-            "api_endpoints": [
-                "/api/method/jarz_pos.api.test_connection.ping",
-                "/api/method/jarz_pos.api.test_connection.health_check",
-                "/api/method/jarz_pos.api.pos.get_pos_profiles",
-                "/api/method/jarz_pos.api.invoices.create_pos_invoice",
-                "/api/method/jarz_pos.api.customer.get_customers",
-                "/api/method/jarz_pos.api.couriers.get_couriers"
-            ],
-            "timestamp": frappe.utils.now()
-        }
-    }
+	"""Get detailed backend information"""
+	return {
+		"success": True,
+		"data": {
+			"app_name": "Jarz POS",
+			"app_version": "1.0.0",
+			"frappe_version": frappe.__version__,
+			"site": frappe.local.site,
+			"user": frappe.session.user,
+			"user_full_name": frappe.get_value("User", frappe.session.user, "full_name"),
+			"api_endpoints": [
+				"/api/method/jarz_pos.api.test_connection.ping",
+				"/api/method/jarz_pos.api.test_connection.health_check",
+				"/api/method/jarz_pos.api.pos.get_pos_profiles",
+				"/api/method/jarz_pos.api.invoices.create_pos_invoice",
+				"/api/method/jarz_pos.api.customer.get_customers",
+				"/api/method/jarz_pos.api.couriers.get_couriers",
+			],
+			"timestamp": frappe.utils.now(),
+		},
+	}
+
 
 @frappe.whitelist()
 def emit_test_event(event: str = WS_EVENTS.NEW_INVOICE):
-    """Emit a realtime test event to verify Socket.IO delivery to clients.
-    Default event is 'jarz_pos_new_invoice'. Requires auth.
+	"""Emit a realtime test event to verify Socket.IO delivery to clients.
+	Default event is 'jarz_pos_new_invoice'. Requires auth.
 
-    The decorator now matches that last sentence (changed 2026-08-19). It read
-    ``allow_guest=True`` while the docstring claimed auth was required — and the
-    docstring was the correct description of the intent. Anyone on the internet
-    could push a fake new-order event to staff clients.
-    """
-    try:
-        now = frappe.utils.now()
-        payload = {"name": f"TEST-SI-{now}", "timestamp": now, "by": frappe.session.user}
-        # Debug endpoint: aim at the caller. user="*" is the room "user:*", which
-        # nobody joins, so this never proved the socket worked.
-        frappe.publish_realtime(event, payload, user=frappe.session.user)
-        # Also emit a kanban-style state-change with no old_state to trigger a refresh
-        kanban_payload = {
-            "event": WS_EVENTS.INVOICE_STATE_CHANGE,
-            "invoice_id": payload["name"],
-            "old_state_key": None,
-            "new_state_key": "received",
-            "old_state": None,
-            "new_state": "Received",
-        }
-        frappe.publish_realtime(WS_EVENTS.INVOICE_STATE_CHANGE, kanban_payload, user=frappe.session.user)
-        return success_response(message="Event emitted", data=payload)
-    except Exception as e:
-        return handle_api_error(e, "Emit Test Event")
+	The decorator now matches that last sentence (changed 2026-08-19). It read
+	``allow_guest=True`` while the docstring claimed auth was required — and the
+	docstring was the correct description of the intent. Anyone on the internet
+	could push a fake new-order event to staff clients.
+	"""
+	try:
+		now = frappe.utils.now()
+		payload = {"name": f"TEST-SI-{now}", "timestamp": now, "by": frappe.session.user}
+		# Debug endpoint: aim at the caller. user="*" is the room "user:*", which
+		# nobody joins, so this never proved the socket worked.
+		frappe.publish_realtime(event, payload, user=frappe.session.user)
+		# Also emit a kanban-style state-change with no old_state to trigger a refresh
+		kanban_payload = {
+			"event": WS_EVENTS.INVOICE_STATE_CHANGE,
+			"invoice_id": payload["name"],
+			"old_state_key": None,
+			"new_state_key": "received",
+			"old_state": None,
+			"new_state": "Received",
+		}
+		frappe.publish_realtime(WS_EVENTS.INVOICE_STATE_CHANGE, kanban_payload, user=frappe.session.user)
+		return success_response(message="Event emitted", data=payload)
+	except Exception as e:
+		return handle_api_error(e, "Emit Test Event")
 
 
 # ---------------------------------------------------------------------------
 # Maintenance utility: Reload missing standard DocTypes from this app
 # ---------------------------------------------------------------------------
 
+
 @frappe.whitelist(allow_guest=False)
 def reload_jarz_doctypes():
-    """Reload standard DocTypes shipped with this app into the site DB.
-    Useful when DocTypes were removed during migrate and need restoring.
+	"""Reload standard DocTypes shipped with this app into the site DB.
+	Useful when DocTypes were removed during migrate and need restoring.
 
-    System Manager only: ``frappe.reload_doc`` re-imports DocType definitions from
-    disk and runs the resulting schema changes, then commits. ``allow_guest=False``
-    alone meant any logged in user could trigger a schema reload on production.
+	System Manager only: ``frappe.reload_doc`` re-imports DocType definitions from
+	disk and runs the resulting schema changes, then commits. ``allow_guest=False``
+	alone meant any logged in user could trigger a schema reload on production.
 
-    Kept rather than deleted: it is the documented recovery path for DocTypes lost
-    during a migrate, and it has no internal callers to break.
-    """
-    frappe.only_for("System Manager")
-    doctypes = [
-        ("jarz_pos", "doctype", "jarz_bundle"),
-        ("jarz_pos", "doctype", "jarz_bundle_item_group"),
-        ("jarz_pos", "doctype", "pos_profile_timetable"),
-        ("jarz_pos", "doctype", "pos_profile_day_timing"),
-        ("jarz_pos", "doctype", "courier"),
-        ("jarz_pos", "doctype", "courier_transaction"),
-        ("jarz_pos", "doctype", "custom_settings"),
-        ("jarz_pos", "doctype", "city"),
-    ]
-    reloaded = []
-    for module, doctype_type, name in doctypes:
-        try:
-            frappe.reload_doc(module, doctype_type, name)
-            reloaded.append(name)
-        except Exception as e:
-            frappe.log_error(f"Failed to reload {name}: {e}", "Jarz POS Reload DocTypes")
-    frappe.db.commit()
-    return {"success": True, "reloaded": reloaded}
+	Kept rather than deleted: it is the documented recovery path for DocTypes lost
+	during a migrate, and it has no internal callers to break.
+	"""
+	frappe.only_for("System Manager")
+	doctypes = [
+		("jarz_pos", "doctype", "jarz_bundle"),
+		("jarz_pos", "doctype", "jarz_bundle_item_group"),
+		("jarz_pos", "doctype", "pos_profile_timetable"),
+		("jarz_pos", "doctype", "pos_profile_day_timing"),
+		("jarz_pos", "doctype", "courier"),
+		("jarz_pos", "doctype", "courier_transaction"),
+		("jarz_pos", "doctype", "custom_settings"),
+		("jarz_pos", "doctype", "city"),
+	]
+	reloaded = []
+	for module, doctype_type, name in doctypes:
+		try:
+			frappe.reload_doc(module, doctype_type, name)
+			reloaded.append(name)
+		except Exception as e:
+			frappe.log_error(f"Failed to reload {name}: {e}", "Jarz POS Reload DocTypes")
+	frappe.db.commit()
+	return {"success": True, "reloaded": reloaded}

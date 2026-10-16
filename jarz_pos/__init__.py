@@ -24,6 +24,7 @@ import importlib as _importlib
 
 _LEGACY_ROOT = __name__ + ".jarz_pos"
 
+
 class _LegacyAliasModule:
 	"""Module proxy that forwards attribute access to subpackages.
 

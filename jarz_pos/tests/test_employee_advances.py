@@ -45,91 +45,91 @@ MODULE = "jarz_pos.api.employee_advances"
 
 
 def _raise_frappe(message, exc=None, title=None):
-    """Stand-in for ``frappe.throw``: honours the exception class when given one."""
-    if exc and isinstance(exc, type) and issubclass(exc, Exception):
-        raise exc(message)
-    raise ValueError(message)
+	"""Stand-in for ``frappe.throw``: honours the exception class when given one."""
+	if exc and isinstance(exc, type) and issubclass(exc, Exception):
+		raise exc(message)
+	raise ValueError(message)
 
 
 def _mock_frappe(roles, user="someone@example.com"):
-    """A ``frappe`` double whose ``throw`` actually throws.
+	"""A ``frappe`` double whose ``throw`` actually throws.
 
-    A bare ``MagicMock`` returns a mock from ``frappe.throw`` and keeps going,
-    which would make every permission test pass regardless of the gate.
-    """
-    mock = MagicMock()
-    mock.session.user = user
-    mock.get_roles.return_value = list(roles)
-    mock.PermissionError = PermissionError
-    mock.throw.side_effect = _raise_frappe
-    return mock
+	A bare ``MagicMock`` returns a mock from ``frappe.throw`` and keeps going,
+	which would make every permission test pass regardless of the gate.
+	"""
+	mock = MagicMock()
+	mock.session.user = user
+	mock.get_roles.return_value = list(roles)
+	mock.PermissionError = PermissionError
+	mock.throw.side_effect = _raise_frappe
+	return mock
 
 
 def _flt(value, precision=None):
-    """Deterministic stand-in for ``frappe.utils.flt``. Patched in by name.
+	"""Deterministic stand-in for ``frappe.utils.flt``. Patched in by name.
 
-    This is NOT belt-and-braces — without it every money assertion in this file
-    silently reads 0.0, and the module under test rejects a valid 1500 EGP
-    request with "Amount must be greater than zero."
+	This is NOT belt-and-braces — without it every money assertion in this file
+	silently reads 0.0, and the module under test rejects a valid 1500 EGP
+	request with "Amount must be greater than zero."
 
-    Why: ``api/employee_advances`` binds ``flt`` at import
-    (``from frappe.utils import flt``), so patching the ``frappe`` module object
-    does not reach it — the REAL ``flt`` runs. And the real ``flt(x, 2)`` calls
-    ``rounded()``, whose first statement is
-    ``frappe.get_system_settings("rounding_method")``
-    (frappe/utils/data.py:1244). Run without a site — which is how this module
-    is executed via ``env/bin/python -m unittest`` — that read raises, and
-    ``flt``'s own ``except Exception`` swallows it and returns 0.0
-    (frappe/utils/data.py:1155-1158). Every currency value collapses to zero
-    with no error anywhere.
+	Why: ``api/employee_advances`` binds ``flt`` at import
+	(``from frappe.utils import flt``), so patching the ``frappe`` module object
+	does not reach it — the REAL ``flt`` runs. And the real ``flt(x, 2)`` calls
+	``rounded()``, whose first statement is
+	``frappe.get_system_settings("rounding_method")``
+	(frappe/utils/data.py:1244). Run without a site — which is how this module
+	is executed via ``env/bin/python -m unittest`` — that read raises, and
+	``flt``'s own ``except Exception`` swallows it and returns 0.0
+	(frappe/utils/data.py:1155-1158). Every currency value collapses to zero
+	with no error anywhere.
 
-    That failure mode belongs to the harness, not to the app: production always
-    has a database. So the double is patched over ``flt`` by name, which also
-    makes these assertions independent of the site's rounding-method setting.
-    It agrees with the real ``flt`` on every value used below; the tests
-    deliberately avoid exact ``.xx5`` midpoints, where the two rounding families
-    legitimately differ.
-    """
-    if value is None:
-        return 0.0
-    if isinstance(value, str):
-        value = value.replace(",", "")
-    try:
-        num = float(value)
-    except (TypeError, ValueError):
-        return 0.0
-    return round(num, precision) if precision is not None else num
+	That failure mode belongs to the harness, not to the app: production always
+	has a database. So the double is patched over ``flt`` by name, which also
+	makes these assertions independent of the site's rounding-method setting.
+	It agrees with the real ``flt`` on every value used below; the tests
+	deliberately avoid exact ``.xx5`` midpoints, where the two rounding families
+	legitimately differ.
+	"""
+	if value is None:
+		return 0.0
+	if isinstance(value, str):
+		value = value.replace(",", "")
+	try:
+		num = float(value)
+	except (TypeError, ValueError):
+		return 0.0
+	return round(num, precision) if precision is not None else num
 
 
 class _FakeAdvanceDoc:
-    """Minimal ``Employee Advance`` stub: attribute, ``get``/``set`` and doc API."""
+	"""Minimal ``Employee Advance`` stub: attribute, ``get``/``set`` and doc API."""
 
-    def __init__(self, **data):
-        self._data = dict(data)
-        self.flags = SimpleNamespace(ignore_permissions=False)
-        self.insert = MagicMock()
-        self.submit = MagicMock()
-        self.cancel = MagicMock()
-        self.reload = MagicMock()
-        self.db_set = MagicMock()
-        self.add_comment = MagicMock()
+	def __init__(self, **data):
+		self._data = dict(data)
+		self.flags = SimpleNamespace(ignore_permissions=False)
+		self.insert = MagicMock()
+		self.submit = MagicMock()
+		self.cancel = MagicMock()
+		self.reload = MagicMock()
+		self.db_set = MagicMock()
+		self.add_comment = MagicMock()
 
-    # -- doc-like access ---------------------------------------------------
-    def __getattr__(self, key):
-        # Only reached when normal attribute lookup fails, and ``_data`` is set
-        # first in __init__, so this cannot recurse.
-        if key in self._data:
-            return self._data[key]
-        raise AttributeError(key)
+	# -- doc-like access ---------------------------------------------------
+	def __getattr__(self, key):
+		# Only reached when normal attribute lookup fails, and ``_data`` is set
+		# first in __init__, so this cannot recurse.
+		if key in self._data:
+			return self._data[key]
+		raise AttributeError(key)
 
-    def get(self, key, default=None):
-        return self._data.get(key, default)
+	def get(self, key, default=None):
+		return self._data.get(key, default)
 
-    def set(self, key, value):
-        self._data[key] = value
+	def set(self, key, value):
+		self._data[key] = value
 
-    def as_dict(self):
-        return dict(self._data)
+	def as_dict(self):
+		return dict(self._data)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -138,282 +138,284 @@ class _FakeAdvanceDoc:
 
 
 class TestEmployeeAdvanceRoleSets(unittest.TestCase):
-    """The two gates are different sets, and both line-manager spellings count."""
+	"""The two gates are different sets, and both line-manager spellings count."""
 
-    def test_line_manager_tier_may_request_but_not_approve(self):
-        from jarz_pos.api import employee_advances as ea
+	def test_line_manager_tier_may_request_but_not_approve(self):
+		from jarz_pos.api import employee_advances as ea
 
-        for role in (ROLES.JARZ_LINE_MANAGER, ROLES.JARZ_LINE_MANAGER_ALT):
-            with self.subTest(role=role):
-                self.assertIn(role, ea.REQUEST_ROLES, "line manager must be able to request")
-                self.assertNotIn(
-                    role,
-                    ea.APPROVE_ROLES,
-                    "a line manager approving their own request defeats the whole flow",
-                )
+		for role in (ROLES.JARZ_LINE_MANAGER, ROLES.JARZ_LINE_MANAGER_ALT):
+			with self.subTest(role=role):
+				self.assertIn(role, ea.REQUEST_ROLES, "line manager must be able to request")
+				self.assertNotIn(
+					role,
+					ea.APPROVE_ROLES,
+					"a line manager approving their own request defeats the whole flow",
+				)
 
-    def test_jarz_manager_may_do_both(self):
-        from jarz_pos.api import employee_advances as ea
+	def test_jarz_manager_may_do_both(self):
+		from jarz_pos.api import employee_advances as ea
 
-        self.assertIn(ROLES.JARZ_MANAGER, ea.REQUEST_ROLES)
-        self.assertIn(ROLES.JARZ_MANAGER, ea.APPROVE_ROLES)
+		self.assertIn(ROLES.JARZ_MANAGER, ea.REQUEST_ROLES)
+		self.assertIn(ROLES.JARZ_MANAGER, ea.APPROVE_ROLES)
 
-    def test_plain_staff_is_in_neither_set(self):
-        from jarz_pos.api import employee_advances as ea
+	def test_plain_staff_is_in_neither_set(self):
+		from jarz_pos.api import employee_advances as ea
 
-        for role in ("Jarz POS Staff", "POS User", "Sales User", "Employee"):
-            with self.subTest(role=role):
-                self.assertNotIn(role, ea.REQUEST_ROLES)
-                self.assertNotIn(role, ea.APPROVE_ROLES)
+		for role in ("Jarz POS Staff", "POS User", "Sales User", "Employee"):
+			with self.subTest(role=role):
+				self.assertNotIn(role, ea.REQUEST_ROLES)
+				self.assertNotIn(role, ea.APPROVE_ROLES)
 
 
 class TestRequestGate(unittest.TestCase):
-    def test_line_manager_is_allowed_to_request(self):
-        """A line manager gets a DRAFT advance — created, never submitted, never paid."""
-        from jarz_pos.api.employee_advances import (
-            F_PAYING_ACCOUNT,
-            F_POS_PROFILE,
-            F_REQUESTED_BY,
-            create_employee_advance_request,
-        )
+	def test_line_manager_is_allowed_to_request(self):
+		"""A line manager gets a DRAFT advance — created, never submitted, never paid."""
+		from jarz_pos.api.employee_advances import (
+			F_PAYING_ACCOUNT,
+			F_POS_PROFILE,
+			F_REQUESTED_BY,
+			create_employee_advance_request,
+		)
 
-        captured = {}
-        fake_doc = _FakeAdvanceDoc(name="HR-EAD-2026-00001")
+		captured = {}
+		fake_doc = _FakeAdvanceDoc(name="HR-EAD-2026-00001")
 
-        def _get_doc(doc_dict):
-            captured.update(doc_dict)
-            return fake_doc
+		def _get_doc(doc_dict):
+			captured.update(doc_dict)
+			return fake_doc
 
-        mock_frappe = _mock_frappe([ROLES.JARZ_LINE_MANAGER], user="line@example.com")
-        mock_frappe.get_doc.side_effect = _get_doc
+		mock_frappe = _mock_frappe([ROLES.JARZ_LINE_MANAGER], user="line@example.com")
+		mock_frappe.get_doc.side_effect = _get_doc
 
-        with patch(f"{MODULE}.frappe", mock_frappe), \
-                patch(f"{MODULE}.flt", _flt), \
-                patch(f"{MODULE}.hrms_available", return_value=True), \
-                patch(f"{MODULE}._advance_has_field", return_value=True), \
-                patch(
-                    f"{MODULE}._validate_employee",
-                    return_value={
-                        "name": "HR-EMP-00001",
-                        "employee_name": "Ahmed",
-                        "status": "Active",
-                        "company": "Jarz",
-                        "salary_currency": "EGP",
-                    },
-                ), \
-                patch(f"{MODULE}._validate_paying_account", return_value={"name": "Dokki - J"}), \
-                patch(f"{MODULE}._resolve_advance_account", return_value="Employee Advances - J"), \
-                patch(f"{MODULE}._serialize_one", return_value={"name": "HR-EAD-2026-00001"}):
-            result = create_employee_advance_request(
-                employee="HR-EMP-00001",
-                amount=1500,
-                purpose="Petty cash float",
-                paying_account="Dokki - J",
-                pos_profile="",
-                posting_date="2026-08-28",
-            )
+		with (
+			patch(f"{MODULE}.frappe", mock_frappe),
+			patch(f"{MODULE}.flt", _flt),
+			patch(f"{MODULE}.hrms_available", return_value=True),
+			patch(f"{MODULE}._advance_has_field", return_value=True),
+			patch(
+				f"{MODULE}._validate_employee",
+				return_value={
+					"name": "HR-EMP-00001",
+					"employee_name": "Ahmed",
+					"status": "Active",
+					"company": "Jarz",
+					"salary_currency": "EGP",
+				},
+			),
+			patch(f"{MODULE}._validate_paying_account", return_value={"name": "Dokki - J"}),
+			patch(f"{MODULE}._resolve_advance_account", return_value="Employee Advances - J"),
+			patch(f"{MODULE}._serialize_one", return_value={"name": "HR-EAD-2026-00001"}),
+		):
+			result = create_employee_advance_request(
+				employee="HR-EMP-00001",
+				amount=1500,
+				purpose="Petty cash float",
+				paying_account="Dokki - J",
+				pos_profile="",
+				posting_date="2026-08-28",
+			)
 
-        self.assertTrue(result.get("success"))
-        self.assertEqual(captured["doctype"], "Employee Advance")
-        self.assertEqual(captured["advance_amount"], 1500.0)
-        self.assertEqual(captured["currency"], "EGP")
-        self.assertEqual(captured["company"], "Jarz")
-        # The draft carries the ledger from the start. It is NOT left empty for
-        # a later fallback to fill: the DocType would fetch
-        # Employee.employee_advance_account into it at insert, and every
-        # downstream ``if not advance_account`` guard would then be a no-op.
-        # See TestAdvanceAccountResolution.
-        self.assertEqual(captured["advance_account"], "Employee Advances - J")
-        # status is read-only and derived by EmployeeAdvance.set_status(); writing
-        # it by hand produces a row whose status disagrees with its own amounts.
-        self.assertNotIn("status", captured)
+		self.assertTrue(result.get("success"))
+		self.assertEqual(captured["doctype"], "Employee Advance")
+		self.assertEqual(captured["advance_amount"], 1500.0)
+		self.assertEqual(captured["currency"], "EGP")
+		self.assertEqual(captured["company"], "Jarz")
+		# The draft carries the ledger from the start. It is NOT left empty for
+		# a later fallback to fill: the DocType would fetch
+		# Employee.employee_advance_account into it at insert, and every
+		# downstream ``if not advance_account`` guard would then be a no-op.
+		# See TestAdvanceAccountResolution.
+		self.assertEqual(captured["advance_account"], "Employee Advances - J")
+		# status is read-only and derived by EmployeeAdvance.set_status(); writing
+		# it by hand produces a row whose status disagrees with its own amounts.
+		self.assertNotIn("status", captured)
 
-        self.assertEqual(fake_doc.get(F_PAYING_ACCOUNT), "Dokki - J")
-        self.assertIsNone(fake_doc.get(F_POS_PROFILE))
-        self.assertEqual(fake_doc.get(F_REQUESTED_BY), "line@example.com")
-        # No salary month sent (a pre-field client): the pay-day suggestion is
-        # stored rather than nothing, so the payroll board can still place it.
-        self.assertRegex(fake_doc.get("custom_jarz_salary_month") or "", r"^\d{4}-\d{2}$")
+		self.assertEqual(fake_doc.get(F_PAYING_ACCOUNT), "Dokki - J")
+		self.assertIsNone(fake_doc.get(F_POS_PROFILE))
+		self.assertEqual(fake_doc.get(F_REQUESTED_BY), "line@example.com")
+		# No salary month sent (a pre-field client): the pay-day suggestion is
+		# stored rather than nothing, so the payroll board can still place it.
+		self.assertRegex(fake_doc.get("custom_jarz_salary_month") or "", r"^\d{4}-\d{2}$")
 
-        fake_doc.insert.assert_called_once()
-        # The request must NOT submit and must NOT pay. Both are the approver's job.
-        fake_doc.submit.assert_not_called()
+		fake_doc.insert.assert_called_once()
+		# The request must NOT submit and must NOT pay. Both are the approver's job.
+		fake_doc.submit.assert_not_called()
 
-    def test_plain_staff_is_denied(self):
-        from jarz_pos.api.employee_advances import create_employee_advance_request
+	def test_plain_staff_is_denied(self):
+		from jarz_pos.api.employee_advances import create_employee_advance_request
 
-        mock_frappe = _mock_frappe(["Jarz POS Staff"], user="staff@example.com")
+		mock_frappe = _mock_frappe(["Jarz POS Staff"], user="staff@example.com")
 
-        with patch(f"{MODULE}.frappe", mock_frappe), \
-                patch(f"{MODULE}.hrms_available", return_value=True):
-            with self.assertRaises(PermissionError):
-                create_employee_advance_request(
-                    employee="HR-EMP-00001",
-                    amount=1500,
-                    purpose="Petty cash float",
-                    paying_account="Dokki - J",
-                )
+		with patch(f"{MODULE}.frappe", mock_frappe), patch(f"{MODULE}.hrms_available", return_value=True):
+			with self.assertRaises(PermissionError):
+				create_employee_advance_request(
+					employee="HR-EMP-00001",
+					amount=1500,
+					purpose="Petty cash float",
+					paying_account="Dokki - J",
+				)
 
-        mock_frappe.get_doc.assert_not_called()
+		mock_frappe.get_doc.assert_not_called()
 
 
 class TestApproveGate(unittest.TestCase):
-    def test_line_manager_may_not_approve(self):
-        """The requester tier must not be able to release the cash."""
-        from jarz_pos.api.employee_advances import approve_employee_advance
+	def test_line_manager_may_not_approve(self):
+		"""The requester tier must not be able to release the cash."""
+		from jarz_pos.api.employee_advances import approve_employee_advance
 
-        for role in (ROLES.JARZ_LINE_MANAGER, ROLES.JARZ_LINE_MANAGER_ALT):
-            with self.subTest(role=role):
-                mock_frappe = _mock_frappe([role], user="line@example.com")
-                with patch(f"{MODULE}.frappe", mock_frappe), \
-                        patch(f"{MODULE}.hrms_available", return_value=True):
-                    with self.assertRaises(PermissionError):
-                        approve_employee_advance("HR-EAD-2026-00001")
-                mock_frappe.get_doc.assert_not_called()
+		for role in (ROLES.JARZ_LINE_MANAGER, ROLES.JARZ_LINE_MANAGER_ALT):
+			with self.subTest(role=role):
+				mock_frappe = _mock_frappe([role], user="line@example.com")
+				with (
+					patch(f"{MODULE}.frappe", mock_frappe),
+					patch(f"{MODULE}.hrms_available", return_value=True),
+				):
+					with self.assertRaises(PermissionError):
+						approve_employee_advance("HR-EAD-2026-00001")
+				mock_frappe.get_doc.assert_not_called()
 
-    def test_jarz_manager_passes_the_gate(self):
-        """A JARZ Manager gets past the permission check and on to the doc.
+	def test_jarz_manager_passes_the_gate(self):
+		"""A JARZ Manager gets past the permission check and on to the doc.
 
-        Asserted by the exception it *does* raise: the advance handed to it is
-        already submitted, so the non-draft guard fires. A PermissionError here
-        would mean the gate rejected a manager.
-        """
-        from jarz_pos.api.employee_advances import approve_employee_advance
+		Asserted by the exception it *does* raise: the advance handed to it is
+		already submitted, so the non-draft guard fires. A PermissionError here
+		would mean the gate rejected a manager.
+		"""
+		from jarz_pos.api.employee_advances import approve_employee_advance
 
-        submitted = _FakeAdvanceDoc(
-            name="HR-EAD-2026-00001", docstatus=1, status="Paid", company="Jarz"
-        )
-        mock_frappe = _mock_frappe([ROLES.JARZ_MANAGER], user="manager@example.com")
-        mock_frappe.get_doc.return_value = submitted
+		submitted = _FakeAdvanceDoc(name="HR-EAD-2026-00001", docstatus=1, status="Paid", company="Jarz")
+		mock_frappe = _mock_frappe([ROLES.JARZ_MANAGER], user="manager@example.com")
+		mock_frappe.get_doc.return_value = submitted
 
-        with patch(f"{MODULE}.frappe", mock_frappe), \
-                patch(f"{MODULE}.hrms_available", return_value=True):
-            with self.assertRaises(ValueError) as ctx:
-                approve_employee_advance("HR-EAD-2026-00001")
+		with patch(f"{MODULE}.frappe", mock_frappe), patch(f"{MODULE}.hrms_available", return_value=True):
+			with self.assertRaises(ValueError) as ctx:
+				approve_employee_advance("HR-EAD-2026-00001")
 
-        self.assertIn("draft", str(ctx.exception).lower())
-        submitted.submit.assert_not_called()
+		self.assertIn("draft", str(ctx.exception).lower())
+		submitted.submit.assert_not_called()
 
-    def test_already_paid_advance_is_not_approved_twice(self):
-        """The non-draft guard is the only thing between one approval and two payouts."""
-        from jarz_pos.api.employee_advances import approve_employee_advance
+	def test_already_paid_advance_is_not_approved_twice(self):
+		"""The non-draft guard is the only thing between one approval and two payouts."""
+		from jarz_pos.api.employee_advances import approve_employee_advance
 
-        for docstatus, status in ((1, "Paid"), (2, "Cancelled")):
-            with self.subTest(docstatus=docstatus):
-                doc = _FakeAdvanceDoc(
-                    name="HR-EAD-2026-00002",
-                    docstatus=docstatus,
-                    status=status,
-                    company="Jarz",
-                )
-                mock_frappe = _mock_frappe([ROLES.JARZ_MANAGER], user="manager@example.com")
-                mock_frappe.get_doc.return_value = doc
+		for docstatus, status in ((1, "Paid"), (2, "Cancelled")):
+			with self.subTest(docstatus=docstatus):
+				doc = _FakeAdvanceDoc(
+					name="HR-EAD-2026-00002",
+					docstatus=docstatus,
+					status=status,
+					company="Jarz",
+				)
+				mock_frappe = _mock_frappe([ROLES.JARZ_MANAGER], user="manager@example.com")
+				mock_frappe.get_doc.return_value = doc
 
-                with patch(f"{MODULE}.frappe", mock_frappe), \
-                        patch(f"{MODULE}.hrms_available", return_value=True):
-                    with self.assertRaises(ValueError):
-                        approve_employee_advance("HR-EAD-2026-00002")
+				with (
+					patch(f"{MODULE}.frappe", mock_frappe),
+					patch(f"{MODULE}.hrms_available", return_value=True),
+				):
+					with self.assertRaises(ValueError):
+						approve_employee_advance("HR-EAD-2026-00002")
 
-                doc.submit.assert_not_called()
+				doc.submit.assert_not_called()
 
-    def test_reject_is_gated_to_approvers(self):
-        from jarz_pos.api.employee_advances import reject_employee_advance
+	def test_reject_is_gated_to_approvers(self):
+		from jarz_pos.api.employee_advances import reject_employee_advance
 
-        mock_frappe = _mock_frappe([ROLES.JARZ_LINE_MANAGER], user="line@example.com")
-        with patch(f"{MODULE}.frappe", mock_frappe), \
-                patch(f"{MODULE}.hrms_available", return_value=True):
-            with self.assertRaises(PermissionError):
-                reject_employee_advance("HR-EAD-2026-00001", "Not budgeted")
+		mock_frappe = _mock_frappe([ROLES.JARZ_LINE_MANAGER], user="line@example.com")
+		with patch(f"{MODULE}.frappe", mock_frappe), patch(f"{MODULE}.hrms_available", return_value=True):
+			with self.assertRaises(PermissionError):
+				reject_employee_advance("HR-EAD-2026-00001", "Not budgeted")
 
-        mock_frappe.get_doc.assert_not_called()
-        mock_frappe.delete_doc.assert_not_called()
+		mock_frappe.get_doc.assert_not_called()
+		mock_frappe.delete_doc.assert_not_called()
 
 
 class TestReject(unittest.TestCase):
-    def test_rejecting_a_draft_records_the_reason_before_deleting_it(self):
-        """``purpose`` survives into the Deleted Document snapshot; a Comment does not."""
-        from jarz_pos.api.employee_advances import reject_employee_advance
+	def test_rejecting_a_draft_records_the_reason_before_deleting_it(self):
+		"""``purpose`` survives into the Deleted Document snapshot; a Comment does not."""
+		from jarz_pos.api.employee_advances import reject_employee_advance
 
-        draft = _FakeAdvanceDoc(
-            name="HR-EAD-2026-00003", docstatus=0, status="Draft", purpose="Petty cash float"
-        )
-        mock_frappe = _mock_frappe([ROLES.JARZ_MANAGER], user="manager@example.com")
-        mock_frappe.get_doc.return_value = draft
+		draft = _FakeAdvanceDoc(
+			name="HR-EAD-2026-00003", docstatus=0, status="Draft", purpose="Petty cash float"
+		)
+		mock_frappe = _mock_frappe([ROLES.JARZ_MANAGER], user="manager@example.com")
+		mock_frappe.get_doc.return_value = draft
 
-        with patch(f"{MODULE}.frappe", mock_frappe), \
-                patch(f"{MODULE}.hrms_available", return_value=True), \
-                patch(f"{MODULE}.now_datetime", return_value="2026-08-28 12:00:00"):
-            result = reject_employee_advance("HR-EAD-2026-00003", "Not budgeted this month")
+		with (
+			patch(f"{MODULE}.frappe", mock_frappe),
+			patch(f"{MODULE}.hrms_available", return_value=True),
+			patch(f"{MODULE}.now_datetime", return_value="2026-08-28 12:00:00"),
+		):
+			result = reject_employee_advance("HR-EAD-2026-00003", "Not budgeted this month")
 
-        self.assertTrue(result["success"])
-        self.assertEqual(result["action"], "deleted")
+		self.assertTrue(result["success"])
+		self.assertEqual(result["action"], "deleted")
 
-        draft.db_set.assert_called_once()
-        annotated = draft.db_set.call_args[0][1]
-        self.assertIn("Petty cash float", annotated, "the original purpose must not be lost")
-        self.assertIn("Not budgeted this month", annotated)
-        self.assertIn("manager@example.com", annotated)
+		draft.db_set.assert_called_once()
+		annotated = draft.db_set.call_args[0][1]
+		self.assertIn("Petty cash float", annotated, "the original purpose must not be lost")
+		self.assertIn("Not budgeted this month", annotated)
+		self.assertIn("manager@example.com", annotated)
 
-        mock_frappe.delete_doc.assert_called_once()
+		mock_frappe.delete_doc.assert_called_once()
 
-    def test_reject_requires_a_reason(self):
-        from jarz_pos.api.employee_advances import reject_employee_advance
+	def test_reject_requires_a_reason(self):
+		from jarz_pos.api.employee_advances import reject_employee_advance
 
-        mock_frappe = _mock_frappe([ROLES.JARZ_MANAGER], user="manager@example.com")
-        with patch(f"{MODULE}.frappe", mock_frappe), \
-                patch(f"{MODULE}.hrms_available", return_value=True):
-            with self.assertRaises(ValueError) as ctx:
-                reject_employee_advance("HR-EAD-2026-00003", "   ")
+		mock_frappe = _mock_frappe([ROLES.JARZ_MANAGER], user="manager@example.com")
+		with patch(f"{MODULE}.frappe", mock_frappe), patch(f"{MODULE}.hrms_available", return_value=True):
+			with self.assertRaises(ValueError) as ctx:
+				reject_employee_advance("HR-EAD-2026-00003", "   ")
 
-        self.assertIn("reason", str(ctx.exception).lower())
-        mock_frappe.get_doc.assert_not_called()
+		self.assertIn("reason", str(ctx.exception).lower())
+		mock_frappe.get_doc.assert_not_called()
 
-    def test_reject_refuses_an_advance_that_was_already_paid(self):
-        """Cancelling a paid advance would strand the payout in the ledger.
+	def test_reject_refuses_an_advance_that_was_already_paid(self):
+		"""Cancelling a paid advance would strand the payout in the ledger.
 
-        HRMS's on_cancel silently UNLINKS the Payment Entry when
-        ``HR Settings.unlink_payment_on_cancellation_of_employee_advance`` is on,
-        so without this guard the cash would be gone from the drawer with no
-        document justifying it.
-        """
-        from jarz_pos.api.employee_advances import reject_employee_advance
+		HRMS's on_cancel silently UNLINKS the Payment Entry when
+		``HR Settings.unlink_payment_on_cancellation_of_employee_advance`` is on,
+		so without this guard the cash would be gone from the drawer with no
+		document justifying it.
+		"""
+		from jarz_pos.api.employee_advances import reject_employee_advance
 
-        submitted = _FakeAdvanceDoc(
-            name="HR-EAD-2026-00004", docstatus=1, status="Paid", purpose="Float"
-        )
-        mock_frappe = _mock_frappe([ROLES.JARZ_MANAGER], user="manager@example.com")
-        mock_frappe.get_doc.return_value = submitted
+		submitted = _FakeAdvanceDoc(name="HR-EAD-2026-00004", docstatus=1, status="Paid", purpose="Float")
+		mock_frappe = _mock_frappe([ROLES.JARZ_MANAGER], user="manager@example.com")
+		mock_frappe.get_doc.return_value = submitted
 
-        with patch(f"{MODULE}.frappe", mock_frappe), \
-                patch(f"{MODULE}.hrms_available", return_value=True), \
-                patch(f"{MODULE}.now_datetime", return_value="2026-08-28 12:00:00"), \
-                patch(f"{MODULE}._linked_payment_entries", return_value=["ACC-PAY-2026-00042"]):
-            with self.assertRaises(ValueError) as ctx:
-                reject_employee_advance("HR-EAD-2026-00004", "Changed our mind")
+		with (
+			patch(f"{MODULE}.frappe", mock_frappe),
+			patch(f"{MODULE}.hrms_available", return_value=True),
+			patch(f"{MODULE}.now_datetime", return_value="2026-08-28 12:00:00"),
+			patch(f"{MODULE}._linked_payment_entries", return_value=["ACC-PAY-2026-00042"]),
+		):
+			with self.assertRaises(ValueError) as ctx:
+				reject_employee_advance("HR-EAD-2026-00004", "Changed our mind")
 
-        self.assertIn("ACC-PAY-2026-00042", str(ctx.exception))
-        submitted.cancel.assert_not_called()
-        mock_frappe.delete_doc.assert_not_called()
+		self.assertIn("ACC-PAY-2026-00042", str(ctx.exception))
+		submitted.cancel.assert_not_called()
+		mock_frappe.delete_doc.assert_not_called()
 
-    def test_reject_cancels_a_submitted_but_unpaid_advance(self):
-        from jarz_pos.api.employee_advances import reject_employee_advance
+	def test_reject_cancels_a_submitted_but_unpaid_advance(self):
+		from jarz_pos.api.employee_advances import reject_employee_advance
 
-        submitted = _FakeAdvanceDoc(
-            name="HR-EAD-2026-00005", docstatus=1, status="Unpaid", purpose="Float"
-        )
-        mock_frappe = _mock_frappe([ROLES.JARZ_MANAGER], user="manager@example.com")
-        mock_frappe.get_doc.return_value = submitted
+		submitted = _FakeAdvanceDoc(name="HR-EAD-2026-00005", docstatus=1, status="Unpaid", purpose="Float")
+		mock_frappe = _mock_frappe([ROLES.JARZ_MANAGER], user="manager@example.com")
+		mock_frappe.get_doc.return_value = submitted
 
-        with patch(f"{MODULE}.frappe", mock_frappe), \
-                patch(f"{MODULE}.hrms_available", return_value=True), \
-                patch(f"{MODULE}.now_datetime", return_value="2026-08-28 12:00:00"), \
-                patch(f"{MODULE}._linked_payment_entries", return_value=[]), \
-                patch(f"{MODULE}._serialize_one", return_value={"name": "HR-EAD-2026-00005"}):
-            result = reject_employee_advance("HR-EAD-2026-00005", "Duplicate request")
+		with (
+			patch(f"{MODULE}.frappe", mock_frappe),
+			patch(f"{MODULE}.hrms_available", return_value=True),
+			patch(f"{MODULE}.now_datetime", return_value="2026-08-28 12:00:00"),
+			patch(f"{MODULE}._linked_payment_entries", return_value=[]),
+			patch(f"{MODULE}._serialize_one", return_value={"name": "HR-EAD-2026-00005"}),
+		):
+			result = reject_employee_advance("HR-EAD-2026-00005", "Duplicate request")
 
-        self.assertEqual(result["action"], "cancelled")
-        submitted.cancel.assert_called_once()
-        mock_frappe.delete_doc.assert_not_called()
+		self.assertEqual(result["action"], "cancelled")
+		submitted.cancel.assert_called_once()
+		mock_frappe.delete_doc.assert_not_called()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -422,111 +424,115 @@ class TestReject(unittest.TestCase):
 
 
 class TestRequestValidation(unittest.TestCase):
-    def _attempt(self, **overrides):
-        from jarz_pos.api.employee_advances import create_employee_advance_request
+	def _attempt(self, **overrides):
+		from jarz_pos.api.employee_advances import create_employee_advance_request
 
-        payload = {
-            "employee": "HR-EMP-00001",
-            "amount": 1500,
-            "purpose": "Petty cash float",
-            "paying_account": "Dokki - J",
-            "posting_date": "2026-08-28",
-        }
-        payload.update(overrides)
+		payload = {
+			"employee": "HR-EMP-00001",
+			"amount": 1500,
+			"purpose": "Petty cash float",
+			"paying_account": "Dokki - J",
+			"posting_date": "2026-08-28",
+		}
+		payload.update(overrides)
 
-        mock_frappe = _mock_frappe([ROLES.JARZ_LINE_MANAGER], user="line@example.com")
-        with patch(f"{MODULE}.frappe", mock_frappe), \
-                patch(f"{MODULE}.flt", _flt), \
-                patch(f"{MODULE}.hrms_available", return_value=True), \
-                patch(f"{MODULE}._advance_has_field", return_value=True), \
-                patch(
-                    f"{MODULE}._validate_employee",
-                    return_value={"company": "Jarz", "salary_currency": "EGP"},
-                ), \
-                patch(f"{MODULE}._validate_paying_account", return_value={}), \
-                patch(f"{MODULE}._serialize_one", return_value={}):
-            create_employee_advance_request(**payload)
+		mock_frappe = _mock_frappe([ROLES.JARZ_LINE_MANAGER], user="line@example.com")
+		with (
+			patch(f"{MODULE}.frappe", mock_frappe),
+			patch(f"{MODULE}.flt", _flt),
+			patch(f"{MODULE}.hrms_available", return_value=True),
+			patch(f"{MODULE}._advance_has_field", return_value=True),
+			patch(
+				f"{MODULE}._validate_employee",
+				return_value={"company": "Jarz", "salary_currency": "EGP"},
+			),
+			patch(f"{MODULE}._validate_paying_account", return_value={}),
+			patch(f"{MODULE}._serialize_one", return_value={}),
+		):
+			create_employee_advance_request(**payload)
 
-    def test_zero_amount_is_rejected(self):
-        with self.assertRaises(ValueError) as ctx:
-            self._attempt(amount=0)
-        self.assertIn("greater than zero", str(ctx.exception))
+	def test_zero_amount_is_rejected(self):
+		with self.assertRaises(ValueError) as ctx:
+			self._attempt(amount=0)
+		self.assertIn("greater than zero", str(ctx.exception))
 
-    def test_negative_amount_is_rejected(self):
-        with self.assertRaises(ValueError) as ctx:
-            self._attempt(amount=-250)
-        self.assertIn("greater than zero", str(ctx.exception))
+	def test_negative_amount_is_rejected(self):
+		with self.assertRaises(ValueError) as ctx:
+			self._attempt(amount=-250)
+		self.assertIn("greater than zero", str(ctx.exception))
 
-    def test_missing_employee_is_rejected(self):
-        with self.assertRaises(ValueError) as ctx:
-            self._attempt(employee="")
-        self.assertIn("Employee", str(ctx.exception))
+	def test_missing_employee_is_rejected(self):
+		with self.assertRaises(ValueError) as ctx:
+			self._attempt(employee="")
+		self.assertIn("Employee", str(ctx.exception))
 
-    def test_missing_purpose_is_rejected(self):
-        """A missing purpose must be answered with "Purpose", not with the amount.
+	def test_missing_purpose_is_rejected(self):
+		"""A missing purpose must be answered with "Purpose", not with the amount.
 
-        The regression this pins: a chain of short-circuiting guards reports
-        whichever field it happens to check FIRST, so a request whose only
-        problem was an empty purpose came back as "Amount must be greater than
-        zero" — sending the manager to fix a box that was already correct.
-        """
-        with self.assertRaises(ValueError) as ctx:
-            self._attempt(purpose="   ")
-        message = str(ctx.exception)
-        self.assertIn("Purpose", message)
-        self.assertNotIn("Amount", message)
+		The regression this pins: a chain of short-circuiting guards reports
+		whichever field it happens to check FIRST, so a request whose only
+		problem was an empty purpose came back as "Amount must be greater than
+		zero" — sending the manager to fix a box that was already correct.
+		"""
+		with self.assertRaises(ValueError) as ctx:
+			self._attempt(purpose="   ")
+		message = str(ctx.exception)
+		self.assertIn("Purpose", message)
+		self.assertNotIn("Amount", message)
 
-    def test_missing_paying_account_is_rejected(self):
-        with self.assertRaises(ValueError) as ctx:
-            self._attempt(paying_account="")
-        message = str(ctx.exception)
-        self.assertIn("Paying account", message)
-        self.assertNotIn("Amount", message)
+	def test_missing_paying_account_is_rejected(self):
+		with self.assertRaises(ValueError) as ctx:
+			self._attempt(paying_account="")
+		message = str(ctx.exception)
+		self.assertIn("Paying account", message)
+		self.assertNotIn("Amount", message)
 
-    def test_a_missing_amount_says_so_rather_than_saying_it_is_too_small(self):
-        with self.assertRaises(ValueError) as ctx:
-            self._attempt(amount=None)
-        message = str(ctx.exception)
-        self.assertIn("Amount", message)
-        self.assertNotIn("greater than zero", message)
+	def test_a_missing_amount_says_so_rather_than_saying_it_is_too_small(self):
+		with self.assertRaises(ValueError) as ctx:
+			self._attempt(amount=None)
+		message = str(ctx.exception)
+		self.assertIn("Amount", message)
+		self.assertNotIn("greater than zero", message)
 
-    def test_every_missing_field_is_named_in_one_reply(self):
-        """One round trip, not one per empty box."""
-        with self.assertRaises(ValueError) as ctx:
-            self._attempt(employee="", purpose="", paying_account="", amount="")
-        message = str(ctx.exception)
-        for field in ("Employee", "Amount", "Purpose", "Paying account"):
-            with self.subTest(field=field):
-                self.assertIn(field, message)
+	def test_every_missing_field_is_named_in_one_reply(self):
+		"""One round trip, not one per empty box."""
+		with self.assertRaises(ValueError) as ctx:
+			self._attempt(employee="", purpose="", paying_account="", amount="")
+		message = str(ctx.exception)
+		for field in ("Employee", "Amount", "Purpose", "Paying account"):
+			with self.subTest(field=field):
+				self.assertIn(field, message)
 
-    def test_request_refuses_when_the_jarz_column_has_not_migrated(self):
-        """Better one clear error than a queue of unapprovable rows.
+	def test_request_refuses_when_the_jarz_column_has_not_migrated(self):
+		"""Better one clear error than a queue of unapprovable rows.
 
-        Without ``custom_jarz_paying_account`` the approve step has no idea which
-        drawer to pay out of, so a request created in that state could never be
-        approved. Deliberately called with an EMPTY purpose as well: the schema
-        guard must win over the field guards, because no amount of editing the
-        form fixes a column that is not there — the action is a deploy.
-        """
-        from jarz_pos.api.employee_advances import create_employee_advance_request
+		Without ``custom_jarz_paying_account`` the approve step has no idea which
+		drawer to pay out of, so a request created in that state could never be
+		approved. Deliberately called with an EMPTY purpose as well: the schema
+		guard must win over the field guards, because no amount of editing the
+		form fixes a column that is not there — the action is a deploy.
+		"""
+		from jarz_pos.api.employee_advances import create_employee_advance_request
 
-        mock_frappe = _mock_frappe([ROLES.JARZ_LINE_MANAGER], user="line@example.com")
-        with patch(f"{MODULE}.frappe", mock_frappe), \
-                patch(f"{MODULE}.flt", _flt), \
-                patch(f"{MODULE}.hrms_available", return_value=True), \
-                patch(f"{MODULE}._advance_has_field", return_value=False):
-            with self.assertRaises(ValueError) as ctx:
-                create_employee_advance_request(
-                    employee="HR-EMP-00001",
-                    amount=1500,
-                    purpose="",
-                    paying_account="Dokki - J",
-                )
+		mock_frappe = _mock_frappe([ROLES.JARZ_LINE_MANAGER], user="line@example.com")
+		with (
+			patch(f"{MODULE}.frappe", mock_frappe),
+			patch(f"{MODULE}.flt", _flt),
+			patch(f"{MODULE}.hrms_available", return_value=True),
+			patch(f"{MODULE}._advance_has_field", return_value=False),
+		):
+			with self.assertRaises(ValueError) as ctx:
+				create_employee_advance_request(
+					employee="HR-EMP-00001",
+					amount=1500,
+					purpose="",
+					paying_account="Dokki - J",
+				)
 
-        message = str(ctx.exception)
-        self.assertIn("bench migrate", message)
-        self.assertNotIn("Purpose", message)
-        mock_frappe.get_doc.assert_not_called()
+		message = str(ctx.exception)
+		self.assertIn("bench migrate", message)
+		self.assertNotIn("Purpose", message)
+		mock_frappe.get_doc.assert_not_called()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -535,59 +541,60 @@ class TestRequestValidation(unittest.TestCase):
 
 
 class TestHrmsAbsent(unittest.TestCase):
-    def test_bootstrap_answers_instead_of_throwing(self):
-        from datetime import date
+	def test_bootstrap_answers_instead_of_throwing(self):
+		from datetime import date
 
-        from jarz_pos.api.employee_advances import get_employee_advance_bootstrap
+		from jarz_pos.api.employee_advances import get_employee_advance_bootstrap
 
-        mock_frappe = _mock_frappe([ROLES.JARZ_MANAGER], user="manager@example.com")
+		mock_frappe = _mock_frappe([ROLES.JARZ_MANAGER], user="manager@example.com")
 
-        with patch(f"{MODULE}.frappe", mock_frappe), \
-                patch(f"{MODULE}.hrms_available", return_value=False), \
-                patch(f"{MODULE}.getdate", return_value=date(2026, 8, 28)):
-            result = get_employee_advance_bootstrap()
+		with (
+			patch(f"{MODULE}.frappe", mock_frappe),
+			patch(f"{MODULE}.hrms_available", return_value=False),
+			patch(f"{MODULE}.getdate", return_value=date(2026, 8, 28)),
+		):
+			result = get_employee_advance_bootstrap()
 
-        self.assertTrue(result["success"], "absence of HRMS is a normal answer, not an error")
-        self.assertFalse(result["hrms_available"])
-        self.assertTrue(result["notice"], "the client needs a string to render as an empty state")
-        self.assertEqual(result["advances"], [])
-        self.assertEqual(result["employees"], [])
-        self.assertEqual(result["payment_sources"], [])
-        self.assertEqual(result["months"], [])
-        self.assertEqual(result["current_month"], "2026-08")
-        self.assertEqual(result["summary"]["pending_count"], 0)
-        self.assertEqual(result["summary"]["outstanding_amount"], 0.0)
-        # The role flags still have to be truthful: the client uses them to decide
-        # which buttons to render, and "HRMS missing" is not "you lost the role".
-        self.assertTrue(result["can_request"])
-        self.assertTrue(result["can_approve"])
+		self.assertTrue(result["success"], "absence of HRMS is a normal answer, not an error")
+		self.assertFalse(result["hrms_available"])
+		self.assertTrue(result["notice"], "the client needs a string to render as an empty state")
+		self.assertEqual(result["advances"], [])
+		self.assertEqual(result["employees"], [])
+		self.assertEqual(result["payment_sources"], [])
+		self.assertEqual(result["months"], [])
+		self.assertEqual(result["current_month"], "2026-08")
+		self.assertEqual(result["summary"]["pending_count"], 0)
+		self.assertEqual(result["summary"]["outstanding_amount"], 0.0)
+		# The role flags still have to be truthful: the client uses them to decide
+		# which buttons to render, and "HRMS missing" is not "you lost the role".
+		self.assertTrue(result["can_request"])
+		self.assertTrue(result["can_approve"])
 
-    def test_write_paths_refuse_clearly(self):
-        from jarz_pos.api.employee_advances import (
-            approve_employee_advance,
-            create_employee_advance_request,
-            reject_employee_advance,
-        )
+	def test_write_paths_refuse_clearly(self):
+		from jarz_pos.api.employee_advances import (
+			approve_employee_advance,
+			create_employee_advance_request,
+			reject_employee_advance,
+		)
 
-        mock_frappe = _mock_frappe([ROLES.JARZ_MANAGER], user="manager@example.com")
+		mock_frappe = _mock_frappe([ROLES.JARZ_MANAGER], user="manager@example.com")
 
-        with patch(f"{MODULE}.frappe", mock_frappe), \
-                patch(f"{MODULE}.hrms_available", return_value=False):
-            for call in (
-                lambda: create_employee_advance_request(
-                    employee="HR-EMP-00001",
-                    amount=100,
-                    purpose="x",
-                    paying_account="Dokki - J",
-                ),
-                lambda: approve_employee_advance("HR-EAD-2026-00001"),
-                lambda: reject_employee_advance("HR-EAD-2026-00001", "no"),
-            ):
-                with self.assertRaises(ValueError) as ctx:
-                    call()
-                self.assertIn("HRMS", str(ctx.exception))
+		with patch(f"{MODULE}.frappe", mock_frappe), patch(f"{MODULE}.hrms_available", return_value=False):
+			for call in (
+				lambda: create_employee_advance_request(
+					employee="HR-EMP-00001",
+					amount=100,
+					purpose="x",
+					paying_account="Dokki - J",
+				),
+				lambda: approve_employee_advance("HR-EAD-2026-00001"),
+				lambda: reject_employee_advance("HR-EAD-2026-00001", "no"),
+			):
+				with self.assertRaises(ValueError) as ctx:
+					call()
+				self.assertIn("HRMS", str(ctx.exception))
 
-        mock_frappe.get_doc.assert_not_called()
+		mock_frappe.get_doc.assert_not_called()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -596,710 +603,744 @@ class TestHrmsAbsent(unittest.TestCase):
 
 
 class TestAdvanceSerializer(unittest.TestCase):
-    """``_serialize_advance`` is pure once its lookup maps and ``flt`` are supplied."""
+	"""``_serialize_advance`` is pure once its lookup maps and ``flt`` are supplied."""
 
-    ROW = {
-        "name": "HR-EAD-2026-00001",
-        "employee": "HR-EMP-00001",
-        "employee_name": "Ahmed Fathy",
-        "posting_date": "2026-08-28",
-        "currency": "EGP",
-        "advance_amount": 1000,
-        "paid_amount": 1000,
-        "claimed_amount": 250.50,
-        "return_amount": 100,
-        "purpose": "Petty cash float",
-        "status": "Partially Paid",
-        "docstatus": 1,
-        "company": "Jarz",
-        "creation": "2026-08-28 10:00:00",
-        "modified": "2026-08-28 11:00:00",
-        "custom_jarz_paying_account": "Dokki - J",
-        "custom_jarz_pos_profile": "Dokki",
-        "custom_jarz_requested_by": "line@example.com",
-        "custom_jarz_approved_by": "manager@example.com",
-        "custom_jarz_approved_on": "2026-08-28 11:00:00",
-        "custom_jarz_payment_entry": "ACC-PAY-2026-00042",
-    }
+	ROW = {
+		"name": "HR-EAD-2026-00001",
+		"employee": "HR-EMP-00001",
+		"employee_name": "Ahmed Fathy",
+		"posting_date": "2026-08-28",
+		"currency": "EGP",
+		"advance_amount": 1000,
+		"paid_amount": 1000,
+		"claimed_amount": 250.50,
+		"return_amount": 100,
+		"purpose": "Petty cash float",
+		"status": "Partially Paid",
+		"docstatus": 1,
+		"company": "Jarz",
+		"creation": "2026-08-28 10:00:00",
+		"modified": "2026-08-28 11:00:00",
+		"custom_jarz_paying_account": "Dokki - J",
+		"custom_jarz_pos_profile": "Dokki",
+		"custom_jarz_requested_by": "line@example.com",
+		"custom_jarz_approved_by": "manager@example.com",
+		"custom_jarz_approved_on": "2026-08-28 11:00:00",
+		"custom_jarz_payment_entry": "ACC-PAY-2026-00042",
+	}
 
-    def setUp(self):
-        # Patched by NAME, not via the frappe mock: the module binds ``flt`` at
-        # import, and the real one collapses every amount to 0.0 without a
-        # database. See the _flt docstring — without this every money assertion
-        # below reads 0.0 and looks like a serializer bug.
-        patcher = patch(f"{MODULE}.flt", _flt)
-        patcher.start()
-        self.addCleanup(patcher.stop)
+	def setUp(self):
+		# Patched by NAME, not via the frappe mock: the module binds ``flt`` at
+		# import, and the real one collapses every amount to 0.0 without a
+		# database. See the _flt docstring — without this every money assertion
+		# below reads 0.0 and looks like a serializer bug.
+		patcher = patch(f"{MODULE}.flt", _flt)
+		patcher.start()
+		self.addCleanup(patcher.stop)
 
-    def _serialize(self, **overrides):
-        from jarz_pos.api.employee_advances import _serialize_advance
+	def _serialize(self, **overrides):
+		from jarz_pos.api.employee_advances import _serialize_advance
 
-        row = dict(self.ROW)
-        row.update(overrides)
-        return _serialize_advance(
-            row,
-            account_labels={"Dokki - J": {"label": "Dokki", "label_en": "Dokki", "label_ar": "الدقي"}},
-            employee_meta={"HR-EMP-00001": {"employee_name": "Ahmed Fathy", "branch": "Dokki"}},
-            user_names={"line@example.com": "Line Manager", "manager@example.com": "The Manager"},
-        )
+		row = dict(self.ROW)
+		row.update(overrides)
+		return _serialize_advance(
+			row,
+			account_labels={"Dokki - J": {"label": "Dokki", "label_en": "Dokki", "label_ar": "الدقي"}},
+			employee_meta={"HR-EMP-00001": {"employee_name": "Ahmed Fathy", "branch": "Dokki"}},
+			user_names={"line@example.com": "Line Manager", "manager@example.com": "The Manager"},
+		)
 
-    def test_balance_is_paid_minus_claimed_and_returned(self):
-        out = self._serialize()
-        # 1000 paid, 250.50 claimed back via an Expense Claim, 100 returned
-        # => 649.50 still sitting with the employee.
-        self.assertEqual(out["balance"], 649.50)
+	def test_balance_is_paid_minus_claimed_and_returned(self):
+		out = self._serialize()
+		# 1000 paid, 250.50 claimed back via an Expense Claim, 100 returned
+		# => 649.50 still sitting with the employee.
+		self.assertEqual(out["balance"], 649.50)
 
-    def test_balance_is_zero_before_anything_is_paid(self):
-        out = self._serialize(paid_amount=0, claimed_amount=0, return_amount=0)
-        self.assertEqual(out["balance"], 0.0)
+	def test_balance_is_zero_before_anything_is_paid(self):
+		out = self._serialize(paid_amount=0, claimed_amount=0, return_amount=0)
+		self.assertEqual(out["balance"], 0.0)
 
-    def test_balance_goes_negative_when_more_is_returned_than_paid(self):
-        """Not clamped: a negative balance is a real data problem worth surfacing."""
-        out = self._serialize(paid_amount=100, claimed_amount=0, return_amount=250)
-        self.assertEqual(out["balance"], -150.0)
+	def test_balance_goes_negative_when_more_is_returned_than_paid(self):
+		"""Not clamped: a negative balance is a real data problem worth surfacing."""
+		out = self._serialize(paid_amount=100, claimed_amount=0, return_amount=250)
+		self.assertEqual(out["balance"], -150.0)
 
-    def test_amount_maps_from_advance_amount(self):
-        out = self._serialize()
-        self.assertEqual(out["amount"], 1000.0)
-        self.assertNotIn(
-            "advance_amount", out, "the client must never see an HRMS fieldname"
-        )
+	def test_amount_maps_from_advance_amount(self):
+		out = self._serialize()
+		self.assertEqual(out["amount"], 1000.0)
+		self.assertNotIn("advance_amount", out, "the client must never see an HRMS fieldname")
 
-    def test_money_is_rounded_to_two_places(self):
-        # Deliberately away from an exact .xx5 midpoint. The real ``flt`` applies
-        # the site's rounding method (banker's rounding by default) while the
-        # ``_flt`` double uses Python's ``round``; the two agree everywhere
-        # EXCEPT at a midpoint. Staying off midpoints keeps the double honest
-        # against the real thing and keeps this asserting the serializer's
-        # contract — "two places" — rather than the site's System Settings.
-        out = self._serialize(advance_amount=1000.567, paid_amount=333.333)
-        self.assertEqual(out["amount"], 1000.57)
-        self.assertEqual(out["paid_amount"], 333.33)
+	def test_money_is_rounded_to_two_places(self):
+		# Deliberately away from an exact .xx5 midpoint. The real ``flt`` applies
+		# the site's rounding method (banker's rounding by default) while the
+		# ``_flt`` double uses Python's ``round``; the two agree everywhere
+		# EXCEPT at a midpoint. Staying off midpoints keeps the double honest
+		# against the real thing and keeps this asserting the serializer's
+		# contract — "two places" — rather than the site's System Settings.
+		out = self._serialize(advance_amount=1000.567, paid_amount=333.333)
+		self.assertEqual(out["amount"], 1000.57)
+		self.assertEqual(out["paid_amount"], 333.33)
 
-    def test_branch_comes_from_the_employee_and_pos_profile_from_the_advance(self):
-        out = self._serialize()
-        self.assertEqual(out["branch"], "Dokki")
-        self.assertEqual(out["pos_profile"], "Dokki")
+	def test_branch_comes_from_the_employee_and_pos_profile_from_the_advance(self):
+		out = self._serialize()
+		self.assertEqual(out["branch"], "Dokki")
+		self.assertEqual(out["pos_profile"], "Dokki")
 
-    def test_bilingual_payment_labels_are_preserved(self):
-        """The Flutter client localises off the label/label_en/label_ar triple."""
-        out = self._serialize()
-        self.assertEqual(out["payment_label"], "Dokki")
-        self.assertEqual(out["payment_label_en"], "Dokki")
-        self.assertEqual(out["payment_label_ar"], "الدقي")
+	def test_bilingual_payment_labels_are_preserved(self):
+		"""The Flutter client localises off the label/label_en/label_ar triple."""
+		out = self._serialize()
+		self.assertEqual(out["payment_label"], "Dokki")
+		self.assertEqual(out["payment_label_en"], "Dokki")
+		self.assertEqual(out["payment_label_ar"], "الدقي")
 
-    def test_status_is_read_never_computed(self):
-        out = self._serialize(status="Claimed")
-        self.assertEqual(out["status"], "Claimed")
+	def test_status_is_read_never_computed(self):
+		out = self._serialize(status="Claimed")
+		self.assertEqual(out["status"], "Claimed")
 
-    def test_status_falls_back_to_docstatus_on_a_brand_new_doc(self):
-        out = self._serialize(status="", docstatus=0)
-        self.assertEqual(out["status"], "Draft")
+	def test_status_falls_back_to_docstatus_on_a_brand_new_doc(self):
+		out = self._serialize(status="", docstatus=0)
+		self.assertEqual(out["status"], "Draft")
 
-    def test_shape_is_exactly_the_documented_contract(self):
-        """The Flutter model is generated against this key set — additions are breaking."""
-        out = self._serialize()
-        self.assertEqual(
-            set(out),
-            {
-                "name",
-                "employee",
-                "employee_name",
-                "branch",
-                "pos_profile",
-                "posting_date",
-                "salary_month",
-                "salary_month_label",
-                "salary_month_explicit",
-                "currency",
-                "amount",
-                "paid_amount",
-                "claimed_amount",
-                "return_amount",
-                "balance",
-                "purpose",
-                "status",
-                "docstatus",
-                "paying_account",
-                "payment_label",
-                "payment_label_en",
-                "payment_label_ar",
-                "requested_by",
-                "requested_by_name",
-                "approved_by",
-                "approved_on",
-                "payment_entry",
-                "company",
-                "creation",
-                "modified",
-            },
-        )
+	def test_shape_is_exactly_the_documented_contract(self):
+		"""The Flutter model is generated against this key set — additions are breaking."""
+		out = self._serialize()
+		self.assertEqual(
+			set(out),
+			{
+				"name",
+				"employee",
+				"employee_name",
+				"branch",
+				"pos_profile",
+				"posting_date",
+				"salary_month",
+				"salary_month_label",
+				"salary_month_explicit",
+				"currency",
+				"amount",
+				"paid_amount",
+				"claimed_amount",
+				"return_amount",
+				"balance",
+				"purpose",
+				"status",
+				"docstatus",
+				"paying_account",
+				"payment_label",
+				"payment_label_en",
+				"payment_label_ar",
+				"requested_by",
+				"requested_by_name",
+				"approved_by",
+				"approved_on",
+				"payment_entry",
+				"company",
+				"creation",
+				"modified",
+			},
+		)
 
-    def test_dates_go_over_the_wire_as_strings(self):
-        from datetime import date, datetime
+	def test_dates_go_over_the_wire_as_strings(self):
+		from datetime import date, datetime
 
-        out = self._serialize(
-            posting_date=date(2026, 8, 28),
-            creation=datetime(2026, 8, 28, 10, 0, 0),
-            custom_jarz_approved_on=datetime(2026, 8, 28, 11, 0, 0),
-        )
-        for key in ("posting_date", "creation", "approved_on", "modified"):
-            with self.subTest(key=key):
-                self.assertIsInstance(out[key], str)
-        self.assertEqual(out["posting_date"], "2026-08-28")
+		out = self._serialize(
+			posting_date=date(2026, 8, 28),
+			creation=datetime(2026, 8, 28, 10, 0, 0),
+			custom_jarz_approved_on=datetime(2026, 8, 28, 11, 0, 0),
+		)
+		for key in ("posting_date", "creation", "approved_on", "modified"):
+			with self.subTest(key=key):
+				self.assertIsInstance(out[key], str)
+		self.assertEqual(out["posting_date"], "2026-08-28")
 
-    def test_requested_by_falls_back_to_owner_on_pre_migration_rows(self):
-        row = dict(self.ROW)
-        row.pop("custom_jarz_requested_by")
-        row["owner"] = "legacy@example.com"
+	def test_requested_by_falls_back_to_owner_on_pre_migration_rows(self):
+		row = dict(self.ROW)
+		row.pop("custom_jarz_requested_by")
+		row["owner"] = "legacy@example.com"
 
-        from jarz_pos.api.employee_advances import _serialize_advance
+		from jarz_pos.api.employee_advances import _serialize_advance
 
-        out = _serialize_advance(row)
-        self.assertEqual(out["requested_by"], "legacy@example.com")
+		out = _serialize_advance(row)
+		self.assertEqual(out["requested_by"], "legacy@example.com")
 
 
 class TestAdvanceAccountTyping(unittest.TestCase):
-    """``_type_unused_advance_account`` — the staging blocker of 2026-08-29.
+	"""``_type_unused_advance_account`` — the staging blocker of 2026-08-29.
 
-    ERPNext had created "Employee Advances" under Loans and Advances with NO
-    ``account_type``. The node looked right in every other respect, and HRMS
-    still refused every approval, because ``validate_advance_account_type``
-    compares against ``"Receivable"`` exactly. Repointing at the only other
-    Receivable ledger was not an option — that is ``Debtors``, i.e. customer AR.
+	ERPNext had created "Employee Advances" under Loans and Advances with NO
+	``account_type``. The node looked right in every other respect, and HRMS
+	still refused every approval, because ``validate_advance_account_type``
+	compares against ``"Receivable"`` exactly. Repointing at the only other
+	Receivable ledger was not an option — that is ``Debtors``, i.e. customer AR.
 
-    The guards below are the whole point: typing an EMPTY account classifies it,
-    but doing the same to one that has already posted would silently change how
-    existing entries report. Hence the GL-entry check.
-    """
+	The guards below are the whole point: typing an EMPTY account classifies it,
+	but doing the same to one that has already posted would silently change how
+	existing entries report. Hence the GL-entry check.
+	"""
 
-    SETUP_MODULE = "jarz_pos.setup.employee_link_setup"
+	SETUP_MODULE = "jarz_pos.setup.employee_link_setup"
 
-    def _run(self, account_row, gl_count=0):
-        from jarz_pos.setup import employee_link_setup as els
+	def _run(self, account_row, gl_count=0):
+		from jarz_pos.setup import employee_link_setup as els
 
-        log = {"created": [], "existing": [], "skipped": [], "warnings": []}
-        mock = MagicMock()
-        mock.get_all.return_value = [account_row] if account_row else []
-        mock.db.count.return_value = gl_count
-        with patch(f"{self.SETUP_MODULE}.frappe", mock):
-            els._type_unused_advance_account("JARZ", log)
-        return log, mock
+		log = {"created": [], "existing": [], "skipped": [], "warnings": []}
+		mock = MagicMock()
+		mock.get_all.return_value = [account_row] if account_row else []
+		mock.db.count.return_value = gl_count
+		with patch(f"{self.SETUP_MODULE}.frappe", mock):
+			els._type_unused_advance_account("JARZ", log)
+		return log, mock
 
-    def _row(self, **over):
-        row = {
-            "name": "Employee Advances - J",
-            "account_type": "",
-            "root_type": "Asset",
-        }
-        row.update(over)
-        return row
+	def _row(self, **over):
+		row = {
+			"name": "Employee Advances - J",
+			"account_type": "",
+			"root_type": "Asset",
+		}
+		row.update(over)
+		return row
 
-    def test_untyped_asset_leaf_with_no_entries_is_typed(self):
-        log, mock = self._run(self._row())
-        mock.db.set_value.assert_called_once_with(
-            "Account", "Employee Advances - J", "account_type", "Receivable",
-            update_modified=False,
-        )
-        self.assertTrue(any("account_type -> Receivable" in c for c in log["created"]))
+	def test_untyped_asset_leaf_with_no_entries_is_typed(self):
+		log, mock = self._run(self._row())
+		mock.db.set_value.assert_called_once_with(
+			"Account",
+			"Employee Advances - J",
+			"account_type",
+			"Receivable",
+			update_modified=False,
+		)
+		self.assertTrue(any("account_type -> Receivable" in c for c in log["created"]))
 
-    def test_an_account_with_gl_entries_is_never_typed(self):
-        log, mock = self._run(self._row(), gl_count=3)
-        mock.db.set_value.assert_not_called()
-        self.assertTrue(any("3 GL entries" in w for w in log["warnings"]))
+	def test_an_account_with_gl_entries_is_never_typed(self):
+		log, mock = self._run(self._row(), gl_count=3)
+		mock.db.set_value.assert_not_called()
+		self.assertTrue(any("3 GL entries" in w for w in log["warnings"]))
 
-    def test_an_already_typed_account_is_left_alone(self):
-        # Even a WRONG type is not ours to overwrite — that is a decision to
-        # revisit, not a typo to patch.
-        log, mock = self._run(self._row(account_type="Payable"))
-        mock.db.set_value.assert_not_called()
-        self.assertEqual(log["created"], [])
-        self.assertEqual(log["warnings"], [])
+	def test_an_already_typed_account_is_left_alone(self):
+		# Even a WRONG type is not ours to overwrite — that is a decision to
+		# revisit, not a typo to patch.
+		log, mock = self._run(self._row(account_type="Payable"))
+		mock.db.set_value.assert_not_called()
+		self.assertEqual(log["created"], [])
+		self.assertEqual(log["warnings"], [])
 
-    def test_a_non_asset_account_is_reported_not_typed(self):
-        log, mock = self._run(self._row(root_type="Expense"))
-        mock.db.set_value.assert_not_called()
-        self.assertTrue(any("not 'Asset'" in w for w in log["warnings"]))
+	def test_a_non_asset_account_is_reported_not_typed(self):
+		log, mock = self._run(self._row(root_type="Expense"))
+		mock.db.set_value.assert_not_called()
+		self.assertTrue(any("not 'Asset'" in w for w in log["warnings"]))
 
-    def test_no_matching_account_is_a_quiet_no_op(self):
-        log, mock = self._run(None)
-        mock.db.set_value.assert_not_called()
-        self.assertEqual(log["created"], [])
-        self.assertEqual(log["warnings"], [])
+	def test_no_matching_account_is_a_quiet_no_op(self):
+		log, mock = self._run(None)
+		mock.db.set_value.assert_not_called()
+		self.assertEqual(log["created"], [])
+		self.assertEqual(log["warnings"], [])
 
-    def test_a_lookup_failure_never_raises(self):
-        from jarz_pos.setup import employee_link_setup as els
+	def test_a_lookup_failure_never_raises(self):
+		from jarz_pos.setup import employee_link_setup as els
 
-        log = {"created": [], "existing": [], "skipped": [], "warnings": []}
-        mock = MagicMock()
-        mock.get_all.side_effect = RuntimeError("db gone")
-        with patch(f"{self.SETUP_MODULE}.frappe", mock):
-            els._type_unused_advance_account("JARZ", log)  # must not raise
-        mock.db.set_value.assert_not_called()
+		log = {"created": [], "existing": [], "skipped": [], "warnings": []}
+		mock = MagicMock()
+		mock.get_all.side_effect = RuntimeError("db gone")
+		with patch(f"{self.SETUP_MODULE}.frappe", mock):
+			els._type_unused_advance_account("JARZ", log)  # must not raise
+		mock.db.set_value.assert_not_called()
 
 
 class TestAdvanceAccountResolution(unittest.TestCase):
-    """``_resolve_advance_account`` — the production misrouting of 2026-09-12.
+	"""``_resolve_advance_account`` — the production misrouting of 2026-09-12.
 
-    Three submitted advances on production (6,000 EGP) were booked to
-    ``Debtors - J``, the company's CUSTOMER receivable, while
-    ``Employee Advances - J`` sat empty and the company default pointed at it
-    correctly the whole time.
+	Three submitted advances on production (6,000 EGP) were booked to
+	``Debtors - J``, the company's CUSTOMER receivable, while
+	``Employee Advances - J`` sat empty and the company default pointed at it
+	correctly the whole time.
 
-    Nothing in the resolve chain was wrong; the chain was simply never entered.
-    ``Employee Advance.advance_account`` is declared
-    ``fetch_from: employee.employee_advance_account`` with ``fetch_if_empty``,
-    and 15 of 24 production Employee records carry ``Debtors - J`` in that
-    field, typed into the Desk in June. Frappe fetches it at insert, so the
-    field is already populated by the time HRMS's ``before_submit`` and this
-    module's own approval-time resolve look at it — and both were spelled
-    ``if not advance_account``. HRMS then copies the value onto the Payment
-    Entry's ``paid_to``.
+	Nothing in the resolve chain was wrong; the chain was simply never entered.
+	``Employee Advance.advance_account`` is declared
+	``fetch_from: employee.employee_advance_account`` with ``fetch_if_empty``,
+	and 15 of 24 production Employee records carry ``Debtors - J`` in that
+	field, typed into the Desk in June. Frappe fetches it at insert, so the
+	field is already populated by the time HRMS's ``before_submit`` and this
+	module's own approval-time resolve look at it — and both were spelled
+	``if not advance_account``. HRMS then copies the value onto the Payment
+	Entry's ``paid_to``.
 
-    So the cases below are about CORRECTING a populated value, not filling an
-    empty one. The empty case never occurs on the site that broke.
-    """
+	So the cases below are about CORRECTING a populated value, not filling an
+	empty one. The empty case never occurs on the site that broke.
+	"""
 
-    COMPANY = "JARZ"
-    AR = "Debtors - J"
-    ADVANCES = "Employee Advances - J"
+	COMPANY = "JARZ"
+	AR = "Debtors - J"
+	ADVANCES = "Employee Advances - J"
 
-    def _mock(self, accounts, company_default=None, named_fallback="",
-              company_ar_rows=None, ar_lookup_raises=False, customer_party_account=""):
-        """A ``frappe`` double whose Account/Company lookups answer from dicts.
+	def _mock(
+		self,
+		accounts,
+		company_default=None,
+		named_fallback="",
+		company_ar_rows=None,
+		ar_lookup_raises=False,
+		customer_party_account="",
+	):
+		"""A ``frappe`` double whose Account/Company lookups answer from dicts.
 
-        ``company_ar_rows`` is what ``tabCompany`` reports as its configured
-        receivable accounts, and it defaults to the real one. Being able to make
-        it EMPTY is the point: an unset ``default_receivable_account`` is the
-        shape that silently disarmed the first version of this guard.
-        """
-        if company_default is None:
-            company_default = self.ADVANCES
-        if company_ar_rows is None:
-            company_ar_rows = [self.AR]
-        mock = _mock_frappe(set())
+		``company_ar_rows`` is what ``tabCompany`` reports as its configured
+		receivable accounts, and it defaults to the real one. Being able to make
+		it EMPTY is the point: an unset ``default_receivable_account`` is the
+		shape that silently disarmed the first version of this guard.
+		"""
+		if company_default is None:
+			company_default = self.ADVANCES
+		if company_ar_rows is None:
+			company_ar_rows = [self.AR]
+		mock = _mock_frappe(set())
 
-        def get_value(doctype, filters, fieldname=None, **kwargs):
-            if doctype == "Company":
-                if fieldname == "default_employee_advance_account":
-                    return company_default
-                if fieldname == "default_receivable_account":
-                    return self.AR
-                return None
-            if doctype == "Account":
-                if isinstance(filters, dict):
-                    # the account_name == "Employee Advances" fallback lookup
-                    return named_fallback
-                return accounts.get(filters)
-            return None
+		def get_value(doctype, filters, fieldname=None, **kwargs):
+			if doctype == "Company":
+				if fieldname == "default_employee_advance_account":
+					return company_default
+				if fieldname == "default_receivable_account":
+					return self.AR
+				return None
+			if doctype == "Account":
+				if isinstance(filters, dict):
+					# the account_name == "Employee Advances" fallback lookup
+					return named_fallback
+				return accounts.get(filters)
+			return None
 
-        def sql_list(*args, **kwargs):
-            if ar_lookup_raises:
-                raise RuntimeError("db gone")
-            return list(company_ar_rows)
+		def sql_list(*args, **kwargs):
+			if ar_lookup_raises:
+				raise RuntimeError("db gone")
+			return list(company_ar_rows)
 
-        mock.db.get_value.side_effect = get_value
-        mock.db.sql_list.side_effect = sql_list
-        # Answers for ONE account, not every account. A blanket True also marked
-        # the company default as customer AR, so the resolver had nothing left to
-        # fall back to and threw — the double, not the code, being wrong.
-        def exists(doctype, filters=None, **kwargs):
-            return bool(
-                customer_party_account
-                and isinstance(filters, dict)
-                and filters.get("account") == customer_party_account
-            )
+		mock.db.get_value.side_effect = get_value
+		mock.db.sql_list.side_effect = sql_list
 
-        mock.db.exists.side_effect = exists
-        mock.db.has_column.return_value = True
-        return mock
+		# Answers for ONE account, not every account. A blanket True also marked
+		# the company default as customer AR, so the resolver had nothing left to
+		# fall back to and threw — the double, not the code, being wrong.
+		def exists(doctype, filters=None, **kwargs):
+			return bool(
+				customer_party_account
+				and isinstance(filters, dict)
+				and filters.get("account") == customer_party_account
+			)
 
-    def _accounts(self, **over):
-        """Both real production accounts, in their real shapes."""
-        rows = {
-            self.ADVANCES: {
-                "company": self.COMPANY, "is_group": 0,
-                "root_type": "Asset", "account_type": "Receivable",
-                "account_currency": "EGP",
-            },
-            self.AR: {
-                "company": self.COMPANY, "is_group": 0,
-                "root_type": "Asset", "account_type": "Receivable",
-                "account_currency": "EGP",
-            },
-        }
-        rows.update(over)
-        return rows
+		mock.db.exists.side_effect = exists
+		mock.db.has_column.return_value = True
+		return mock
 
-    def _resolve(self, current, accounts=None, currency="", **kw):
-        from jarz_pos.api import employee_advances as mod
+	def _accounts(self, **over):
+		"""Both real production accounts, in their real shapes."""
+		rows = {
+			self.ADVANCES: {
+				"company": self.COMPANY,
+				"is_group": 0,
+				"root_type": "Asset",
+				"account_type": "Receivable",
+				"account_currency": "EGP",
+			},
+			self.AR: {
+				"company": self.COMPANY,
+				"is_group": 0,
+				"root_type": "Asset",
+				"account_type": "Receivable",
+				"account_currency": "EGP",
+			},
+		}
+		rows.update(over)
+		return rows
 
-        mock = self._mock(accounts or self._accounts(), **kw)
-        with patch(MODULE + ".frappe", mock):
-            return mod._resolve_advance_account(self.COMPANY, current, currency)
+	def _resolve(self, current, accounts=None, currency="", **kw):
+		from jarz_pos.api import employee_advances as mod
 
-    # -- the actual defect ---------------------------------------------------
+		mock = self._mock(accounts or self._accounts(), **kw)
+		with patch(MODULE + ".frappe", mock):
+			return mod._resolve_advance_account(self.COMPANY, current, currency)
 
-    def test_customer_ar_is_overridden_by_the_company_default(self):
-        """The one that matters. Debtors passes every structural check —
-        leaf, Asset, Receivable, right company — and is still wrong."""
-        self.assertEqual(self._resolve(self.AR), self.ADVANCES)
+	# -- the actual defect ---------------------------------------------------
 
-    def test_a_genuine_advance_ledger_is_kept(self):
-        """A per-employee override is a real HRMS feature and is not clobbered."""
-        self.assertEqual(self._resolve(self.ADVANCES), self.ADVANCES)
+	def test_customer_ar_is_overridden_by_the_company_default(self):
+		"""The one that matters. Debtors passes every structural check —
+		leaf, Asset, Receivable, right company — and is still wrong."""
+		self.assertEqual(self._resolve(self.AR), self.ADVANCES)
 
-    def test_an_empty_value_still_falls_back(self):
-        self.assertEqual(self._resolve(""), self.ADVANCES)
+	def test_a_genuine_advance_ledger_is_kept(self):
+		"""A per-employee override is a real HRMS feature and is not clobbered."""
+		self.assertEqual(self._resolve(self.ADVANCES), self.ADVANCES)
 
-    # -- structural rejections, each of which HRMS would throw on later ------
+	def test_an_empty_value_still_falls_back(self):
+		self.assertEqual(self._resolve(""), self.ADVANCES)
 
-    def test_a_payable_account_is_rejected(self):
-        accounts = self._accounts()
-        accounts["Creditors - J"] = {
-            "company": self.COMPANY, "is_group": 0,
-            "root_type": "Liability", "account_type": "Payable",
-        }
-        self.assertEqual(
-            self._resolve("Creditors - J", accounts=accounts), self.ADVANCES
-        )
+	# -- structural rejections, each of which HRMS would throw on later ------
 
-    def test_a_group_account_is_rejected(self):
-        accounts = self._accounts()
-        accounts["Loans and Advances (Assets) - J"] = {
-            "company": self.COMPANY, "is_group": 1,
-            "root_type": "Asset", "account_type": "Receivable",
-        }
-        self.assertEqual(
-            self._resolve("Loans and Advances (Assets) - J", accounts=accounts),
-            self.ADVANCES,
-        )
+	def test_a_payable_account_is_rejected(self):
+		accounts = self._accounts()
+		accounts["Creditors - J"] = {
+			"company": self.COMPANY,
+			"is_group": 0,
+			"root_type": "Liability",
+			"account_type": "Payable",
+		}
+		self.assertEqual(self._resolve("Creditors - J", accounts=accounts), self.ADVANCES)
 
-    def test_an_untyped_account_is_rejected(self):
-        """The 2026-08-29 staging shape: right node, empty ``account_type``.
-        HRMS's validate_advance_account_type throws on it, so accepting it here
-        only moves the failure to the moment cash is handed over.
+	def test_a_group_account_is_rejected(self):
+		accounts = self._accounts()
+		accounts["Loans and Advances (Assets) - J"] = {
+			"company": self.COMPANY,
+			"is_group": 1,
+			"root_type": "Asset",
+			"account_type": "Receivable",
+		}
+		self.assertEqual(
+			self._resolve("Loans and Advances (Assets) - J", accounts=accounts),
+			self.ADVANCES,
+		)
 
-        Deliberately a DISTINCT account, leaving the company default healthy: an
-        earlier version of this test blanked the type on the default itself, so
-        it passed off the default being refused rather than off the candidate
-        being rejected, and would have stayed green with the candidate check
-        deleted."""
-        accounts = self._accounts()
-        accounts["Staff Advances (untyped) - J"] = {
-            "company": self.COMPANY, "is_group": 0,
-            "root_type": "Asset", "account_type": "",
-        }
-        self.assertEqual(
-            self._resolve("Staff Advances (untyped) - J", accounts=accounts), self.ADVANCES
-        )
+	def test_an_untyped_account_is_rejected(self):
+		"""The 2026-08-29 staging shape: right node, empty ``account_type``.
+		HRMS's validate_advance_account_type throws on it, so accepting it here
+		only moves the failure to the moment cash is handed over.
 
-    def test_a_mismatched_currency_account_is_rejected(self):
-        """HRMS's validate_advance_account_currency throws during validate(), so
-        a mismatch now fails at INSERT — the field is always populated."""
-        accounts = self._accounts()
-        accounts["Employee Advances USD - J"] = {
-            "company": self.COMPANY, "is_group": 0,
-            "root_type": "Asset", "account_type": "Receivable",
-            "account_currency": "USD",
-        }
-        self.assertEqual(
-            self._resolve("Employee Advances USD - J", accounts=accounts, currency="EGP"),
-            self.ADVANCES,
-        )
+		Deliberately a DISTINCT account, leaving the company default healthy: an
+		earlier version of this test blanked the type on the default itself, so
+		it passed off the default being refused rather than off the candidate
+		being rejected, and would have stayed green with the candidate check
+		deleted."""
+		accounts = self._accounts()
+		accounts["Staff Advances (untyped) - J"] = {
+			"company": self.COMPANY,
+			"is_group": 0,
+			"root_type": "Asset",
+			"account_type": "",
+		}
+		self.assertEqual(self._resolve("Staff Advances (untyped) - J", accounts=accounts), self.ADVANCES)
 
-    # -- the guard must not fail OPEN ---------------------------------------
+	def test_a_mismatched_currency_account_is_rejected(self):
+		"""HRMS's validate_advance_account_currency throws during validate(), so
+		a mismatch now fails at INSERT — the field is always populated."""
+		accounts = self._accounts()
+		accounts["Employee Advances USD - J"] = {
+			"company": self.COMPANY,
+			"is_group": 0,
+			"root_type": "Asset",
+			"account_type": "Receivable",
+			"account_currency": "USD",
+		}
+		self.assertEqual(
+			self._resolve("Employee Advances USD - J", accounts=accounts, currency="EGP"),
+			self.ADVANCES,
+		)
 
-    def test_customer_ar_is_still_refused_when_no_company_declares_one(self):
-        """The critical regression. The first version of this guard read
-        ``if customer_ar and account == customer_ar``, so an unset
-        ``default_receivable_account`` — not a mandatory field in ERPNext — made
-        ``Debtors - J`` pass every structural check and the money went back into
-        customer AR with nothing logged. Unprovable must mean refused."""
-        self.assertEqual(self._resolve(self.AR, company_ar_rows=[]), self.ADVANCES)
+	# -- the guard must not fail OPEN ---------------------------------------
 
-    def test_customer_ar_is_still_refused_when_the_lookup_raises(self):
-        """A lock-wait timeout mid-transaction must not bless customer AR."""
-        self.assertEqual(self._resolve(self.AR, ar_lookup_raises=True), self.ADVANCES)
+	def test_customer_ar_is_still_refused_when_no_company_declares_one(self):
+		"""The critical regression. The first version of this guard read
+		``if customer_ar and account == customer_ar``, so an unset
+		``default_receivable_account`` — not a mandatory field in ERPNext — made
+		``Debtors - J`` pass every structural check and the money went back into
+		customer AR with nothing logged. Unprovable must mean refused."""
+		self.assertEqual(self._resolve(self.AR, company_ar_rows=[]), self.ADVANCES)
 
-    def test_an_account_attached_to_a_customer_is_refused(self):
-        """A Party Account override is customer AR even when it is no company's
-        default."""
-        accounts = self._accounts()
-        accounts["Debtors Retail - J"] = {
-            "company": self.COMPANY, "is_group": 0,
-            "root_type": "Asset", "account_type": "Receivable",
-        }
-        self.assertEqual(
-            self._resolve("Debtors Retail - J", accounts=accounts,
-                          customer_party_account="Debtors Retail - J"),
-            self.ADVANCES,
-        )
+	def test_customer_ar_is_still_refused_when_the_lookup_raises(self):
+		"""A lock-wait timeout mid-transaction must not bless customer AR."""
+		self.assertEqual(self._resolve(self.AR, ar_lookup_raises=True), self.ADVANCES)
 
-    def test_customer_ar_is_matched_case_insensitively(self):
-        """MariaDB resolves a Link case-insensitively; Python's == does not, so a
-        row written as "debtors - J" by an import would sail past an exact
-        compare."""
-        accounts = self._accounts()
-        accounts["debtors - J"] = {
-            "company": self.COMPANY, "is_group": 0,
-            "root_type": "Asset", "account_type": "Receivable",
-        }
-        self.assertEqual(
-            self._resolve("debtors - J", accounts=accounts), self.ADVANCES
-        )
+	def test_an_account_attached_to_a_customer_is_refused(self):
+		"""A Party Account override is customer AR even when it is no company's
+		default."""
+		accounts = self._accounts()
+		accounts["Debtors Retail - J"] = {
+			"company": self.COMPANY,
+			"is_group": 0,
+			"root_type": "Asset",
+			"account_type": "Receivable",
+		}
+		self.assertEqual(
+			self._resolve(
+				"Debtors Retail - J", accounts=accounts, customer_party_account="Debtors Retail - J"
+			),
+			self.ADVANCES,
+		)
 
-    def test_the_company_default_survives_an_unreadable_customer_ar(self):
-        """The opposite default, and deliberately so. The FALLBACK is judged with
-        ``trust_when_unknown=True``: refusing it because we could not prove a
-        negative would throw at the exact moment a manager is handing cash over.
-        Distinct from the test above — there the unprovable value is the
-        CANDIDATE and must be dropped; here it is the account we fall back TO and
-        must be kept."""
-        self.assertEqual(self._resolve("", ar_lookup_raises=True), self.ADVANCES)
+	def test_customer_ar_is_matched_case_insensitively(self):
+		"""MariaDB resolves a Link case-insensitively; Python's == does not, so a
+		row written as "debtors - J" by an import would sail past an exact
+		compare."""
+		accounts = self._accounts()
+		accounts["debtors - J"] = {
+			"company": self.COMPANY,
+			"is_group": 0,
+			"root_type": "Asset",
+			"account_type": "Receivable",
+		}
+		self.assertEqual(self._resolve("debtors - J", accounts=accounts), self.ADVANCES)
 
-    def test_an_account_of_another_company_is_rejected(self):
-        accounts = self._accounts()
-        accounts["Employee Advances - X"] = {
-            "company": "OTHER", "is_group": 0,
-            "root_type": "Asset", "account_type": "Receivable",
-        }
-        self.assertEqual(
-            self._resolve("Employee Advances - X", accounts=accounts), self.ADVANCES
-        )
+	def test_the_company_default_survives_an_unreadable_customer_ar(self):
+		"""The opposite default, and deliberately so. The FALLBACK is judged with
+		``trust_when_unknown=True``: refusing it because we could not prove a
+		negative would throw at the exact moment a manager is handing cash over.
+		Distinct from the test above — there the unprovable value is the
+		CANDIDATE and must be dropped; here it is the account we fall back TO and
+		must be kept."""
+		self.assertEqual(self._resolve("", ar_lookup_raises=True), self.ADVANCES)
 
-    def test_an_unknown_account_is_rejected(self):
-        self.assertEqual(self._resolve("Ghost - J"), self.ADVANCES)
+	def test_an_account_of_another_company_is_rejected(self):
+		accounts = self._accounts()
+		accounts["Employee Advances - X"] = {
+			"company": "OTHER",
+			"is_group": 0,
+			"root_type": "Asset",
+			"account_type": "Receivable",
+		}
+		self.assertEqual(self._resolve("Employee Advances - X", accounts=accounts), self.ADVANCES)
 
-    # -- the company default gets the same treatment ------------------------
+	def test_an_unknown_account_is_rejected(self):
+		self.assertEqual(self._resolve("Ghost - J"), self.ADVANCES)
 
-    def test_a_company_default_pointing_at_customer_ar_is_refused(self):
-        """Otherwise the guard is defeated one level up, by the same mistake."""
-        with self.assertRaises(ValueError) as ctx:
-            self._resolve(self.AR, company_default=self.AR)
-        self.assertIn("Employee Advances", str(ctx.exception))
+	# -- the company default gets the same treatment ------------------------
 
-    def test_no_configuration_at_all_throws(self):
-        with self.assertRaises(ValueError):
-            self._resolve("", company_default="", named_fallback="")
+	def test_a_company_default_pointing_at_customer_ar_is_refused(self):
+		"""Otherwise the guard is defeated one level up, by the same mistake."""
+		with self.assertRaises(ValueError) as ctx:
+			self._resolve(self.AR, company_default=self.AR)
+		self.assertIn("Employee Advances", str(ctx.exception))
+
+	def test_no_configuration_at_all_throws(self):
+		with self.assertRaises(ValueError):
+			self._resolve("", company_default="", named_fallback="")
 
 
 class TestRequestStampsTheAdvanceAccount(unittest.TestCase):
-    """The draft must carry the resolved ledger BEFORE it is inserted.
+	"""The draft must carry the resolved ledger BEFORE it is inserted.
 
-    Leaving the field empty and trusting a later fallback is what failed: the
-    DocType's ``fetch_if_empty`` fetch fires at insert and fills it from the
-    Employee, so by the time any ``if not advance_account`` guard runs there is
-    nothing left to fill. Writing it onto the document pre-empts the fetch.
-    """
+	Leaving the field empty and trusting a later fallback is what failed: the
+	DocType's ``fetch_if_empty`` fetch fires at insert and fills it from the
+	Employee, so by the time any ``if not advance_account`` guard runs there is
+	nothing left to fill. Writing it onto the document pre-empts the fetch.
+	"""
 
-    def _request(self, employee_override):
-        from jarz_pos.api import employee_advances as mod
+	def _request(self, employee_override):
+		from jarz_pos.api import employee_advances as mod
 
-        mock = _mock_frappe(ROLES.LINE_MANAGER_TIER)
-        mock.db.get_value.return_value = employee_override
-        mock.db.exists.return_value = True
-        captured = {}
+		mock = _mock_frappe(ROLES.LINE_MANAGER_TIER)
+		mock.db.get_value.return_value = employee_override
+		mock.db.exists.return_value = True
+		captured = {}
 
-        def get_doc(payload):
-            captured["payload"] = payload
-            return _FakeAdvanceDoc(**payload)
+		def get_doc(payload):
+			captured["payload"] = payload
+			return _FakeAdvanceDoc(**payload)
 
-        mock.get_doc.side_effect = get_doc
+		mock.get_doc.side_effect = get_doc
 
-        patches = [
-            patch(MODULE + ".frappe", mock),
-            patch(MODULE + ".flt", _flt),
-            patch(MODULE + "._ensure_hrms", lambda: None),
-            patch(MODULE + "._advance_has_field", lambda f: True),
-            patch(MODULE + "._validate_employee",
-                  lambda e: {"company": "JARZ", "salary_currency": "EGP"}),
-            patch(MODULE + "._validate_paying_account", lambda c, a: {}),
-            patch(MODULE + "._resolve_advance_account",
-                  lambda company, current="", currency="":
-                      "RESOLVED(" + (current or "") + "|" + (currency or "") + ")"),
-            patch(MODULE + "._serialize_one", lambda d: {}),
-            patch(MODULE + ".today", lambda: "2026-09-12"),
-            patch(MODULE + ".getdate", lambda v: v),
-            patch(MODULE + ".split_posting_datetime", lambda v: ("2026-09-12", None)),
-        ]
-        for p in patches:
-            p.start()
-        try:
-            mod.create_employee_advance_request(
-                employee="HR-EMP-000002", amount=500, purpose="Advance",
-                paying_account="Nasr city - J",
-            )
-        finally:
-            for p in reversed(patches):
-                p.stop()
-        return captured["payload"]
+		patches = [
+			patch(MODULE + ".frappe", mock),
+			patch(MODULE + ".flt", _flt),
+			patch(MODULE + "._ensure_hrms", lambda: None),
+			patch(MODULE + "._advance_has_field", lambda f: True),
+			patch(MODULE + "._validate_employee", lambda e: {"company": "JARZ", "salary_currency": "EGP"}),
+			patch(MODULE + "._validate_paying_account", lambda c, a: {}),
+			patch(
+				MODULE + "._resolve_advance_account",
+				lambda company, current="", currency="": "RESOLVED("
+				+ (current or "")
+				+ "|"
+				+ (currency or "")
+				+ ")",
+			),
+			patch(MODULE + "._serialize_one", lambda d: {}),
+			patch(MODULE + ".today", lambda: "2026-09-12"),
+			patch(MODULE + ".getdate", lambda v: v),
+			patch(MODULE + ".split_posting_datetime", lambda v: ("2026-09-12", None)),
+		]
+		for p in patches:
+			p.start()
+		try:
+			mod.create_employee_advance_request(
+				employee="HR-EMP-000002",
+				amount=500,
+				purpose="Advance",
+				paying_account="Nasr city - J",
+			)
+		finally:
+			for p in reversed(patches):
+				p.stop()
+		return captured["payload"]
 
-    def test_the_draft_carries_a_resolved_account_not_an_empty_field(self):
-        payload = self._request("Debtors - J")
-        self.assertEqual(payload["advance_account"], "RESOLVED(Debtors - J|EGP)")
+	def test_the_draft_carries_a_resolved_account_not_an_empty_field(self):
+		payload = self._request("Debtors - J")
+		self.assertEqual(payload["advance_account"], "RESOLVED(Debtors - J|EGP)")
 
-    def test_an_employee_with_no_override_still_gets_an_account(self):
-        payload = self._request("")
-        self.assertEqual(payload["advance_account"], "RESOLVED(|EGP)")
+	def test_an_employee_with_no_override_still_gets_an_account(self):
+		payload = self._request("")
+		self.assertEqual(payload["advance_account"], "RESOLVED(|EGP)")
 
 
 class TestApproveRepairsTheAccount(unittest.TestCase):
-    """The approve path must CORRECT a bad ledger, and do it before submit.
+	"""The approve path must CORRECT a bad ledger, and do it before submit.
 
-    Drafts filed before the fix still carry whatever the ``fetch_from`` gave
-    them, and approve is the last gate before the Payment Entry is built — HRMS
-    reads ``advance_account`` straight off the submitted document and copies it
-    onto ``paid_to``. Two things therefore have to hold, and neither was pinned:
-    the value is replaced, and it is replaced BEFORE ``doc.submit()``. Move the
-    assignment below the submit and nothing else in this file notices, yet every
-    legacy draft would submit against Debtors.
-    """
+	Drafts filed before the fix still carry whatever the ``fetch_from`` gave
+	them, and approve is the last gate before the Payment Entry is built — HRMS
+	reads ``advance_account`` straight off the submitted document and copies it
+	onto ``paid_to``. Two things therefore have to hold, and neither was pinned:
+	the value is replaced, and it is replaced BEFORE ``doc.submit()``. Move the
+	assignment below the submit and nothing else in this file notices, yet every
+	legacy draft would submit against Debtors.
+	"""
 
-    def _approve(self, advance_account):
-        from jarz_pos.api import employee_advances as mod
+	def _approve(self, advance_account):
+		from jarz_pos.api import employee_advances as mod
 
-        order = []
-        doc = _FakeAdvanceDoc(
-            name="HR-EAD-2026-00001", company="JARZ", currency="EGP",
-            advance_account=advance_account, docstatus=0, status="Draft",
-            custom_jarz_paying_account="Nasr city - J",
-        )
-        doc.submit = MagicMock(side_effect=lambda: order.append("submit"))
+		order = []
+		doc = _FakeAdvanceDoc(
+			name="HR-EAD-2026-00001",
+			company="JARZ",
+			currency="EGP",
+			advance_account=advance_account,
+			docstatus=0,
+			status="Draft",
+			custom_jarz_paying_account="Nasr city - J",
+		)
+		doc.submit = MagicMock(side_effect=lambda: order.append("submit"))
 
-        mock = _mock_frappe(ROLES.ADMIN | {ROLES.JARZ_MANAGER})
-        mock.get_doc.return_value = doc
+		mock = _mock_frappe(ROLES.ADMIN | {ROLES.JARZ_MANAGER})
+		mock.get_doc.return_value = doc
 
-        def resolve(company, current="", currency=""):
-            order.append("resolve")
-            return "Employee Advances - J"
+		def resolve(company, current="", currency=""):
+			order.append("resolve")
+			return "Employee Advances - J"
 
-        patches = [
-            patch(MODULE + ".frappe", mock),
-            patch(MODULE + "._ensure_hrms", lambda: None),
-            patch(MODULE + "._advance_has_field", lambda f: True),
-            patch(MODULE + "._validate_paying_account", lambda c, a: {}),
-            patch(MODULE + "._resolve_advance_account", resolve),
-            patch(MODULE + "._build_and_submit_payment_entry",
-                  lambda d, a: SimpleNamespace(name="ACC-PAY-2026-000001")),
-            patch(MODULE + "._serialize_one", lambda d: {}),
-            patch(MODULE + ".now_datetime", lambda: "2026-09-12 00:00:00"),
-        ]
-        for p in patches:
-            p.start()
-        try:
-            mod.approve_employee_advance("HR-EAD-2026-00001")
-        finally:
-            for p in reversed(patches):
-                p.stop()
-        return doc, order
+		patches = [
+			patch(MODULE + ".frappe", mock),
+			patch(MODULE + "._ensure_hrms", lambda: None),
+			patch(MODULE + "._advance_has_field", lambda f: True),
+			patch(MODULE + "._validate_paying_account", lambda c, a: {}),
+			patch(MODULE + "._resolve_advance_account", resolve),
+			patch(
+				MODULE + "._build_and_submit_payment_entry",
+				lambda d, a: SimpleNamespace(name="ACC-PAY-2026-000001"),
+			),
+			patch(MODULE + "._serialize_one", lambda d: {}),
+			patch(MODULE + ".now_datetime", lambda: "2026-09-12 00:00:00"),
+		]
+		for p in patches:
+			p.start()
+		try:
+			mod.approve_employee_advance("HR-EAD-2026-00001")
+		finally:
+			for p in reversed(patches):
+				p.stop()
+		return doc, order
 
-    def test_a_legacy_draft_on_customer_ar_is_corrected(self):
-        doc, _ = self._approve("Debtors - J")
-        # Read the ATTRIBUTE, not .get(): the production code assigns
-        # `doc.advance_account = ...`, and _FakeAdvanceDoc.get() reads only its
-        # `_data` dict. __getattr__ still falls back to `_data` when nothing was
-        # assigned, so this spelling is right for both outcomes.
-        self.assertEqual(doc.advance_account, "Employee Advances - J")
+	def test_a_legacy_draft_on_customer_ar_is_corrected(self):
+		doc, _ = self._approve("Debtors - J")
+		# Read the ATTRIBUTE, not .get(): the production code assigns
+		# `doc.advance_account = ...`, and _FakeAdvanceDoc.get() reads only its
+		# `_data` dict. __getattr__ still falls back to `_data` when nothing was
+		# assigned, so this spelling is right for both outcomes.
+		self.assertEqual(doc.advance_account, "Employee Advances - J")
 
-    def test_the_account_is_resolved_before_the_document_is_submitted(self):
-        _, order = self._approve("Debtors - J")
-        self.assertEqual(order, ["resolve", "submit"])
+	def test_the_account_is_resolved_before_the_document_is_submitted(self):
+		_, order = self._approve("Debtors - J")
+		self.assertEqual(order, ["resolve", "submit"])
 
-    def test_an_already_correct_draft_is_left_as_it_is(self):
-        doc, _ = self._approve("Employee Advances - J")
-        self.assertEqual(doc.advance_account, "Employee Advances - J")
+	def test_an_already_correct_draft_is_left_as_it_is(self):
+		doc, _ = self._approve("Employee Advances - J")
+		self.assertEqual(doc.advance_account, "Employee Advances - J")
 
 
 if __name__ == "__main__":
-    unittest.main()
+	unittest.main()
 
 
 class TestSalaryMonthHelpers(unittest.TestCase):
-    """Which salary an advance comes off — distinct from the day the cash left.
+	"""Which salary an advance comes off — distinct from the day the cash left.
 
-    The case that motivated it: on the 7th, before the 10th's pay day, an
-    advance is an early slice of LAST month's salary even though the Payment
-    Entry posts today on today's drawer.
-    """
+	The case that motivated it: on the 7th, before the 10th's pay day, an
+	advance is an early slice of LAST month's salary even though the Payment
+	Entry posts today on today's drawer.
+	"""
 
-    def test_before_and_on_pay_day_suggests_last_month(self):
-        from jarz_pos.utils.employee_link import suggested_salary_month
+	def test_before_and_on_pay_day_suggests_last_month(self):
+		from jarz_pos.utils.employee_link import suggested_salary_month
 
-        self.assertEqual(suggested_salary_month("2026-10-07"), "2026-09")
-        self.assertEqual(suggested_salary_month("2026-10-10"), "2026-09")
+		self.assertEqual(suggested_salary_month("2026-10-07"), "2026-09")
+		self.assertEqual(suggested_salary_month("2026-10-10"), "2026-09")
 
-    def test_after_pay_day_suggests_this_month(self):
-        from jarz_pos.utils.employee_link import suggested_salary_month
+	def test_after_pay_day_suggests_this_month(self):
+		from jarz_pos.utils.employee_link import suggested_salary_month
 
-        self.assertEqual(suggested_salary_month("2026-10-11"), "2026-10")
+		self.assertEqual(suggested_salary_month("2026-10-11"), "2026-10")
 
-    def test_january_rolls_back_to_last_december(self):
-        from jarz_pos.utils.employee_link import suggested_salary_month
+	def test_january_rolls_back_to_last_december(self):
+		from jarz_pos.utils.employee_link import suggested_salary_month
 
-        self.assertEqual(suggested_salary_month("2027-01-05"), "2026-12")
+		self.assertEqual(suggested_salary_month("2027-01-05"), "2026-12")
 
-    def test_options_are_this_month_and_three_before_never_the_future(self):
-        from jarz_pos.utils.employee_link import salary_month_options
+	def test_options_are_this_month_and_three_before_never_the_future(self):
+		from jarz_pos.utils.employee_link import salary_month_options
 
-        self.assertEqual(
-            salary_month_options("2026-02-15", 3),
-            ["2026-02", "2026-01", "2025-12", "2025-11"],
-        )
+		self.assertEqual(
+			salary_month_options("2026-02-15", 3),
+			["2026-02", "2026-01", "2025-12", "2025-11"],
+		)
 
-    def test_normalize(self):
-        from jarz_pos.utils.employee_link import normalize_salary_month
+	def test_normalize(self):
+		from jarz_pos.utils.employee_link import normalize_salary_month
 
-        self.assertEqual(normalize_salary_month("2026-09"), "2026-09")
-        self.assertEqual(normalize_salary_month("2026-09-12"), "2026-09")
-        self.assertIsNone(normalize_salary_month("2026-13"))
-        self.assertIsNone(normalize_salary_month("Sept"))
-        self.assertIsNone(normalize_salary_month(None))
+		self.assertEqual(normalize_salary_month("2026-09"), "2026-09")
+		self.assertEqual(normalize_salary_month("2026-09-12"), "2026-09")
+		self.assertIsNone(normalize_salary_month("2026-13"))
+		self.assertIsNone(normalize_salary_month("Sept"))
+		self.assertIsNone(normalize_salary_month(None))
 
-    def test_legacy_advance_falls_back_to_the_pay_day_rule(self):
-        from jarz_pos.utils.employee_link import advance_salary_month
+	def test_legacy_advance_falls_back_to_the_pay_day_rule(self):
+		from jarz_pos.utils.employee_link import advance_salary_month
 
-        self.assertEqual(advance_salary_month({"posting_date": "2026-09-12"}), "2026-09")
-        self.assertEqual(advance_salary_month({"posting_date": "2026-10-07"}), "2026-09")
-        self.assertEqual(advance_salary_month({"posting_date": None}), "")
-        self.assertEqual(
-            advance_salary_month(
-                {"posting_date": "2026-10-07", "custom_jarz_salary_month": "2026-09"}
-            ),
-            "2026-09",
-        )
+		self.assertEqual(advance_salary_month({"posting_date": "2026-09-12"}), "2026-09")
+		self.assertEqual(advance_salary_month({"posting_date": "2026-10-07"}), "2026-09")
+		self.assertEqual(advance_salary_month({"posting_date": None}), "")
+		self.assertEqual(
+			advance_salary_month({"posting_date": "2026-10-07", "custom_jarz_salary_month": "2026-09"}),
+			"2026-09",
+		)
 
 
 class TestRequestSalaryMonth(unittest.TestCase):
-    def _resolve(self, raw, today="2026-10-07", posting_date=None):
-        from jarz_pos.api import employee_advances as mod
+	def _resolve(self, raw, today="2026-10-07", posting_date=None):
+		from jarz_pos.api import employee_advances as mod
 
-        with patch(MODULE + ".frappe", _mock_frappe(ROLES.LINE_MANAGER_TIER)),                 patch(MODULE + ".today", lambda: today),                 patch(MODULE + "._month_label", lambda m: m):
-            return mod._resolve_salary_month(raw, posting_date)
+		with (
+			patch(MODULE + ".frappe", _mock_frappe(ROLES.LINE_MANAGER_TIER)),
+			patch(MODULE + ".today", lambda: today),
+			patch(MODULE + "._month_label", lambda m: m),
+		):
+			return mod._resolve_salary_month(raw, posting_date)
 
-    def test_a_backdated_request_defaults_from_its_own_date(self):
-        self.assertEqual(self._resolve(None, posting_date="2026-09-02"), "2026-08")
+	def test_a_backdated_request_defaults_from_its_own_date(self):
+		self.assertEqual(self._resolve(None, posting_date="2026-09-02"), "2026-08")
 
-    def test_a_salary_month_after_the_cash_was_paid_is_refused(self):
-        with self.assertRaises(Exception):
-            self._resolve("2026-10", posting_date="2026-09-20")
+	def test_a_salary_month_after_the_cash_was_paid_is_refused(self):
+		with self.assertRaises(Exception):
+			self._resolve("2026-10", posting_date="2026-09-20")
 
-    def test_the_requesters_choice_is_kept(self):
-        self.assertEqual(self._resolve("2026-09"), "2026-09")
-        self.assertEqual(self._resolve("2026-10"), "2026-10")
+	def test_the_requesters_choice_is_kept(self):
+		self.assertEqual(self._resolve("2026-09"), "2026-09")
+		self.assertEqual(self._resolve("2026-10"), "2026-10")
 
-    def test_no_choice_falls_back_to_the_pay_day_suggestion(self):
-        self.assertEqual(self._resolve(None), "2026-09")
-        self.assertEqual(self._resolve("", today="2026-10-20"), "2026-10")
+	def test_no_choice_falls_back_to_the_pay_day_suggestion(self):
+		self.assertEqual(self._resolve(None), "2026-09")
+		self.assertEqual(self._resolve("", today="2026-10-20"), "2026-10")
 
-    def test_a_future_salary_month_is_refused(self):
-        with self.assertRaises(Exception):
-            self._resolve("2026-11")
+	def test_a_future_salary_month_is_refused(self):
+		with self.assertRaises(Exception):
+			self._resolve("2026-11")
 
-    def test_a_month_too_far_back_is_refused(self):
-        with self.assertRaises(Exception):
-            self._resolve("2026-05")
+	def test_a_month_too_far_back_is_refused(self):
+		with self.assertRaises(Exception):
+			self._resolve("2026-05")
 
-    def test_garbage_is_refused(self):
-        with self.assertRaises(Exception):
-            self._resolve("September")
+	def test_garbage_is_refused(self):
+		with self.assertRaises(Exception):
+			self._resolve("September")

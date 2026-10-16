@@ -45,14 +45,14 @@ sitemap = 0
 
 
 def get_context(context: Any) -> Any:
-    """Static shell context. Contains no order data and no token."""
-    context.no_cache = 1
-    context.no_sitemap = 1
-    # The client needs to know where to poll and how often; neither is secret,
-    # and hard-coding them in the template would let the route and the service
-    # constant drift apart.
-    context.status_endpoint = "/api/method/jarz_pos.api.tracking.get_public_status"
-    context.poll_interval_sec = _tracking.DEFAULT_POLL_INTERVAL_SEC
-    context.route_prefix = _tracking.TRACKING_ROUTE_PREFIX
-    context.title = "Track your order"
-    return context
+	"""Static shell context. Contains no order data and no token."""
+	context.no_cache = 1
+	context.no_sitemap = 1
+	# The client needs to know where to poll and how often; neither is secret,
+	# and hard-coding them in the template would let the route and the service
+	# constant drift apart.
+	context.status_endpoint = "/api/method/jarz_pos.api.tracking.get_public_status"
+	context.poll_interval_sec = _tracking.DEFAULT_POLL_INTERVAL_SEC
+	context.route_prefix = _tracking.TRACKING_ROUTE_PREFIX
+	context.title = "Track your order"
+	return context

@@ -8,6 +8,7 @@ try:
 	from frappe.exceptions import PermissionError as FrappePermissionError
 	from frappe.exceptions import ValidationError as FrappeValidationError
 except ModuleNotFoundError:
+
 	class FrappePermissionError(Exception):
 		pass
 
@@ -32,7 +33,16 @@ def _raise_frappe(message, exc=None, title=None):
 
 
 class _FakeReceiptDoc:
-	def __init__(self, *, status="Unconfirmed", pos_profile="Dokki", sales_invoice="ACC-SINV-0001", payment_method="InstaPay", amount=120.0, receipt_image_url="/files/receipt.png"):
+	def __init__(
+		self,
+		*,
+		status="Unconfirmed",
+		pos_profile="Dokki",
+		sales_invoice="ACC-SINV-0001",
+		payment_method="InstaPay",
+		amount=120.0,
+		receipt_image_url="/files/receipt.png",
+	):
 		self.name = "PPR-0001"
 		self.status = status
 		self.pos_profile = pos_profile
@@ -67,8 +77,10 @@ class TestPaymentReceiptsAPI(unittest.TestCase):
 		mock_frappe = MagicMock()
 		mock_frappe.session.user = "user@example.com"
 
-		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe), \
-				 patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=["Dokki"]):
+		with (
+			patch("jarz_pos.api.payment_receipts.frappe", mock_frappe),
+			patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=["Dokki"]),
+		):
 			mock_frappe.get_roles.return_value = ["Sales User"]
 			self.assertFalse(_has_payment_receipt_confirm_access("Dokki"))
 
@@ -87,8 +99,10 @@ class TestPaymentReceiptsAPI(unittest.TestCase):
 		mock_frappe.throw.side_effect = _raise_frappe
 		mock_frappe.get_doc.return_value = _FakeReceiptDoc()
 
-		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe), \
-				 patch("jarz_pos.api.payment_receipts._has_payment_receipt_confirm_access", return_value=False):
+		with (
+			patch("jarz_pos.api.payment_receipts.frappe", mock_frappe),
+			patch("jarz_pos.api.payment_receipts._has_payment_receipt_confirm_access", return_value=False),
+		):
 			with self.assertRaises(FrappePermissionError):
 				confirm_receipt("PPR-0001")
 
@@ -99,27 +113,31 @@ class TestPaymentReceiptsAPI(unittest.TestCase):
 		from jarz_pos.api.payment_receipts import list_payment_receipts
 
 		mock_frappe = MagicMock()
-		mock_frappe.get_all.return_value = [{
-			"name": "PPR-0001",
-			"sales_invoice": "ACC-SINV-0001",
-			"payment_method": "Instapay",
-			"amount": 120.0,
-			"pos_profile": "Dokki",
-			"status": "Unconfirmed",
-			"receipt_image": "/files/receipt.png",
-			"receipt_image_url": "/files/receipt.png",
-			"uploaded_by": "staff@example.com",
-			"upload_date": "2026-05-07 12:00:00",
-			"confirmed_by": None,
-			"confirmed_date": None,
-			"creation": "2026-05-07 12:00:00",
-			"modified": "2026-05-07 12:00:00",
-		}]
+		mock_frappe.get_all.return_value = [
+			{
+				"name": "PPR-0001",
+				"sales_invoice": "ACC-SINV-0001",
+				"payment_method": "Instapay",
+				"amount": 120.0,
+				"pos_profile": "Dokki",
+				"status": "Unconfirmed",
+				"receipt_image": "/files/receipt.png",
+				"receipt_image_url": "/files/receipt.png",
+				"uploaded_by": "staff@example.com",
+				"upload_date": "2026-05-07 12:00:00",
+				"confirmed_by": None,
+				"confirmed_date": None,
+				"creation": "2026-05-07 12:00:00",
+				"modified": "2026-05-07 12:00:00",
+			}
+		]
 		mock_frappe.get_doc.return_value = _FakeInvoiceDoc()
 
-		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe), \
-				 patch("jarz_pos.api.payment_receipts._has_payment_receipt_confirm_access", return_value=False), \
-				 patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=["Dokki"]):
+		with (
+			patch("jarz_pos.api.payment_receipts.frappe", mock_frappe),
+			patch("jarz_pos.api.payment_receipts._has_payment_receipt_confirm_access", return_value=False),
+			patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=["Dokki"]),
+		):
 			result = list_payment_receipts()
 
 		self.assertEqual(len(result), 1)
@@ -135,10 +153,12 @@ class TestPaymentReceiptsAPI(unittest.TestCase):
 
 		mock_frappe = MagicMock()
 		receipt_doc = _FakeReceiptDoc(status="Unconfirmed")
-		mock_frappe.get_all.return_value = [{
-			"name": "PPR-0001",
-			"payment_method": "InstaPay",
-		}]
+		mock_frappe.get_all.return_value = [
+			{
+				"name": "PPR-0001",
+				"payment_method": "InstaPay",
+			}
+		]
 		mock_frappe.get_doc.return_value = receipt_doc
 
 		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe):
@@ -161,7 +181,10 @@ class TestPaymentReceiptsAPI(unittest.TestCase):
 		mock_frappe.get_doc.return_value = new_receipt
 		mock_frappe.session.user = "manager@example.com"
 
-		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe), 				 patch("jarz_pos.api.payment_receipts._allowed_pos_profiles", return_value=["Dokki"]):
+		with (
+			patch("jarz_pos.api.payment_receipts.frappe", mock_frappe),
+			patch("jarz_pos.api.payment_receipts._allowed_pos_profiles", return_value=["Dokki"]),
+		):
 			result = create_payment_receipt(
 				sales_invoice="ACC-SINV-0001",
 				payment_method="Instapay",
@@ -175,7 +198,6 @@ class TestPaymentReceiptsAPI(unittest.TestCase):
 			mock_frappe.get_all.call_args.kwargs["filters"]["status"],
 			["!=", "Changed"],
 		)
-
 
 	# -- Branch scoping on the write endpoints -------------------------------
 	#
@@ -192,8 +214,10 @@ class TestPaymentReceiptsAPI(unittest.TestCase):
 		receipt = _FakeReceiptDoc(pos_profile="Nasr city")
 		mock_frappe.get_doc.return_value = receipt
 
-		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe), \
-				 patch("jarz_pos.api.payment_receipts._allowed_pos_profiles", return_value=["Dokki"]):
+		with (
+			patch("jarz_pos.api.payment_receipts.frappe", mock_frappe),
+			patch("jarz_pos.api.payment_receipts._allowed_pos_profiles", return_value=["Dokki"]),
+		):
 			with self.assertRaises(FrappePermissionError) as exc:
 				upload_receipt_image("PPR-0001", "aGVsbG8=", "shot.png")
 
@@ -210,8 +234,10 @@ class TestPaymentReceiptsAPI(unittest.TestCase):
 		receipt = _FakeReceiptDoc(pos_profile="Nasr city")
 		mock_frappe.get_doc.return_value = receipt
 
-		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe), \
-				 patch("jarz_pos.api.payment_receipts._allowed_pos_profiles", return_value=["Dokki"]):
+		with (
+			patch("jarz_pos.api.payment_receipts.frappe", mock_frappe),
+			patch("jarz_pos.api.payment_receipts._allowed_pos_profiles", return_value=["Dokki"]),
+		):
 			with self.assertRaises(FrappePermissionError) as exc:
 				remove_receipt_image("PPR-0001")
 
@@ -226,8 +252,10 @@ class TestPaymentReceiptsAPI(unittest.TestCase):
 		mock_frappe = MagicMock()
 		mock_frappe.throw.side_effect = _raise_frappe
 
-		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe), \
-				 patch("jarz_pos.api.payment_receipts._allowed_pos_profiles", return_value=["Dokki"]):
+		with (
+			patch("jarz_pos.api.payment_receipts.frappe", mock_frappe),
+			patch("jarz_pos.api.payment_receipts._allowed_pos_profiles", return_value=["Dokki"]),
+		):
 			with self.assertRaises(FrappePermissionError) as exc:
 				create_payment_receipt(
 					sales_invoice="ACC-SINV-0001",
@@ -270,8 +298,10 @@ class TestPaymentReceiptsAPI(unittest.TestCase):
 		mock_frappe.get_doc.side_effect = _get_doc
 		mock_frappe.get_all.return_value = []
 
-		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe), \
-				 patch("jarz_pos.api.payment_receipts._allowed_pos_profiles", return_value=["Dokki"]):
+		with (
+			patch("jarz_pos.api.payment_receipts.frappe", mock_frappe),
+			patch("jarz_pos.api.payment_receipts._allowed_pos_profiles", return_value=["Dokki"]),
+		):
 			result = upload_receipt_image("PPR-0001", "aGVsbG8=", "shot.png")
 
 		self.assertTrue(result["success"])
@@ -303,8 +333,10 @@ class TestPaymentReceiptsAPI(unittest.TestCase):
 		mock_frappe.get_doc.side_effect = _get_doc
 		mock_frappe.get_all.return_value = []
 
-		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe), \
-				 patch("jarz_pos.api.payment_receipts._allowed_pos_profiles", return_value=["Dokki"]):
+		with (
+			patch("jarz_pos.api.payment_receipts.frappe", mock_frappe),
+			patch("jarz_pos.api.payment_receipts._allowed_pos_profiles", return_value=["Dokki"]),
+		):
 			result = upload_receipt_image("PPR-0001", "aGVsbG8=", "shot.png")
 
 		self.assertFalse(result["reopened"])
@@ -320,7 +352,9 @@ class TestPaymentReceiptsAPI(unittest.TestCase):
 
 		doctype_json = os.path.join(
 			os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-			"doctype", "pos_payment_receipt", "pos_payment_receipt.json",
+			"doctype",
+			"pos_payment_receipt",
+			"pos_payment_receipt.json",
 		)
 		with open(doctype_json, encoding="utf-8") as handle:
 			perms = json.load(handle)["permissions"]
@@ -385,7 +419,10 @@ class TestPaymentReceiptsAPI(unittest.TestCase):
 			{"name": "FILE-OLD", "file_url": "/files/old.png", "attached_to_field": "receipt_image"},
 		]
 
-		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe), 				 patch("jarz_pos.api.payment_receipts._allowed_pos_profiles", return_value=["Dokki"]):
+		with (
+			patch("jarz_pos.api.payment_receipts.frappe", mock_frappe),
+			patch("jarz_pos.api.payment_receipts._allowed_pos_profiles", return_value=["Dokki"]),
+		):
 			result = upload_receipt_image("PPR-0001", "aGVsbG8=", "shot.png")
 
 		self.assertTrue(result["success"])
@@ -404,7 +441,10 @@ class TestPaymentReceiptsAPI(unittest.TestCase):
 		mock_frappe.throw.side_effect = _raise_frappe
 		mock_frappe.get_doc.return_value = _FakeReceiptDoc(status="Confirmed")
 
-		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe), 				 patch("jarz_pos.api.payment_receipts._allowed_pos_profiles", return_value=["Dokki"]):
+		with (
+			patch("jarz_pos.api.payment_receipts.frappe", mock_frappe),
+			patch("jarz_pos.api.payment_receipts._allowed_pos_profiles", return_value=["Dokki"]),
+		):
 			with self.assertRaises(Exception) as exc:
 				upload_receipt_image("PPR-0001", "aGVsbG8=", "shot.png")
 
@@ -424,7 +464,10 @@ class TestPaymentReceiptsAPI(unittest.TestCase):
 			{"name": "FILE-OLD", "file_url": "/files/old.png", "attached_to_field": "receipt_image"},
 		]
 
-		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe), 				 patch("jarz_pos.api.payment_receipts._allowed_pos_profiles", return_value=["Dokki"]):
+		with (
+			patch("jarz_pos.api.payment_receipts.frappe", mock_frappe),
+			patch("jarz_pos.api.payment_receipts._allowed_pos_profiles", return_value=["Dokki"]),
+		):
 			result = remove_receipt_image("PPR-0001")
 
 		self.assertTrue(result["success"])
@@ -447,7 +490,10 @@ class TestPaymentReceiptsAPI(unittest.TestCase):
 		receipt = _FakeReceiptDoc(status="Confirmed")
 		mock_frappe.get_doc.return_value = receipt
 
-		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe), 				 patch("jarz_pos.api.payment_receipts._allowed_pos_profiles", return_value=["Dokki"]):
+		with (
+			patch("jarz_pos.api.payment_receipts.frappe", mock_frappe),
+			patch("jarz_pos.api.payment_receipts._allowed_pos_profiles", return_value=["Dokki"]),
+		):
 			with self.assertRaises(Exception) as exc:
 				remove_receipt_image("PPR-0001")
 
@@ -464,7 +510,10 @@ class TestPaymentReceiptsAPI(unittest.TestCase):
 		mock_frappe.throw.side_effect = _raise_frappe
 		mock_frappe.get_doc.return_value = _FakeReceiptDoc(status="Changed")
 
-		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe), 				 patch("jarz_pos.api.payment_receipts._allowed_pos_profiles", return_value=["Dokki"]):
+		with (
+			patch("jarz_pos.api.payment_receipts.frappe", mock_frappe),
+			patch("jarz_pos.api.payment_receipts._allowed_pos_profiles", return_value=["Dokki"]),
+		):
 			with self.assertRaises(Exception) as exc:
 				remove_receipt_image("PPR-0001")
 
@@ -519,9 +568,11 @@ class TestGetPaymentReceipt(unittest.TestCase):
 		)
 
 		single_frappe = self._frappe([_receipt_row()])
-		with patch("jarz_pos.api.payment_receipts.frappe", single_frappe), \
-				 patch("jarz_pos.api.payment_receipts._has_payment_receipt_confirm_access", return_value=True), \
-				 patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=["Dokki"]):
+		with (
+			patch("jarz_pos.api.payment_receipts.frappe", single_frappe),
+			patch("jarz_pos.api.payment_receipts._has_payment_receipt_confirm_access", return_value=True),
+			patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=["Dokki"]),
+		):
 			result = get_payment_receipt("PPR-0001")
 
 		self.assertTrue(result["success"])
@@ -531,11 +582,25 @@ class TestGetPaymentReceipt(unittest.TestCase):
 		self.assertEqual(receipt["invoice_id"], "ACC-SINV-0001")
 		self.assertTrue(receipt["can_confirm"])
 		for field in (
-			"name", "sales_invoice", "payment_method", "amount", "pos_profile",
-			"status", "receipt_image", "receipt_image_url", "uploaded_by",
-			"upload_date", "confirmed_by", "confirmed_date", "rejected_by",
-			"rejected_date", "rejection_reason", "customer_name", "invoice_id",
-			"woo_order_id", "can_confirm",
+			"name",
+			"sales_invoice",
+			"payment_method",
+			"amount",
+			"pos_profile",
+			"status",
+			"receipt_image",
+			"receipt_image_url",
+			"uploaded_by",
+			"upload_date",
+			"confirmed_by",
+			"confirmed_date",
+			"rejected_by",
+			"rejected_date",
+			"rejection_reason",
+			"customer_name",
+			"invoice_id",
+			"woo_order_id",
+			"can_confirm",
 		):
 			self.assertIn(field, receipt)
 
@@ -550,23 +615,25 @@ class TestGetPaymentReceipt(unittest.TestCase):
 		# The sheet feeds this row to the model the list populates, so the two
 		# shapes must not drift: same source row, same keys.
 		list_frappe = self._frappe([_receipt_row()])
-		with patch("jarz_pos.api.payment_receipts.frappe", list_frappe), \
-				 patch("jarz_pos.api.payment_receipts._has_payment_receipt_confirm_access", return_value=True), \
-				 patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=["Dokki"]):
+		with (
+			patch("jarz_pos.api.payment_receipts.frappe", list_frappe),
+			patch("jarz_pos.api.payment_receipts._has_payment_receipt_confirm_access", return_value=True),
+			patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=["Dokki"]),
+		):
 			listed = list_payment_receipts()
 
 		self.assertEqual(set(listed[0].keys()), set(receipt.keys()))
-		self.assertEqual(
-			list_frappe.get_all.call_args.kwargs["fields"], call.kwargs["fields"]
-		)
+		self.assertEqual(list_frappe.get_all.call_args.kwargs["fields"], call.kwargs["fields"])
 
 	def test_returns_a_changed_receipt_with_its_status(self):
 		from jarz_pos.api.payment_receipts import get_payment_receipt
 
 		mock_frappe = self._frappe([_receipt_row(status="Changed")])
-		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe), \
-				 patch("jarz_pos.api.payment_receipts._has_payment_receipt_confirm_access", return_value=False), \
-				 patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=["Dokki"]):
+		with (
+			patch("jarz_pos.api.payment_receipts.frappe", mock_frappe),
+			patch("jarz_pos.api.payment_receipts._has_payment_receipt_confirm_access", return_value=False),
+			patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=["Dokki"]),
+		):
 			result = get_payment_receipt("PPR-0001")
 
 		# Asked for by name, so it is returned; the status tells the sheet.
@@ -583,9 +650,11 @@ class TestGetPaymentReceipt(unittest.TestCase):
 		from jarz_pos.api.payment_receipts import get_payment_receipt
 
 		mock_frappe = self._frappe([_receipt_row(pos_profile="Nasr city")])
-		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe), \
-				 patch("jarz_pos.api.payment_receipts._has_payment_receipt_confirm_access", return_value=True), \
-				 patch("jarz_pos.api.payment_receipts._allowed_pos_profiles", return_value=[]):
+		with (
+			patch("jarz_pos.api.payment_receipts.frappe", mock_frappe),
+			patch("jarz_pos.api.payment_receipts._has_payment_receipt_confirm_access", return_value=True),
+			patch("jarz_pos.api.payment_receipts._allowed_pos_profiles", return_value=[]),
+		):
 			with self.assertRaises(FrappePermissionError) as exc:
 				get_payment_receipt("PPR-0001")
 
@@ -598,9 +667,11 @@ class TestGetPaymentReceipt(unittest.TestCase):
 		# Same rule as the writes: a row predating ``pos_profile`` has nothing to
 		# scope against, and refusing it would brick it for everyone.
 		mock_frappe = self._frappe([_receipt_row(pos_profile="")])
-		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe), \
-				 patch("jarz_pos.api.payment_receipts._has_payment_receipt_confirm_access", return_value=False), \
-				 patch("jarz_pos.api.payment_receipts._allowed_pos_profiles", return_value=[]):
+		with (
+			patch("jarz_pos.api.payment_receipts.frappe", mock_frappe),
+			patch("jarz_pos.api.payment_receipts._has_payment_receipt_confirm_access", return_value=False),
+			patch("jarz_pos.api.payment_receipts._allowed_pos_profiles", return_value=[]),
+		):
 			result = get_payment_receipt("PPR-0001")
 
 		self.assertTrue(result["success"])
@@ -611,9 +682,11 @@ class TestGetPaymentReceipt(unittest.TestCase):
 
 		# The Administrator shape: every enabled profile, not an empty list.
 		mock_frappe = self._frappe([_receipt_row(pos_profile="Nasr city")])
-		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe), \
-				 patch("jarz_pos.api.payment_receipts._has_payment_receipt_confirm_access", return_value=True), \
-				 patch("jarz_pos.api.payment_receipts._allowed_pos_profiles", return_value=["Dokki", "Nasr city"]):
+		with (
+			patch("jarz_pos.api.payment_receipts.frappe", mock_frappe),
+			patch("jarz_pos.api.payment_receipts._has_payment_receipt_confirm_access", return_value=True),
+			patch("jarz_pos.api.payment_receipts._allowed_pos_profiles", return_value=["Dokki", "Nasr city"]),
+		):
 			result = get_payment_receipt("PPR-0001")
 
 		self.assertEqual(result["receipt"]["pos_profile"], "Nasr city")
@@ -622,9 +695,11 @@ class TestGetPaymentReceipt(unittest.TestCase):
 		from jarz_pos.api.payment_receipts import get_payment_receipt
 
 		mock_frappe = self._frappe([_receipt_row(pos_profile="Nasr city")])
-		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe), \
-				 patch("jarz_pos.api.payment_receipts._has_payment_receipt_confirm_access", return_value=True), \
-				 patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=["Dokki"]):
+		with (
+			patch("jarz_pos.api.payment_receipts.frappe", mock_frappe),
+			patch("jarz_pos.api.payment_receipts._has_payment_receipt_confirm_access", return_value=True),
+			patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=["Dokki"]),
+		):
 			with self.assertRaises(FrappePermissionError) as exc:
 				get_payment_receipt("PPR-0001")
 
@@ -636,8 +711,10 @@ class TestGetPaymentReceipt(unittest.TestCase):
 		from jarz_pos.api.payment_receipts import get_payment_receipt
 
 		mock_frappe = self._frappe([])
-		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe), \
-				 patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=["Dokki"]):
+		with (
+			patch("jarz_pos.api.payment_receipts.frappe", mock_frappe),
+			patch("jarz_pos.api.manager._current_user_allowed_profiles", return_value=["Dokki"]),
+		):
 			with self.assertRaises(FrappeValidationError) as exc:
 				get_payment_receipt("PPR-MISSING")
 
@@ -680,9 +757,11 @@ class TestListPaymentReceiptsBranchScope(unittest.TestCase):
 	def _list(self, mock_frappe, allowed, **kwargs):
 		from jarz_pos.api.payment_receipts import list_payment_receipts
 
-		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe), \
-				 patch("jarz_pos.api.payment_receipts._has_payment_receipt_confirm_access", return_value=False), \
-				 patch("jarz_pos.api.payment_receipts._allowed_pos_profiles", return_value=allowed):
+		with (
+			patch("jarz_pos.api.payment_receipts.frappe", mock_frappe),
+			patch("jarz_pos.api.payment_receipts._has_payment_receipt_confirm_access", return_value=False),
+			patch("jarz_pos.api.payment_receipts._allowed_pos_profiles", return_value=allowed),
+		):
 			return list_payment_receipts(**kwargs)
 
 	def test_refuses_an_explicit_branch_the_caller_is_not_assigned_to(self):
@@ -909,9 +988,7 @@ class TestPendingReceiptFiling(unittest.TestCase):
 				pos_profile="Dokki",
 			)
 
-		self.assertEqual(
-			mock_frappe.get_doc.call_args.args[0]["payment_method"], "Wallet"
-		)
+		self.assertEqual(mock_frappe.get_doc.call_args.args[0]["payment_method"], "Wallet")
 
 	def test_files_nothing_for_a_method_that_takes_no_screenshot(self):
 		from jarz_pos.api.payment_receipts import ensure_pending_payment_receipt
@@ -935,12 +1012,14 @@ class TestPendingReceiptFiling(unittest.TestCase):
 		from jarz_pos.api.payment_receipts import ensure_pending_payment_receipt
 
 		mock_frappe = MagicMock()
-		mock_frappe.get_all.return_value = [{
-			"name": "POS-RCPT-2026-00044",
-			"payment_method": "InstaPay",
-			"status": "Unconfirmed",
-			"amount": 480.0,
-		}]
+		mock_frappe.get_all.return_value = [
+			{
+				"name": "POS-RCPT-2026-00044",
+				"payment_method": "InstaPay",
+				"status": "Unconfirmed",
+				"amount": 480.0,
+			}
+		]
 
 		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe):
 			result = ensure_pending_payment_receipt(
@@ -973,12 +1052,14 @@ class TestPendingReceiptFiling(unittest.TestCase):
 		from jarz_pos.api.payment_receipts import ensure_pending_payment_receipt
 
 		mock_frappe = MagicMock()
-		mock_frappe.get_all.return_value = [{
-			"name": "POS-RCPT-2026-00044",
-			"payment_method": "InstaPay",
-			"status": "Unconfirmed",
-			"amount": 480.0,
-		}]
+		mock_frappe.get_all.return_value = [
+			{
+				"name": "POS-RCPT-2026-00044",
+				"payment_method": "InstaPay",
+				"status": "Unconfirmed",
+				"amount": 480.0,
+			}
+		]
 
 		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe):
 			result = ensure_pending_payment_receipt(
@@ -1002,12 +1083,14 @@ class TestPendingReceiptFiling(unittest.TestCase):
 		from jarz_pos.api.payment_receipts import ensure_pending_payment_receipt
 
 		mock_frappe = MagicMock()
-		mock_frappe.get_all.return_value = [{
-			"name": "POS-RCPT-2026-00044",
-			"payment_method": "InstaPay",
-			"status": "Confirmed",
-			"amount": 480.0,
-		}]
+		mock_frappe.get_all.return_value = [
+			{
+				"name": "POS-RCPT-2026-00044",
+				"payment_method": "InstaPay",
+				"status": "Confirmed",
+				"amount": 480.0,
+			}
+		]
 
 		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe):
 			result = ensure_pending_payment_receipt(
@@ -1058,7 +1141,6 @@ class TestPendingReceiptFiling(unittest.TestCase):
 			["in", ["Unconfirmed", "Rejected"]],
 		)
 
-
 	def test_does_not_resync_the_amount_once_a_screenshot_is_attached(self):
 		"""An imageless row holds a target; a row with an image holds a claim.
 
@@ -1068,14 +1150,16 @@ class TestPendingReceiptFiling(unittest.TestCase):
 		from jarz_pos.api.payment_receipts import ensure_pending_payment_receipt
 
 		mock_frappe = MagicMock()
-		mock_frappe.get_all.return_value = [{
-			"name": "POS-RCPT-2026-00044",
-			"payment_method": "InstaPay",
-			"status": "Unconfirmed",
-			"amount": 500.0,
-			"receipt_image": "/files/proof.jpg",
-			"receipt_image_url": "/files/proof.jpg",
-		}]
+		mock_frappe.get_all.return_value = [
+			{
+				"name": "POS-RCPT-2026-00044",
+				"payment_method": "InstaPay",
+				"status": "Unconfirmed",
+				"amount": 500.0,
+				"receipt_image": "/files/proof.jpg",
+				"receipt_image_url": "/files/proof.jpg",
+			}
+		]
 
 		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe):
 			result = ensure_pending_payment_receipt(
@@ -1100,9 +1184,7 @@ class TestPendingReceiptFiling(unittest.TestCase):
 		mock_frappe = MagicMock()
 		mock_frappe.throw.side_effect = _raise_frappe
 		mock_frappe.db.exists.return_value = True
-		mock_frappe.get_doc.return_value = _FakeReceiptDoc(
-			status="Unconfirmed", amount=500.0
-		)
+		mock_frappe.get_doc.return_value = _FakeReceiptDoc(status="Unconfirmed", amount=500.0)
 
 		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe):
 			with self.assertRaises(Exception) as exc:
@@ -1115,6 +1197,7 @@ class TestPendingReceiptFiling(unittest.TestCase):
 
 		self.assertIn("does not match", str(exc.exception))
 		mock_frappe.get_doc.return_value.save.assert_not_called()
+
 
 class TestConfirmReceiptCollectsTheMoney(unittest.TestCase):
 	"""Confirming in the receipts list must post the payment, not just stamp.
@@ -1160,21 +1243,23 @@ class TestConfirmReceiptCollectsTheMoney(unittest.TestCase):
 		receipt = _FakeReceiptDoc(status="Unconfirmed")
 		mock_frappe = self._awaiting_frappe(receipt)
 		plan = self._plan("awaiting")
-		booked = MagicMock(return_value={
-			"payment_entry": "ACC-PAY-0001",
-			"payment_confirmation_status": "Payment Confirmed",
-		})
+		booked = MagicMock(
+			return_value={
+				"payment_entry": "ACC-PAY-0001",
+				"payment_confirmation_status": "Payment Confirmed",
+			}
+		)
 
-		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe), \
-				 patch("jarz_pos.api.payment_receipts._ensure_payment_receipt_confirm_access"), \
-				 plan, \
-				 _stubbed_confirm_online_payment(booked):
+		with (
+			patch("jarz_pos.api.payment_receipts.frappe", mock_frappe),
+			patch("jarz_pos.api.payment_receipts._ensure_payment_receipt_confirm_access"),
+			plan,
+			_stubbed_confirm_online_payment(booked),
+		):
 			result = confirm_receipt("PPR-0001")
 
 		self.assertEqual(result["payment_entry"], "ACC-PAY-0001")
-		booked.assert_called_once_with(
-			"ACC-SINV-0001", "Dokki", receipt_name="PPR-0001"
-		)
+		booked.assert_called_once_with("ACC-SINV-0001", "Dokki", receipt_name="PPR-0001")
 		# The stamp is the payment path's job, not a second write from here.
 		receipt.save.assert_not_called()
 
@@ -1186,10 +1271,12 @@ class TestConfirmReceiptCollectsTheMoney(unittest.TestCase):
 		plan = self._plan("awaiting")
 		booked = MagicMock()
 
-		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe), \
-				 patch("jarz_pos.api.payment_receipts._ensure_payment_receipt_confirm_access"), \
-				 plan, \
-				 _stubbed_confirm_online_payment(booked):
+		with (
+			patch("jarz_pos.api.payment_receipts.frappe", mock_frappe),
+			patch("jarz_pos.api.payment_receipts._ensure_payment_receipt_confirm_access"),
+			plan,
+			_stubbed_confirm_online_payment(booked),
+		):
 			with self.assertRaises(Exception) as exc:
 				confirm_receipt("PPR-0001")
 
@@ -1213,10 +1300,12 @@ class TestConfirmReceiptCollectsTheMoney(unittest.TestCase):
 		plan = self._plan("awaiting")
 		booked = MagicMock(return_value={"payment_entry": "ACC-PAY-0002"})
 
-		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe), \
-				 patch("jarz_pos.api.payment_receipts._ensure_payment_receipt_confirm_access"), \
-				 plan, \
-				 _stubbed_confirm_online_payment(booked):
+		with (
+			patch("jarz_pos.api.payment_receipts.frappe", mock_frappe),
+			patch("jarz_pos.api.payment_receipts._ensure_payment_receipt_confirm_access"),
+			plan,
+			_stubbed_confirm_online_payment(booked),
+		):
 			result = confirm_receipt("PPR-0001")
 
 		self.assertEqual(result["payment_entry"], "ACC-PAY-0002")
@@ -1231,10 +1320,12 @@ class TestConfirmReceiptCollectsTheMoney(unittest.TestCase):
 		plan = self._plan("none")
 		booked = MagicMock()
 
-		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe), \
-				 patch("jarz_pos.api.payment_receipts._ensure_payment_receipt_confirm_access"), \
-				 plan, \
-				 _stubbed_confirm_online_payment(booked):
+		with (
+			patch("jarz_pos.api.payment_receipts.frappe", mock_frappe),
+			patch("jarz_pos.api.payment_receipts._ensure_payment_receipt_confirm_access"),
+			plan,
+			_stubbed_confirm_online_payment(booked),
+		):
 			result = confirm_receipt("PPR-0001")
 
 		booked.assert_not_called()
@@ -1251,10 +1342,12 @@ class TestConfirmReceiptCollectsTheMoney(unittest.TestCase):
 		plan = self._plan("none")
 		booked = MagicMock()
 
-		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe), \
-				 patch("jarz_pos.api.payment_receipts._ensure_payment_receipt_confirm_access"), \
-				 plan, \
-				 _stubbed_confirm_online_payment(booked):
+		with (
+			patch("jarz_pos.api.payment_receipts.frappe", mock_frappe),
+			patch("jarz_pos.api.payment_receipts._ensure_payment_receipt_confirm_access"),
+			plan,
+			_stubbed_confirm_online_payment(booked),
+		):
 			confirm_receipt("PPR-0001")
 
 		booked.assert_not_called()
@@ -1276,10 +1369,12 @@ class TestConfirmReceiptCollectsTheMoney(unittest.TestCase):
 		plan = self._plan("unpaid", outstanding=480.0)
 		booked = MagicMock(return_value={"payment_entry": "ACC-PAY-0003"})
 
-		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe), \
-				 patch("jarz_pos.api.payment_receipts._ensure_payment_receipt_confirm_access"), \
-				 plan, \
-				 _stubbed_confirm_online_payment(booked):
+		with (
+			patch("jarz_pos.api.payment_receipts.frappe", mock_frappe),
+			patch("jarz_pos.api.payment_receipts._ensure_payment_receipt_confirm_access"),
+			plan,
+			_stubbed_confirm_online_payment(booked),
+		):
 			result = confirm_receipt("PPR-0001")
 
 		self.assertEqual(result["payment_entry"], "ACC-PAY-0003")
@@ -1302,16 +1397,23 @@ class TestConfirmReceiptCollectsTheMoney(unittest.TestCase):
 		booked = MagicMock()
 		# The whitelisted wrapper nests the service's answer under "data" --
 		# reading the keys off the top level returned nulls to the operator.
-		changed = MagicMock(return_value={"success": True, "data": {
-			"journal_entry": "ACC-JV-0001",
-			"courier_transaction": "CT-001",
-			"collection_change_mode": "cod_to_online",
-		}})
+		changed = MagicMock(
+			return_value={
+				"success": True,
+				"data": {
+					"journal_entry": "ACC-JV-0001",
+					"courier_transaction": "CT-001",
+					"collection_change_mode": "cod_to_online",
+				},
+			}
+		)
 
-		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe), \
-				 patch("jarz_pos.api.payment_receipts._ensure_payment_receipt_confirm_access"), \
-				 plan, \
-				 _stubbed_confirm_online_payment(booked, changed):
+		with (
+			patch("jarz_pos.api.payment_receipts.frappe", mock_frappe),
+			patch("jarz_pos.api.payment_receipts._ensure_payment_receipt_confirm_access"),
+			plan,
+			_stubbed_confirm_online_payment(booked, changed),
+		):
 			result = confirm_receipt("PPR-0001")
 
 		booked.assert_not_called()
@@ -1345,10 +1447,12 @@ class TestConfirmReceiptCollectsTheMoney(unittest.TestCase):
 		booked = MagicMock()
 		changed = MagicMock(return_value={"success": True, "data": {}})
 
-		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe), \
-				 patch("jarz_pos.api.payment_receipts._ensure_payment_receipt_confirm_access"), \
-				 plan, \
-				 _stubbed_confirm_online_payment(booked, changed):
+		with (
+			patch("jarz_pos.api.payment_receipts.frappe", mock_frappe),
+			patch("jarz_pos.api.payment_receipts._ensure_payment_receipt_confirm_access"),
+			plan,
+			_stubbed_confirm_online_payment(booked, changed),
+		):
 			confirm_receipt("PPR-0001")
 
 		self.assertEqual(changed.call_args[0][2], "Nasr city")
@@ -1368,10 +1472,12 @@ class TestConfirmReceiptCollectsTheMoney(unittest.TestCase):
 		booked = MagicMock()
 		changed = MagicMock()
 
-		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe), \
-				 patch("jarz_pos.api.payment_receipts._ensure_payment_receipt_confirm_access"), \
-				 plan, \
-				 _stubbed_confirm_online_payment(booked, changed):
+		with (
+			patch("jarz_pos.api.payment_receipts.frappe", mock_frappe),
+			patch("jarz_pos.api.payment_receipts._ensure_payment_receipt_confirm_access"),
+			plan,
+			_stubbed_confirm_online_payment(booked, changed),
+		):
 			with self.assertRaises(Exception) as exc:
 				confirm_receipt("PPR-0001")
 
@@ -1397,9 +1503,7 @@ class TestConfirmReceiptCollectsTheMoney(unittest.TestCase):
 
 		receipt = _FakeReceiptDoc(status="Unconfirmed", payment_method="Cash")
 		classifier = MagicMock()
-		with patch(
-			"jarz_pos.api.payment_receipts._classify_receipt_collection", classifier
-		):
+		with patch("jarz_pos.api.payment_receipts._classify_receipt_collection", classifier):
 			self.assertIsNone(_plan_receipt_collection(receipt))
 		classifier.assert_not_called()
 
@@ -1434,9 +1538,11 @@ class TestTransferProofIsMandatory(unittest.TestCase):
 		"""Confirmed but imageless is not proof -- nobody looked at anything."""
 		from jarz_pos.api.invoices import _require_confirmed_transfer_proof
 
-		mock_frappe = self._frappe([
-			{"name": "PPR-1", "receipt_image": None, "receipt_image_url": None},
-		])
+		mock_frappe = self._frappe(
+			[
+				{"name": "PPR-1", "receipt_image": None, "receipt_image_url": None},
+			]
+		)
 		with patch("jarz_pos.api.invoices.frappe", mock_frappe):
 			with self.assertRaises(Exception):
 				_require_confirmed_transfer_proof("ACC-SINV-0001", "instapay")
@@ -1444,17 +1550,16 @@ class TestTransferProofIsMandatory(unittest.TestCase):
 	def test_allows_a_confirmed_receipt_with_an_image(self):
 		from jarz_pos.api.invoices import _require_confirmed_transfer_proof
 
-		mock_frappe = self._frappe([
-			{"name": "PPR-1", "receipt_image": None,
-			 "receipt_image_url": "/files/transfer.jpg"},
-		])
+		mock_frappe = self._frappe(
+			[
+				{"name": "PPR-1", "receipt_image": None, "receipt_image_url": "/files/transfer.jpg"},
+			]
+		)
 		with patch("jarz_pos.api.invoices.frappe", mock_frappe):
 			_require_confirmed_transfer_proof("ACC-SINV-0001", "instapay")
 		# Only CONFIRMED receipts are even considered -- an Unconfirmed one is
 		# a screenshot nobody with bank access has checked yet.
-		self.assertEqual(
-			mock_frappe.get_all.call_args.kwargs["filters"]["status"], "Confirmed"
-		)
+		self.assertEqual(mock_frappe.get_all.call_args.kwargs["filters"]["status"], "Confirmed")
 
 	def test_the_gate_is_wired_into_pay_invoice_for_both_online_modes(self):
 		"""The rule has to hold at the endpoint, not just in the helper."""

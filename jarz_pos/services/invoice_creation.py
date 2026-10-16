@@ -18,43 +18,43 @@ from jarz_pos.services import customer_deals as _customer_deals
 from jarz_pos.services import branch_fulfilment as _branch_fulfilment
 from jarz_pos.services import delivery_pin_requirement as _delivery_pin
 from jarz_pos.utils.validation_utils import (
-    validate_cart_data, 
-    validate_customer, 
-    validate_pos_profile,
-    validate_delivery_datetime
+	validate_cart_data,
+	validate_customer,
+	validate_pos_profile,
+	validate_delivery_datetime,
 )
 from jarz_pos.utils.invoice_utils import (
-    set_invoice_fields,
-    add_items_to_invoice,
-    verify_invoice_totals,
-    resolve_order_territory,
-    append_pos_audit_marker,
-    stamp_order_channel,
-    is_unresolved_territory,
-    _log_loud,
+	set_invoice_fields,
+	add_items_to_invoice,
+	verify_invoice_totals,
+	resolve_order_territory,
+	append_pos_audit_marker,
+	stamp_order_channel,
+	is_unresolved_territory,
+	_log_loud,
 )
 from jarz_pos.utils.customer_address_utils import (
-    ensure_shipping_address,
-    preferred_address_was_honoured,
-    resolve_customer_shipping_address,
+	ensure_shipping_address,
+	preferred_address_was_honoured,
+	resolve_customer_shipping_address,
 )
 from jarz_pos.utils.credit_utils import (
-    CREDIT_PAYMENT_METHOD,
-    is_credit_payment_method,
+	CREDIT_PAYMENT_METHOD,
+	is_credit_payment_method,
 )
 from jarz_pos.services import delivery_handling as _delivery
 from jarz_pos.utils.delivery_utils import add_delivery_charges_to_taxes
 from jarz_pos.utils.account_utils import (
-    # NOTE: no longer called from this module (see _resolve_item_rate_with_provenance's
-    # docstring, FIX 3c) — it ran the identical query as this module's own generic
-    # Item Price lookup and could never return a different answer. Import kept ONLY
-    # because existing tests patch `jarz_pos.services.invoice_creation.get_item_price`
-    # and `jarz_pos.page.custom_pos.custom_pos` re-exports the real one separately.
-    get_item_price,
-    get_company_receivable_account,
-    get_pos_cash_account,
-    ensure_partner_receivable_subaccount,
-    resolve_online_partner_paid_to,
+	# NOTE: no longer called from this module (see _resolve_item_rate_with_provenance's
+	# docstring, FIX 3c) — it ran the identical query as this module's own generic
+	# Item Price lookup and could never return a different answer. Import kept ONLY
+	# because existing tests patch `jarz_pos.services.invoice_creation.get_item_price`
+	# and `jarz_pos.page.custom_pos.custom_pos` re-exports the real one separately.
+	get_item_price,
+	get_company_receivable_account,
+	get_pos_cash_account,
+	ensure_partner_receivable_subaccount,
+	resolve_online_partner_paid_to,
 )
 from jarz_pos.utils.access_control import ShiftRequiredError, get_open_shift_for_profile
 from jarz_pos.utils.employee_link import EMPLOYEE_ORDER_PURPOSE
@@ -64,68 +64,68 @@ from jarz_pos.utils.employee_link import EMPLOYEE_ORDER_PURPOSE
 # jarz_pos.api.kanban's optional imports) because a site that has not migrated the
 # `Jarz Territory Exception` DocType yet must still be able to take an order.
 try:
-    from jarz_pos.services.territory_exceptions import (  # type: ignore
-        record_invoice_territory_exception,
-    )
+	from jarz_pos.services.territory_exceptions import (  # type: ignore
+		record_invoice_territory_exception,
+	)
 
-    _TERRITORY_EXCEPTIONS_AVAILABLE = True
+	_TERRITORY_EXCEPTIONS_AVAILABLE = True
 except Exception:  # pragma: no cover - exercised only on a not-yet-migrated site
-    _TERRITORY_EXCEPTIONS_AVAILABLE = False
+	_TERRITORY_EXCEPTIONS_AVAILABLE = False
 
-    def record_invoice_territory_exception(invoice_doc):  # type: ignore
-        return None
+	def record_invoice_territory_exception(invoice_doc):  # type: ignore
+		return None
 
 
 def _exception_detail(exc) -> str:
-    """Human-readable cause of ``exc`` — never an empty string.
+	"""Human-readable cause of ``exc`` — never an empty string.
 
-    ``frappe.PermissionError`` and friends are raised by ``frappe/__init__.py``
-    with NO arguments; the real text is parked in ``frappe.flags.error_message``
-    and the exception itself stringifies to "". Formatting such an exception with
-    ``str(e)`` is how the till came to display "Error during document validation: "
-    — a colon and nothing else — for every permission failure.
+	``frappe.PermissionError`` and friends are raised by ``frappe/__init__.py``
+	with NO arguments; the real text is parked in ``frappe.flags.error_message``
+	and the exception itself stringifies to "". Formatting such an exception with
+	``str(e)`` is how the till came to display "Error during document validation: "
+	— a colon and nothing else — for every permission failure.
 
-    Order: the exception's own text, then the parked flag, then the class name so
-    the operator at least learns *what kind* of failure it was.
-    """
-    try:
-        detail = str(exc)
-    except Exception:
-        detail = ""
-    if detail.strip():
-        return detail
+	Order: the exception's own text, then the parked flag, then the class name so
+	the operator at least learns *what kind* of failure it was.
+	"""
+	try:
+		detail = str(exc)
+	except Exception:
+		detail = ""
+	if detail.strip():
+		return detail
 
-    parked = None
-    try:
-        flags = getattr(frappe, "flags", None)
-        if flags is not None:
-            getter = getattr(flags, "get", None)
-            parked = getter("error_message") if callable(getter) else getattr(flags, "error_message", None)
-    except Exception:
-        parked = None
-    # isinstance guard: under a mocked frappe this attribute is a Mock, which is
-    # truthy and would stringify into the operator's error message.
-    if isinstance(parked, str) and parked.strip():
-        return parked.strip()
+	parked = None
+	try:
+		flags = getattr(frappe, "flags", None)
+		if flags is not None:
+			getter = getattr(flags, "get", None)
+			parked = getter("error_message") if callable(getter) else getattr(flags, "error_message", None)
+	except Exception:
+		parked = None
+	# isinstance guard: under a mocked frappe this attribute is a Mock, which is
+	# truthy and would stringify into the operator's error message.
+	if isinstance(parked, str) and parked.strip():
+		return parked.strip()
 
-    return type(exc).__name__
+	return type(exc).__name__
 
 
 _MANAGER_PRICING_ROLES = ROLES.LINE_MANAGER_TIER
 
 
 def _has_manager_pricing_access() -> bool:
-    roles = {
-        str(role or "").strip()
-        for role in (frappe.get_roles(frappe.session.user) or [])
-        if str(role or "").strip()
-    }
-    return bool(roles.intersection(_MANAGER_PRICING_ROLES))
+	roles = {
+		str(role or "").strip()
+		for role in (frappe.get_roles(frappe.session.user) or [])
+		if str(role or "").strip()
+	}
+	return bool(roles.intersection(_MANAGER_PRICING_ROLES))
 
 
 def _ensure_manager_pricing_access() -> None:
-    if not _has_manager_pricing_access():
-        frappe.throw("Not permitted: manager pricing access required")
+	if not _has_manager_pricing_access():
+		frappe.throw("Not permitted: manager pricing access required")
 
 
 # Roles that grant retail/cashier (B2C) access — a user with any of these is
@@ -134,27 +134,27 @@ _B2C_RETAIL_ROLES = ROLES.LINE_MANAGER_TIER | {"Jarz POS Staff"}
 
 
 def _ensure_can_place_standard_order(order_purpose) -> None:
-    """Block a B2B-Sales-Rep-ONLY user from placing a Standard (B2C) retail order.
+	"""Block a B2B-Sales-Rep-ONLY user from placing a Standard (B2C) retail order.
 
-    Conservative: only blocks when the user holds "B2B Sales Rep" and does NOT hold
-    any retail/cashier or manager role. Managers and cashiers are unaffected.
-    """
-    purpose = str(order_purpose or "").strip()
-    if purpose not in ("", "Standard"):
-        return
+	Conservative: only blocks when the user holds "B2B Sales Rep" and does NOT hold
+	any retail/cashier or manager role. Managers and cashiers are unaffected.
+	"""
+	purpose = str(order_purpose or "").strip()
+	if purpose not in ("", "Standard"):
+		return
 
-    roles = set(frappe.get_roles(frappe.session.user) or [])
-    if "B2B Sales Rep" not in roles:
-        return
-    if roles.intersection(_B2C_RETAIL_ROLES):
-        return
+	roles = set(frappe.get_roles(frappe.session.user) or [])
+	if "B2B Sales Rep" not in roles:
+		return
+	if roles.intersection(_B2C_RETAIL_ROLES):
+		return
 
-    frappe.throw("B2B Sales Rep accounts cannot place Standard retail orders.")
+	frappe.throw("B2B Sales Rep accounts cannot place Standard retail orders.")
 
 
 def _normalize_price_list_name(value) -> str | None:
-    cleaned = str(value or "").strip()
-    return cleaned or None
+	cleaned = str(value or "").strip()
+	return cleaned or None
 
 
 # F-13: `remarks` must mean "the customer's note" on BOTH lanes, so the POS lane's
@@ -181,40 +181,40 @@ def _normalize_price_list_name(value) -> str | None:
 # `[POLICY PRICE LIST]` has NO reader anywhere in the workspace (both Python apps
 # and the Flutter client were grepped), so it moves out of `remarks` outright.
 _REMARKS_MIRRORED_TAGS = frozenset(
-    {
-        "[PICKUP]",
-        "[ORDER PURPOSE]",
-        "[PRICE LIST OVERRIDE]",
-        "[ZERO SHIPPING OVERRIDE]",
-        "[CUSTOM LINE PRICING]",
-        "[LINE DISCOUNTS]",
-        "[UNRESOLVED TERRITORY]",
-    }
+	{
+		"[PICKUP]",
+		"[ORDER PURPOSE]",
+		"[PRICE LIST OVERRIDE]",
+		"[ZERO SHIPPING OVERRIDE]",
+		"[CUSTOM LINE PRICING]",
+		"[LINE DISCOUNTS]",
+		"[UNRESOLVED TERRITORY]",
+	}
 )
 
 
 def _marker_tag(marker: str) -> str:
-    """Return the leading ``[TAG]`` of a marker, ignoring any trailing detail.
+	"""Return the leading ``[TAG]`` of a marker, ignoring any trailing detail.
 
-    Markers come in two shapes — bare (``[PICKUP]``) and parameterised
-    (``[ORDER PURPOSE] Employee``) — and the mirror decision is per tag, not per
-    rendered string.
-    """
-    text = str(marker or "").strip()
-    if text.startswith("["):
-        closing = text.find("]")
-        if closing != -1:
-            return text[: closing + 1]
-    return text
+	Markers come in two shapes — bare (``[PICKUP]``) and parameterised
+	(``[ORDER PURPOSE] Employee``) — and the mirror decision is per tag, not per
+	rendered string.
+	"""
+	text = str(marker or "").strip()
+	if text.startswith("["):
+		closing = text.find("]")
+		if closing != -1:
+			return text[: closing + 1]
+	return text
 
 
 def _append_audit_marker(invoice_doc, marker: str) -> None:
-    """Record a POS audit marker, mirroring to `remarks` only where still required."""
-    append_pos_audit_marker(
-        invoice_doc,
-        marker,
-        mirror_to_remarks=_marker_tag(marker) in _REMARKS_MIRRORED_TAGS,
-    )
+	"""Record a POS audit marker, mirroring to `remarks` only where still required."""
+	append_pos_audit_marker(
+		invoice_doc,
+		marker,
+		mirror_to_remarks=_marker_tag(marker) in _REMARKS_MIRRORED_TAGS,
+	)
 
 
 #: Deprecated alias kept so any external caller of the old private name keeps
@@ -223,897 +223,879 @@ _append_unique_remark = _append_audit_marker
 
 
 def _record_territory_exception(invoice_doc, logger) -> None:
-    """Log a submitted invoice into the territory/branch review queue (F-08, F-09).
+	"""Log a submitted invoice into the territory/branch review queue (F-08, F-09).
 
-    Two conditions land here, and neither one blocks or corrects anything:
+	Two conditions land here, and neither one blocks or corrects anything:
 
-      * the invoice's ``pos_profile`` differs from the profile its ``territory``
-        points at (1,285 submitted invoices, ~EGP 520k, on staging) — the branch
-        that shipped is the fact, so the territory is what may need fixing;
-      * the territory could not be resolved at all, which used to mean a silent
-        free delivery.
+	  * the invoice's ``pos_profile`` differs from the profile its ``territory``
+	    points at (1,285 submitted invoices, ~EGP 520k, on staging) — the branch
+	    that shipped is the fact, so the territory is what may need fixing;
+	  * the territory could not be resolved at all, which used to mean a silent
+	    free delivery.
 
-    Fully defensive. ``record_invoice_territory_exception`` is contractually
-    non-raising, but invoice creation must survive even a broken implementation of
-    it, a missing DocType, or a site that has not migrated yet.
-    """
-    if not _TERRITORY_EXCEPTIONS_AVAILABLE:
-        print("   ℹ️ Territory exception service unavailable – review queue skipped")
-        return
+	Fully defensive. ``record_invoice_territory_exception`` is contractually
+	non-raising, but invoice creation must survive even a broken implementation of
+	it, a missing DocType, or a site that has not migrated yet.
+	"""
+	if not _TERRITORY_EXCEPTIONS_AVAILABLE:
+		print("   ℹ️ Territory exception service unavailable – review queue skipped")
+		return
 
-    try:
-        exception_name = record_invoice_territory_exception(invoice_doc)
-    except Exception as exc:  # pragma: no cover - contract says this cannot happen
-        print(f"   ⚠️ Territory exception logging failed: {exc}")
-        try:
-            frappe.log_error(
-                f"record_invoice_territory_exception failed for "
-                f"{getattr(invoice_doc, 'name', '?')}: {exc}",
-                "Jarz POS Territory Exception Logging",
-            )
-        except Exception:
-            pass
-        return
+	try:
+		exception_name = record_invoice_territory_exception(invoice_doc)
+	except Exception as exc:  # pragma: no cover - contract says this cannot happen
+		print(f"   ⚠️ Territory exception logging failed: {exc}")
+		try:
+			frappe.log_error(
+				f"record_invoice_territory_exception failed for "
+				f"{getattr(invoice_doc, 'name', '?')}: {exc}",
+				"Jarz POS Territory Exception Logging",
+			)
+		except Exception:
+			pass
+		return
 
-    if exception_name:
-        print(f"   🧭 Territory exception recorded for review: {exception_name}")
-        try:
-            logger.info(f"Territory exception recorded: {exception_name}")
-        except Exception:
-            pass
+	if exception_name:
+		print(f"   🧭 Territory exception recorded for review: {exception_name}")
+		try:
+			logger.info(f"Territory exception recorded: {exception_name}")
+		except Exception:
+			pass
 
 
 def _describe_unresolved_territory_source(
-    *,
-    resolved_shipping_address=None,
-    shipping_address_name: str | None = None,
-    customer_doc=None,
+	*,
+	resolved_shipping_address=None,
+	shipping_address_name: str | None = None,
+	customer_doc=None,
 ) -> str:
-    if isinstance(resolved_shipping_address, dict):
-        address_name = str(resolved_shipping_address.get("name") or shipping_address_name or "").strip()
-        for fieldname in ("city", "state"):
-            value = str(resolved_shipping_address.get(fieldname) or "").strip()
-            if value:
-                if address_name:
-                    return f"{fieldname}={value} (address {address_name})"
-                return f"{fieldname}={value}"
+	if isinstance(resolved_shipping_address, dict):
+		address_name = str(resolved_shipping_address.get("name") or shipping_address_name or "").strip()
+		for fieldname in ("city", "state"):
+			value = str(resolved_shipping_address.get(fieldname) or "").strip()
+			if value:
+				if address_name:
+					return f"{fieldname}={value} (address {address_name})"
+				return f"{fieldname}={value}"
 
-    customer_territory = str(getattr(customer_doc, "territory", "") or "").strip()
-    if customer_territory:
-        return f"customer_territory={customer_territory}"
+	customer_territory = str(getattr(customer_doc, "territory", "") or "").strip()
+	if customer_territory:
+		return f"customer_territory={customer_territory}"
 
-    shipping_address_name = str(shipping_address_name or "").strip()
-    if shipping_address_name:
-        return f"shipping_address_name={shipping_address_name}"
+	shipping_address_name = str(shipping_address_name or "").strip()
+	if shipping_address_name:
+		return f"shipping_address_name={shipping_address_name}"
 
-    return "no territory source"
+	return "no territory source"
 
 
 def _pricing_field_provided(value) -> bool:
-    """True when the client explicitly SENT a value for this pricing field.
+	"""True when the client explicitly SENT a value for this pricing field.
 
-    ``0`` / ``0.0`` is a DELIBERATE zero price (a free line), not "unset" — treating
-    it as absent is how a cashier without manager access could submit a free line
-    with no gate and no audit trail. Only ``None`` and ``""`` mean the client sent
-    nothing at all for this field.
+	``0`` / ``0.0`` is a DELIBERATE zero price (a free line), not "unset" — treating
+	it as absent is how a cashier without manager access could submit a free line
+	with no gate and no audit trail. Only ``None`` and ``""`` mean the client sent
+	nothing at all for this field.
 
-    This is the ONE predicate for "was this pricing field provided" in this module.
-    The manager gate (:func:`_pricing_action_requires_manager`), the audit-marker
-    checks in :func:`create_pos_invoice`, the pricing engine
-    (:func:`_process_regular_item`) and the bundle price override
-    (:func:`_process_bundle_item`) must all use it — they must never diverge again.
-    """
-    return value not in (None, "")
+	This is the ONE predicate for "was this pricing field provided" in this module.
+	The manager gate (:func:`_pricing_action_requires_manager`), the audit-marker
+	checks in :func:`create_pos_invoice`, the pricing engine
+	(:func:`_process_regular_item`) and the bundle price override
+	(:func:`_process_bundle_item`) must all use it — they must never diverge again.
+	"""
+	return value not in (None, "")
 
 
 def _pricing_action_requires_manager(
-    cart_items,
-    *,
-    requested_price_list: str | None,
-    default_price_list: str | None,
-    suppress_shipping_income: bool | None,
-    suppress_legacy_delivery_charges: bool | None,
-    auto_derivable_price_lists: set[str] | None = None,
+	cart_items,
+	*,
+	requested_price_list: str | None,
+	default_price_list: str | None,
+	suppress_shipping_income: bool | None,
+	suppress_legacy_delivery_charges: bool | None,
+	auto_derivable_price_lists: set[str] | None = None,
 ) -> bool:
-    requested = _normalize_price_list_name(requested_price_list)
-    default = _normalize_price_list_name(default_price_list)
-    # A requested price list is a MANUAL override — and therefore manager-gated — only
-    # when it is NOT one the server itself would derive for this exact order context.
-    # The POS client applies the server-resolved tier list to the cart (so prices display
-    # correctly) and then echoes it back at checkout; that round-trip is not an override.
-    if requested and requested != default:
-        if requested not in (auto_derivable_price_lists or set()):
-            return True
-    if suppress_shipping_income is True or suppress_legacy_delivery_charges is True:
-        return True
+	requested = _normalize_price_list_name(requested_price_list)
+	default = _normalize_price_list_name(default_price_list)
+	# A requested price list is a MANUAL override — and therefore manager-gated — only
+	# when it is NOT one the server itself would derive for this exact order context.
+	# The POS client applies the server-resolved tier list to the cart (so prices display
+	# correctly) and then echoes it back at checkout; that round-trip is not an override.
+	if requested and requested != default:
+		if requested not in (auto_derivable_price_lists or set()):
+			return True
+	if suppress_shipping_income is True or suppress_legacy_delivery_charges is True:
+		return True
 
-    for item in cart_items or []:
-        if not isinstance(item, dict):
-            continue
-        for field in ("custom_rate_override", "discount_amount", "discount_percentage"):
-            if _pricing_field_provided(item.get(field)):
-                return True
+	for item in cart_items or []:
+		if not isinstance(item, dict):
+			continue
+		for field in ("custom_rate_override", "discount_amount", "discount_percentage"):
+			if _pricing_field_provided(item.get(field)):
+				return True
 
-    return False
+	return False
 
 
 def _resolve_sales_partner_price_list(sales_partner: str | None) -> str | None:
-    if not sales_partner:
-        return None
-    try:
-        return _normalize_price_list_name(
-            frappe.db.get_value("Sales Partner", sales_partner, "price_list")
-        )
-    except Exception:
-        return None
+	if not sales_partner:
+		return None
+	try:
+		return _normalize_price_list_name(frappe.db.get_value("Sales Partner", sales_partner, "price_list"))
+	except Exception:
+		return None
 
 
 def _resolve_customer_price_list(customer_doc) -> str | None:
-    """Customer-specific, then Customer-Group, default selling price list (if present).
+	"""Customer-specific, then Customer-Group, default selling price list (if present).
 
-    Uses getattr/db lookups defensively so missing fields never break creation.
-    """
-    if customer_doc is None:
-        return None
-    candidate = _normalize_price_list_name(getattr(customer_doc, "default_price_list", None))
-    if candidate:
-        return candidate
-    customer_group = getattr(customer_doc, "customer_group", None)
-    if customer_group:
-        try:
-            candidate = _normalize_price_list_name(
-                frappe.db.get_value("Customer Group", customer_group, "default_price_list")
-            )
-        except Exception:
-            candidate = None
-    return candidate
+	Uses getattr/db lookups defensively so missing fields never break creation.
+	"""
+	if customer_doc is None:
+		return None
+	candidate = _normalize_price_list_name(getattr(customer_doc, "default_price_list", None))
+	if candidate:
+		return candidate
+	customer_group = getattr(customer_doc, "customer_group", None)
+	if customer_group:
+		try:
+			candidate = _normalize_price_list_name(
+				frappe.db.get_value("Customer Group", customer_group, "default_price_list")
+			)
+		except Exception:
+			candidate = None
+	return candidate
 
 
 def _resolve_b2b_baseline_price_list(order_purpose: str | None) -> str | None:
-    """The B2B base list ("B2B Selling"), for a B2B Supply order with no tier.
+	"""The B2B base list ("B2B Selling"), for a B2B Supply order with no tier.
 
-    The "B2B Supply" policy carries no price list on purpose: the tier is supposed to
-    come from ``Customer.default_price_list`` or the customer group's. When neither is
-    set — which is every B2B customer on both servers today — the chain used to fall
-    through to the POS Profile's list and the order booked at RETAIL. Proven on staging
-    2026-09-03: a B2B Supply order booked Molten Large at 160 instead of the agreed 92.
+	The "B2B Supply" policy carries no price list on purpose: the tier is supposed to
+	come from ``Customer.default_price_list`` or the customer group's. When neither is
+	set — which is every B2B customer on both servers today — the chain used to fall
+	through to the POS Profile's list and the order booked at RETAIL. Proven on staging
+	2026-09-03: a B2B Supply order booked Molten Large at 160 instead of the agreed 92.
 
-    So this sits AFTER the customer/group lookup and BEFORE the POS Profile default: a
-    configured tier still wins, and only the un-tiered customer is caught here.
+	So this sits AFTER the customer/group lookup and BEFORE the POS Profile default: a
+	configured tier still wins, and only the un-tiered customer is caught here.
 
-    Deliberately scoped to ONE purpose. "Free Shipping Waiver" also has no price list,
-    but it is a retail order with the shipping income waived and must keep pricing at
-    retail — returning the B2B list for it would quietly discount every waiver order.
-    """
-    from jarz_pos.setup.b2b_pricing import B2B_SUPPLY_PURPOSE, PRICE_LIST as B2B_PRICE_LIST
+	Deliberately scoped to ONE purpose. "Free Shipping Waiver" also has no price list,
+	but it is a retail order with the shipping income waived and must keep pricing at
+	retail — returning the B2B list for it would quietly discount every waiver order.
+	"""
+	from jarz_pos.setup.b2b_pricing import B2B_SUPPLY_PURPOSE, PRICE_LIST as B2B_PRICE_LIST
 
-    if (order_purpose or "").strip() != B2B_SUPPLY_PURPOSE:
-        return None
-    try:
-        row = frappe.db.get_value(
-            "Price List", B2B_PRICE_LIST, ["enabled", "selling"], as_dict=True
-        )
-    except Exception:
-        return None
-    # A disabled or buying-only list would be rejected downstream anyway; falling back
-    # to the POS default is the safer answer than throwing at checkout.
-    if not row or not row.get("enabled") or not row.get("selling"):
-        return None
-    return _normalize_price_list_name(B2B_PRICE_LIST)
+	if (order_purpose or "").strip() != B2B_SUPPLY_PURPOSE:
+		return None
+	try:
+		row = frappe.db.get_value("Price List", B2B_PRICE_LIST, ["enabled", "selling"], as_dict=True)
+	except Exception:
+		return None
+	# A disabled or buying-only list would be rejected downstream anyway; falling back
+	# to the POS default is the safer answer than throwing at checkout.
+	if not row or not row.get("enabled") or not row.get("selling"):
+		return None
+	return _normalize_price_list_name(B2B_PRICE_LIST)
 
 
 def _resolve_company_default_price_list() -> str | None:
-    try:
-        return _normalize_price_list_name(
-            frappe.db.get_single_value("Selling Settings", "selling_price_list")
-        )
-    except Exception:
-        return None
+	try:
+		return _normalize_price_list_name(
+			frappe.db.get_single_value("Selling Settings", "selling_price_list")
+		)
+	except Exception:
+		return None
 
 
 def _auto_derivable_price_lists(
-    *,
-    default_price_list: str | None,
-    policy_matched: bool = False,
-    policy_price_list: str | None = None,
-    policy_order_purpose: str | None = None,
-    customer_doc=None,
-    sales_partner: str | None = None,
+	*,
+	default_price_list: str | None,
+	policy_matched: bool = False,
+	policy_price_list: str | None = None,
+	policy_order_purpose: str | None = None,
+	customer_doc=None,
+	sales_partner: str | None = None,
 ) -> set[str]:
-    """Price lists the SERVER itself would derive for THIS EXACT order context.
+	"""Price lists the SERVER itself would derive for THIS EXACT order context.
 
-    This set mirrors the resolution chain in ``_resolve_effective_price_list`` and nothing
-    more — it is what separates a benign client echo from a manual manager override.
+	This set mirrors the resolution chain in ``_resolve_effective_price_list`` and nothing
+	more — it is what separates a benign client echo from a manual manager override.
 
-    Why the echo needs an exemption: the POS client resolves a B2B/tier customer's price
-    list via ``jarz_pos.api.pos.resolve_customer_price_list`` (Customer.default_price_list
-    → Customer Group.default_price_list), applies it to the cart so displayed prices are
-    correct, then sends that SAME server-resolved name back as ``price_list`` at checkout.
-    Gating that round-trip as an override locked non-managers (cashiers / B2B Sales Reps)
-    out of B2B checkout entirely.
+	Why the echo needs an exemption: the POS client resolves a B2B/tier customer's price
+	list via ``jarz_pos.api.pos.resolve_customer_price_list`` (Customer.default_price_list
+	→ Customer Group.default_price_list), applies it to the cart so displayed prices are
+	correct, then sends that SAME server-resolved name back as ``price_list`` at checkout.
+	Gating that round-trip as an override locked non-managers (cashiers / B2B Sales Reps)
+	out of B2B checkout entirely.
 
-    Why ``policy_matched`` gates most of it: the policy / sales-partner / customer
-    candidates are ONLY reachable in the matched branch of the chain. A Standard (retail)
-    order resolves strictly ``requested or default_price_list``, so a customer's B2B tier
-    list is NOT server-derivable there and must keep requiring manager access — otherwise
-    a cashier could apply cheaper B2B tier pricing to a retail sale with no approval,
-    which is exactly what this gate exists to stop.
+	Why ``policy_matched`` gates most of it: the policy / sales-partner / customer
+	candidates are ONLY reachable in the matched branch of the chain. A Standard (retail)
+	order resolves strictly ``requested or default_price_list``, so a customer's B2B tier
+	list is NOT server-derivable there and must keep requiring manager access — otherwise
+	a cashier could apply cheaper B2B tier pricing to a retail sale with no approval,
+	which is exactly what this gate exists to stop.
 
-    The POS Profile default stays unconditional; it is harmless because
-    ``requested == default`` short-circuits before the gate is ever consulted.
+	The POS Profile default stays unconditional; it is harmless because
+	``requested == default`` short-circuits before the gate is ever consulted.
 
-    Reuses the existing resolvers verbatim — no new pricing logic.
-    """
-    candidates = [_normalize_price_list_name(default_price_list)]
-    if policy_matched:
-        candidates.extend(
-            (
-                _normalize_price_list_name(policy_price_list),
-                _resolve_sales_partner_price_list(sales_partner),
-                _resolve_customer_price_list(customer_doc),
-                # The B2B baseline is server-derived exactly like the ones above, so a
-                # rep echoing it back from the cart must not trip the manager gate —
-                # that is the lockout this whole function exists to prevent.
-                _resolve_b2b_baseline_price_list(policy_order_purpose),
-            )
-        )
-    return {candidate for candidate in candidates if candidate}
+	Reuses the existing resolvers verbatim — no new pricing logic.
+	"""
+	candidates = [_normalize_price_list_name(default_price_list)]
+	if policy_matched:
+		candidates.extend(
+			(
+				_normalize_price_list_name(policy_price_list),
+				_resolve_sales_partner_price_list(sales_partner),
+				_resolve_customer_price_list(customer_doc),
+				# The B2B baseline is server-derived exactly like the ones above, so a
+				# rep echoing it back from the cart must not trip the manager gate —
+				# that is the lockout this whole function exists to prevent.
+				_resolve_b2b_baseline_price_list(policy_order_purpose),
+			)
+		)
+	return {candidate for candidate in candidates if candidate}
 
 
 def _derive_policy_price_list(
-    *,
-    default_price_list: str | None,
-    policy_price_list: str | None,
-    policy_order_purpose: str | None,
-    customer_doc=None,
-    sales_partner: str | None = None,
+	*,
+	default_price_list: str | None,
+	policy_price_list: str | None,
+	policy_order_purpose: str | None,
+	customer_doc=None,
+	sales_partner: str | None = None,
 ) -> str | None:
-    """The list a MATCHED-policy order resolves to when the client requests none.
+	"""The list a MATCHED-policy order resolves to when the client requests none.
 
-    Extracted verbatim from ``_resolve_effective_price_list`` — one chain, never a copy
-    that can drift from it. Evaluation stays lazy: each lookup runs only when every
-    higher-priority source came back empty. The purpose/price-list consistency check
-    does NOT hold a request to this single answer; see
-    :func:`_b2b_supply_acceptable_price_lists`.
-    """
-    return (
-        _normalize_price_list_name(policy_price_list)
-        or _resolve_sales_partner_price_list(sales_partner)
-        or _resolve_customer_price_list(customer_doc)
-        # Un-tiered B2B customer: the agreed base list, never retail. Sits below the
-        # customer/group lookup so a configured tier still wins.
-        or _resolve_b2b_baseline_price_list(policy_order_purpose)
-        or _normalize_price_list_name(default_price_list)
-        or _resolve_company_default_price_list()
-    )
+	Extracted verbatim from ``_resolve_effective_price_list`` — one chain, never a copy
+	that can drift from it. Evaluation stays lazy: each lookup runs only when every
+	higher-priority source came back empty. The purpose/price-list consistency check
+	does NOT hold a request to this single answer; see
+	:func:`_b2b_supply_acceptable_price_lists`.
+	"""
+	return (
+		_normalize_price_list_name(policy_price_list)
+		or _resolve_sales_partner_price_list(sales_partner)
+		or _resolve_customer_price_list(customer_doc)
+		# Un-tiered B2B customer: the agreed base list, never retail. Sits below the
+		# customer/group lookup so a configured tier still wins.
+		or _resolve_b2b_baseline_price_list(policy_order_purpose)
+		or _normalize_price_list_name(default_price_list)
+		or _resolve_company_default_price_list()
+	)
 
 
 def _b2b_supply_acceptable_price_lists(
-    *,
-    default_price_list: str | None,
-    policy_order_purpose: str | None,
-    customer_doc=None,
-    sales_partner: str | None = None,
+	*,
+	default_price_list: str | None,
+	policy_order_purpose: str | None,
+	customer_doc=None,
+	sales_partner: str | None = None,
 ) -> list[str]:
-    """Every list a B2B Supply request may legitimately name, in chain order.
+	"""Every list a B2B Supply request may legitimately name, in chain order.
 
-    WHY a set and not :func:`_derive_policy_price_list`'s single answer: the POS never
-    runs that chain. The cart prices a B2B customer through
-    ``api/pos.resolve_customer_price_list`` — customer -> customer group (only an
-    enabled SELLING list) -> B2B baseline — which ignores the Sales Partner entirely.
-    Holding the request to the chain's first hit refused exactly what the client
-    legitimately sends: a B2B Supply order with a Sales Partner that carries a price
-    list, where the cart echoes the customer's tier and the chain expects the
-    partner's list. So a request is accepted when it equals ANY of:
+	WHY a set and not :func:`_derive_policy_price_list`'s single answer: the POS never
+	runs that chain. The cart prices a B2B customer through
+	``api/pos.resolve_customer_price_list`` — customer -> customer group (only an
+	enabled SELLING list) -> B2B baseline — which ignores the Sales Partner entirely.
+	Holding the request to the chain's first hit refused exactly what the client
+	legitimately sends: a B2B Supply order with a Sales Partner that carries a price
+	list, where the cart echoes the customer's tier and the chain expects the
+	partner's list. So a request is accepted when it equals ANY of:
 
-      * the Sales Partner's list (what the chain picks with no request);
-      * the customer / customer-group tier;
-      * the B2B baseline — only when there is no tier, or the tier is not a selling
-        list (that is when the client falls through to it). A configured tier still
-        keeps a rep from booking the baseline instead.
+	  * the Sales Partner's list (what the chain picks with no request);
+	  * the customer / customer-group tier;
+	  * the B2B baseline — only when there is no tier, or the tier is not a selling
+	    list (that is when the client falls through to it). A configured tier still
+	    keeps a rep from booking the baseline instead.
 
-    The POS default / company default are candidates ONLY when none of those exist
-    (the chain's last resort). Anything else — a retail list for a tiered or
-    baseline-priced customer — is refused. Resolution of the effective list is
-    unchanged (``requested or _derive_policy_price_list(...)``); this only decides
-    which requests are consistent with the purpose.
-    """
-    candidates: list[str] = []
+	The POS default / company default are candidates ONLY when none of those exist
+	(the chain's last resort). Anything else — a retail list for a tiered or
+	baseline-priced customer — is refused. Resolution of the effective list is
+	unchanged (``requested or _derive_policy_price_list(...)``); this only decides
+	which requests are consistent with the purpose.
+	"""
+	candidates: list[str] = []
 
-    def _add(name):
-        name = _normalize_price_list_name(name)
-        if name and not any(_same_price_list(name, existing) for existing in candidates):
-            candidates.append(name)
+	def _add(name):
+		name = _normalize_price_list_name(name)
+		if name and not any(_same_price_list(name, existing) for existing in candidates):
+			candidates.append(name)
 
-    _add(_resolve_sales_partner_price_list(sales_partner))
-    tier = _resolve_customer_price_list(customer_doc)
-    _add(tier)
-    if not tier or not _is_selling_price_list(tier):
-        _add(_resolve_b2b_baseline_price_list(policy_order_purpose))
-    if not candidates:
-        _add(_normalize_price_list_name(default_price_list) or _resolve_company_default_price_list())
-    return candidates
+	_add(_resolve_sales_partner_price_list(sales_partner))
+	tier = _resolve_customer_price_list(customer_doc)
+	_add(tier)
+	if not tier or not _is_selling_price_list(tier):
+		_add(_resolve_b2b_baseline_price_list(policy_order_purpose))
+	if not candidates:
+		_add(_normalize_price_list_name(default_price_list) or _resolve_company_default_price_list())
+	return candidates
 
 
 def _is_selling_price_list(price_list: str | None) -> bool:
-    """Same test ``api/pos.resolve_customer_price_list`` applies to a customer tier."""
-    name = _normalize_price_list_name(price_list)
-    if not name:
-        return False
-    try:
-        return bool(frappe.db.get_value("Price List", name, "selling"))
-    except Exception:
-        # Unreadable -> treat as selling: the tier then stays the only B2B candidate,
-        # which is the stricter answer (the baseline is not unlocked by a DB error).
-        return True
+	"""Same test ``api/pos.resolve_customer_price_list`` applies to a customer tier."""
+	name = _normalize_price_list_name(price_list)
+	if not name:
+		return False
+	try:
+		return bool(frappe.db.get_value("Price List", name, "selling"))
+	except Exception:
+		# Unreadable -> treat as selling: the tier then stays the only B2B candidate,
+		# which is the stricter answer (the baseline is not unlocked by a DB error).
+		return True
 
 
 def _same_price_list(a: str | None, b: str | None) -> bool:
-    """Case-insensitive name equality: MariaDB's collation makes "sample" == "Sample"."""
-    left = _normalize_price_list_name(a)
-    right = _normalize_price_list_name(b)
-    return bool(left) and bool(right) and left.casefold() == right.casefold()
+	"""Case-insensitive name equality: MariaDB's collation makes "sample" == "Sample"."""
+	left = _normalize_price_list_name(a)
+	right = _normalize_price_list_name(b)
+	return bool(left) and bool(right) and left.casefold() == right.casefold()
 
 
-def _amendment_keeps_source_price_list(amended_from: str | None, requested: str | None,
-                                       order_purpose: str | None, *,
-                                       customer: str | None = None,
-                                       pos_profile: str | None = None) -> bool:
-    """True when an amendment is only carrying its cancelled source's OWN price list.
+def _amendment_keeps_source_price_list(
+	amended_from: str | None,
+	requested: str | None,
+	order_purpose: str | None,
+	*,
+	customer: str | None = None,
+	pos_profile: str | None = None,
+) -> bool:
+	"""True when an amendment is only carrying its cancelled source's OWN price list.
 
-    WHY this exemption exists: invoices booked before the purpose/price-list check —
-    Sample - Courier orders at Standard Selling, a B2B Supply order at Standard Selling,
-    or a B2B order whose customer tier has changed since — must stay amendable.
-    ``api/manager._resolve_amendment_price_list`` re-sends the source's header (or the
-    profile default that equals it) and the job copies ``custom_order_purpose``
-    verbatim, so without this every such amendment would be refused after the source
-    had ALREADY been cancelled inside the same job, stranding the order.
+	WHY this exemption exists: invoices booked before the purpose/price-list check —
+	Sample - Courier orders at Standard Selling, a B2B Supply order at Standard Selling,
+	or a B2B order whose customer tier has changed since — must stay amendable.
+	``api/manager._resolve_amendment_price_list`` re-sends the source's header (or the
+	profile default that equals it) and the job copies ``custom_order_purpose``
+	verbatim, so without this every such amendment would be refused after the source
+	had ALREADY been cancelled inside the same job, stranding the order.
 
-    Deliberately narrow, because ``create_pos_invoice`` is whitelisted and
-    ``amended_from`` is client-supplied. All must hold:
-      * the source exists and is CANCELLED (the amendment job cancels it before it
-        creates the replacement);
-      * no live replacement for it exists yet — a cancelled invoice grandfathers ONE
-        replacement, not an unlimited supply of mismatched orders;
-      * the source had the SAME order purpose;
-      * the source belongs to the SAME customer as the new order;
-      * the source was booked on the SAME POS profile (its ``pos_profile`` or its
-        ``custom_kanban_profile``) as the new order;
-      * the requested list IS the source's persisted ``selling_price_list``.
-    The customer and profile checks close the remaining hole in a client-supplied
-    ``amended_from``: without them any cancelled invoice that has no replacement
-    yet — say an old B2B order at a cheap tier — could lend its list to an order
-    for a DIFFERENT customer or branch. The amendment job always recreates the
-    source's own customer on the source's branch unless the manager changed
-    them, and a changed customer/branch is a new pricing context anyway.
-    A deliberately NEW list on an amendment still goes through the full check.
-    """
-    source = str(amended_from or "").strip()
-    new_customer = str(customer or "").strip()
-    new_profile = str(pos_profile or "").strip()
-    if not source or not _normalize_price_list_name(requested):
-        return False
-    if not new_customer or not new_profile:
-        return False
-    try:
-        row = frappe.db.get_value(
-            "Sales Invoice",
-            source,
-            [
-                "selling_price_list",
-                "docstatus",
-                "custom_order_purpose",
-                "customer",
-                "pos_profile",
-                "custom_kanban_profile",
-            ],
-            as_dict=True,
-        )
-        if not row or int(row.get("docstatus") or 0) != 2:
-            return False
-        if not _same_price_list(requested, row.get("selling_price_list")):
-            return False
-        source_purpose = str(row.get("custom_order_purpose") or "").strip() or "Standard"
-        if source_purpose != (str(order_purpose or "").strip() or "Standard"):
-            return False
-        if str(row.get("customer") or "").strip() != new_customer:
-            return False
-        source_profiles = {
-            str(row.get(field) or "").strip()
-            for field in ("pos_profile", "custom_kanban_profile")
-        } - {""}
-        if new_profile not in source_profiles:
-            return False
-        if frappe.db.exists(
-            "Sales Invoice", {"amended_from": source, "docstatus": ["!=", 2]}
-        ):
-            return False
-    except Exception:
-        # Unverifiable -> no exemption: the caller throws the ordinary mismatch message.
-        return False
-    return True
+	Deliberately narrow, because ``create_pos_invoice`` is whitelisted and
+	``amended_from`` is client-supplied. All must hold:
+	  * the source exists and is CANCELLED (the amendment job cancels it before it
+	    creates the replacement);
+	  * no live replacement for it exists yet — a cancelled invoice grandfathers ONE
+	    replacement, not an unlimited supply of mismatched orders;
+	  * the source had the SAME order purpose;
+	  * the source belongs to the SAME customer as the new order;
+	  * the source was booked on the SAME POS profile (its ``pos_profile`` or its
+	    ``custom_kanban_profile``) as the new order;
+	  * the requested list IS the source's persisted ``selling_price_list``.
+	The customer and profile checks close the remaining hole in a client-supplied
+	``amended_from``: without them any cancelled invoice that has no replacement
+	yet — say an old B2B order at a cheap tier — could lend its list to an order
+	for a DIFFERENT customer or branch. The amendment job always recreates the
+	source's own customer on the source's branch unless the manager changed
+	them, and a changed customer/branch is a new pricing context anyway.
+	A deliberately NEW list on an amendment still goes through the full check.
+	"""
+	source = str(amended_from or "").strip()
+	new_customer = str(customer or "").strip()
+	new_profile = str(pos_profile or "").strip()
+	if not source or not _normalize_price_list_name(requested):
+		return False
+	if not new_customer or not new_profile:
+		return False
+	try:
+		row = frappe.db.get_value(
+			"Sales Invoice",
+			source,
+			[
+				"selling_price_list",
+				"docstatus",
+				"custom_order_purpose",
+				"customer",
+				"pos_profile",
+				"custom_kanban_profile",
+			],
+			as_dict=True,
+		)
+		if not row or int(row.get("docstatus") or 0) != 2:
+			return False
+		if not _same_price_list(requested, row.get("selling_price_list")):
+			return False
+		source_purpose = str(row.get("custom_order_purpose") or "").strip() or "Standard"
+		if source_purpose != (str(order_purpose or "").strip() or "Standard"):
+			return False
+		if str(row.get("customer") or "").strip() != new_customer:
+			return False
+		source_profiles = {
+			str(row.get(field) or "").strip() for field in ("pos_profile", "custom_kanban_profile")
+		} - {""}
+		if new_profile not in source_profiles:
+			return False
+		if frappe.db.exists("Sales Invoice", {"amended_from": source, "docstatus": ["!=", 2]}):
+			return False
+	except Exception:
+		# Unverifiable -> no exemption: the caller throws the ordinary mismatch message.
+		return False
+	return True
 
 
 def _deal_pricing_date(amended_from: str | None, customer: str | None):
-    """The date customer deals are judged on for this order.
+	"""The date customer deals are judged on for this order.
 
-    A new order: today. An amendment: the ORIGINAL order's ``posting_date`` --
-    the first invoice of the ``amended_from`` chain, because every replacement
-    is itself posted on the day it was made. So an order placed during a deal
-    keeps the deal price however many times it is edited after the deal ended,
-    and an old order can never pick up a deal that started later.
+	A new order: today. An amendment: the ORIGINAL order's ``posting_date`` --
+	the first invoice of the ``amended_from`` chain, because every replacement
+	is itself posted on the day it was made. So an order placed during a deal
+	keeps the deal price however many times it is edited after the deal ended,
+	and an old order can never pick up a deal that started later.
 
-    ``create_pos_invoice`` is whitelisted and ``amended_from`` is client-supplied,
-    so the source date is honoured ONLY inside the amendment job, which marks
-    itself with ``frappe.flags.jarz_amendment_source`` (``api/manager.py``), and
-    only when that source is cancelled, belongs to the same customer and has no
-    live replacement yet. Anything else prices on today.
-    """
-    today = frappe.utils.getdate(frappe.utils.today())
-    source = str(amended_from or "").strip()
-    customer = str(customer or "").strip()
-    if not source or not customer:
-        return today
-    try:
-        if str(frappe.flags.get("jarz_amendment_source") or "").strip() != source:
-            return today
-        row = frappe.db.get_value(
-            "Sales Invoice",
-            source,
-            ["docstatus", "customer", "posting_date", "amended_from"],
-            as_dict=True,
-        )
-        if (
-            not row
-            or int(row.get("docstatus") or 0) != 2
-            or str(row.get("customer") or "").strip() != customer
-            or not row.get("posting_date")
-        ):
-            return today
-        if frappe.db.exists(
-            "Sales Invoice", {"amended_from": source, "docstatus": ["!=", 2]}
-        ):
-            return today
-        original = row
-        seen = {source}
-        # Walk back to the first order of the chain. Bounded: a chain is a
-        # handful of edits, and a cycle (never expected) must not spin.
-        for _ in range(50):
-            parent = str(original.get("amended_from") or "").strip()
-            if not parent or parent in seen:
-                break
-            seen.add(parent)
-            prev = frappe.db.get_value(
-                "Sales Invoice",
-                parent,
-                ["customer", "posting_date", "amended_from"],
-                as_dict=True,
-            )
-            if (
-                not prev
-                or str(prev.get("customer") or "").strip() != customer
-                or not prev.get("posting_date")
-            ):
-                break
-            original = prev
-        return frappe.utils.getdate(original.get("posting_date"))
-    except Exception:
-        return today
+	``create_pos_invoice`` is whitelisted and ``amended_from`` is client-supplied,
+	so the source date is honoured ONLY inside the amendment job, which marks
+	itself with ``frappe.flags.jarz_amendment_source`` (``api/manager.py``), and
+	only when that source is cancelled, belongs to the same customer and has no
+	live replacement yet. Anything else prices on today.
+	"""
+	today = frappe.utils.getdate(frappe.utils.today())
+	source = str(amended_from or "").strip()
+	customer = str(customer or "").strip()
+	if not source or not customer:
+		return today
+	try:
+		if str(frappe.flags.get("jarz_amendment_source") or "").strip() != source:
+			return today
+		row = frappe.db.get_value(
+			"Sales Invoice",
+			source,
+			["docstatus", "customer", "posting_date", "amended_from"],
+			as_dict=True,
+		)
+		if (
+			not row
+			or int(row.get("docstatus") or 0) != 2
+			or str(row.get("customer") or "").strip() != customer
+			or not row.get("posting_date")
+		):
+			return today
+		if frappe.db.exists("Sales Invoice", {"amended_from": source, "docstatus": ["!=", 2]}):
+			return today
+		original = row
+		seen = {source}
+		# Walk back to the first order of the chain. Bounded: a chain is a
+		# handful of edits, and a cycle (never expected) must not spin.
+		for _ in range(50):
+			parent = str(original.get("amended_from") or "").strip()
+			if not parent or parent in seen:
+				break
+			seen.add(parent)
+			prev = frappe.db.get_value(
+				"Sales Invoice",
+				parent,
+				["customer", "posting_date", "amended_from"],
+				as_dict=True,
+			)
+			if (
+				not prev
+				or str(prev.get("customer") or "").strip() != customer
+				or not prev.get("posting_date")
+			):
+				break
+			original = prev
+		return frappe.utils.getdate(original.get("posting_date"))
+	except Exception:
+		return today
 
 
 def _enforce_order_purpose_price_list(
-    pos_profile,
-    *,
-    requested: str | None,
-    default_price_list: str | None,
-    policy_matched: bool,
-    policy_price_list: str | None,
-    policy_order_purpose: str | None,
-    customer_doc=None,
-    sales_partner: str | None = None,
-    amended_from: str | None = None,
-    logger=None,
+	pos_profile,
+	*,
+	requested: str | None,
+	default_price_list: str | None,
+	policy_matched: bool,
+	policy_price_list: str | None,
+	policy_order_purpose: str | None,
+	customer_doc=None,
+	sales_partner: str | None = None,
+	amended_from: str | None = None,
+	logger=None,
 ) -> None:
-    """Refuse a requested price list that contradicts the order purpose.
+	"""Refuse a requested price list that contradicts the order purpose.
 
-    WHY: the chain resolves ``requested or policy_pl ...``, so a list sent by the client
-    silently beat the policy's own. Production carried Sample - Courier invoices and a
-    B2B Supply invoice booked at Standard Selling. Order Purpose now drives the list:
+	WHY: the chain resolves ``requested or policy_pl ...``, so a list sent by the client
+	silently beat the policy's own. Production carried Sample - Courier invoices and a
+	B2B Supply invoice booked at Standard Selling. Order Purpose now drives the list:
 
-      1. matched policy WITH a price list (Employee, Sample): the request must BE it;
-      2. matched B2B Supply policy without one: the request must be ONE of the lists
-         the server can derive for this context — see
-         :func:`_b2b_supply_acceptable_price_lists` for why it is a set and not the
-         single answer of :func:`_derive_policy_price_list`;
-      3. Standard, or any other matched policy without a list (Free Shipping Waiver,
-         a retail order with shipping waived): the request must BE the POS Profile's
-         default ``selling_price_list`` (case-insensitive).
+	  1. matched policy WITH a price list (Employee, Sample): the request must BE it;
+	  2. matched B2B Supply policy without one: the request must be ONE of the lists
+	     the server can derive for this context — see
+	     :func:`_b2b_supply_acceptable_price_lists` for why it is a set and not the
+	     single answer of :func:`_derive_policy_price_list`;
+	  3. Standard, or any other matched policy without a list (Free Shipping Waiver,
+	     a retail order with shipping waived): the request must BE the POS Profile's
+	     default ``selling_price_list`` (case-insensitive).
 
-    WHY rule 3 is the branch default and not merely "not reserved": the cart's Price
-    List dropdown is being removed, so Order Purpose alone decides the list. Rule 3
-    used to refuse only lists RESERVED for some purpose
-    (``commercial_policy.reserved_price_lists``), which still let a Standard order book
-    "Selling Bundle of 3" / "Selling Bundle of 4" — lists that appear on none of the
-    11,362 production invoices and carry three item prices each, so a manager picking
-    one priced a retail order off a near-empty list. Every retail invoice ever booked
-    is at the branch default, so holding the request to it refuses nothing real.
-    When the request IS a reserved list the message still names its owners (it tells
-    the operator which purpose to pick instead). A profile with NO default has nothing
-    to hold the request to, so it keeps the reserved-only check.
+	WHY rule 3 is the branch default and not merely "not reserved": the cart's Price
+	List dropdown is being removed, so Order Purpose alone decides the list. Rule 3
+	used to refuse only lists RESERVED for some purpose
+	(``commercial_policy.reserved_price_lists``), which still let a Standard order book
+	"Selling Bundle of 3" / "Selling Bundle of 4" — lists that appear on none of the
+	11,362 production invoices and carry three item prices each, so a manager picking
+	one priced a retail order off a near-empty list. Every retail invoice ever booked
+	is at the branch default, so holding the request to it refuses nothing real.
+	When the request IS a reserved list the message still names its owners (it tells
+	the operator which purpose to pick instead). A profile with NO default has nothing
+	to hold the request to, so it keeps the reserved-only check.
 
-    An amendment carrying its cancelled source's own list stays exempt under every rule
-    (:func:`_amendment_keeps_source_price_list`), so an invoice booked before this check
-    at a now-refused list is still amendable. With rule 3 in place the manager gate can
-    no longer be reached by a price list on a Standard order; it is left intact for the
-    matched-policy paths and the line-pricing / shipping-suppression triggers.
+	An amendment carrying its cancelled source's own list stays exempt under every rule
+	(:func:`_amendment_keeps_source_price_list`), so an invoice booked before this check
+	at a now-refused list is still amendable. With rule 3 in place the manager gate can
+	no longer be reached by a price list on a Standard order; it is left intact for the
+	matched-policy paths and the line-pricing / shipping-suppression triggers.
 
-    Runs BEFORE the manager gate so a manager — who would otherwise pass the gate and
-    succeed silently — is told about the mismatch instead. An absent request keeps
-    today's behaviour: the chain resolves it, and a derived list is consistent by
-    construction. ``_auto_derivable_price_lists`` stays intact: a rep echoing the
-    server-derived tier back is rule 1/2's valid combination, so it passes here and
-    is exempt from the gate exactly as before.
-    """
-    if not requested:
-        return
+	Runs BEFORE the manager gate so a manager — who would otherwise pass the gate and
+	succeed silently — is told about the mismatch instead. An absent request keeps
+	today's behaviour: the chain resolves it, and a derived list is consistent by
+	construction. ``_auto_derivable_price_lists`` stays intact: a rep echoing the
+	server-derived tier back is rule 1/2's valid combination, so it passes here and
+	is exempt from the gate exactly as before.
+	"""
+	if not requested:
+		return
 
-    purpose = str(policy_order_purpose or "").strip() or "Standard"
-    policy_pl = _normalize_price_list_name(policy_price_list)
+	purpose = str(policy_order_purpose or "").strip() or "Standard"
+	policy_pl = _normalize_price_list_name(policy_price_list)
 
-    from jarz_pos.setup.b2b_pricing import B2B_SUPPLY_PURPOSE
+	from jarz_pos.setup.b2b_pricing import B2B_SUPPLY_PURPOSE
 
-    expected: list[str] | None = None
-    reserved_for: set[str] = set()
-    if policy_matched and policy_pl:
-        expected = [policy_pl]
-    elif policy_matched and purpose == B2B_SUPPLY_PURPOSE:
-        expected = _b2b_supply_acceptable_price_lists(
-            default_price_list=default_price_list,
-            policy_order_purpose=purpose,
-            customer_doc=customer_doc,
-            sales_partner=sales_partner,
-        )
-        if not expected:
-            # Nothing derivable at all (no tier, no baseline, no default anywhere):
-            # there is no list to hold the request to, so the chain's answer stands.
-            return
-    else:
-        # The POS Profile default is the only retail list, so the everyday retail order
-        # skips the policy query entirely.
-        if _same_price_list(requested, default_price_list):
-            return
-        # Queried only on the refusal path: it decides the wording when a default
-        # exists, and whether to refuse at all when it does not.
-        reserved = _commercial_policy.reserved_price_lists(
-            getattr(pos_profile, "name", None),
-            default_price_list=default_price_list,
-        )
-        for name, purposes in (reserved or {}).items():
-            if _same_price_list(name, requested):
-                reserved_for.update(purposes)
-        if not reserved_for and not default_price_list:
-            # No branch default to hold the request to: only a reserved list is refused.
-            return
+	expected: list[str] | None = None
+	reserved_for: set[str] = set()
+	if policy_matched and policy_pl:
+		expected = [policy_pl]
+	elif policy_matched and purpose == B2B_SUPPLY_PURPOSE:
+		expected = _b2b_supply_acceptable_price_lists(
+			default_price_list=default_price_list,
+			policy_order_purpose=purpose,
+			customer_doc=customer_doc,
+			sales_partner=sales_partner,
+		)
+		if not expected:
+			# Nothing derivable at all (no tier, no baseline, no default anywhere):
+			# there is no list to hold the request to, so the chain's answer stands.
+			return
+	else:
+		# The POS Profile default is the only retail list, so the everyday retail order
+		# skips the policy query entirely.
+		if _same_price_list(requested, default_price_list):
+			return
+		# Queried only on the refusal path: it decides the wording when a default
+		# exists, and whether to refuse at all when it does not.
+		reserved = _commercial_policy.reserved_price_lists(
+			getattr(pos_profile, "name", None),
+			default_price_list=default_price_list,
+		)
+		for name, purposes in (reserved or {}).items():
+			if _same_price_list(name, requested):
+				reserved_for.update(purposes)
+		if not reserved_for and not default_price_list:
+			# No branch default to hold the request to: only a reserved list is refused.
+			return
 
-    if expected is not None and any(_same_price_list(requested, name) for name in expected):
-        return
+	if expected is not None and any(_same_price_list(requested, name) for name in expected):
+		return
 
-    if _amendment_keeps_source_price_list(
-        amended_from,
-        requested,
-        purpose,
-        customer=getattr(customer_doc, "name", None),
-        pos_profile=getattr(pos_profile, "name", None),
-    ):
-        if logger is not None:
-            try:
-                if expected:
-                    wanted = " or ".join(expected)
-                elif default_price_list:
-                    wanted = default_price_list
-                else:
-                    wanted = "a retail list"
-                logger.warning(
-                    f"purpose_price_list: amendment of {amended_from} keeps its source "
-                    f"price list {requested} under order purpose {purpose} "
-                    f"(expected {wanted}); grandfathered."
-                )
-            except Exception:
-                pass
-        return
+	if _amendment_keeps_source_price_list(
+		amended_from,
+		requested,
+		purpose,
+		customer=getattr(customer_doc, "name", None),
+		pos_profile=getattr(pos_profile, "name", None),
+	):
+		if logger is not None:
+			try:
+				if expected:
+					wanted = " or ".join(expected)
+				elif default_price_list:
+					wanted = default_price_list
+				else:
+					wanted = "a retail list"
+				logger.warning(
+					f"purpose_price_list: amendment of {amended_from} keeps its source "
+					f"price list {requested} under order purpose {purpose} "
+					f"(expected {wanted}); grandfathered."
+				)
+			except Exception:
+				pass
+		return
 
-    if expected is not None:
-        message = (
-            f"Order purpose {purpose} must use price list {' or '.join(expected)}, "
-            f"not {requested}."
-        )
-    elif reserved_for and default_price_list:
-        message = (
-            f"Price list {requested} is reserved for order purpose "
-            f"{', '.join(sorted(reserved_for))}; order purpose {purpose} uses the branch "
-            f"price list {default_price_list}."
-        )
-    elif reserved_for:
-        message = (
-            f"Price list {requested} is reserved for order purpose "
-            f"{', '.join(sorted(reserved_for))}; order purpose {purpose} must use a "
-            f"retail price list."
-        )
-    else:
-        message = (
-            f"Order purpose {purpose} uses the branch price list {default_price_list}, "
-            f"not {requested}."
-        )
-    frappe.throw(message)
+	if expected is not None:
+		message = f"Order purpose {purpose} must use price list {' or '.join(expected)}, " f"not {requested}."
+	elif reserved_for and default_price_list:
+		message = (
+			f"Price list {requested} is reserved for order purpose "
+			f"{', '.join(sorted(reserved_for))}; order purpose {purpose} uses the branch "
+			f"price list {default_price_list}."
+		)
+	elif reserved_for:
+		message = (
+			f"Price list {requested} is reserved for order purpose "
+			f"{', '.join(sorted(reserved_for))}; order purpose {purpose} must use a "
+			f"retail price list."
+		)
+	else:
+		message = (
+			f"Order purpose {purpose} uses the branch price list {default_price_list}, " f"not {requested}."
+		)
+	frappe.throw(message)
 
 
 def _resolve_effective_price_list(
-    pos_profile,
-    cart_items,
-    *,
-    requested_price_list: str | None,
-    suppress_shipping_income: bool | None,
-    suppress_legacy_delivery_charges: bool | None,
-    logger,
-    policy_matched: bool = False,
-    policy_price_list: str | None = None,
-    policy_order_purpose: str | None = None,
-    customer_doc=None,
-    sales_partner: str | None = None,
-    amended_from: str | None = None,
+	pos_profile,
+	cart_items,
+	*,
+	requested_price_list: str | None,
+	suppress_shipping_income: bool | None,
+	suppress_legacy_delivery_charges: bool | None,
+	logger,
+	policy_matched: bool = False,
+	policy_price_list: str | None = None,
+	policy_order_purpose: str | None = None,
+	customer_doc=None,
+	sales_partner: str | None = None,
+	amended_from: str | None = None,
 ) -> str | None:
-    default_price_list = _normalize_price_list_name(
-        getattr(pos_profile, "selling_price_list", None)
-    )
-    requested = _normalize_price_list_name(requested_price_list)
+	default_price_list = _normalize_price_list_name(getattr(pos_profile, "selling_price_list", None))
+	requested = _normalize_price_list_name(requested_price_list)
 
-    # Order Purpose drives the Price List. Checked before the manager gate so a manager
-    # gets the mismatch message instead of silently booking the wrong list.
-    _enforce_order_purpose_price_list(
-        pos_profile,
-        requested=requested,
-        default_price_list=default_price_list,
-        policy_matched=policy_matched,
-        policy_price_list=policy_price_list,
-        policy_order_purpose=policy_order_purpose,
-        customer_doc=customer_doc,
-        sales_partner=sales_partner,
-        amended_from=amended_from,
-        logger=logger,
-    )
+	# Order Purpose drives the Price List. Checked before the manager gate so a manager
+	# gets the mismatch message instead of silently booking the wrong list.
+	_enforce_order_purpose_price_list(
+		pos_profile,
+		requested=requested,
+		default_price_list=default_price_list,
+		policy_matched=policy_matched,
+		policy_price_list=policy_price_list,
+		policy_order_purpose=policy_order_purpose,
+		customer_doc=customer_doc,
+		sales_partner=sales_partner,
+		amended_from=amended_from,
+		logger=logger,
+	)
 
-    # Manager gating: only an explicit MANUAL override (or line pricing / suppress hints)
-    # requires manager access. A requested price list bypasses the gate ONLY when the
-    # server would itself derive it for this exact order context (see
-    # _auto_derivable_price_lists) — which, for policy / sales-partner / customer lists,
-    # means matched-policy orders only. Those are already gated by the commercial-policy
-    # resolver, so they do NOT re-trip this check. A Standard order derives nothing but
-    # the POS Profile default, and since the Price List dropdown was removed any other
-    # list there is refused outright by the purpose check above (rule 3) before this
-    # gate is reached. The gate still sees one only on a profile with no default, or on
-    # an amendment that keeps its cancelled source's own list — both stay manager-only.
-    # Computed lazily: when the request matches the POS Profile default (the overwhelming
-    # majority of orders) the gate cannot trip on the price list, so we skip the call
-    # entirely. A Standard order costs no queries either way — the set builder short-
-    # circuits to the profile default without touching the DB when policy_matched is False.
-    auto_derivable: set[str] = set()
-    if requested and requested != default_price_list:
-        auto_derivable = _auto_derivable_price_lists(
-            default_price_list=default_price_list,
-            policy_matched=policy_matched,
-            policy_price_list=policy_price_list,
-            policy_order_purpose=policy_order_purpose,
-            customer_doc=customer_doc,
-            sales_partner=sales_partner,
-        )
+	# Manager gating: only an explicit MANUAL override (or line pricing / suppress hints)
+	# requires manager access. A requested price list bypasses the gate ONLY when the
+	# server would itself derive it for this exact order context (see
+	# _auto_derivable_price_lists) — which, for policy / sales-partner / customer lists,
+	# means matched-policy orders only. Those are already gated by the commercial-policy
+	# resolver, so they do NOT re-trip this check. A Standard order derives nothing but
+	# the POS Profile default, and since the Price List dropdown was removed any other
+	# list there is refused outright by the purpose check above (rule 3) before this
+	# gate is reached. The gate still sees one only on a profile with no default, or on
+	# an amendment that keeps its cancelled source's own list — both stay manager-only.
+	# Computed lazily: when the request matches the POS Profile default (the overwhelming
+	# majority of orders) the gate cannot trip on the price list, so we skip the call
+	# entirely. A Standard order costs no queries either way — the set builder short-
+	# circuits to the profile default without touching the DB when policy_matched is False.
+	auto_derivable: set[str] = set()
+	if requested and requested != default_price_list:
+		auto_derivable = _auto_derivable_price_lists(
+			default_price_list=default_price_list,
+			policy_matched=policy_matched,
+			policy_price_list=policy_price_list,
+			policy_order_purpose=policy_order_purpose,
+			customer_doc=customer_doc,
+			sales_partner=sales_partner,
+		)
 
-    if _pricing_action_requires_manager(
-        cart_items,
-        requested_price_list=requested,
-        default_price_list=default_price_list,
-        suppress_shipping_income=suppress_shipping_income,
-        suppress_legacy_delivery_charges=suppress_legacy_delivery_charges,
-        auto_derivable_price_lists=auto_derivable,
-    ):
-        _ensure_manager_pricing_access()
+	if _pricing_action_requires_manager(
+		cart_items,
+		requested_price_list=requested,
+		default_price_list=default_price_list,
+		suppress_shipping_income=suppress_shipping_income,
+		suppress_legacy_delivery_charges=suppress_legacy_delivery_charges,
+		auto_derivable_price_lists=auto_derivable,
+	):
+		_ensure_manager_pricing_access()
 
-    policy_pl = _normalize_price_list_name(policy_price_list)
-    from jarz_pos.setup.b2b_pricing import B2B_SUPPLY_PURPOSE
+	policy_pl = _normalize_price_list_name(policy_price_list)
+	from jarz_pos.setup.b2b_pricing import B2B_SUPPLY_PURPOSE
 
-    retail_purpose = policy_matched and not policy_pl and (
-        str(policy_order_purpose or "").strip() != B2B_SUPPLY_PURPOSE
-    )
-    if retail_purpose and default_price_list:
-        # A list-less retail purpose (Free Shipping Waiver) prices like Standard: the POS
-        # Profile default, never the customer's group tier. Rule 3 already refuses any other
-        # REQUESTED list; without this, a client that sends no list would fall through the
-        # policy chain to e.g. "B2B Selling" for a B2B-group customer — a list the same
-        # request would have been refused for.
-        effective_price_list = requested or default_price_list
-    elif policy_matched:
-        # Non-Standard (B2B/Employee/Sample/...) resolution chain, highest priority first.
-        # Only reached for an explicitly chosen, permission-gated order purpose.
-        effective_price_list = requested or _derive_policy_price_list(
-            default_price_list=default_price_list,
-            policy_price_list=policy_pl,
-            policy_order_purpose=policy_order_purpose,
-            customer_doc=customer_doc,
-            sales_partner=sales_partner,
-        )
-    else:
-        # Standard order: BYTE-IDENTICAL to prior behavior — POS Profile default only.
-        effective_price_list = requested or default_price_list
+	retail_purpose = (
+		policy_matched and not policy_pl and (str(policy_order_purpose or "").strip() != B2B_SUPPLY_PURPOSE)
+	)
+	if retail_purpose and default_price_list:
+		# A list-less retail purpose (Free Shipping Waiver) prices like Standard: the POS
+		# Profile default, never the customer's group tier. Rule 3 already refuses any other
+		# REQUESTED list; without this, a client that sends no list would fall through the
+		# policy chain to e.g. "B2B Selling" for a B2B-group customer — a list the same
+		# request would have been refused for.
+		effective_price_list = requested or default_price_list
+	elif policy_matched:
+		# Non-Standard (B2B/Employee/Sample/...) resolution chain, highest priority first.
+		# Only reached for an explicitly chosen, permission-gated order purpose.
+		effective_price_list = requested or _derive_policy_price_list(
+			default_price_list=default_price_list,
+			policy_price_list=policy_pl,
+			policy_order_purpose=policy_order_purpose,
+			customer_doc=customer_doc,
+			sales_partner=sales_partner,
+		)
+	else:
+		# Standard order: BYTE-IDENTICAL to prior behavior — POS Profile default only.
+		effective_price_list = requested or default_price_list
 
-    if effective_price_list and not frappe.db.exists("Price List", effective_price_list):
-        frappe.throw(f"Price List '{effective_price_list}' does not exist")
+	if effective_price_list and not frappe.db.exists("Price List", effective_price_list):
+		frappe.throw(f"Price List '{effective_price_list}' does not exist")
 
-    logger.info(
-        f"pricing_context resolved: requested={requested or ''}, policy={policy_pl or ''}, "
-        f"default={default_price_list or ''}, effective={effective_price_list or ''}"
-    )
-    return effective_price_list
+	logger.info(
+		f"pricing_context resolved: requested={requested or ''}, policy={policy_pl or ''}, "
+		f"default={default_price_list or ''}, effective={effective_price_list or ''}"
+	)
+	return effective_price_list
 
 
 def _persist_selling_price_list(invoice_doc, effective_price_list, logger) -> None:
-    """Re-stamp the resolved price list onto the invoice AFTER ERPNext validation.
+	"""Re-stamp the resolved price list onto the invoice AFTER ERPNext validation.
 
-    Why this exists (production incident, order 17206 / ACC-SINV-2026-18128):
-    ``create_pos_invoice`` sets ``selling_price_list`` at STEP 6, but every invoice this
-    package writes carries ``is_pos=1``, and ERPNext's own
-    ``SalesInvoice.set_pos_fields`` then OVERWRITES that column with
-    ``customer.default_price_list or customer_group.default_price_list or
-    pos_profile.selling_price_list``. The operator's choice therefore never reached the
-    database: ACC-SINV-2026-18128 has item rates of 92 (B2B Selling) while its header
-    reads ``Standard Selling``, and the only surviving trace of the real list is the
-    free-text ``[PRICE LIST OVERRIDE]`` audit marker.
+	Why this exists (production incident, order 17206 / ACC-SINV-2026-18128):
+	``create_pos_invoice`` sets ``selling_price_list`` at STEP 6, but every invoice this
+	package writes carries ``is_pos=1``, and ERPNext's own
+	``SalesInvoice.set_pos_fields`` then OVERWRITES that column with
+	``customer.default_price_list or customer_group.default_price_list or
+	pos_profile.selling_price_list``. The operator's choice therefore never reached the
+	database: ACC-SINV-2026-18128 has item rates of 92 (B2B Selling) while its header
+	reads ``Standard Selling``, and the only surviving trace of the real list is the
+	free-text ``[PRICE LIST OVERRIDE]`` audit marker.
 
-    That lie is not cosmetic. The amendment draft loader (both the Flutter client and
-    :func:`jarz_pos.api.manager._resolve_amendment_price_list`) reads the header to know
-    what the order was priced at, so a clobbered header re-prices the replacement at
-    retail — the customer on 17206 was overcharged EGP 476 across four identical
-    amendments.
+	That lie is not cosmetic. The amendment draft loader (both the Flutter client and
+	:func:`jarz_pos.api.manager._resolve_amendment_price_list`) reads the header to know
+	what the order was priced at, so a clobbered header re-prices the replacement at
+	retail — the customer on 17206 was overcharged EGP 476 across four identical
+	amendments.
 
-    Mechanism: re-stamp the EXISTING ``selling_price_list`` column with ``db_set`` once
-    the document is submitted and ERPNext can no longer touch it. Deliberately not a new
-    custom field — Sales Invoice on this site sits at the MariaDB 247-column row limit,
-    so it has no room for one — and deliberately not a re-parse of the audit marker,
-    which is free text and only a breadcrumb. Nothing in GL reads this column (item
-    rates are already stamped on the child rows), so correcting it moves no money.
+	Mechanism: re-stamp the EXISTING ``selling_price_list`` column with ``db_set`` once
+	the document is submitted and ERPNext can no longer touch it. Deliberately not a new
+	custom field — Sales Invoice on this site sits at the MariaDB 247-column row limit,
+	so it has no room for one — and deliberately not a re-parse of the audit marker,
+	which is free text and only a breadcrumb. Nothing in GL reads this column (item
+	rates are already stamped on the child rows), so correcting it moves no money.
 
-    ``update_modified=False`` keeps the in-memory document's timestamp valid, so the
-    post-submit steps that follow (partner payment entry, branch fulfilment) do not hit
-    a ``TimestampMismatchError``.
+	``update_modified=False`` keeps the in-memory document's timestamp valid, so the
+	post-submit steps that follow (partner payment entry, branch fulfilment) do not hit
+	a ``TimestampMismatchError``.
 
-    Fully defensive: a submitted invoice must never be lost to a metadata correction.
-    """
-    wanted = _normalize_price_list_name(effective_price_list)
-    if not wanted:
-        return
-    current = _normalize_price_list_name(getattr(invoice_doc, "selling_price_list", None))
-    if current == wanted:
-        # The overwhelmingly common case (no override): nothing to do, no query.
-        return
-    try:
-        invoice_doc.db_set("selling_price_list", wanted, update_modified=False)
-        print(f"   🏷️ Selling Price List re-stamped after submit: {current or '<blank>'} → {wanted}")
-        try:
-            logger.info(
-                f"selling_price_list re-stamped on {getattr(invoice_doc, 'name', '?')}: "
-                f"{current or ''} -> {wanted} (ERPNext set_pos_fields clobber)"
-            )
-        except Exception:
-            pass
-    except Exception as exc:  # pragma: no cover - metadata fix must never abort creation
-        print(f"   ⚠️ Could not re-stamp selling_price_list: {exc}")
-        try:
-            logger.warning(
-                f"Failed to re-stamp selling_price_list on "
-                f"{getattr(invoice_doc, 'name', '?')}: {exc}"
-            )
-        except Exception:
-            pass
+	Fully defensive: a submitted invoice must never be lost to a metadata correction.
+	"""
+	wanted = _normalize_price_list_name(effective_price_list)
+	if not wanted:
+		return
+	current = _normalize_price_list_name(getattr(invoice_doc, "selling_price_list", None))
+	if current == wanted:
+		# The overwhelmingly common case (no override): nothing to do, no query.
+		return
+	try:
+		invoice_doc.db_set("selling_price_list", wanted, update_modified=False)
+		print(f"   🏷️ Selling Price List re-stamped after submit: {current or '<blank>'} → {wanted}")
+		try:
+			logger.info(
+				f"selling_price_list re-stamped on {getattr(invoice_doc, 'name', '?')}: "
+				f"{current or ''} -> {wanted} (ERPNext set_pos_fields clobber)"
+			)
+		except Exception:
+			pass
+	except Exception as exc:  # pragma: no cover - metadata fix must never abort creation
+		print(f"   ⚠️ Could not re-stamp selling_price_list: {exc}")
+		try:
+			logger.warning(
+				f"Failed to re-stamp selling_price_list on " f"{getattr(invoice_doc, 'name', '?')}: {exc}"
+			)
+		except Exception:
+			pass
 
 
 def _validate_policy_price_list_coverage(
-    policy_decision,
-    effective_price_list,
-    cart_items,
-    logger,
-    customer: str | None = None,
-    pricing_date=None,
-    apply_deals: bool = False,
+	policy_decision,
+	effective_price_list,
+	cart_items,
+	logger,
+	customer: str | None = None,
+	pricing_date=None,
+	apply_deals: bool = False,
 ) -> None:
-    """For a MATCHED commercial policy, ensure the resolved price list has a selling
-    Item Price for every plain cart item. Gives a clear, actionable error (instead of a
-    cryptic failure or a silently zero-priced order) when a B2B/Employee/Sample price
-    list has not been populated yet. Standard orders are unaffected (they price from the
-    cart rate as before).
+	"""For a MATCHED commercial policy, ensure the resolved price list has a selling
+	Item Price for every plain cart item. Gives a clear, actionable error (instead of a
+	cryptic failure or a silently zero-priced order) when a B2B/Employee/Sample price
+	list has not been populated yet. Standard orders are unaffected (they price from the
+	cart rate as before).
 
-    ``customer`` MUST be the same customer :func:`_resolve_item_rate` will resolve
-    against. Without it this check used to ask "does ANY Item Price exist for this
-    item in this price list" with no customer filter at all — so an Item Price row
-    scoped to a DIFFERENT customer made the item look covered, then
-    ``_resolve_item_rate`` (which correctly excludes other customers' rows) found
-    nothing and silently fell back to trusting the client's own rate. Coverage now
-    counts a row only if it is generic (no customer) OR scoped to THIS customer.
-    """
-    if not getattr(policy_decision, "matched", False) or not effective_price_list:
-        return
-    # Free samples (and any policy that discounts the whole line by 100%) force every net
-    # line amount to zero, so the resolved price list is irrelevant — a populated Item
-    # Price cannot change a zero-net order. Skip coverage in that case (the same discount
-    # is applied from this policy_decision at the call site). Coverage still applies in
-    # full for any discount < 100%.
-    try:
-        _policy_disc = float(getattr(policy_decision, "discount_percentage", 0) or 0)
-    except (TypeError, ValueError):
-        _policy_disc = 0.0
-    if _policy_disc >= 100:
-        logger.info(
-            f"Skipping price-list coverage for '{effective_price_list}': policy discount "
-            f"{_policy_disc}% forces the net to zero."
-        )
-        return
-    missing = []
-    for it in cart_items or []:
-        if not isinstance(it, dict):
-            continue
-        code = str(it.get("item_code") or "").strip()
-        if not code:
-            continue
-        # Skip bundles and manually-overridden lines — those don't price off the list.
-        if it.get("is_bundle") or _pricing_field_provided(it.get("custom_rate_override")):
-            continue
-        # A live customer deal prices the item outright (it outranks every list
-        # row in _resolve_item_rate_with_provenance), so it covers it too.
-        if (
-            apply_deals
-            and customer
-            and _customer_deals.find_deal_rate(customer, code, on_date=pricing_date)
-        ):
-            continue
-        # An item is covered if it has a per-item selling Item Price that is either
-        # generic (no customer) or scoped to THIS customer — never one scoped to a
-        # different customer, which _resolve_item_rate would ignore anyway.
-        _coverage_customer_filter = ["in", [None, "", customer]] if customer else ["in", [None, ""]]
-        if frappe.db.exists(
-            "Item Price",
-            {
-                "item_code": code,
-                "price_list": effective_price_list,
-                "selling": 1,
-                "customer": _coverage_customer_filter,
-            },
-        ):
-            continue
-        # ...OR a category rate for its item_group. Category rates (Jarz Price List
-        # Category Rate) are the PRIMARY B2B pricing mechanism and are exactly what
-        # _resolve_item_rate falls back to, so coverage MUST recognize them too —
-        # otherwise a valid category-priced order is wrongly rejected as "no price".
-        item_group = frappe.db.get_value("Item", code, "item_group")
-        if item_group and frappe.db.get_value(
-            "Jarz Price List Category Rate",
-            {"price_list": effective_price_list, "item_group": item_group},
-            "rate",
-        ) not in (None, ""):
-            continue
-        missing.append(code)
-    if missing:
-        names = ", ".join(sorted(set(missing)))
-        # WARNING, not ERROR: this record is immediately followed by a throw, and
-        # sentry_sdk's LoggingIntegration files every ERROR record as its own event.
-        # The throw is already captured downstream with the full traceback, so an
-        # ERROR here only duplicates one failure into a second Sentry issue. As a
-        # warning it stays in the log file and rides along as a breadcrumb.
-        logger.warning(
-            f"Policy price list '{effective_price_list}' missing prices for: {names}"
-        )
-        frappe.throw(
-            f"Order purpose '{getattr(policy_decision, 'order_purpose', '')}' uses price "
-            f"list '{effective_price_list}', but it has no selling price for: {names}. "
-            f"Add an Item Price for these item(s) in '{effective_price_list}' "
-            f"(Selling → Item Price) before placing this order."
-        )
+	``customer`` MUST be the same customer :func:`_resolve_item_rate` will resolve
+	against. Without it this check used to ask "does ANY Item Price exist for this
+	item in this price list" with no customer filter at all — so an Item Price row
+	scoped to a DIFFERENT customer made the item look covered, then
+	``_resolve_item_rate`` (which correctly excludes other customers' rows) found
+	nothing and silently fell back to trusting the client's own rate. Coverage now
+	counts a row only if it is generic (no customer) OR scoped to THIS customer.
+	"""
+	if not getattr(policy_decision, "matched", False) or not effective_price_list:
+		return
+	# Free samples (and any policy that discounts the whole line by 100%) force every net
+	# line amount to zero, so the resolved price list is irrelevant — a populated Item
+	# Price cannot change a zero-net order. Skip coverage in that case (the same discount
+	# is applied from this policy_decision at the call site). Coverage still applies in
+	# full for any discount < 100%.
+	try:
+		_policy_disc = float(getattr(policy_decision, "discount_percentage", 0) or 0)
+	except (TypeError, ValueError):
+		_policy_disc = 0.0
+	if _policy_disc >= 100:
+		logger.info(
+			f"Skipping price-list coverage for '{effective_price_list}': policy discount "
+			f"{_policy_disc}% forces the net to zero."
+		)
+		return
+	missing = []
+	for it in cart_items or []:
+		if not isinstance(it, dict):
+			continue
+		code = str(it.get("item_code") or "").strip()
+		if not code:
+			continue
+		# Skip bundles and manually-overridden lines — those don't price off the list.
+		if it.get("is_bundle") or _pricing_field_provided(it.get("custom_rate_override")):
+			continue
+		# A live customer deal prices the item outright (it outranks every list
+		# row in _resolve_item_rate_with_provenance), so it covers it too.
+		if apply_deals and customer and _customer_deals.find_deal_rate(customer, code, on_date=pricing_date):
+			continue
+		# An item is covered if it has a per-item selling Item Price that is either
+		# generic (no customer) or scoped to THIS customer — never one scoped to a
+		# different customer, which _resolve_item_rate would ignore anyway.
+		_coverage_customer_filter = ["in", [None, "", customer]] if customer else ["in", [None, ""]]
+		if frappe.db.exists(
+			"Item Price",
+			{
+				"item_code": code,
+				"price_list": effective_price_list,
+				"selling": 1,
+				"customer": _coverage_customer_filter,
+			},
+		):
+			continue
+		# ...OR a category rate for its item_group. Category rates (Jarz Price List
+		# Category Rate) are the PRIMARY B2B pricing mechanism and are exactly what
+		# _resolve_item_rate falls back to, so coverage MUST recognize them too —
+		# otherwise a valid category-priced order is wrongly rejected as "no price".
+		item_group = frappe.db.get_value("Item", code, "item_group")
+		if item_group and frappe.db.get_value(
+			"Jarz Price List Category Rate",
+			{"price_list": effective_price_list, "item_group": item_group},
+			"rate",
+		) not in (None, ""):
+			continue
+		missing.append(code)
+	if missing:
+		names = ", ".join(sorted(set(missing)))
+		# WARNING, not ERROR: this record is immediately followed by a throw, and
+		# sentry_sdk's LoggingIntegration files every ERROR record as its own event.
+		# The throw is already captured downstream with the full traceback, so an
+		# ERROR here only duplicates one failure into a second Sentry issue. As a
+		# warning it stays in the log file and rides along as a breadcrumb.
+		logger.warning(f"Policy price list '{effective_price_list}' missing prices for: {names}")
+		frappe.throw(
+			f"Order purpose '{getattr(policy_decision, 'order_purpose', '')}' uses price "
+			f"list '{effective_price_list}', but it has no selling price for: {names}. "
+			f"Add an Item Price for these item(s) in '{effective_price_list}' "
+			f"(Selling → Item Price) before placing this order."
+		)
 
 
 #: Item groups that may only be sold at a price a price list backs. The Small
@@ -1125,379 +1107,380 @@ PRICE_LIST_ONLY_ITEM_GROUPS = frozenset({"Small"})
 
 
 def _resolve_item_rate_with_provenance(
-    item_code, price_list, fallback_rate=0.0, customer=None, on_date=None, include_deals=False
+	item_code, price_list, fallback_rate=0.0, customer=None, on_date=None, include_deals=False
 ) -> tuple[float, str]:
-    """Resolve a plain item's unit rate AND report where it came from.
+	"""Resolve a plain item's unit rate AND report where it came from.
 
-    Provenance values, most trustworthy first:
-      - ``"deal"``:           a live ``Jarz Customer Deal`` for THIS customer on
-                               ``on_date`` (default today) -- a temporary special
-                               price that outranks every list row, see
-                               ``services/customer_deals``. Only consulted with
-                               ``include_deals=True``, which callers pass for a
-                               B2B Supply order alone: a deal must never reach a
-                               retail, Employee or waiver order, whose catalog
-                               would not show it.
-      - ``"customer_price"``: an Item Price row scoped to THIS exact customer.
-      - ``"item_price"``:     a generic (no-customer) Item Price row in this list.
-      - ``"category"``:       a ``Jarz Price List Category Rate`` row for the
-                               item's item_group.
-      - ``"client"``:         nothing was found server-side; ``fallback_rate`` —
-                               whatever the CALLER supplied, i.e. the cart's own
-                               rate/price_list_rate — was used verbatim.
+	Provenance values, most trustworthy first:
+	  - ``"deal"``:           a live ``Jarz Customer Deal`` for THIS customer on
+	                           ``on_date`` (default today) -- a temporary special
+	                           price that outranks every list row, see
+	                           ``services/customer_deals``. Only consulted with
+	                           ``include_deals=True``, which callers pass for a
+	                           B2B Supply order alone: a deal must never reach a
+	                           retail, Employee or waiver order, whose catalog
+	                           would not show it.
+	  - ``"customer_price"``: an Item Price row scoped to THIS exact customer.
+	  - ``"item_price"``:     a generic (no-customer) Item Price row in this list.
+	  - ``"category"``:       a ``Jarz Price List Category Rate`` row for the
+	                           item's item_group.
+	  - ``"client"``:         nothing was found server-side; ``fallback_rate`` —
+	                           whatever the CALLER supplied, i.e. the cart's own
+	                           rate/price_list_rate — was used verbatim.
 
-    ``"client"`` is the dangerous case FIX 3 exists for: on a MATCHED commercial
-    policy that resolved a real (non-default) price list, this used to be
-    reachable via a dead fallback (``account_utils.get_item_price`` ran the
-    IDENTICAL query as the generic-rate lookup above, so it could never return
-    anything different) that made the expression collapse to
-    ``float(fallback_rate or 0.0)`` — i.e. always the client's own number,
-    completely unaudited. That dead call is gone; the caller decides what
-    "client" provenance means for THIS order (see ``_process_regular_item``).
-    """
-    if customer and include_deals:
-        deal = _customer_deals.find_deal_rate(customer, item_code, on_date=on_date)
-        if deal:
-            return deal[0], "deal"
-    if price_list:
-        # Per-customer override: an Item Price scoped to this customer in the same price
-        # list wins over the generic list rate (special rates for a specific B2B client).
-        # ``selling: 1`` on BOTH lookups is load-bearing, not decoration: it is the
-        # same filter _validate_policy_price_list_coverage uses, and the two queries
-        # must ask the identical question or coverage means nothing. Without it a
-        # buying-only row (selling=0) is invisible to coverage yet returned here as
-        # the selling rate — i.e. an order priced at COST. Production carries 221
-        # such rows today; they all sit in Standard Buying, so nothing selling-side
-        # reaches them right now, but one buying row added to a selling list is all
-        # it would take.
-        if customer:
-            cust_rate = frappe.db.get_value(
-                "Item Price",
-                {
-                    "item_code": item_code,
-                    "price_list": price_list,
-                    "customer": customer,
-                    "selling": 1,
-                },
-                "price_list_rate",
-            )
-            if cust_rate not in (None, ""):
-                return float(cust_rate), "customer_price"
-        # Generic list rate: exclude customer-scoped rows so one customer's special price
-        # never leaks into another customer's order.
-        rate = frappe.db.get_value(
-            "Item Price",
-            {
-                "item_code": item_code,
-                "price_list": price_list,
-                "customer": ["in", [None, ""]],
-                "selling": 1,
-            },
-            "price_list_rate",
-        )
-        if rate not in (None, ""):
-            return float(rate), "item_price"
-        # Category ("item-group") rate: when the item has no per-item Item Price in this
-        # list, fall back to the B2B category price stored in the app-owned
-        # ``Jarz Price List Category Rate`` DocType (one row per price_list + item_group,
-        # e.g. item_group="Medium" -> 75). This is NOT an Item Price row — this ERPNext
-        # build makes Item Price.item_code / uom mandatory with no item_group field, so
-        # category rates live in their own table. Standard/default lists carry no category
-        # rows, so this lookup finds nothing and the resolution falls through unchanged.
-        item_group = frappe.db.get_value("Item", item_code, "item_group")
-        if item_group:
-            group_rate = frappe.db.get_value(
-                "Jarz Price List Category Rate",
-                {"price_list": price_list, "item_group": item_group},
-                "rate",
-            )
-            if group_rate not in (None, ""):
-                return float(group_rate), "category"
+	``"client"`` is the dangerous case FIX 3 exists for: on a MATCHED commercial
+	policy that resolved a real (non-default) price list, this used to be
+	reachable via a dead fallback (``account_utils.get_item_price`` ran the
+	IDENTICAL query as the generic-rate lookup above, so it could never return
+	anything different) that made the expression collapse to
+	``float(fallback_rate or 0.0)`` — i.e. always the client's own number,
+	completely unaudited. That dead call is gone; the caller decides what
+	"client" provenance means for THIS order (see ``_process_regular_item``).
+	"""
+	if customer and include_deals:
+		deal = _customer_deals.find_deal_rate(customer, item_code, on_date=on_date)
+		if deal:
+			return deal[0], "deal"
+	if price_list:
+		# Per-customer override: an Item Price scoped to this customer in the same price
+		# list wins over the generic list rate (special rates for a specific B2B client).
+		# ``selling: 1`` on BOTH lookups is load-bearing, not decoration: it is the
+		# same filter _validate_policy_price_list_coverage uses, and the two queries
+		# must ask the identical question or coverage means nothing. Without it a
+		# buying-only row (selling=0) is invisible to coverage yet returned here as
+		# the selling rate — i.e. an order priced at COST. Production carries 221
+		# such rows today; they all sit in Standard Buying, so nothing selling-side
+		# reaches them right now, but one buying row added to a selling list is all
+		# it would take.
+		if customer:
+			cust_rate = frappe.db.get_value(
+				"Item Price",
+				{
+					"item_code": item_code,
+					"price_list": price_list,
+					"customer": customer,
+					"selling": 1,
+				},
+				"price_list_rate",
+			)
+			if cust_rate not in (None, ""):
+				return float(cust_rate), "customer_price"
+		# Generic list rate: exclude customer-scoped rows so one customer's special price
+		# never leaks into another customer's order.
+		rate = frappe.db.get_value(
+			"Item Price",
+			{
+				"item_code": item_code,
+				"price_list": price_list,
+				"customer": ["in", [None, ""]],
+				"selling": 1,
+			},
+			"price_list_rate",
+		)
+		if rate not in (None, ""):
+			return float(rate), "item_price"
+		# Category ("item-group") rate: when the item has no per-item Item Price in this
+		# list, fall back to the B2B category price stored in the app-owned
+		# ``Jarz Price List Category Rate`` DocType (one row per price_list + item_group,
+		# e.g. item_group="Medium" -> 75). This is NOT an Item Price row — this ERPNext
+		# build makes Item Price.item_code / uom mandatory with no item_group field, so
+		# category rates live in their own table. Standard/default lists carry no category
+		# rows, so this lookup finds nothing and the resolution falls through unchanged.
+		item_group = frappe.db.get_value("Item", item_code, "item_group")
+		if item_group:
+			group_rate = frappe.db.get_value(
+				"Jarz Price List Category Rate",
+				{"price_list": price_list, "item_group": item_group},
+				"rate",
+			)
+			if group_rate not in (None, ""):
+				return float(group_rate), "category"
 
-    # Nothing server-side backed this rate. NOTE: this deliberately does NOT call
-    # ``account_utils.get_item_price(item_code, price_list)`` — that helper runs the
-    # exact same "generic Item Price in this list" query already tried above, so it
-    # could never legitimately return anything the lookup above did not already find.
-    # Calling it anyway looked like a real second-chance lookup while being
-    # unreachable in production; see the docstring above (FIX 3c).
-    return float(fallback_rate or 0.0), "client"
+	# Nothing server-side backed this rate. NOTE: this deliberately does NOT call
+	# ``account_utils.get_item_price(item_code, price_list)`` — that helper runs the
+	# exact same "generic Item Price in this list" query already tried above, so it
+	# could never legitimately return anything the lookup above did not already find.
+	# Calling it anyway looked like a real second-chance lookup while being
+	# unreachable in production; see the docstring above (FIX 3c).
+	return float(fallback_rate or 0.0), "client"
 
 
 def _resolve_item_rate(
-    item_code, price_list, fallback_rate=0.0, customer=None, on_date=None, include_deals=False
+	item_code, price_list, fallback_rate=0.0, customer=None, on_date=None, include_deals=False
 ) -> float:
-    """Backward-compatible wrapper: the rate only, no provenance.
+	"""Backward-compatible wrapper: the rate only, no provenance.
 
-    Kept byte-identical in signature/behaviour for existing callers outside this
-    module (``api/pos.py``, ``api/manager.py`` amendment pricing) and for the
-    existing unit tests pinned on it. New code inside this module that needs to
-    know WHERE the rate came from should call
-    :func:`_resolve_item_rate_with_provenance` directly.
-    """
-    rate, _provenance = _resolve_item_rate_with_provenance(
-        item_code,
-        price_list,
-        fallback_rate=fallback_rate,
-        customer=customer,
-        on_date=on_date,
-        include_deals=include_deals,
-    )
-    return rate
+	Kept byte-identical in signature/behaviour for existing callers outside this
+	module (``api/pos.py``, ``api/manager.py`` amendment pricing) and for the
+	existing unit tests pinned on it. New code inside this module that needs to
+	know WHERE the rate came from should call
+	:func:`_resolve_item_rate_with_provenance` directly.
+	"""
+	rate, _provenance = _resolve_item_rate_with_provenance(
+		item_code,
+		price_list,
+		fallback_rate=fallback_rate,
+		customer=customer,
+		on_date=on_date,
+		include_deals=include_deals,
+	)
+	return rate
 
 
 def _requested_delivery_end():
-    """The end of the slot the POS says it picked, as sent with the request."""
-    try:
-        raw = getattr(frappe, "form_dict", {}).get("delivery_end_datetime")
-    except Exception:
-        return None
-    if not raw:
-        return None
-    try:
-        return frappe.utils.get_datetime(raw)
-    except Exception:
-        return None
+	"""The end of the slot the POS says it picked, as sent with the request."""
+	try:
+		raw = getattr(frappe, "form_dict", {}).get("delivery_end_datetime")
+	except Exception:
+		return None
+	if not raw:
+		return None
+	try:
+		return frappe.utils.get_datetime(raw)
+	except Exception:
+		return None
 
 
 def _requested_delivery_slot_explicit() -> bool | None:
-    """Whether the operator deliberately picked the slot (``True``), the POS
-    pre-selected it (``False``), or the client did not say (``None``).
+	"""Whether the operator deliberately picked the slot (``True``), the POS
+	pre-selected it (``False``), or the client did not say (``None``).
 
-    Only a pre-selected start in a slot that is already running is snapped;
-    see ``normalize_delivery_window``. An app too old to send the flag keeps
-    the behaviour it had, so absent or blank must stay ``None``, not ``False``.
-    """
-    try:
-        raw = getattr(frappe, "form_dict", {}).get("delivery_slot_explicit")
-    except Exception:
-        return None
-    if raw is None:
-        return None
-    if isinstance(raw, bool):
-        return raw
-    text = str(raw).strip().lower()
-    if not text:
-        return None
-    return text in {"1", "true", "yes", "on"}
+	Only a pre-selected start in a slot that is already running is snapped;
+	see ``normalize_delivery_window``. An app too old to send the flag keeps
+	the behaviour it had, so absent or blank must stay ``None``, not ``False``.
+	"""
+	try:
+		raw = getattr(frappe, "form_dict", {}).get("delivery_slot_explicit")
+	except Exception:
+		return None
+	if raw is None:
+		return None
+	if isinstance(raw, bool):
+		return raw
+	text = str(raw).strip().lower()
+	if not text:
+		return None
+	return text in {"1", "true", "yes", "on"}
 
 
 def _normalize_delivery_window(pos_profile_name, delivery_datetime, logger):
-    """Return ``(start, end)`` for a delivery window a timetable really sells.
+	"""Return ``(start, end)`` for a delivery window a timetable really sells.
 
-    Falls back to the historical "a past slot becomes now + 5 minutes" behaviour
-    only when the grid cannot be resolved at all (no timetable, or nothing left
-    to offer) - and says so at ERROR, because that fallback is exactly what
-    quietly produced windows like 22:24-23:54 that no courier is scheduled for.
-    """
-    if not delivery_datetime:
-        return delivery_datetime, None
+	Falls back to the historical "a past slot becomes now + 5 minutes" behaviour
+	only when the grid cannot be resolved at all (no timetable, or nothing left
+	to offer) - and says so at ERROR, because that fallback is exactly what
+	quietly produced windows like 22:24-23:54 that no courier is scheduled for.
+	"""
+	if not delivery_datetime:
+		return delivery_datetime, None
 
-    requested_end = _requested_delivery_end()
-    try:
-        from jarz_pos.api.delivery_slots import normalize_delivery_window
+	requested_end = _requested_delivery_end()
+	try:
+		from jarz_pos.api.delivery_slots import normalize_delivery_window
 
-        start, end, note = normalize_delivery_window(
-            pos_profile_name,
-            delivery_datetime,
-            requested_end,
-            explicit=_requested_delivery_slot_explicit(),
-        )
-    except Exception as exc:  # never fail an order over slot normalisation
-        logger.error(f"Delivery slot normalisation failed: {exc}")
-        return delivery_datetime, requested_end
+		start, end, note = normalize_delivery_window(
+			pos_profile_name,
+			delivery_datetime,
+			requested_end,
+			explicit=_requested_delivery_slot_explicit(),
+		)
+	except Exception as exc:  # never fail an order over slot normalisation
+		logger.error(f"Delivery slot normalisation failed: {exc}")
+		return delivery_datetime, requested_end
 
-    if note == "snapped":
-        logger.error(
-            f"Delivery slot had passed; snapped {delivery_datetime} -> {start} "
-            f"for POS Profile {pos_profile_name}"
-        )
-        print(f"   Delivery slot had passed; snapped to {start}")
-    elif note == "unresolved" and start and start <= frappe.utils.now_datetime():
-        adjusted = frappe.utils.now_datetime() + timedelta(minutes=5)
-        logger.error(
-            f"Delivery slot {start} has passed and no slot grid could be resolved "
-            f"for POS Profile {pos_profile_name}; falling back to {adjusted}"
-        )
-        print(f"   No slot grid available; delivery time set to {adjusted}")
-        return adjusted, None
+	if note == "snapped":
+		logger.error(
+			f"Delivery slot had passed; snapped {delivery_datetime} -> {start} "
+			f"for POS Profile {pos_profile_name}"
+		)
+		print(f"   Delivery slot had passed; snapped to {start}")
+	elif note == "unresolved" and start and start <= frappe.utils.now_datetime():
+		adjusted = frappe.utils.now_datetime() + timedelta(minutes=5)
+		logger.error(
+			f"Delivery slot {start} has passed and no slot grid could be resolved "
+			f"for POS Profile {pos_profile_name}; falling back to {adjusted}"
+		)
+		print(f"   No slot grid available; delivery time set to {adjusted}")
+		return adjusted, None
 
-    return start, end
+	return start, end
 
 
 def _apply_delivery_slot_fields(invoice_doc, delivery_datetime, delivery_end_datetime=None):
-    """Populate new delivery slot fields on the Sales Invoice from a datetime.
+	"""Populate new delivery slot fields on the Sales Invoice from a datetime.
 
-    Fields:
-      - custom_delivery_date (Date)
-      - custom_delivery_time_from (Time)
-      - custom_delivery_duration (Duration, stored in SECONDS)
+	Fields:
+	  - custom_delivery_date (Date)
+	  - custom_delivery_time_from (Time)
+	  - custom_delivery_duration (Duration, stored in SECONDS)
 
-    Notes:
-      - Historically code treated duration as minutes. We now standardize to seconds.
-      - If a small integer value (< 1000) is detected, it's assumed to be minutes and converted to seconds.
-      - Parse optional request param 'delivery_duration' if present: supports '4h', '240m', '2:30', or plain numbers.
-    """
-    def _parse_duration_to_seconds(raw) -> int | None:
-        if raw is None:
-            return None
-        try:
-            if isinstance(raw, (int, float)):
-                val = float(raw)
-                # Heuristic: treat small numbers as minutes (legacy), otherwise seconds
-                return int(val * 60) if val < 1000 else int(val)
-            s = str(raw).strip().lower()
-            if not s:
-                return None
-            # HH:MM or H:MM
-            if ":" in s:
-                parts = s.split(":", 1)
-                h = int(parts[0] or 0)
-                m = int(parts[1] or 0)
-                return h * 3600 + m * 60
-            # Suffix-based
-            if s.endswith(("hours", "hour", "hrs", "hr", "h")):
-                num = float(s.rstrip("hoursr h"))
-                return int(num * 3600)
-            if s.endswith(("minutes", "minute", "mins", "min", "m")):
-                num = float(s.rstrip("minutesin m"))
-                return int(num * 60)
-            # Plain number: assume minutes (legacy)
-            return int(float(s) * 60)
-        except Exception:
-            return None
+	Notes:
+	  - Historically code treated duration as minutes. We now standardize to seconds.
+	  - If a small integer value (< 1000) is detected, it's assumed to be minutes and converted to seconds.
+	  - Parse optional request param 'delivery_duration' if present: supports '4h', '240m', '2:30', or plain numbers.
+	"""
 
-    if not delivery_datetime:
-        return
-    try:
-        dt = frappe.utils.get_datetime(delivery_datetime)
-        invoice_doc.custom_delivery_date = dt.date()
-        invoice_doc.custom_delivery_time_from = dt.time().strftime("%H:%M:%S")
+	def _parse_duration_to_seconds(raw) -> int | None:
+		if raw is None:
+			return None
+		try:
+			if isinstance(raw, (int, float)):
+				val = float(raw)
+				# Heuristic: treat small numbers as minutes (legacy), otherwise seconds
+				return int(val * 60) if val < 1000 else int(val)
+			s = str(raw).strip().lower()
+			if not s:
+				return None
+			# HH:MM or H:MM
+			if ":" in s:
+				parts = s.split(":", 1)
+				h = int(parts[0] or 0)
+				m = int(parts[1] or 0)
+				return h * 3600 + m * 60
+			# Suffix-based
+			if s.endswith(("hours", "hour", "hrs", "hr", "h")):
+				num = float(s.rstrip("hoursr h"))
+				return int(num * 3600)
+			if s.endswith(("minutes", "minute", "mins", "min", "m")):
+				num = float(s.rstrip("minutesin m"))
+				return int(num * 60)
+			# Plain number: assume minutes (legacy)
+			return int(float(s) * 60)
+		except Exception:
+			return None
 
-        # --- Calculate duration from end_datetime (preferred) ---
-        # ``delivery_end_datetime`` is passed in by the caller once the window has
-        # been snapped onto the profile's slot grid, so the duration describes the
-        # slot that was actually stored. The form_dict read stays as the fallback
-        # for callers that never normalised.
-        duration_set = False
-        try:
-            raw_end = delivery_end_datetime or getattr(frappe, "form_dict", {}).get(
-                "delivery_end_datetime"
-            )
-            if raw_end:
-                end_dt = frappe.utils.get_datetime(raw_end)
-                duration_seconds = int((end_dt - dt).total_seconds())
-                if duration_seconds > 0:
-                    invoice_doc.custom_delivery_duration = duration_seconds
-                    duration_set = True
-        except Exception:
-            pass
+	if not delivery_datetime:
+		return
+	try:
+		dt = frappe.utils.get_datetime(delivery_datetime)
+		invoice_doc.custom_delivery_date = dt.date()
+		invoice_doc.custom_delivery_time_from = dt.time().strftime("%H:%M:%S")
 
-        if not duration_set:
-            # Fallback: explicit delivery_duration param
-            try:
-                raw_duration = getattr(frappe, "form_dict", {}).get("delivery_duration")
-            except Exception:
-                raw_duration = None
-            parsed_seconds = _parse_duration_to_seconds(raw_duration)
-            if parsed_seconds is not None:
-                invoice_doc.custom_delivery_duration = parsed_seconds
-                duration_set = True
+		# --- Calculate duration from end_datetime (preferred) ---
+		# ``delivery_end_datetime`` is passed in by the caller once the window has
+		# been snapped onto the profile's slot grid, so the duration describes the
+		# slot that was actually stored. The form_dict read stays as the fallback
+		# for callers that never normalised.
+		duration_set = False
+		try:
+			raw_end = delivery_end_datetime or getattr(frappe, "form_dict", {}).get("delivery_end_datetime")
+			if raw_end:
+				end_dt = frappe.utils.get_datetime(raw_end)
+				duration_seconds = int((end_dt - dt).total_seconds())
+				if duration_seconds > 0:
+					invoice_doc.custom_delivery_duration = duration_seconds
+					duration_set = True
+		except Exception:
+			pass
 
-        if not duration_set:
-            # Fallback: look up timetable slot duration for the POS profile
-            try:
-                pos_profile_name = getattr(invoice_doc, "pos_profile", None)
-                if pos_profile_name:
-                    timetable = frappe.db.get_value(
-                        "POS Profile Timetable",
-                        {"pos_profile": pos_profile_name},
-                        ["slot_hours", "slot_minutes"],
-                        as_dict=True,
-                    )
-                    if timetable:
-                        total_minutes = int(timetable.slot_hours or 1) * 60 + int(timetable.slot_minutes or 0)
-                        invoice_doc.custom_delivery_duration = total_minutes * 60
-                        duration_set = True
-            except Exception:
-                pass
+		if not duration_set:
+			# Fallback: explicit delivery_duration param
+			try:
+				raw_duration = getattr(frappe, "form_dict", {}).get("delivery_duration")
+			except Exception:
+				raw_duration = None
+			parsed_seconds = _parse_duration_to_seconds(raw_duration)
+			if parsed_seconds is not None:
+				invoice_doc.custom_delivery_duration = parsed_seconds
+				duration_set = True
 
-        if not duration_set:
-            # Final fallback: 1 hour in seconds
-            invoice_doc.custom_delivery_duration = 3600
-    except Exception:
-        # Non-fatal; let validation hook catch missing fields if required
-        pass
+		if not duration_set:
+			# Fallback: look up timetable slot duration for the POS profile
+			try:
+				pos_profile_name = getattr(invoice_doc, "pos_profile", None)
+				if pos_profile_name:
+					timetable = frappe.db.get_value(
+						"POS Profile Timetable",
+						{"pos_profile": pos_profile_name},
+						["slot_hours", "slot_minutes"],
+						as_dict=True,
+					)
+					if timetable:
+						total_minutes = int(timetable.slot_hours or 1) * 60 + int(timetable.slot_minutes or 0)
+						invoice_doc.custom_delivery_duration = total_minutes * 60
+						duration_set = True
+			except Exception:
+				pass
+
+		if not duration_set:
+			# Final fallback: 1 hour in seconds
+			invoice_doc.custom_delivery_duration = 3600
+	except Exception:
+		# Non-fatal; let validation hook catch missing fields if required
+		pass
 
 
 def _set_initial_state_for_sales_partner(invoice_doc, logger):
-    """If a Sales Partner is set on the invoice, initialize the Kanban state to 'In Progress'.
+	"""If a Sales Partner is set on the invoice, initialize the Kanban state to 'In Progress'.
 
-    We don't assume a specific custom field name. Instead, we probe common candidates and
-    set whichever exist on the Sales Invoice meta so the Kanban board (which reads these
-    fields) will place the new order under the 'In Progress' column.
+	We don't assume a specific custom field name. Instead, we probe common candidates and
+	set whichever exist on the Sales Invoice meta so the Kanban board (which reads these
+	fields) will place the new order under the 'In Progress' column.
 
-    Candidate fields (in priority order):
-      - custom_sales_invoice_state (preferred)
-      - sales_invoice_state
-      - custom_state
-      - state
-    """
-    try:
-        if not getattr(invoice_doc, "sales_partner", None):
-            return
-        target_state = "In Progress"
-        meta = frappe.get_meta("Sales Invoice")
-        candidates = [
-            "custom_sales_invoice_state",
-            "sales_invoice_state",
-            "custom_state",
-            "state",
-        ]
-        updated = []
-        for f in candidates:
-            try:
-                field = meta.get_field(f)
-                if field:
-                    value_to_set = target_state
-                    # If it's a Select field, ensure option exists (case-insensitive)
-                    try:
-                        if getattr(field, "fieldtype", "") == "Select":
-                            raw_options = getattr(field, "options", "") or ""
-                            opts = [o.strip() for o in str(raw_options).split("\n") if o.strip()]
-                            if opts:
-                                match = next((o for o in opts if o.lower() == target_state.lower()), None)
-                                if match:
-                                    value_to_set = match
-                                else:
-                                    # Skip setting this field if 'In Progress' isn't an allowed option
-                                    print(f"   ℹ️ Field '{f}' is Select without 'In Progress' option – skipping")
-                                    field = None
-                    except Exception:
-                        pass
-                    if field:
-                        # Prefer using setter to ensure ORM picks change up
-                        try:
-                            invoice_doc.set(f, value_to_set)
-                        except Exception:
-                            setattr(invoice_doc, f, value_to_set)
-                        updated.append(f)
-            except Exception:
-                # Ignore meta access issues per-field and continue
-                continue
-        if updated:
-            logger.info(
-                f"Initial Kanban state set to '{target_state}' on fields: {updated} (sales_partner present)"
-            )
-            print(f"   🧭 Initial state set to '{target_state}' on {updated}")
-        else:
-            logger.warning(
-                "Sales partner present, but no known Kanban state field found to set initial state"
-            )
-    except Exception as e:
-        try:
-            logger.warning(f"Could not set initial Kanban state for sales partner: {e}")
-        except Exception:
-            pass
+	Candidate fields (in priority order):
+	  - custom_sales_invoice_state (preferred)
+	  - sales_invoice_state
+	  - custom_state
+	  - state
+	"""
+	try:
+		if not getattr(invoice_doc, "sales_partner", None):
+			return
+		target_state = "In Progress"
+		meta = frappe.get_meta("Sales Invoice")
+		candidates = [
+			"custom_sales_invoice_state",
+			"sales_invoice_state",
+			"custom_state",
+			"state",
+		]
+		updated = []
+		for f in candidates:
+			try:
+				field = meta.get_field(f)
+				if field:
+					value_to_set = target_state
+					# If it's a Select field, ensure option exists (case-insensitive)
+					try:
+						if getattr(field, "fieldtype", "") == "Select":
+							raw_options = getattr(field, "options", "") or ""
+							opts = [o.strip() for o in str(raw_options).split("\n") if o.strip()]
+							if opts:
+								match = next((o for o in opts if o.lower() == target_state.lower()), None)
+								if match:
+									value_to_set = match
+								else:
+									# Skip setting this field if 'In Progress' isn't an allowed option
+									print(
+										f"   ℹ️ Field '{f}' is Select without 'In Progress' option – skipping"
+									)
+									field = None
+					except Exception:
+						pass
+					if field:
+						# Prefer using setter to ensure ORM picks change up
+						try:
+							invoice_doc.set(f, value_to_set)
+						except Exception:
+							setattr(invoice_doc, f, value_to_set)
+						updated.append(f)
+			except Exception:
+				# Ignore meta access issues per-field and continue
+				continue
+		if updated:
+			logger.info(
+				f"Initial Kanban state set to '{target_state}' on fields: {updated} (sales_partner present)"
+			)
+			print(f"   🧭 Initial state set to '{target_state}' on {updated}")
+		else:
+			logger.warning(
+				"Sales partner present, but no known Kanban state field found to set initial state"
+			)
+	except Exception as e:
+		try:
+			logger.warning(f"Could not set initial Kanban state for sales partner: {e}")
+		except Exception:
+			pass
 
 
 # ---------------------------------------------------------------------------
@@ -1533,277 +1516,272 @@ DEFAULT_CREDIT_DAYS = 30
 
 
 def _customer_credit_settings(customer_name: str) -> dict:
-    """Read the three credit columns off a Customer, defensively.
+	"""Read the three credit columns off a Customer, defensively.
 
-    Every field is a Custom Field seeded by ``setup/credit_terms.py``, so on a
-    bench that has not migrated yet the read raises rather than returning None.
-    That must degrade to "credit not allowed" — refusing the order — and never
-    to "allowed with no limit", which is the direction that loses money.
-    """
-    result = {"allowed": False, "days": 0, "limit": 0.0}
-    name = str(customer_name or "").strip()
-    if not name:
-        return result
-    try:
-        row = frappe.db.get_value(
-            "Customer",
-            name,
-            ["custom_credit_allowed", "custom_credit_days", "custom_credit_limit_amount"],
-            as_dict=True,
-        )
-    except Exception:
-        # Column missing (seeder has not run) or DB hiccup. Fail CLOSED.
-        return result
-    if not row:
-        return result
-    try:
-        result["allowed"] = bool(int(row.get("custom_credit_allowed") or 0))
-    except Exception:
-        result["allowed"] = bool(row.get("custom_credit_allowed"))
-    try:
-        result["days"] = max(0, int(row.get("custom_credit_days") or 0))
-    except Exception:
-        result["days"] = 0
-    try:
-        result["limit"] = max(0.0, float(row.get("custom_credit_limit_amount") or 0))
-    except Exception:
-        result["limit"] = 0.0
-    return result
+	Every field is a Custom Field seeded by ``setup/credit_terms.py``, so on a
+	bench that has not migrated yet the read raises rather than returning None.
+	That must degrade to "credit not allowed" — refusing the order — and never
+	to "allowed with no limit", which is the direction that loses money.
+	"""
+	result = {"allowed": False, "days": 0, "limit": 0.0}
+	name = str(customer_name or "").strip()
+	if not name:
+		return result
+	try:
+		row = frappe.db.get_value(
+			"Customer",
+			name,
+			["custom_credit_allowed", "custom_credit_days", "custom_credit_limit_amount"],
+			as_dict=True,
+		)
+	except Exception:
+		# Column missing (seeder has not run) or DB hiccup. Fail CLOSED.
+		return result
+	if not row:
+		return result
+	try:
+		result["allowed"] = bool(int(row.get("custom_credit_allowed") or 0))
+	except Exception:
+		result["allowed"] = bool(row.get("custom_credit_allowed"))
+	try:
+		result["days"] = max(0, int(row.get("custom_credit_days") or 0))
+	except Exception:
+		result["days"] = 0
+	try:
+		result["limit"] = max(0.0, float(row.get("custom_credit_limit_amount") or 0))
+	except Exception:
+		result["limit"] = 0.0
+	return result
 
 
 def get_open_credit_balance(customer_name: str, exclude_invoice: str | None = None) -> float:
-    """What this customer still owes across every OPEN credit order.
+	"""What this customer still owes across every OPEN credit order.
 
-    Deliberately all-time and unfiltered by branch or date: a credit balance is
-    money, and a windowed balance would quietly shrink exactly the oldest debt
-    the limit exists to catch. Only submitted invoices that WERE TAKEN on credit
-    count — a shop's cash orders are not credit exposure.
+	Deliberately all-time and unfiltered by branch or date: a credit balance is
+	money, and a windowed balance would quietly shrink exactly the oldest debt
+	the limit exists to catch. Only submitted invoices that WERE TAKEN on credit
+	count — a shop's cash orders are not credit exposure.
 
-    "Were taken on credit" is an OR, and it has to be. ``custom_payment_method``
-    is a MUTABLE column — ``change_payment_collection_method`` rewrites it on
-    every collection-method change, and its ``unpaid_online_retarget`` branch
-    posts no voucher at all, so the outstanding stays exactly where it was.
-    Keyed on the method alone, relabelling a credit card as Instapay silently
-    FREED that much of the shop's credit limit while they still owed every
-    pound. ``custom_credit_terms_days`` is stamped once by
-    :func:`_apply_credit_terms` and never rewritten, so it is permanent
-    provenance. ``api/credit._open_credit_invoices`` and
-    ``api/kanban._get_unsettled_customer_amount_map`` match the same way; the
-    predicate lives in ``utils/credit_utils`` so the three cannot drift.
+	"Were taken on credit" is an OR, and it has to be. ``custom_payment_method``
+	is a MUTABLE column — ``change_payment_collection_method`` rewrites it on
+	every collection-method change, and its ``unpaid_online_retarget`` branch
+	posts no voucher at all, so the outstanding stays exactly where it was.
+	Keyed on the method alone, relabelling a credit card as Instapay silently
+	FREED that much of the shop's credit limit while they still owed every
+	pound. ``custom_credit_terms_days`` is stamped once by
+	:func:`_apply_credit_terms` and never rewritten, so it is permanent
+	provenance. ``api/credit._open_credit_invoices`` and
+	``api/kanban._get_unsettled_customer_amount_map`` match the same way; the
+	predicate lives in ``utils/credit_utils`` so the three cannot drift.
 
-    ``exclude_invoice`` lets an amendment leave its own predecessor out of the
-    sum instead of counting the order twice against the limit.
-    """
-    from jarz_pos.utils.credit_utils import apply_credit_invoice_match
+	``exclude_invoice`` lets an amendment leave its own predecessor out of the
+	sum instead of counting the order twice against the limit.
+	"""
+	from jarz_pos.utils.credit_utils import apply_credit_invoice_match
 
-    name = str(customer_name or "").strip()
-    if not name:
-        return 0.0
-    filters = {
-        "docstatus": 1,
-        "customer": name,
-        "outstanding_amount": [">", 0.005],
-        # A credit note carries a negative outstanding and is excluded by the
-        # filter above anyway; this is belt and braces for partial returns. Kept
-        # on purpose: services/invoice_return knocks a return off the ORIGINAL
-        # invoice's outstanding (JE_AR_KNOCKOFF), so the surviving row already
-        # reflects it and admitting the credit note here would double-count.
-        "is_return": 0,
-    }
-    or_filters = apply_credit_invoice_match(filters)
-    if exclude_invoice:
-        filters["name"] = ["!=", str(exclude_invoice).strip()]
-    try:
-        rows = frappe.get_all(
-            "Sales Invoice",
-            filters=filters,
-            or_filters=or_filters,
-            fields=["outstanding_amount"],
-            limit_page_length=0,
-        ) or []
-    except Exception:
-        # An unreadable balance must not silently become "nothing owed" — that
-        # would wave an over-limit order through. Re-raise as a clear refusal.
-        frappe.throw(
-            "Could not read the current credit balance for customer "
-            f"'{name}'. Refusing to take this order on credit until it can be checked."
-        )
-        return 0.0
-    total = 0.0
-    for row in rows:
-        try:
-            total += float(row.get("outstanding_amount") or 0)
-        except Exception:
-            continue
-    return round(total, 2)
+	name = str(customer_name or "").strip()
+	if not name:
+		return 0.0
+	filters = {
+		"docstatus": 1,
+		"customer": name,
+		"outstanding_amount": [">", 0.005],
+		# A credit note carries a negative outstanding and is excluded by the
+		# filter above anyway; this is belt and braces for partial returns. Kept
+		# on purpose: services/invoice_return knocks a return off the ORIGINAL
+		# invoice's outstanding (JE_AR_KNOCKOFF), so the surviving row already
+		# reflects it and admitting the credit note here would double-count.
+		"is_return": 0,
+	}
+	or_filters = apply_credit_invoice_match(filters)
+	if exclude_invoice:
+		filters["name"] = ["!=", str(exclude_invoice).strip()]
+	try:
+		rows = (
+			frappe.get_all(
+				"Sales Invoice",
+				filters=filters,
+				or_filters=or_filters,
+				fields=["outstanding_amount"],
+				limit_page_length=0,
+			)
+			or []
+		)
+	except Exception:
+		# An unreadable balance must not silently become "nothing owed" — that
+		# would wave an over-limit order through. Re-raise as a clear refusal.
+		frappe.throw(
+			"Could not read the current credit balance for customer "
+			f"'{name}'. Refusing to take this order on credit until it can be checked."
+		)
+		return 0.0
+	total = 0.0
+	for row in rows:
+		try:
+			total += float(row.get("outstanding_amount") or 0)
+		except Exception:
+			continue
+	return round(total, 2)
 
 
 def _is_credit_debt_invoice(name: str | None, customer: str | None = None) -> bool:
-    """Was ``name`` taken on account? Method OR the frozen terms stamp.
+	"""Was ``name`` taken on account? Method OR the frozen terms stamp.
 
-    Never the mutable ``custom_payment_method`` alone — see ``utils/credit_utils``.
+	Never the mutable ``custom_payment_method`` alone — see ``utils/credit_utils``.
 
-    With ``customer``, the answer is also "no" unless ``name`` belongs to that
-    customer. ``submit_invoice_amendment`` accepts a new ``customer_name``, so
-    without this an on-account order could be amended onto a different shop
-    that was never approved for credit, and inherit the original's exemption.
-    """
-    if not name:
-        return False
-    try:
-        row = frappe.db.get_value(
-            "Sales Invoice",
-            name,
-            ["customer", "custom_payment_method", "custom_credit_terms_days"],
-            as_dict=True,
-        )
-    except Exception:
-        try:
-            row = frappe.db.get_value(
-                "Sales Invoice", name, ["customer", "custom_payment_method"], as_dict=True
-            )
-        except Exception:
-            return False
-    if not row:
-        return False
-    if customer is not None and str(row.get("customer") or "").strip() != str(customer).strip():
-        # Fail closed: a missing or different customer is not the same debt.
-        return False
-    from jarz_pos.utils.credit_utils import is_credit_payment_method
+	With ``customer``, the answer is also "no" unless ``name`` belongs to that
+	customer. ``submit_invoice_amendment`` accepts a new ``customer_name``, so
+	without this an on-account order could be amended onto a different shop
+	that was never approved for credit, and inherit the original's exemption.
+	"""
+	if not name:
+		return False
+	try:
+		row = frappe.db.get_value(
+			"Sales Invoice",
+			name,
+			["customer", "custom_payment_method", "custom_credit_terms_days"],
+			as_dict=True,
+		)
+	except Exception:
+		try:
+			row = frappe.db.get_value(
+				"Sales Invoice", name, ["customer", "custom_payment_method"], as_dict=True
+			)
+		except Exception:
+			return False
+	if not row:
+		return False
+	if customer is not None and str(row.get("customer") or "").strip() != str(customer).strip():
+		# Fail closed: a missing or different customer is not the same debt.
+		return False
+	from jarz_pos.utils.credit_utils import is_credit_payment_method
 
-    if is_credit_payment_method(row.get("custom_payment_method")):
-        return True
-    try:
-        return int(row.get("custom_credit_terms_days") or 0) > 0
-    except Exception:
-        return False
+	if is_credit_payment_method(row.get("custom_payment_method")):
+		return True
+	try:
+		return int(row.get("custom_credit_terms_days") or 0) > 0
+	except Exception:
+		return False
 
 
 def _apply_credit_terms(invoice_doc, customer_doc, logger, amended_from: str | None = None) -> None:
-    """Gate a Credit order and freeze its terms onto the invoice.
+	"""Gate a Credit order and freeze its terms onto the invoice.
 
-    Runs AFTER ``calculate_taxes_and_totals`` (so ``grand_total`` is real) and
-    BEFORE ``insert`` (so ``due_date`` is the one ERPNext keeps: ``set_missing_values``
-    only fills ``due_date`` when it is empty, and ``set_payment_schedule``
-    returns early for ``is_pos``, so nothing downstream overwrites it).
+	Runs AFTER ``calculate_taxes_and_totals`` (so ``grand_total`` is real) and
+	BEFORE ``insert`` (so ``due_date`` is the one ERPNext keeps: ``set_missing_values``
+	only fills ``due_date`` when it is empty, and ``set_payment_schedule``
+	returns early for ``is_pos``, so nothing downstream overwrites it).
 
-    Three things happen, in this order:
+	Three things happen, in this order:
 
-    1. **Permission.** No ``custom_credit_allowed`` on the Customer, no credit
-       order. The message names the shop and the field, because the person
-       reading it is at a counter with a customer in front of them.
-    2. **Limit.** When ``custom_credit_limit_amount`` is set, the existing open
-       balance plus THIS order must fit inside it. An order that lands exactly
-       on the limit is allowed; only exceeding it is refused.
-    3. **Terms.** ``due_date = posting_date + days`` and the days actually used
-       are stamped on ``custom_credit_terms_days``.
+	1. **Permission.** No ``custom_credit_allowed`` on the Customer, no credit
+	   order. The message names the shop and the field, because the person
+	   reading it is at a counter with a customer in front of them.
+	2. **Limit.** When ``custom_credit_limit_amount`` is set, the existing open
+	   balance plus THIS order must fit inside it. An order that lands exactly
+	   on the limit is allowed; only exceeding it is refused.
+	3. **Terms.** ``due_date = posting_date + days`` and the days actually used
+	   are stamped on ``custom_credit_terms_days``.
 
-    The stamp is a FREEZE, exactly like ``commercial_policy``: nothing later
-    re-reads the Customer. Changing a shop's credit days tomorrow must not
-    silently re-date an invoice that was already agreed, delivered and is
-    sitting in somebody's ledger.
-    """
-    customer_name = getattr(customer_doc, "name", None) or getattr(invoice_doc, "customer", None)
-    display_name = getattr(customer_doc, "customer_name", None) or customer_name
+	The stamp is a FREEZE, exactly like ``commercial_policy``: nothing later
+	re-reads the Customer. Changing a shop's credit days tomorrow must not
+	silently re-date an invoice that was already agreed, delivered and is
+	sitting in somebody's ledger.
+	"""
+	customer_name = getattr(customer_doc, "name", None) or getattr(invoice_doc, "customer", None)
+	display_name = getattr(customer_doc, "customer_name", None) or customer_name
 
-    settings = _customer_credit_settings(customer_name)
+	settings = _customer_credit_settings(customer_name)
 
-    # Switching a shop's credit off stops NEW credit orders. Amending one that
-    # is already on account is not a new grant, so it is not refused here —
-    # the limit and terms below still apply to the replacement. Only for the
-    # SAME customer: moving the debt onto another shop is a new grant to them.
-    if not settings["allowed"] and not _is_credit_debt_invoice(
-        amended_from, customer=customer_name or ""
-    ):
-        message = (
-            f"{display_name} is not set up for credit orders. "
-            "Open the Customer record and tick 'Allow orders on credit' "
-            "(and set the credit days / limit) before taking this order on account."
-        )
-        logger.warning(  # pre-throw: see _exception_detail note on log levels
-            f"Credit order refused for {customer_name}: custom_credit_allowed is off"
-        )
-        print(f"   ❌ {message}")
-        frappe.throw(message)
+	# Switching a shop's credit off stops NEW credit orders. Amending one that
+	# is already on account is not a new grant, so it is not refused here —
+	# the limit and terms below still apply to the replacement. Only for the
+	# SAME customer: moving the debt onto another shop is a new grant to them.
+	if not settings["allowed"] and not _is_credit_debt_invoice(amended_from, customer=customer_name or ""):
+		message = (
+			f"{display_name} is not set up for credit orders. "
+			"Open the Customer record and tick 'Allow orders on credit' "
+			"(and set the credit days / limit) before taking this order on account."
+		)
+		logger.warning(  # pre-throw: see _exception_detail note on log levels
+			f"Credit order refused for {customer_name}: custom_credit_allowed is off"
+		)
+		print(f"   ❌ {message}")
+		frappe.throw(message)
 
-    order_value = 0.0
-    try:
-        order_value = float(invoice_doc.grand_total or 0)
-    except Exception:
-        order_value = 0.0
+	order_value = 0.0
+	try:
+		order_value = float(invoice_doc.grand_total or 0)
+	except Exception:
+		order_value = 0.0
 
-    limit = settings["limit"]
-    if limit > 0:
-        current_balance = get_open_credit_balance(customer_name, exclude_invoice=amended_from)
-        projected = round(current_balance + order_value, 2)
-        # Half a piastre of tolerance: an order that lands exactly ON the limit
-        # is inside it, and float arithmetic must not turn that into a refusal.
-        if projected > limit + 0.005:
-            message = (
-                f"This order would put {display_name} over their credit limit. "
-                f"Limit {limit:,.2f}; already owed {current_balance:,.2f}; "
-                f"this order {order_value:,.2f} (total {projected:,.2f}). "
-                "Collect a payment first, or raise the limit on the Customer record."
-            )
-            logger.warning(  # pre-throw: see _exception_detail note on log levels
-                f"Credit order refused for {customer_name}: "
-                f"limit={limit} balance={current_balance} order={order_value}"
-            )
-            print(f"   ❌ {message}")
-            frappe.throw(message)
-        print(
-            f"   ✅ Credit limit OK: {projected:,.2f} of {limit:,.2f} "
-            f"(was {current_balance:,.2f})"
-        )
-    else:
-        print("   ✅ Credit allowed with no limit set")
+	limit = settings["limit"]
+	if limit > 0:
+		current_balance = get_open_credit_balance(customer_name, exclude_invoice=amended_from)
+		projected = round(current_balance + order_value, 2)
+		# Half a piastre of tolerance: an order that lands exactly ON the limit
+		# is inside it, and float arithmetic must not turn that into a refusal.
+		if projected > limit + 0.005:
+			message = (
+				f"This order would put {display_name} over their credit limit. "
+				f"Limit {limit:,.2f}; already owed {current_balance:,.2f}; "
+				f"this order {order_value:,.2f} (total {projected:,.2f}). "
+				"Collect a payment first, or raise the limit on the Customer record."
+			)
+			logger.warning(  # pre-throw: see _exception_detail note on log levels
+				f"Credit order refused for {customer_name}: "
+				f"limit={limit} balance={current_balance} order={order_value}"
+			)
+			print(f"   ❌ {message}")
+			frappe.throw(message)
+		print(f"   ✅ Credit limit OK: {projected:,.2f} of {limit:,.2f} " f"(was {current_balance:,.2f})")
+	else:
+		print("   ✅ Credit allowed with no limit set")
 
-    days = settings["days"] or DEFAULT_CREDIT_DAYS
-    posting_date = getattr(invoice_doc, "posting_date", None) or frappe.utils.nowdate()
-    try:
-        invoice_doc.due_date = frappe.utils.add_days(frappe.utils.getdate(posting_date), days)
-    except Exception as due_err:
-        # A due date we could not compute must not become "due today" by
-        # accident; refuse rather than mis-state the agreed term.
-        frappe.throw(f"Could not compute the credit due date: {due_err}")
-    # Checked, not assumed. Setting an attribute a DocType has no field for does
-    # NOT raise in Frappe — it is simply dropped at save — so without this probe a
-    # bench whose fixture has not imported would take credit orders that silently
-    # forget their own terms, and only api/credit would notice, months later.
-    #
-    # Worth naming loudly for whoever migrates this: Sales Invoice on this site
-    # sits close to the MariaDB row limit (see _persist_selling_price_list), which
-    # is why this field is an Int — four bytes, the cheapest column there is. If a
-    # migrate ever refuses it, this is the message that will point here.
-    try:
-        _has_terms_field = bool(
-            frappe.get_meta("Sales Invoice").get_field("custom_credit_terms_days")
-        )
-    except Exception:
-        _has_terms_field = False
-    if not _has_terms_field:
-        frappe.throw(
-            "This site has no 'custom_credit_terms_days' field on Sales Invoice, so "
-            "a credit order cannot record the terms it was agreed on. Run bench "
-            "migrate for jarz_pos, then take this order again."
-        )
+	days = settings["days"] or DEFAULT_CREDIT_DAYS
+	posting_date = getattr(invoice_doc, "posting_date", None) or frappe.utils.nowdate()
+	try:
+		invoice_doc.due_date = frappe.utils.add_days(frappe.utils.getdate(posting_date), days)
+	except Exception as due_err:
+		# A due date we could not compute must not become "due today" by
+		# accident; refuse rather than mis-state the agreed term.
+		frappe.throw(f"Could not compute the credit due date: {due_err}")
+	# Checked, not assumed. Setting an attribute a DocType has no field for does
+	# NOT raise in Frappe — it is simply dropped at save — so without this probe a
+	# bench whose fixture has not imported would take credit orders that silently
+	# forget their own terms, and only api/credit would notice, months later.
+	#
+	# Worth naming loudly for whoever migrates this: Sales Invoice on this site
+	# sits close to the MariaDB row limit (see _persist_selling_price_list), which
+	# is why this field is an Int — four bytes, the cheapest column there is. If a
+	# migrate ever refuses it, this is the message that will point here.
+	try:
+		_has_terms_field = bool(frappe.get_meta("Sales Invoice").get_field("custom_credit_terms_days"))
+	except Exception:
+		_has_terms_field = False
+	if not _has_terms_field:
+		frappe.throw(
+			"This site has no 'custom_credit_terms_days' field on Sales Invoice, so "
+			"a credit order cannot record the terms it was agreed on. Run bench "
+			"migrate for jarz_pos, then take this order again."
+		)
 
-    try:
-        invoice_doc.custom_credit_terms_days = days
-    except Exception as stamp_err:
-        # Unlike the price-list re-stamp this is NOT cosmetic: the frozen term is
-        # what api/credit reports as the agreed one, so a silent miss would leave
-        # the order claiming the customer's *current* days forever after.
-        frappe.throw(
-            "Could not stamp the credit terms onto this invoice "
-            f"(custom_credit_terms_days): {stamp_err}"
-        )
+	try:
+		invoice_doc.custom_credit_terms_days = days
+	except Exception as stamp_err:
+		# Unlike the price-list re-stamp this is NOT cosmetic: the frozen term is
+		# what api/credit reports as the agreed one, so a silent miss would leave
+		# the order claiming the customer's *current* days forever after.
+		frappe.throw(
+			"Could not stamp the credit terms onto this invoice " f"(custom_credit_terms_days): {stamp_err}"
+		)
 
-    logger.info(
-        f"Credit order accepted for {customer_name}: days={days}, "
-        f"due_date={invoice_doc.due_date}, order_value={order_value}"
-    )
-    print(f"   🧾 Credit terms frozen: {days} day(s), due {invoice_doc.due_date}")
+	logger.info(
+		f"Credit order accepted for {customer_name}: days={days}, "
+		f"due_date={invoice_doc.due_date}, order_value={order_value}"
+	)
+	print(f"   🧾 Credit terms frozen: {days} day(s), due {invoice_doc.due_date}")
 
 
 # ---------------------------------------------------------------------------
@@ -1850,2000 +1828,2011 @@ _EMPLOYEE_CASH_TOLERANCE = 0.005
 
 
 def _is_employee_purpose(policy_decision) -> bool:
-    """True only when the RESOLVED order purpose is exactly the Employee purpose.
+	"""True only when the RESOLVED order purpose is exactly the Employee purpose.
 
-    ``isinstance`` rather than truthiness so a mocked decision can never pass for
-    an Employee order by stringifying into something that happens to compare.
-    """
-    purpose = getattr(policy_decision, "order_purpose", None)
-    return isinstance(purpose, str) and purpose.strip() == EMPLOYEE_ORDER_PURPOSE
+	``isinstance`` rather than truthiness so a mocked decision can never pass for
+	an Employee order by stringifying into something that happens to compare.
+	"""
+	purpose = getattr(policy_decision, "order_purpose", None)
+	return isinstance(purpose, str) and purpose.strip() == EMPLOYEE_ORDER_PURPOSE
 
 
 def _parse_employee_payment(employee_payment) -> str:
-    """Fold the request value to ``"credit"`` / ``"cash"``, refusing anything else.
+	"""Fold the request value to ``"credit"`` / ``"cash"``, refusing anything else.
 
-    Missing or blank means credit, because credit is what every client that
-    predates this key has always got. An unknown value is REFUSED rather than
-    defaulted: silently treating a typo as credit would leave cash the employee
-    really paid out of the till count.
-    """
-    if employee_payment is None:
-        return EMPLOYEE_PAYMENT_CREDIT
-    value = str(employee_payment).strip().lower()
-    if not value:
-        return EMPLOYEE_PAYMENT_CREDIT
-    if value not in EMPLOYEE_PAYMENT_CHOICES:
-        frappe.throw(
-            f"Invalid employee_payment: {employee_payment}. "
-            f"Must be one of: {', '.join(EMPLOYEE_PAYMENT_CHOICES)}"
-        )
-    return value
+	Missing or blank means credit, because credit is what every client that
+	predates this key has always got. An unknown value is REFUSED rather than
+	defaulted: silently treating a typo as credit would leave cash the employee
+	really paid out of the till count.
+	"""
+	if employee_payment is None:
+		return EMPLOYEE_PAYMENT_CREDIT
+	value = str(employee_payment).strip().lower()
+	if not value:
+		return EMPLOYEE_PAYMENT_CREDIT
+	if value not in EMPLOYEE_PAYMENT_CHOICES:
+		frappe.throw(
+			f"Invalid employee_payment: {employee_payment}. "
+			f"Must be one of: {', '.join(EMPLOYEE_PAYMENT_CHOICES)}"
+		)
+	return value
 
 
 def _normalize_employee_payment(
-    employee_payment, policy_decision, payment_method, payment_type=None
+	employee_payment, policy_decision, payment_method, payment_type=None
 ) -> tuple[str, str | None]:
-    """Validate the employee payment choice and return ``(choice, payment_method)``.
+	"""Validate the employee payment choice and return ``(choice, payment_method)``.
 
-    Cash is refused, loudly, in every shape where it cannot mean "an employee
-    paid this branch's till for their own order":
+	Cash is refused, loudly, in every shape where it cannot mean "an employee
+	paid this branch's till for their own order":
 
-    * the resolved purpose is not Employee — a retail customer's cash is settled
-      by the normal dispatch/pay flows, never pre-booked at creation;
-    * ``payment_method`` names another method (Instapay, Credit, …) — the two
-      would contradict each other about where the money is;
-    * ``payment_type`` is ``online`` — that path settles the invoice into a sales
-      partner's receivable, and a "cash" order whose payment went to a partner is
-      two stories about one invoice.
+	* the resolved purpose is not Employee — a retail customer's cash is settled
+	  by the normal dispatch/pay flows, never pre-booked at creation;
+	* ``payment_method`` names another method (Instapay, Credit, …) — the two
+	  would contradict each other about where the money is;
+	* ``payment_type`` is ``online`` — that path settles the invoice into a sales
+	  partner's receivable, and a "cash" order whose payment went to a partner is
+	  two stories about one invoice.
 
-    For cash the returned ``payment_method`` is forced to ``Cash`` so
-    ``custom_payment_method`` agrees with the ledger the money lands in. Credit
-    hands ``payment_method`` back untouched.
-    """
-    choice = _parse_employee_payment(employee_payment)
-    if choice != EMPLOYEE_PAYMENT_CASH:
-        return choice, payment_method
+	For cash the returned ``payment_method`` is forced to ``Cash`` so
+	``custom_payment_method`` agrees with the ledger the money lands in. Credit
+	hands ``payment_method`` back untouched.
+	"""
+	choice = _parse_employee_payment(employee_payment)
+	if choice != EMPLOYEE_PAYMENT_CASH:
+		return choice, payment_method
 
-    if not _is_employee_purpose(policy_decision):
-        frappe.throw(
-            "employee_payment=cash is only allowed on Employee orders "
-            f"(order purpose is '{getattr(policy_decision, 'order_purpose', None) or 'Standard'}')."
-        )
-    method = str(payment_method or "").strip()
-    if method and method != PAYMENT_MODES.CASH:
-        frappe.throw(
-            "employee_payment=cash cannot be combined with payment_method "
-            f"'{payment_method}'. Send payment_method Cash or leave it empty."
-        )
-    if str(payment_type or "").strip().lower() == "online":
-        frappe.throw(
-            "employee_payment=cash cannot be combined with payment_type 'online'."
-        )
-    return choice, PAYMENT_MODES.CASH
+	if not _is_employee_purpose(policy_decision):
+		frappe.throw(
+			"employee_payment=cash is only allowed on Employee orders "
+			f"(order purpose is '{getattr(policy_decision, 'order_purpose', None) or 'Standard'}')."
+		)
+	method = str(payment_method or "").strip()
+	if method and method != PAYMENT_MODES.CASH:
+		frappe.throw(
+			"employee_payment=cash cannot be combined with payment_method "
+			f"'{payment_method}'. Send payment_method Cash or leave it empty."
+		)
+	if str(payment_type or "").strip().lower() == "online":
+		frappe.throw("employee_payment=cash cannot be combined with payment_type 'online'.")
+	return choice, PAYMENT_MODES.CASH
 
 
 def _ensure_employee_cash_can_be_taken(pos_profile_name: str, company: str) -> str:
-    """Refuse a counter-paid Employee order BEFORE anything is created.
+	"""Refuse a counter-paid Employee order BEFORE anything is created.
 
-    Runs before insert so a branch that cannot receive the money leaves no
-    invoice behind:
+	Runs before insert so a branch that cannot receive the money leaves no
+	invoice behind:
 
-    * **an open shift on the branch, for EVERY user.** Deliberately not
-      ``ensure_open_shift``: that gate returns early for users without
-      ``custom_require_pos_shift``, and Employee orders are placed by managers
-      and B2B reps who usually lack the flag. Their cash would land in the till
-      outside any shift window, and the next shift open would book it as Cash
-      Over/Short. So the branch lookup is asked directly, and the refusal is the
-      same ``ShiftRequiredError`` shape so the client still routes to Start
-      Shift. A lookup failure returns no shift, so it refuses too.
-    * ``get_pos_cash_account`` — the till the Payment Entry will pay into. It
-      throws when the branch has no Cash In Hand ledger, and resolving it here
-      is what turns that into a refusal instead of a submitted invoice with no
-      payment.
+	* **an open shift on the branch, for EVERY user.** Deliberately not
+	  ``ensure_open_shift``: that gate returns early for users without
+	  ``custom_require_pos_shift``, and Employee orders are placed by managers
+	  and B2B reps who usually lack the flag. Their cash would land in the till
+	  outside any shift window, and the next shift open would book it as Cash
+	  Over/Short. So the branch lookup is asked directly, and the refusal is the
+	  same ``ShiftRequiredError`` shape so the client still routes to Start
+	  Shift. A lookup failure returns no shift, so it refuses too.
+	* ``get_pos_cash_account`` — the till the Payment Entry will pay into. It
+	  throws when the branch has no Cash In Hand ledger, and resolving it here
+	  is what turns that into a refusal instead of a submitted invoice with no
+	  payment.
 
-    ``pos_profile_name`` must be the SAME branch the Payment Entry is later
-    booked against: the caller resolves it once and passes it to both, so the
-    shift that was checked is the shift whose drawer receives the cash.
+	``pos_profile_name`` must be the SAME branch the Payment Entry is later
+	booked against: the caller resolves it once and passes it to both, so the
+	shift that was checked is the shift whose drawer receives the cash.
 
-    Credit Employee orders never reach this gate. Returns the till account.
-    """
-    branch = str(pos_profile_name or "").strip()
-    if not get_open_shift_for_profile(branch):
-        frappe.throw(
-            frappe._(
-                "No open shift on branch {0}, so taking an employee's cash payment is "
-                "not allowed. Start a shift on this branch first."
-            ).format(branch or "?"),
-            ShiftRequiredError,
-            title=frappe._("Shift Required"),
-        )
-    return get_pos_cash_account(branch, company)
+	Credit Employee orders never reach this gate. Returns the till account.
+	"""
+	branch = str(pos_profile_name or "").strip()
+	if not get_open_shift_for_profile(branch):
+		frappe.throw(
+			frappe._(
+				"No open shift on branch {0}, so taking an employee's cash payment is "
+				"not allowed. Start a shift on this branch first."
+			).format(branch or "?"),
+			ShiftRequiredError,
+			title=frappe._("Shift Required"),
+		)
+	return get_pos_cash_account(branch, company)
 
 
 def _find_submitted_receive_payment_entry(invoice_name: str) -> str | None:
-    """The submitted Receive Payment Entry already allocated to this invoice.
+	"""The submitted Receive Payment Entry already allocated to this invoice.
 
-    Same lookup ``api/invoices.pay_invoice`` does for idempotency — kept here
-    rather than imported because a service must not import an api module.
-    """
-    ref_parents = frappe.get_all(
-        "Payment Entry Reference",
-        filters={"reference_doctype": "Sales Invoice", "reference_name": invoice_name},
-        pluck="parent",
-    ) or []
-    if not ref_parents:
-        return None
-    rows = frappe.get_all(
-        "Payment Entry",
-        filters={"name": ["in", ref_parents], "docstatus": 1, "payment_type": "Receive"},
-        fields=["name"],
-        order_by="creation asc",
-        limit=1,
-    ) or []
-    return rows[0].get("name") if rows else None
+	Same lookup ``api/invoices.pay_invoice`` does for idempotency — kept here
+	rather than imported because a service must not import an api module.
+	"""
+	ref_parents = (
+		frappe.get_all(
+			"Payment Entry Reference",
+			filters={"reference_doctype": "Sales Invoice", "reference_name": invoice_name},
+			pluck="parent",
+		)
+		or []
+	)
+	if not ref_parents:
+		return None
+	rows = (
+		frappe.get_all(
+			"Payment Entry",
+			filters={"name": ["in", ref_parents], "docstatus": 1, "payment_type": "Receive"},
+			fields=["name"],
+			order_by="creation asc",
+			limit=1,
+		)
+		or []
+	)
+	return rows[0].get("name") if rows else None
 
 
 def _register_employee_counter_cash_payment(invoice_doc, branch: str, logger) -> str | None:
-    """Settle a counter-paid Employee order into the branch till.
+	"""Settle a counter-paid Employee order into the branch till.
 
-    Called after submit and BEFORE ``fulfil_at_branch``: money in before the
-    goods are handed over, the same order pickups follow. Deliberately NOT
-    wrapped in a swallowing ``try`` by the caller — if the money cannot be
-    booked, the whole request must roll back rather than leave a "cash" order
-    sitting on the employee's salary as debt while the drawer holds the cash.
+	Called after submit and BEFORE ``fulfil_at_branch``: money in before the
+	goods are handed over, the same order pickups follow. Deliberately NOT
+	wrapped in a swallowing ``try`` by the caller — if the money cannot be
+	booked, the whole request must roll back rather than leave a "cash" order
+	sitting on the employee's salary as debt while the drawer holds the cash.
 
-    Returns the Payment Entry name, or ``None`` for a zero-total order.
+	Returns the Payment Entry name, or ``None`` for a zero-total order.
 
-    GL (a 150 EGP order at branch "Nasr City")::
+	GL (a 150 EGP order at branch "Nasr City")::
 
-        Sales Invoice   DR Debtors (party: staff Customer)  150
-                        CR Sales                             150
-        Payment Entry   DR Nasr City - J (Cash In Hand)     150
-                        CR Debtors (party: staff Customer)  150
+	    Sales Invoice   DR Debtors (party: staff Customer)  150
+	                    CR Sales                             150
+	    Payment Entry   DR Nasr City - J (Cash In Hand)     150
+	                    CR Debtors (party: staff Customer)  150
 
-    **Posting date = the invoice's posting date.** A POS invoice is always
-    posted "now" (``set_invoice_fields``), so today in practice; tying the
-    receipt to the invoice keeps the pair on one day even across midnight. The
-    shift count does not read posting_date at all — ``api/shift`` buckets till
-    GL rows by ``creation`` — so the receipt counts in the shift that is open
-    right now, which is the shift whose drawer took the cash.
-    """
-    invoice_name = invoice_doc.name
-    company = invoice_doc.company
+	**Posting date = the invoice's posting date.** A POS invoice is always
+	posted "now" (``set_invoice_fields``), so today in practice; tying the
+	receipt to the invoice keeps the pair on one day even across midnight. The
+	shift count does not read posting_date at all — ``api/shift`` buckets till
+	GL rows by ``creation`` — so the receipt counts in the shift that is open
+	right now, which is the shift whose drawer took the cash.
+	"""
+	invoice_name = invoice_doc.name
+	company = invoice_doc.company
 
-    # Idempotent, exactly like pay_invoice: a retried request, or a manager who
-    # already took the payment, must not book the same cash twice.
-    existing = _find_submitted_receive_payment_entry(invoice_name)
-    if existing:
-        print(f"   ♻️ Employee cash payment already recorded: {existing}")
-        return existing
+	# Idempotent, exactly like pay_invoice: a retried request, or a manager who
+	# already took the payment, must not book the same cash twice.
+	existing = _find_submitted_receive_payment_entry(invoice_name)
+	if existing:
+		print(f"   ♻️ Employee cash payment already recorded: {existing}")
+		return existing
 
-    # The DB, not the in-memory document: submit and its hooks may have moved it.
-    try:
-        outstanding = float(
-            frappe.db.get_value("Sales Invoice", invoice_name, "outstanding_amount") or 0
-        )
-    except (TypeError, ValueError):
-        outstanding = 0.0
-    if outstanding <= _EMPLOYEE_CASH_TOLERANCE:
-        print("   ℹ️ Employee cash order has nothing outstanding – no Payment Entry")
-        return None
+	# The DB, not the in-memory document: submit and its hooks may have moved it.
+	try:
+		outstanding = float(frappe.db.get_value("Sales Invoice", invoice_name, "outstanding_amount") or 0)
+	except (TypeError, ValueError):
+		outstanding = 0.0
+	if outstanding <= _EMPLOYEE_CASH_TOLERANCE:
+		print("   ℹ️ Employee cash order has nothing outstanding – no Payment Entry")
+		return None
 
-    till = get_pos_cash_account(branch, company)
-    receivable = getattr(invoice_doc, "debit_to", None) or get_company_receivable_account(company)
-    posting_date = getattr(invoice_doc, "posting_date", None) or frappe.utils.today()
+	till = get_pos_cash_account(branch, company)
+	receivable = getattr(invoice_doc, "debit_to", None) or get_company_receivable_account(company)
+	posting_date = getattr(invoice_doc, "posting_date", None) or frappe.utils.today()
 
-    try:
-        pe = frappe.new_doc("Payment Entry")
-        pe.payment_type = "Receive"
-        pe.company = company
-        pe.posting_date = posting_date
-        pe.mode_of_payment = PAYMENT_MODES.CASH
-        pe.party_type = "Customer"
-        pe.party = invoice_doc.customer
-        pe.paid_from = receivable
-        pe.party_account = receivable
-        pe.paid_to = till
-        pe.paid_amount = outstanding
-        pe.received_amount = outstanding
-        pe.reference_no = f"EMP-CASH-{invoice_name}"
-        pe.reference_date = posting_date
-        # Branch attribution, same guarded write as the partner cash helper in
-        # api/kanban: the field is custom and may not exist on every site.
-        try:
-            if frappe.get_meta("Payment Entry").get_field("custom_kanban_profile"):
-                pe.custom_kanban_profile = branch
-        except Exception:
-            pass
-        pe.append("references", {
-            "reference_doctype": "Sales Invoice",
-            "reference_name": invoice_name,
-            "due_date": getattr(invoice_doc, "due_date", None),
-            "total_amount": float(getattr(invoice_doc, "grand_total", 0) or 0),
-            "outstanding_amount": outstanding,
-            "allocated_amount": outstanding,
-        })
-        pe.flags.ignore_permissions = True
-        try:
-            pe.set_missing_values()
-        except AttributeError:
-            if not getattr(pe, "party_account", None):
-                pe.party_account = receivable
-        pe.insert(ignore_permissions=True)
-        pe.submit()
-    except Exception as pe_err:
-        detail = _exception_detail(pe_err)
-        logger.warning(  # pre-throw: see _exception_detail note on log levels
-            f"Employee cash payment failed for {invoice_name} into {till}: {detail}"
-        )
-        frappe.throw(
-            f"Could not record the employee's cash payment for {invoice_name} "
-            f"into {till}: {detail}"
-        )
+	try:
+		pe = frappe.new_doc("Payment Entry")
+		pe.payment_type = "Receive"
+		pe.company = company
+		pe.posting_date = posting_date
+		pe.mode_of_payment = PAYMENT_MODES.CASH
+		pe.party_type = "Customer"
+		pe.party = invoice_doc.customer
+		pe.paid_from = receivable
+		pe.party_account = receivable
+		pe.paid_to = till
+		pe.paid_amount = outstanding
+		pe.received_amount = outstanding
+		pe.reference_no = f"EMP-CASH-{invoice_name}"
+		pe.reference_date = posting_date
+		# Branch attribution, same guarded write as the partner cash helper in
+		# api/kanban: the field is custom and may not exist on every site.
+		try:
+			if frappe.get_meta("Payment Entry").get_field("custom_kanban_profile"):
+				pe.custom_kanban_profile = branch
+		except Exception:
+			pass
+		pe.append(
+			"references",
+			{
+				"reference_doctype": "Sales Invoice",
+				"reference_name": invoice_name,
+				"due_date": getattr(invoice_doc, "due_date", None),
+				"total_amount": float(getattr(invoice_doc, "grand_total", 0) or 0),
+				"outstanding_amount": outstanding,
+				"allocated_amount": outstanding,
+			},
+		)
+		pe.flags.ignore_permissions = True
+		try:
+			pe.set_missing_values()
+		except AttributeError:
+			if not getattr(pe, "party_account", None):
+				pe.party_account = receivable
+		pe.insert(ignore_permissions=True)
+		pe.submit()
+	except Exception as pe_err:
+		detail = _exception_detail(pe_err)
+		logger.warning(  # pre-throw: see _exception_detail note on log levels
+			f"Employee cash payment failed for {invoice_name} into {till}: {detail}"
+		)
+		frappe.throw(
+			f"Could not record the employee's cash payment for {invoice_name} " f"into {till}: {detail}"
+		)
 
-    print(f"   💵 Employee cash payment recorded: {pe.name} → {till} ({outstanding})")
-    logger.info(f"Employee cash Payment Entry {pe.name} for {invoice_name} into {till}")
-    return pe.name
+	print(f"   💵 Employee cash payment recorded: {pe.name} → {till} ({outstanding})")
+	logger.info(f"Employee cash Payment Entry {pe.name} for {invoice_name} into {till}")
+	return pe.name
 
 
 @frappe.whitelist()
 def create_pos_invoice(
-    cart_json,
-    customer_name,
-    pos_profile_name=None,
-    delivery_charges_json=None,
-    required_delivery_datetime=None,
-    shipping_address_name: str | None = None,
-    sales_partner: str | None = None,
-    payment_type: str | None = None,
-    pickup: bool | None = None,
-    payment_method: str | None = None,
-    price_list: str | None = None,
-    amended_from: str | None = None,
-    woo_order_id: int | None = None,
-    suppress_shipping_income: bool | None = None,
-    suppress_legacy_delivery_charges: bool | None = None,
-    custom_delivery_income: float | str | None = None,
-    order_purpose: str | None = None,
-    commercial_policy: str | None = None,
-    policy_reason: str | None = None,
-    promo_codes=None,
-    channel: str = "flutter",
-    employee_payment: str | None = None,
+	cart_json,
+	customer_name,
+	pos_profile_name=None,
+	delivery_charges_json=None,
+	required_delivery_datetime=None,
+	shipping_address_name: str | None = None,
+	sales_partner: str | None = None,
+	payment_type: str | None = None,
+	pickup: bool | None = None,
+	payment_method: str | None = None,
+	price_list: str | None = None,
+	amended_from: str | None = None,
+	woo_order_id: int | None = None,
+	suppress_shipping_income: bool | None = None,
+	suppress_legacy_delivery_charges: bool | None = None,
+	custom_delivery_income: float | str | None = None,
+	order_purpose: str | None = None,
+	commercial_policy: str | None = None,
+	policy_reason: str | None = None,
+	promo_codes=None,
+	channel: str = "flutter",
+	employee_payment: str | None = None,
 ):
-    """
-    Create POS Sales Invoice using Frappe best practices with comprehensive logging
+	"""
+	Create POS Sales Invoice using Frappe best practices with comprehensive logging
 
-    Following Frappe/ERPNext best practices:
-    - Proper error handling with frappe.throw()
-    - Structured logging with frappe.log_error()
-    - Document validation before save/submit
-    - Handle delivery time slot for scheduled deliveries
-    - Proper field setting in correct order
+	Following Frappe/ERPNext best practices:
+	- Proper error handling with frappe.throw()
+	- Structured logging with frappe.log_error()
+	- Document validation before save/submit
+	- Handle delivery time slot for scheduled deliveries
+	- Proper field setting in correct order
 
-    Args:
-        payment_method: Payment method - Cash, Instapay, or Mobile Wallet
-        employee_payment: Employee orders only. ``"credit"`` (default; the order
-            stays an unpaid receivable deducted from salary) or ``"cash"`` (the
-            employee pays at the counter and the invoice is settled into the
-            branch till before the goods are handed over). Validated HERE, not
-            only in ``api/invoices``, because this function is whitelisted too.
-            See the "Employee orders" block above for why this is not keyed on
-            ``payment_method``.
-    """
+	Args:
+	    payment_method: Payment method - Cash, Instapay, or Mobile Wallet
+	    employee_payment: Employee orders only. ``"credit"`` (default; the order
+	        stays an unpaid receivable deducted from salary) or ``"cash"`` (the
+	        employee pays at the counter and the invoice is settled into the
+	        branch till before the goods are handed over). Validated HERE, not
+	        only in ``api/invoices``, because this function is whitelisted too.
+	        See the "Employee orders" block above for why this is not keyed on
+	        ``payment_method``.
+	"""
 
-    # Frappe best practice: Create logger for this module
-    logger = frappe.logger("jarz_pos.custom_pos", allow_site=frappe.local.site)
+	# Frappe best practice: Create logger for this module
+	logger = frappe.logger("jarz_pos.custom_pos", allow_site=frappe.local.site)
 
-    # Always log function entry for debugging
-    logger.info(f"create_pos_invoice called with customer: {customer_name}")
+	# Always log function entry for debugging
+	logger.info(f"create_pos_invoice called with customer: {customer_name}")
 
-    print("\n" + "=" * 100)
-    print("🚀 CORE FUNCTION: create_pos_invoice")
-    print("=" * 100)
-    print(f"🕐 {frappe.utils.now()}")
+	print("\n" + "=" * 100)
+	print("🚀 CORE FUNCTION: create_pos_invoice")
+	print("=" * 100)
+	print(f"🕐 {frappe.utils.now()}")
 
-    try:
-        # STEP 1: Input Validation and Parsing
-        print("\n1️⃣ INPUT VALIDATION:")
-        logger.debug(f"Validating inputs: cart={bool(cart_json)}, customer={customer_name}")
+	try:
+		# STEP 1: Input Validation and Parsing
+		print("\n1️⃣ INPUT VALIDATION:")
+		logger.debug(f"Validating inputs: cart={bool(cart_json)}, customer={customer_name}")
 
-        # Validate and parse cart data
-        cart_items = validate_cart_data(cart_json, logger)
+		# Validate and parse cart data
+		cart_items = validate_cart_data(cart_json, logger)
 
-        # Parse delivery charges if provided
-        delivery_charges = _parse_delivery_charges(delivery_charges_json, logger)
+		# Parse delivery charges if provided
+		delivery_charges = _parse_delivery_charges(delivery_charges_json, logger)
 
-        # Parse and validate delivery datetime
-        delivery_datetime = validate_delivery_datetime(required_delivery_datetime, logger)
+		# Parse and validate delivery datetime
+		delivery_datetime = validate_delivery_datetime(required_delivery_datetime, logger)
 
-        # Validate payment method if provided
-        if payment_method:
-            # "Credit" is not a way of paying — it is a way of NOT paying yet.
-            # Everything that makes it different is enforced later (see
-            # _apply_credit_terms at STEP 8.2), once grand_total is real.
-            #
-            # CANONICALISED FIRST, and that is the point: the dispatch predicates
-            # (``settlement_strategies._is_credit_intent`` /
-            # ``delivery_handling._invoice_is_credit_intent``) normalise case,
-            # spaces and underscores and also accept "on account", while this gate
-            # compared the raw string. The two disagreeing is how an invoice could
-            # end up routed to the credit handler at dispatch while having skipped
-            # ``_apply_credit_terms`` entirely — no permission check, no limit, no
-            # due date and, fatally, no ``custom_credit_terms_days`` stamp, which is
-            # the only permanent evidence the ledger has that a debt is a credit
-            # debt. Folding every credit spelling to the exact Select option here
-            # also keeps ``custom_payment_method`` a VALID option value.
-            if is_credit_payment_method(payment_method):
-                if payment_method != CREDIT_PAYMENT_METHOD:
-                    print(
-                        f"   🔤 Payment method '{payment_method}' normalised to "
-                        f"'{CREDIT_PAYMENT_METHOD}'"
-                    )
-                payment_method = CREDIT_PAYMENT_METHOD
-            allowed_methods = [
-                "Cash",
-                "Instapay",
-                "Mobile Wallet",
-                "Kashier Card",
-                "Kashier Wallet",
-                CREDIT_PAYMENT_METHOD,
-            ]
-            if payment_method not in allowed_methods:
-                error_msg = f"Invalid payment_method: {payment_method}. Must be one of: {', '.join(allowed_methods)}"
-                logger.warning(error_msg)  # pre-throw: see _exception_detail note on log levels
-                print(f"   ❌ {error_msg}")
-                frappe.throw(error_msg)
-            print(f"   ✅ Payment method validated: {payment_method}")
+		# Validate payment method if provided
+		if payment_method:
+			# "Credit" is not a way of paying — it is a way of NOT paying yet.
+			# Everything that makes it different is enforced later (see
+			# _apply_credit_terms at STEP 8.2), once grand_total is real.
+			#
+			# CANONICALISED FIRST, and that is the point: the dispatch predicates
+			# (``settlement_strategies._is_credit_intent`` /
+			# ``delivery_handling._invoice_is_credit_intent``) normalise case,
+			# spaces and underscores and also accept "on account", while this gate
+			# compared the raw string. The two disagreeing is how an invoice could
+			# end up routed to the credit handler at dispatch while having skipped
+			# ``_apply_credit_terms`` entirely — no permission check, no limit, no
+			# due date and, fatally, no ``custom_credit_terms_days`` stamp, which is
+			# the only permanent evidence the ledger has that a debt is a credit
+			# debt. Folding every credit spelling to the exact Select option here
+			# also keeps ``custom_payment_method`` a VALID option value.
+			if is_credit_payment_method(payment_method):
+				if payment_method != CREDIT_PAYMENT_METHOD:
+					print(
+						f"   🔤 Payment method '{payment_method}' normalised to " f"'{CREDIT_PAYMENT_METHOD}'"
+					)
+				payment_method = CREDIT_PAYMENT_METHOD
+			allowed_methods = [
+				"Cash",
+				"Instapay",
+				"Mobile Wallet",
+				"Kashier Card",
+				"Kashier Wallet",
+				CREDIT_PAYMENT_METHOD,
+			]
+			if payment_method not in allowed_methods:
+				error_msg = (
+					f"Invalid payment_method: {payment_method}. Must be one of: {', '.join(allowed_methods)}"
+				)
+				logger.warning(error_msg)  # pre-throw: see _exception_detail note on log levels
+				print(f"   ❌ {error_msg}")
+				frappe.throw(error_msg)
+			print(f"   ✅ Payment method validated: {payment_method}")
 
-        print("   ✅ Input validation passed")
+		print("   ✅ Input validation passed")
 
-        # Normalize custom_delivery_income: "" or None → None (use territory);
-        # any other value → flt; negative → error.
-        delivery_income_override: float | None = None
-        if custom_delivery_income is not None and str(custom_delivery_income).strip() != "":
-            _override_val = frappe.utils.flt(custom_delivery_income)
-            if _override_val < 0:
-                frappe.throw("custom_delivery_income must be non-negative")
-            delivery_income_override = _override_val
+		# Normalize custom_delivery_income: "" or None → None (use territory);
+		# any other value → flt; negative → error.
+		delivery_income_override: float | None = None
+		if custom_delivery_income is not None and str(custom_delivery_income).strip() != "":
+			_override_val = frappe.utils.flt(custom_delivery_income)
+			if _override_val < 0:
+				frappe.throw("custom_delivery_income must be non-negative")
+			delivery_income_override = _override_val
 
-        # STEP 2: Customer Validation
-        print("\n2️⃣ CUSTOMER VALIDATION:")
-        customer_doc = validate_customer(customer_name, logger)
+		# STEP 2: Customer Validation
+		print("\n2️⃣ CUSTOMER VALIDATION:")
+		customer_doc = validate_customer(customer_name, logger)
 
-        # STEP 3: POS Profile Validation
-        print("\n3️⃣ POS PROFILE VALIDATION:")
-        pos_profile = validate_pos_profile(pos_profile_name, logger)
+		# STEP 3: POS Profile Validation
+		print("\n3️⃣ POS PROFILE VALIDATION:")
+		pos_profile = validate_pos_profile(pos_profile_name, logger)
 
-        # STEP 3.1: Snap the requested delivery window onto this profile's real
-        # slot grid. The POS picks a slot when the cart is opened and never
-        # revisits it, so a cart left open past its own slot arrives with a start
-        # that has already gone by; storing it verbatim (or, as before, rewriting
-        # it to "now + 5 minutes") books a window no timetable sells.
-        delivery_datetime, delivery_end_datetime = _normalize_delivery_window(
-            pos_profile.name, delivery_datetime, logger
-        )
+		# STEP 3.1: Snap the requested delivery window onto this profile's real
+		# slot grid. The POS picks a slot when the cart is opened and never
+		# revisits it, so a cart left open past its own slot arrives with a start
+		# that has already gone by; storing it verbatim (or, as before, rewriting
+		# it to "now + 5 minutes") books a window no timetable sells.
+		delivery_datetime, delivery_end_datetime = _normalize_delivery_window(
+			pos_profile.name, delivery_datetime, logger
+		)
 
-        # STEP 3.5: Resolve Commercial Policy / Order Purpose (gated; Standard is inert)
-        policy_decision = _commercial_policy.resolve_commercial_policy(
-            order_purpose=order_purpose,
-            commercial_policy=commercial_policy,
-            policy_reason=policy_reason,
-            pos_profile=pos_profile,
-            logger=logger,
-        )
+		# STEP 3.5: Resolve Commercial Policy / Order Purpose (gated; Standard is inert)
+		policy_decision = _commercial_policy.resolve_commercial_policy(
+			order_purpose=order_purpose,
+			commercial_policy=commercial_policy,
+			policy_reason=policy_reason,
+			pos_profile=pos_profile,
+			logger=logger,
+		)
 
-        # Block B2B-Sales-Rep-only accounts from placing Standard (B2C) retail orders.
-        _ensure_can_place_standard_order(policy_decision.order_purpose)
+		# Block B2B-Sales-Rep-only accounts from placing Standard (B2C) retail orders.
+		_ensure_can_place_standard_order(policy_decision.order_purpose)
 
-        # STEP 3.6: Employee order payment choice (credit | cash). Needs the RESOLVED
-        # purpose, so it cannot run earlier; it writes nothing, so a refusal here
-        # leaves no trace. Cash forces payment_method to "Cash" so STEP 6.3 stamps it.
-        employee_payment, payment_method = _normalize_employee_payment(
-            employee_payment, policy_decision, payment_method, payment_type=payment_type
-        )
-        is_employee_order = _is_employee_purpose(policy_decision)
-        is_employee_cash = employee_payment == EMPLOYEE_PAYMENT_CASH
+		# STEP 3.6: Employee order payment choice (credit | cash). Needs the RESOLVED
+		# purpose, so it cannot run earlier; it writes nothing, so a refusal here
+		# leaves no trace. Cash forces payment_method to "Cash" so STEP 6.3 stamps it.
+		employee_payment, payment_method = _normalize_employee_payment(
+			employee_payment, policy_decision, payment_method, payment_type=payment_type
+		)
+		is_employee_order = _is_employee_purpose(policy_decision)
+		is_employee_cash = employee_payment == EMPLOYEE_PAYMENT_CASH
 
-        # STEP 4: Item and Bundle Processing
-        print("\n4️⃣ ITEM AND BUNDLE PROCESSING:")
-        effective_price_list = _resolve_effective_price_list(
-            pos_profile,
-            cart_items,
-            requested_price_list=price_list,
-            suppress_shipping_income=suppress_shipping_income,
-            suppress_legacy_delivery_charges=suppress_legacy_delivery_charges,
-            logger=logger,
-            policy_matched=policy_decision.matched,
-            policy_price_list=policy_decision.price_list,
-            policy_order_purpose=policy_decision.order_purpose,
-            customer_doc=customer_doc,
-            sales_partner=sales_partner,
-            # Only consulted when the requested list contradicts the purpose: lets an
-            # amendment keep its cancelled source's own list (see
-            # _amendment_keeps_source_price_list).
-            amended_from=amended_from,
-        )
-        # Fail fast with an actionable message if a policy order's price list is missing
-        # prices (the common "B2B Selling not populated yet" data gap). Customer-scoped
-        # so an Item Price that belongs to a DIFFERENT customer is never mistaken for
-        # coverage of THIS order (FIX 3a).
-        # Customer deals are judged on the ORDER date; an amendment keeps its
-        # source order's date so a deal that ended since does not re-price it.
-        pricing_date = _deal_pricing_date(amended_from, getattr(customer_doc, "name", None))
-        # Deals are B2B Supply prices: the B2B catalog shows them, no other
-        # catalog does, so no other purpose may book them.
-        from jarz_pos.setup.b2b_pricing import B2B_SUPPLY_PURPOSE
+		# STEP 4: Item and Bundle Processing
+		print("\n4️⃣ ITEM AND BUNDLE PROCESSING:")
+		effective_price_list = _resolve_effective_price_list(
+			pos_profile,
+			cart_items,
+			requested_price_list=price_list,
+			suppress_shipping_income=suppress_shipping_income,
+			suppress_legacy_delivery_charges=suppress_legacy_delivery_charges,
+			logger=logger,
+			policy_matched=policy_decision.matched,
+			policy_price_list=policy_decision.price_list,
+			policy_order_purpose=policy_decision.order_purpose,
+			customer_doc=customer_doc,
+			sales_partner=sales_partner,
+			# Only consulted when the requested list contradicts the purpose: lets an
+			# amendment keep its cancelled source's own list (see
+			# _amendment_keeps_source_price_list).
+			amended_from=amended_from,
+		)
+		# Fail fast with an actionable message if a policy order's price list is missing
+		# prices (the common "B2B Selling not populated yet" data gap). Customer-scoped
+		# so an Item Price that belongs to a DIFFERENT customer is never mistaken for
+		# coverage of THIS order (FIX 3a).
+		# Customer deals are judged on the ORDER date; an amendment keeps its
+		# source order's date so a deal that ended since does not re-price it.
+		pricing_date = _deal_pricing_date(amended_from, getattr(customer_doc, "name", None))
+		# Deals are B2B Supply prices: the B2B catalog shows them, no other
+		# catalog does, so no other purpose may book them.
+		from jarz_pos.setup.b2b_pricing import B2B_SUPPLY_PURPOSE
 
-        apply_deals = bool(policy_decision.matched) and (
-            str(getattr(policy_decision, "order_purpose", "") or "").strip()
-            == B2B_SUPPLY_PURPOSE
-        )
-        _validate_policy_price_list_coverage(
-            policy_decision,
-            effective_price_list,
-            cart_items,
-            logger,
-            customer=getattr(customer_doc, "name", None),
-            pricing_date=pricing_date,
-            apply_deals=apply_deals,
-        )
-        # FIX 3c: a MATCHED, sub-100%-discount policy already requires the coverage
-        # check above to pass for every plain cart item, so a rate that STILL resolves
-        # from the client afterwards (see _process_regular_item) is refused outright
-        # rather than silently trusted. A 100%-discount policy (free sample) forces the
-        # net to zero regardless of price, so it is exempt exactly like the coverage
-        # check above — same predicate, so the two can never disagree.
-        try:
-            _policy_disc_for_rate_check = float(
-                getattr(policy_decision, "discount_percentage", 0) or 0
-            )
-        except (TypeError, ValueError):
-            _policy_disc_for_rate_check = 0.0
-        enforce_price_list_pricing = (
-            bool(policy_decision.matched) and _policy_disc_for_rate_check < 100
-        )
-        # A free-sample order nets every line to zero, so a price-list-only item
-        # (the Small jar) may ride it unpriced, exactly like the coverage check.
-        free_of_charge_order = (
-            bool(policy_decision.matched) and _policy_disc_for_rate_check >= 100
-        )
-        processed_items = _process_cart_items(
-            cart_items,
-            pos_profile,
-            logger,
-            price_list=effective_price_list,
-            customer=getattr(customer_doc, "name", None),
-            enforce_price_list_pricing=enforce_price_list_pricing,
-            free_of_charge_order=free_of_charge_order,
-            pricing_date=pricing_date,
-            apply_deals=apply_deals,
-        )
+		apply_deals = bool(policy_decision.matched) and (
+			str(getattr(policy_decision, "order_purpose", "") or "").strip() == B2B_SUPPLY_PURPOSE
+		)
+		_validate_policy_price_list_coverage(
+			policy_decision,
+			effective_price_list,
+			cart_items,
+			logger,
+			customer=getattr(customer_doc, "name", None),
+			pricing_date=pricing_date,
+			apply_deals=apply_deals,
+		)
+		# FIX 3c: a MATCHED, sub-100%-discount policy already requires the coverage
+		# check above to pass for every plain cart item, so a rate that STILL resolves
+		# from the client afterwards (see _process_regular_item) is refused outright
+		# rather than silently trusted. A 100%-discount policy (free sample) forces the
+		# net to zero regardless of price, so it is exempt exactly like the coverage
+		# check above — same predicate, so the two can never disagree.
+		try:
+			_policy_disc_for_rate_check = float(getattr(policy_decision, "discount_percentage", 0) or 0)
+		except (TypeError, ValueError):
+			_policy_disc_for_rate_check = 0.0
+		enforce_price_list_pricing = bool(policy_decision.matched) and _policy_disc_for_rate_check < 100
+		# A free-sample order nets every line to zero, so a price-list-only item
+		# (the Small jar) may ride it unpriced, exactly like the coverage check.
+		free_of_charge_order = bool(policy_decision.matched) and _policy_disc_for_rate_check >= 100
+		processed_items = _process_cart_items(
+			cart_items,
+			pos_profile,
+			logger,
+			price_list=effective_price_list,
+			customer=getattr(customer_doc, "name", None),
+			enforce_price_list_pricing=enforce_price_list_pricing,
+			free_of_charge_order=free_of_charge_order,
+			pricing_date=pricing_date,
+			apply_deals=apply_deals,
+		)
 
-        # Sample policies may carry a fallback discount %. Apply it to plain item rows
-        # that have no explicit line discount, reusing the existing line-discount path
-        # (no new discount engine). Bundle rows are left untouched.
-        if policy_decision.matched and policy_decision.discount_percentage > 0:
-            _disc = min(max(float(policy_decision.discount_percentage), 0.0), 100.0)
-            for _it in processed_items:
-                if (
-                    _it.get("is_bundle_parent")
-                    or _it.get("is_bundle_child")
-                    or _it.get("is_bundle_item")
-                    or _it.get("bundle_type")
-                ):
-                    continue
-                if _it.get("discount_percentage") in (None, "", 0, 0.0) and _it.get(
-                    "discount_amount"
-                ) in (None, "", 0, 0.0):
-                    _it["discount_percentage"] = _disc
-            print(f"   🎁 Sample discount applied to plain rows: {_disc}%")
+		# Sample policies may carry a fallback discount %. Apply it to plain item rows
+		# that have no explicit line discount, reusing the existing line-discount path
+		# (no new discount engine). Bundle rows are left untouched.
+		if policy_decision.matched and policy_decision.discount_percentage > 0:
+			_disc = min(max(float(policy_decision.discount_percentage), 0.0), 100.0)
+			for _it in processed_items:
+				if (
+					_it.get("is_bundle_parent")
+					or _it.get("is_bundle_child")
+					or _it.get("is_bundle_item")
+					or _it.get("bundle_type")
+				):
+					continue
+				if _it.get("discount_percentage") in (None, "", 0, 0.0) and _it.get("discount_amount") in (
+					None,
+					"",
+					0,
+					0.0,
+				):
+					_it["discount_percentage"] = _disc
+			print(f"   🎁 Sample discount applied to plain rows: {_disc}%")
 
-        # STEP 5: Create Sales Invoice Document
-        print("\n5️⃣ CREATING SALES INVOICE:")
-        invoice_doc = _create_invoice_document(logger)
+		# STEP 5: Create Sales Invoice Document
+		print("\n5️⃣ CREATING SALES INVOICE:")
+		invoice_doc = _create_invoice_document(logger)
 
-        # STEP 6: Set Document Fields
-        print("\n6️⃣ SETTING DOCUMENT FIELDS:")
-        set_invoice_fields(invoice_doc, customer_doc, pos_profile, delivery_datetime, logger)
+		# STEP 6: Set Document Fields
+		print("\n6️⃣ SETTING DOCUMENT FIELDS:")
+		set_invoice_fields(invoice_doc, customer_doc, pos_profile, delivery_datetime, logger)
 
-        # STEP 6.0a: Persist the ordering channel (F-14). It used to be accepted and
-        # then discarded after promo evaluation, which left every POS order with all
-        # 14 `woo_*` attribution columns NULL — reading as "unknown source" in channel
-        # analytics rather than as "placed in the POS".
-        stamped_channel = stamp_order_channel(invoice_doc, channel or "flutter")
-        if stamped_channel:
-            print(f"   📡 Order channel stamped: {stamped_channel}")
+		# STEP 6.0a: Persist the ordering channel (F-14). It used to be accepted and
+		# then discarded after promo evaluation, which left every POS order with all
+		# 14 `woo_*` attribution columns NULL — reading as "unknown source" in channel
+		# analytics rather than as "placed in the POS".
+		stamped_channel = stamp_order_channel(invoice_doc, channel or "flutter")
+		if stamped_channel:
+			print(f"   📡 Order channel stamped: {stamped_channel}")
 
-        if effective_price_list:
-            invoice_doc.selling_price_list = effective_price_list
-            print(f"   🏷️ Selling Price List set: {effective_price_list}")
-            if effective_price_list != getattr(pos_profile, "selling_price_list", None):
-                _append_audit_marker(invoice_doc, f"[PRICE LIST OVERRIDE] {effective_price_list}")
-        if suppress_shipping_income is True or suppress_legacy_delivery_charges is True:
-            _append_audit_marker(invoice_doc, "[ZERO SHIPPING OVERRIDE]")
-        if any(_pricing_field_provided(item.get("custom_rate_override")) for item in processed_items):
-            _append_audit_marker(invoice_doc, "[CUSTOM LINE PRICING]")
-        if any(
-            (
-                _pricing_field_provided(item.get("discount_amount"))
-                or _pricing_field_provided(item.get("discount_percentage"))
-            )
-            and not item.get("is_bundle_parent")
-            and not item.get("is_bundle_child")
-            for item in processed_items
-        ):
-            _append_audit_marker(invoice_doc, "[LINE DISCOUNTS]")
-        # FIX 3c: a plain line whose rate came from neither this customer's Item
-        # Price, a generic Item Price, nor a category rate — the client's own number
-        # was trusted (see _process_regular_item / _resolve_item_rate_with_provenance).
-        # Legitimate on a non-policy order (this is how Standard pricing has always
-        # worked), so it is allowed but left as a breadcrumb rather than silent.
-        if any(item.get("_client_priced") for item in processed_items):
-            _append_audit_marker(invoice_doc, "[CLIENT PRICED]")
-        _deals_used = sorted({item["_deal"] for item in processed_items if item.get("_deal")})
-        if _deals_used:
-            _append_audit_marker(invoice_doc, f"[CUSTOMER DEAL] {', '.join(_deals_used)}")
+		if effective_price_list:
+			invoice_doc.selling_price_list = effective_price_list
+			print(f"   🏷️ Selling Price List set: {effective_price_list}")
+			if effective_price_list != getattr(pos_profile, "selling_price_list", None):
+				_append_audit_marker(invoice_doc, f"[PRICE LIST OVERRIDE] {effective_price_list}")
+		if suppress_shipping_income is True or suppress_legacy_delivery_charges is True:
+			_append_audit_marker(invoice_doc, "[ZERO SHIPPING OVERRIDE]")
+		if any(_pricing_field_provided(item.get("custom_rate_override")) for item in processed_items):
+			_append_audit_marker(invoice_doc, "[CUSTOM LINE PRICING]")
+		if any(
+			(
+				_pricing_field_provided(item.get("discount_amount"))
+				or _pricing_field_provided(item.get("discount_percentage"))
+			)
+			and not item.get("is_bundle_parent")
+			and not item.get("is_bundle_child")
+			for item in processed_items
+		):
+			_append_audit_marker(invoice_doc, "[LINE DISCOUNTS]")
+		# FIX 3c: a plain line whose rate came from neither this customer's Item
+		# Price, a generic Item Price, nor a category rate — the client's own number
+		# was trusted (see _process_regular_item / _resolve_item_rate_with_provenance).
+		# Legitimate on a non-policy order (this is how Standard pricing has always
+		# worked), so it is allowed but left as a breadcrumb rather than silent.
+		if any(item.get("_client_priced") for item in processed_items):
+			_append_audit_marker(invoice_doc, "[CLIENT PRICED]")
+		_deals_used = sorted({item["_deal"] for item in processed_items if item.get("_deal")})
+		if _deals_used:
+			_append_audit_marker(invoice_doc, f"[CUSTOMER DEAL] {', '.join(_deals_used)}")
 
-        # STEP 6.A: Resolve and stamp the shipping address explicitly.
-        resolved_shipping_address = resolve_customer_shipping_address(
-            customer_doc.name,
-            preferred_address_name=shipping_address_name,
-        )
-        # The guard asks whether the requested address was HONOURED, not whether the
-        # resolver echoed its name back. The resolver deliberately substitutes the
-        # deduped survivor of an equivalent address (same address_line1|address_line2|
-        # city), so name equality rejected its own correct answer: 5.8% of the last 90
-        # days' invoices were affected, and every one of them was permanently
-        # unamendable because the amendment replays shipping_address_name verbatim.
-        # The guard is kept, not deleted — an address belonging to another customer,
-        # or one that no longer exists, still has no raw row here and must never fall
-        # through to candidates[0] silently.
-        if shipping_address_name and not preferred_address_was_honoured(
-            customer_doc.name, shipping_address_name, resolved_shipping_address
-        ):
-            frappe.throw("Selected shipping address is no longer available for this customer")
-        resolved_shipping_address_name = None
-        if resolved_shipping_address:
-            resolved_shipping_address_name = str(resolved_shipping_address.get("name") or "").strip()
-            if resolved_shipping_address_name:
-                ensure_shipping_address(resolved_shipping_address_name)
-                invoice_doc.shipping_address_name = resolved_shipping_address_name
-                invoice_doc.customer_address = resolved_shipping_address_name
-                print(f"   📍 Shipping address set: {resolved_shipping_address_name}")
+		# STEP 6.A: Resolve and stamp the shipping address explicitly.
+		resolved_shipping_address = resolve_customer_shipping_address(
+			customer_doc.name,
+			preferred_address_name=shipping_address_name,
+		)
+		# The guard asks whether the requested address was HONOURED, not whether the
+		# resolver echoed its name back. The resolver deliberately substitutes the
+		# deduped survivor of an equivalent address (same address_line1|address_line2|
+		# city), so name equality rejected its own correct answer: 5.8% of the last 90
+		# days' invoices were affected, and every one of them was permanently
+		# unamendable because the amendment replays shipping_address_name verbatim.
+		# The guard is kept, not deleted — an address belonging to another customer,
+		# or one that no longer exists, still has no raw row here and must never fall
+		# through to candidates[0] silently.
+		if shipping_address_name and not preferred_address_was_honoured(
+			customer_doc.name, shipping_address_name, resolved_shipping_address
+		):
+			frappe.throw("Selected shipping address is no longer available for this customer")
+		resolved_shipping_address_name = None
+		if resolved_shipping_address:
+			resolved_shipping_address_name = str(resolved_shipping_address.get("name") or "").strip()
+			if resolved_shipping_address_name:
+				ensure_shipping_address(resolved_shipping_address_name)
+				invoice_doc.shipping_address_name = resolved_shipping_address_name
+				invoice_doc.customer_address = resolved_shipping_address_name
+				print(f"   📍 Shipping address set: {resolved_shipping_address_name}")
 
-        # F1: a POS delivery order needs a pin-grade address (switch off by
-        # default). Woo-origin, pickup and deliver-at-branch orders are exempt;
-        # this runs before anything is inserted, so a refusal leaves no trace.
-        _delivery_pin.assert_delivery_pin(
-            resolved_shipping_address_name or shipping_address_name,
-            pickup=bool(pickup),
-            woo_order_id=woo_order_id,
-            deliver_at_branch=getattr(policy_decision, "deliver_at_branch", False) is True,
-        )
+		# F1: a POS delivery order needs a pin-grade address (switch off by
+		# default). Woo-origin, pickup and deliver-at-branch orders are exempt;
+		# this runs before anything is inserted, so a refusal leaves no trace.
+		_delivery_pin.assert_delivery_pin(
+			resolved_shipping_address_name or shipping_address_name,
+			pickup=bool(pickup),
+			woo_order_id=woo_order_id,
+			deliver_at_branch=getattr(policy_decision, "deliver_at_branch", False) is True,
+		)
 
-        effective_order_territory = resolve_order_territory(
-            customer_doc.name,
-            shipping_address_name=resolved_shipping_address_name or shipping_address_name,
-            resolved_shipping_address=resolved_shipping_address,
-        )
-        if effective_order_territory:
-            invoice_doc.territory = effective_order_territory
-            print(f"   🧭 Order territory set: {effective_order_territory}")
+		effective_order_territory = resolve_order_territory(
+			customer_doc.name,
+			shipping_address_name=resolved_shipping_address_name or shipping_address_name,
+			resolved_shipping_address=resolved_shipping_address,
+		)
+		if effective_order_territory:
+			invoice_doc.territory = effective_order_territory
+			print(f"   🧭 Order territory set: {effective_order_territory}")
 
-        # F-09: a territory that tells us nothing must not pass for an answer. Both a
-        # missing territory AND "All Territories" (tree root: delivery_income 0, no
-        # pos_profile) bill no shipping and name no branch, so both are caught — which
-        # of the two a code path happens to produce is an implementation detail. The
-        # resolved value itself is left exactly as-is; this only shouts and, at STEP
-        # 10.5, files a review row. A catch, not a gate: order taking never stops.
-        stamped_territory = effective_order_territory or getattr(invoice_doc, "territory", None)
-        # `is True`, not truthiness: the decision is a dataclass bool, and a mocked
-        # decision must never be able to silence the F-09 catch by accident.
-        if is_unresolved_territory(stamped_territory) and (
-            getattr(policy_decision, "deliver_at_branch", False) is True
-        ):
-            # A Deliver-at-Branch order (Employee Order: staff collect at the
-            # counter) never travels and waives shipping by design, and a staff
-            # customer carries no delivery address — so "no territory" is the
-            # expected shape here, not a routing defect. No marker, no Error Log
-            # entry; the review-queue recorder skips it on the same policy
-            # (services.territory_exceptions._is_counter_fulfilled). The territory
-            # value itself is left exactly as resolved.
-            print(
-                "   🏪 Territory unresolved on a Deliver-at-Branch order – expected, not flagged"
-            )
-        elif is_unresolved_territory(stamped_territory):
-            _unresolved_source = _describe_unresolved_territory_source(
-                resolved_shipping_address=resolved_shipping_address,
-                shipping_address_name=resolved_shipping_address_name or shipping_address_name,
-                customer_doc=customer_doc,
-            )
-            _append_audit_marker(invoice_doc, f"[UNRESOLVED TERRITORY] {_unresolved_source}")
-            _log_loud(
-                logger,
-                f"Order territory unresolved for customer {customer_doc.name} "
-                f"(territory={stamped_territory or '<blank>'}, {_unresolved_source}); "
-                "invoice will carry no shipping income row.",
-                "Jarz POS Territory Unresolved",
-            )
-            # Hint for the exception recorder, which sees this same in-memory doc.
-            try:
-                invoice_doc.flags.jarz_territory_unresolved = True
-            except Exception:
-                pass
+		# F-09: a territory that tells us nothing must not pass for an answer. Both a
+		# missing territory AND "All Territories" (tree root: delivery_income 0, no
+		# pos_profile) bill no shipping and name no branch, so both are caught — which
+		# of the two a code path happens to produce is an implementation detail. The
+		# resolved value itself is left exactly as-is; this only shouts and, at STEP
+		# 10.5, files a review row. A catch, not a gate: order taking never stops.
+		stamped_territory = effective_order_territory or getattr(invoice_doc, "territory", None)
+		# `is True`, not truthiness: the decision is a dataclass bool, and a mocked
+		# decision must never be able to silence the F-09 catch by accident.
+		if is_unresolved_territory(stamped_territory) and (
+			getattr(policy_decision, "deliver_at_branch", False) is True
+		):
+			# A Deliver-at-Branch order (Employee Order: staff collect at the
+			# counter) never travels and waives shipping by design, and a staff
+			# customer carries no delivery address — so "no territory" is the
+			# expected shape here, not a routing defect. No marker, no Error Log
+			# entry; the review-queue recorder skips it on the same policy
+			# (services.territory_exceptions._is_counter_fulfilled). The territory
+			# value itself is left exactly as resolved.
+			print("   🏪 Territory unresolved on a Deliver-at-Branch order – expected, not flagged")
+		elif is_unresolved_territory(stamped_territory):
+			_unresolved_source = _describe_unresolved_territory_source(
+				resolved_shipping_address=resolved_shipping_address,
+				shipping_address_name=resolved_shipping_address_name or shipping_address_name,
+				customer_doc=customer_doc,
+			)
+			_append_audit_marker(invoice_doc, f"[UNRESOLVED TERRITORY] {_unresolved_source}")
+			_log_loud(
+				logger,
+				f"Order territory unresolved for customer {customer_doc.name} "
+				f"(territory={stamped_territory or '<blank>'}, {_unresolved_source}); "
+				"invoice will carry no shipping income row.",
+				"Jarz POS Territory Unresolved",
+			)
+			# Hint for the exception recorder, which sees this same in-memory doc.
+			try:
+				invoice_doc.flags.jarz_territory_unresolved = True
+			except Exception:
+				pass
 
-        # STEP 6.0: Mark pickup flag if provided
-        is_pickup = bool(pickup)
-        if is_pickup:
-            try:
-                # Set the standardized custom_is_pickup field
-                invoice_doc.custom_is_pickup = 1
-                # Audit marker: `custom_is_pickup` above is the source of truth, but
-                # three consumers outside this package still fall back to reading
-                # "[PICKUP]" out of `remarks`, so the marker keeps being mirrored
-                # there (see _REMARKS_MIRRORED_TAGS).
-                _append_audit_marker(invoice_doc, "[PICKUP]")
-                print("   🚏 Pickup mode enabled – shipping suppressed")
-            except Exception as _mkpu_err:
-                print(f"   ⚠️ Could not mark pickup flag: {_mkpu_err}")
+		# STEP 6.0: Mark pickup flag if provided
+		is_pickup = bool(pickup)
+		if is_pickup:
+			try:
+				# Set the standardized custom_is_pickup field
+				invoice_doc.custom_is_pickup = 1
+				# Audit marker: `custom_is_pickup` above is the source of truth, but
+				# three consumers outside this package still fall back to reading
+				# "[PICKUP]" out of `remarks`, so the marker keeps being mirrored
+				# there (see _REMARKS_MIRRORED_TAGS).
+				_append_audit_marker(invoice_doc, "[PICKUP]")
+				print("   🚏 Pickup mode enabled – shipping suppressed")
+			except Exception as _mkpu_err:
+				print(f"   ⚠️ Could not mark pickup flag: {_mkpu_err}")
 
-        # STEP 6.0b: Freeze commercial-policy / order-purpose snapshot onto the invoice.
-        # For Standard orders these fields default to "Standard"/0, leaving accounting
-        # behavior byte-identical. For a MATCHED policy order the snapshot drives the
-        # accounting (custom_no_courier etc.), so stamping must NOT be silently swallowed
-        # — a stamp failure on a matched order must abort, never submit as Standard.
-        invoice_doc.custom_order_purpose = policy_decision.order_purpose or "Standard"
-        if policy_decision.matched:
-            if policy_decision.policy_name:
-                invoice_doc.custom_commercial_policy = policy_decision.policy_name
-            if policy_decision.reason:
-                invoice_doc.custom_policy_reason = policy_decision.reason
-            invoice_doc.custom_no_courier = 1 if policy_decision.no_courier else 0
-            _append_audit_marker(
-                invoice_doc, f"[ORDER PURPOSE] {policy_decision.order_purpose}"
-            )
-            if policy_decision.price_list:
-                _append_audit_marker(
-                    invoice_doc, f"[POLICY PRICE LIST] {policy_decision.price_list}"
-                )
-            print(
-                f"   🧾 Order purpose: {policy_decision.order_purpose} "
-                f"(policy={policy_decision.policy_name}, no_courier={policy_decision.no_courier})"
-            )
-        elif policy_decision.reason:
-            # Reason supplied without a matched policy (e.g. Standard) — keep for audit.
-            invoice_doc.custom_policy_reason = policy_decision.reason
-        if is_employee_cash:
-            # Same marker style as [ORDER PURPOSE]; the settlement itself is the
-            # Payment Entry posted after submit, this only says why it exists.
-            _append_audit_marker(
-                invoice_doc, f"{EMPLOYEE_PAYMENT_MARKER} {PAYMENT_MODES.CASH}"
-            )
+		# STEP 6.0b: Freeze commercial-policy / order-purpose snapshot onto the invoice.
+		# For Standard orders these fields default to "Standard"/0, leaving accounting
+		# behavior byte-identical. For a MATCHED policy order the snapshot drives the
+		# accounting (custom_no_courier etc.), so stamping must NOT be silently swallowed
+		# — a stamp failure on a matched order must abort, never submit as Standard.
+		invoice_doc.custom_order_purpose = policy_decision.order_purpose or "Standard"
+		if policy_decision.matched:
+			if policy_decision.policy_name:
+				invoice_doc.custom_commercial_policy = policy_decision.policy_name
+			if policy_decision.reason:
+				invoice_doc.custom_policy_reason = policy_decision.reason
+			invoice_doc.custom_no_courier = 1 if policy_decision.no_courier else 0
+			_append_audit_marker(invoice_doc, f"[ORDER PURPOSE] {policy_decision.order_purpose}")
+			if policy_decision.price_list:
+				_append_audit_marker(invoice_doc, f"[POLICY PRICE LIST] {policy_decision.price_list}")
+			print(
+				f"   🧾 Order purpose: {policy_decision.order_purpose} "
+				f"(policy={policy_decision.policy_name}, no_courier={policy_decision.no_courier})"
+			)
+		elif policy_decision.reason:
+			# Reason supplied without a matched policy (e.g. Standard) — keep for audit.
+			invoice_doc.custom_policy_reason = policy_decision.reason
+		if is_employee_cash:
+			# Same marker style as [ORDER PURPOSE]; the settlement itself is the
+			# Payment Entry posted after submit, this only says why it exists.
+			_append_audit_marker(invoice_doc, f"{EMPLOYEE_PAYMENT_MARKER} {PAYMENT_MODES.CASH}")
 
-        # Ensure custom_kanban_profile mirrors POS profile at creation time (defensive in addition to hook)
-        try:
-            if getattr(invoice_doc, "pos_profile", None):
-                invoice_doc.custom_kanban_profile = invoice_doc.pos_profile
-            else:
-                invoice_doc.custom_kanban_profile = None
-        except Exception:
-            # If custom field missing, don't fail invoice creation
-            pass
+		# Ensure custom_kanban_profile mirrors POS profile at creation time (defensive in addition to hook)
+		try:
+			if getattr(invoice_doc, "pos_profile", None):
+				invoice_doc.custom_kanban_profile = invoice_doc.pos_profile
+			else:
+				invoice_doc.custom_kanban_profile = None
+		except Exception:
+			# If custom field missing, don't fail invoice creation
+			pass
 
-        # Persist delivery income override (None = territory default; 0 = free delivery; >0 = custom)
-        if delivery_income_override is not None:
-            try:
-                invoice_doc.custom_delivery_income = delivery_income_override
-            except Exception:
-                pass
+		# Persist delivery income override (None = territory default; 0 = free delivery; >0 = custom)
+		if delivery_income_override is not None:
+			try:
+				invoice_doc.custom_delivery_income = delivery_income_override
+			except Exception:
+				pass
 
-        # STEP 6.1: Optional Sales Partner assignment (touch-friendly picker from POS)
-        if sales_partner:
-            try:
-                if frappe.db.exists("Sales Partner", sales_partner):
-                    invoice_doc.sales_partner = sales_partner
-                    print(f"   🤝 Sales Partner set: {sales_partner}")
-                else:
-                    print(f"   ⚠️ Sales Partner not found: {sales_partner} (ignored)")
-            except Exception as sp_err:
-                print(f"   ⚠️ Could not set Sales Partner: {sp_err}")
+		# STEP 6.1: Optional Sales Partner assignment (touch-friendly picker from POS)
+		if sales_partner:
+			try:
+				if frappe.db.exists("Sales Partner", sales_partner):
+					invoice_doc.sales_partner = sales_partner
+					print(f"   🤝 Sales Partner set: {sales_partner}")
+				else:
+					print(f"   ⚠️ Sales Partner not found: {sales_partner} (ignored)")
+			except Exception as sp_err:
+				print(f"   ⚠️ Could not set Sales Partner: {sp_err}")
 
-        # STEP 6.2: Initialize Kanban state to 'In Progress' when a Sales Partner is set
-        _set_initial_state_for_sales_partner(invoice_doc, logger)
+		# STEP 6.2: Initialize Kanban state to 'In Progress' when a Sales Partner is set
+		_set_initial_state_for_sales_partner(invoice_doc, logger)
 
-        # STEP 6.3: Set Payment Method (Cash | Instapay | Mobile Wallet)
-        if payment_method:
-            try:
-                invoice_doc.custom_payment_method = payment_method
-                print(f"   💳 Payment Method set: {payment_method}")
-            except Exception as pm_err:
-                print(f"   ⚠️ Could not set Payment Method: {pm_err}")
+		# STEP 6.3: Set Payment Method (Cash | Instapay | Mobile Wallet)
+		if payment_method:
+			try:
+				invoice_doc.custom_payment_method = payment_method
+				print(f"   💳 Payment Method set: {payment_method}")
+			except Exception as pm_err:
+				print(f"   ⚠️ Could not set Payment Method: {pm_err}")
 
-        # STEP 6.4: Preserve amendment lineage and remote Woo link before submit
-        if amended_from:
-            try:
-                invoice_doc.amended_from = amended_from
-                print(f"   🔁 Amendment source set: {amended_from}")
-            except Exception as amend_err:
-                print(f"   ⚠️ Could not set amended_from: {amend_err}")
-        if woo_order_id:
-            try:
-                invoice_doc.woo_order_id = woo_order_id
-                print(f"   🛒 Existing Woo Order ID set: {woo_order_id}")
-            except Exception as woo_err:
-                print(f"   ⚠️ Could not set woo_order_id: {woo_err}")
+		# STEP 6.4: Preserve amendment lineage and remote Woo link before submit
+		if amended_from:
+			try:
+				invoice_doc.amended_from = amended_from
+				print(f"   🔁 Amendment source set: {amended_from}")
+			except Exception as amend_err:
+				print(f"   ⚠️ Could not set amended_from: {amend_err}")
+		if woo_order_id:
+			try:
+				invoice_doc.woo_order_id = woo_order_id
+				print(f"   🛒 Existing Woo Order ID set: {woo_order_id}")
+			except Exception as woo_err:
+				print(f"   ⚠️ Could not set woo_order_id: {woo_err}")
 
-        # STEP 7: Add Items to Document
-        print("\n7️⃣ ADDING ITEMS:")
-        add_items_to_invoice(invoice_doc, processed_items, logger)
+		# STEP 7: Add Items to Document
+		print("\n7️⃣ ADDING ITEMS:")
+		add_items_to_invoice(invoice_doc, processed_items, logger)
 
-        # STEP 7.3: Sales Partner Tax Suppression Rule
-        # Business Rule (2025-09): If an invoice has a Sales Partner, it must have NO rows in
-        # the "Sales Taxes and Charges" table. We therefore:
-        #   1. Clear any default taxes added by POS Profile / Tax Template.
-        #   2. Skip adding Shipping Income (territory delivery income) rows.
-        #   3. Skip adding legacy delivery_charges rows.
-        partner_tax_suppressed = False
-        if getattr(invoice_doc, "sales_partner", None):
-            try:
-                existing_taxes = len(getattr(invoice_doc, "taxes", []) or [])
-                if existing_taxes:
-                    print(f"\n7️⃣.3️⃣ SALES PARTNER MODE: Clearing {existing_taxes} pre-populated tax rows")
-                # Reset taxes child table fully (use set to ensure ORM awareness)
-                try:
-                    invoice_doc.set("taxes", [])
-                except Exception:
-                    invoice_doc.taxes = []  # fallback
-                partner_tax_suppressed = True
-                print("   ✅ Sales Partner present → all tax rows suppressed")
-            except Exception as clear_err:
-                print(f"   ⚠️ Could not clear existing taxes: {clear_err}")
-        
-        # Determine if cart includes any free-shipping bundle to suppress shipping income insertion
-        free_shipping_waived = False
-        try:
-            # Inspect processed_items for any bundle link and query Jarz Bundle.free_shipping
-            bundle_candidates = []
-            for it in processed_items:
-                bcode = it.get('bundle_code') or it.get('parent_bundle')
-                if bcode and bcode not in bundle_candidates:
-                    bundle_candidates.append(bcode)
-                # Also consider ERPNext parent items that map to a bundle
-                code = it.get('item_code')
-                if code and not bcode:
-                    try:
-                        rows = frappe.get_all('Jarz Bundle', filters={'erpnext_item': code}, pluck='name')
-                        for r in rows:
-                            if r not in bundle_candidates:
-                                bundle_candidates.append(r)
-                    except Exception:
-                        pass
-            if bundle_candidates:
-                cols = set(frappe.db.get_table_columns('Jarz Bundle') or [])
-                if 'free_shipping' in cols:
-                    any_free = frappe.get_all('Jarz Bundle', filters={'name': ['in', bundle_candidates], 'free_shipping': 1}, pluck='name')
-                    free_shipping_waived = bool(any_free)
-        except Exception:
-            free_shipping_waived = False
+		# STEP 7.3: Sales Partner Tax Suppression Rule
+		# Business Rule (2025-09): If an invoice has a Sales Partner, it must have NO rows in
+		# the "Sales Taxes and Charges" table. We therefore:
+		#   1. Clear any default taxes added by POS Profile / Tax Template.
+		#   2. Skip adding Shipping Income (territory delivery income) rows.
+		#   3. Skip adding legacy delivery_charges rows.
+		partner_tax_suppressed = False
+		if getattr(invoice_doc, "sales_partner", None):
+			try:
+				existing_taxes = len(getattr(invoice_doc, "taxes", []) or [])
+				if existing_taxes:
+					print(f"\n7️⃣.3️⃣ SALES PARTNER MODE: Clearing {existing_taxes} pre-populated tax rows")
+				# Reset taxes child table fully (use set to ensure ORM awareness)
+				try:
+					invoice_doc.set("taxes", [])
+				except Exception:
+					invoice_doc.taxes = []  # fallback
+				partner_tax_suppressed = True
+				print("   ✅ Sales Partner present → all tax rows suppressed")
+			except Exception as clear_err:
+				print(f"   ⚠️ Could not clear existing taxes: {clear_err}")
 
-        delivery_promotion = _delivery_promotions.DeliveryPromotionDecision()
-        try:
-            delivery_promotion = _delivery_promotions.resolve_delivery_promotion(
-                invoice_doc,
-                customer_doc=customer_doc,
-                pos_profile=pos_profile,
-                channel="flutter",
-                is_pickup=bool(pickup),
-            )
-            if delivery_promotion.matched:
-                _delivery_promotions.apply_delivery_promotion_audit(invoice_doc, delivery_promotion)
-                print(
-                    "   🎯 Delivery promotion matched: "
-                    f"{delivery_promotion.rule_name} "
-                    f"(merchandise_subtotal={delivery_promotion.merchandise_subtotal:.2f})"
-                )
-        except Exception as promo_err:
-            print(f"   ⚠️ Delivery promotion resolution failed: {promo_err}")
+		# Determine if cart includes any free-shipping bundle to suppress shipping income insertion
+		free_shipping_waived = False
+		try:
+			# Inspect processed_items for any bundle link and query Jarz Bundle.free_shipping
+			bundle_candidates = []
+			for it in processed_items:
+				bcode = it.get("bundle_code") or it.get("parent_bundle")
+				if bcode and bcode not in bundle_candidates:
+					bundle_candidates.append(bcode)
+				# Also consider ERPNext parent items that map to a bundle
+				code = it.get("item_code")
+				if code and not bcode:
+					try:
+						rows = frappe.get_all("Jarz Bundle", filters={"erpnext_item": code}, pluck="name")
+						for r in rows:
+							if r not in bundle_candidates:
+								bundle_candidates.append(r)
+					except Exception:
+						pass
+			if bundle_candidates:
+				cols = set(frappe.db.get_table_columns("Jarz Bundle") or [])
+				if "free_shipping" in cols:
+					any_free = frappe.get_all(
+						"Jarz Bundle",
+						filters={"name": ["in", bundle_candidates], "free_shipping": 1},
+						pluck="name",
+					)
+					free_shipping_waived = bool(any_free)
+		except Exception:
+			free_shipping_waived = False
 
-        # STEP 7.3b: Promo-code engine (inline POS path).
-        # Evaluate BEFORE the suppression flags so a Free-Delivery promo can
-        # waive shipping income/legacy delivery charges.  Defensive: never
-        # break invoice creation.
-        promo_eval = _promo_codes.PromoEvaluation()
-        promo_codes_list = []
-        try:
-            promo_codes_list = _promo_codes._normalize_codes(promo_codes)
-            if promo_codes_list:
-                promo_eval = _promo_codes.evaluate_promo_codes(
-                    invoice_doc,
-                    promo_codes_list,
-                    customer=getattr(customer_doc, "name", None),
-                    customer_doc=customer_doc,
-                    pos_profile=pos_profile,
-                    channel=channel or "flutter",
-                    is_pickup=bool(pickup),
-                )
-                # Persist the requested codes so on_submit can record redemptions.
-                invoice_doc.custom_promo_codes = json.dumps(promo_codes_list)
-        except Exception as _promo_err:
-            print(f"   ⚠️ Promo-code evaluation failed: {_promo_err}")
-            promo_eval = _promo_codes.PromoEvaluation()
+		delivery_promotion = _delivery_promotions.DeliveryPromotionDecision()
+		try:
+			delivery_promotion = _delivery_promotions.resolve_delivery_promotion(
+				invoice_doc,
+				customer_doc=customer_doc,
+				pos_profile=pos_profile,
+				channel="flutter",
+				is_pickup=bool(pickup),
+			)
+			if delivery_promotion.matched:
+				_delivery_promotions.apply_delivery_promotion_audit(invoice_doc, delivery_promotion)
+				print(
+					"   🎯 Delivery promotion matched: "
+					f"{delivery_promotion.rule_name} "
+					f"(merchandise_subtotal={delivery_promotion.merchandise_subtotal:.2f})"
+				)
+		except Exception as promo_err:
+			print(f"   ⚠️ Delivery promotion resolution failed: {promo_err}")
 
-        suppress_shipping_income = (
-            (suppress_shipping_income is True)  # explicit hint from amendment caller
-            or partner_tax_suppressed
-            or free_shipping_waived
-            or bool(pickup)
-            or delivery_promotion.suppress_shipping_income
-            or policy_decision.suppress_shipping_income
-            or promo_eval.free_delivery
-        )
-        suppress_legacy_delivery_charges = (
-            (suppress_legacy_delivery_charges is True)  # explicit hint from amendment caller
-            or partner_tax_suppressed
-            or free_shipping_waived
-            or bool(pickup)
-            or delivery_promotion.suppress_legacy_delivery_charges
-            or policy_decision.suppress_legacy_delivery_charges
-            or promo_eval.free_delivery
-        )
+		# STEP 7.3b: Promo-code engine (inline POS path).
+		# Evaluate BEFORE the suppression flags so a Free-Delivery promo can
+		# waive shipping income/legacy delivery charges.  Defensive: never
+		# break invoice creation.
+		promo_eval = _promo_codes.PromoEvaluation()
+		promo_codes_list = []
+		try:
+			promo_codes_list = _promo_codes._normalize_codes(promo_codes)
+			if promo_codes_list:
+				promo_eval = _promo_codes.evaluate_promo_codes(
+					invoice_doc,
+					promo_codes_list,
+					customer=getattr(customer_doc, "name", None),
+					customer_doc=customer_doc,
+					pos_profile=pos_profile,
+					channel=channel or "flutter",
+					is_pickup=bool(pickup),
+				)
+				# Persist the requested codes so on_submit can record redemptions.
+				invoice_doc.custom_promo_codes = json.dumps(promo_codes_list)
+		except Exception as _promo_err:
+			print(f"   ⚠️ Promo-code evaluation failed: {_promo_err}")
+			promo_eval = _promo_codes.PromoEvaluation()
 
-        # STEP 7.4: Inject Shipping (Territory Delivery Income OR override) as Actual tax row
-        if not suppress_shipping_income:
-            print("\n7️⃣.4️⃣ ADDING SHIPPING (Territory Delivery Income) AS TAX:")
-            try:
-                # Idempotency guard shared by both paths
-                already_added = False
-                if getattr(invoice_doc, "taxes", None):
-                    for tax in invoice_doc.taxes:
-                        if (tax.get("description") or "").lower().startswith("shipping income"):
-                            already_added = True
-                            print("   ⚠️ Shipping income tax row already present – skipping")
-                            break
+		suppress_shipping_income = (
+			(suppress_shipping_income is True)  # explicit hint from amendment caller
+			or partner_tax_suppressed
+			or free_shipping_waived
+			or bool(pickup)
+			or delivery_promotion.suppress_shipping_income
+			or policy_decision.suppress_shipping_income
+			or promo_eval.free_delivery
+		)
+		suppress_legacy_delivery_charges = (
+			(suppress_legacy_delivery_charges is True)  # explicit hint from amendment caller
+			or partner_tax_suppressed
+			or free_shipping_waived
+			or bool(pickup)
+			or delivery_promotion.suppress_legacy_delivery_charges
+			or policy_decision.suppress_legacy_delivery_charges
+			or promo_eval.free_delivery
+		)
 
-                if delivery_income_override is not None:
-                    # Custom override path – fully replaces territory income.
-                    # override == 0 → free delivery (add_delivery_charges_to_taxes
-                    # early-returns for <= 0, so nothing is injected).
-                    print(f"   🎯 Custom delivery income override: {delivery_income_override}")
-                    if not already_added and delivery_income_override > 0:
-                        territory_label = effective_order_territory or getattr(invoice_doc, "territory", None) or "Override"
-                        add_delivery_charges_to_taxes(
-                            invoice_doc,
-                            delivery_income_override,
-                            delivery_description=f"Shipping Income ({territory_label})",
-                        )
-                        print("   ✅ Override shipping income tax row appended")
-                    elif delivery_income_override == 0:
-                        print("   ℹ️ Override = 0 → free delivery, no shipping row injected")
-                else:
-                    # Territory default path (unchanged)
-                    territory_name = effective_order_territory or getattr(invoice_doc, "territory", None)
-                    if territory_name and frappe.db.exists("Territory", territory_name):
-                        territory_doc = frappe.get_doc("Territory", territory_name)
-                        shipping_income = getattr(territory_doc, "delivery_income", 0) or 0
-                        print(f"   📦 Territory: {territory_name} | delivery_income: {shipping_income}")
-                        if shipping_income and float(shipping_income) > 0:
-                            if not already_added:
-                                add_delivery_charges_to_taxes(
-                                    invoice_doc,
-                                    shipping_income,
-                                    delivery_description=f"Shipping Income ({territory_name})",
-                                )
-                                print("   ✅ Shipping income tax row appended")
-                        else:
-                            print("   ℹ️ No positive delivery_income on territory – nothing added")
-                    else:
-                        unresolved_source = _describe_unresolved_territory_source(
-                            resolved_shipping_address=resolved_shipping_address,
-                            shipping_address_name=resolved_shipping_address_name or shipping_address_name,
-                            customer_doc=customer_doc,
-                        )
-                        _append_audit_marker(invoice_doc, f"[UNRESOLVED TERRITORY] {unresolved_source}")
-                        logger.warning(
-                            "Order territory unresolved; shipping income skipped "
-                            f"(customer={customer_doc.name}, source={unresolved_source})"
-                        )
-                        print(
-                            "   ⚠️ Order territory unresolved – skipping shipping income "
-                            f"({unresolved_source})"
-                        )
-            except Exception as ship_err:
-                print(f"   ❌ Failed adding shipping income: {ship_err}")
-                # Do not abort – continue invoice creation
-        else:
-            print("\n7️⃣.4️⃣ SKIPPED: Shipping income suppressed")
-            if partner_tax_suppressed:
-                print("   🤝 Sales Partner tax suppression active")
-            if free_shipping_waived:
-                print("   🚚 Free-shipping bundle detected")
-            if bool(pickup):
-                print("   🚏 Pickup mode enabled")
-            if delivery_promotion.suppress_shipping_income:
-                print(f"   🎯 Promotion matched: {delivery_promotion.rule_name}")
+		# STEP 7.4: Inject Shipping (Territory Delivery Income OR override) as Actual tax row
+		if not suppress_shipping_income:
+			print("\n7️⃣.4️⃣ ADDING SHIPPING (Territory Delivery Income) AS TAX:")
+			try:
+				# Idempotency guard shared by both paths
+				already_added = False
+				if getattr(invoice_doc, "taxes", None):
+					for tax in invoice_doc.taxes:
+						if (tax.get("description") or "").lower().startswith("shipping income"):
+							already_added = True
+							print("   ⚠️ Shipping income tax row already present – skipping")
+							break
 
-        # STEP 7.5: Add Delivery Charges (legacy param based)
-        if delivery_charges and not suppress_legacy_delivery_charges:
-            print("\n7️⃣.5️⃣ ADDING DELIVERY CHARGES:")
-            add_delivery_charges_to_taxes(invoice_doc, delivery_charges, "Delivery Charges")
-        else:
-            print("\n7️⃣.5️⃣ SKIPPED: Delivery charges suppressed or not provided")
-            if not delivery_charges:
-                print("   ℹ️ No legacy delivery charges provided")
-            if partner_tax_suppressed:
-                print("   🤝 Sales Partner tax suppression active")
-            if free_shipping_waived:
-                print("   🚚 Free-shipping bundle detected")
-            if bool(pickup):
-                print("   🚏 Pickup mode enabled")
-            if delivery_promotion.suppress_legacy_delivery_charges:
-                print(f"   🎯 Promotion matched: {delivery_promotion.rule_name}")
+				if delivery_income_override is not None:
+					# Custom override path – fully replaces territory income.
+					# override == 0 → free delivery (add_delivery_charges_to_taxes
+					# early-returns for <= 0, so nothing is injected).
+					print(f"   🎯 Custom delivery income override: {delivery_income_override}")
+					if not already_added and delivery_income_override > 0:
+						territory_label = (
+							effective_order_territory or getattr(invoice_doc, "territory", None) or "Override"
+						)
+						add_delivery_charges_to_taxes(
+							invoice_doc,
+							delivery_income_override,
+							delivery_description=f"Shipping Income ({territory_label})",
+						)
+						print("   ✅ Override shipping income tax row appended")
+					elif delivery_income_override == 0:
+						print("   ℹ️ Override = 0 → free delivery, no shipping row injected")
+				else:
+					# Territory default path (unchanged)
+					territory_name = effective_order_territory or getattr(invoice_doc, "territory", None)
+					if territory_name and frappe.db.exists("Territory", territory_name):
+						territory_doc = frappe.get_doc("Territory", territory_name)
+						shipping_income = getattr(territory_doc, "delivery_income", 0) or 0
+						print(f"   📦 Territory: {territory_name} | delivery_income: {shipping_income}")
+						if shipping_income and float(shipping_income) > 0:
+							if not already_added:
+								add_delivery_charges_to_taxes(
+									invoice_doc,
+									shipping_income,
+									delivery_description=f"Shipping Income ({territory_name})",
+								)
+								print("   ✅ Shipping income tax row appended")
+						else:
+							print("   ℹ️ No positive delivery_income on territory – nothing added")
+					else:
+						unresolved_source = _describe_unresolved_territory_source(
+							resolved_shipping_address=resolved_shipping_address,
+							shipping_address_name=resolved_shipping_address_name or shipping_address_name,
+							customer_doc=customer_doc,
+						)
+						_append_audit_marker(invoice_doc, f"[UNRESOLVED TERRITORY] {unresolved_source}")
+						logger.warning(
+							"Order territory unresolved; shipping income skipped "
+							f"(customer={customer_doc.name}, source={unresolved_source})"
+						)
+						print(
+							"   ⚠️ Order territory unresolved – skipping shipping income "
+							f"({unresolved_source})"
+						)
+			except Exception as ship_err:
+				print(f"   ❌ Failed adding shipping income: {ship_err}")
+				# Do not abort – continue invoice creation
+		else:
+			print("\n7️⃣.4️⃣ SKIPPED: Shipping income suppressed")
+			if partner_tax_suppressed:
+				print("   🤝 Sales Partner tax suppression active")
+			if free_shipping_waived:
+				print("   🚚 Free-shipping bundle detected")
+			if bool(pickup):
+				print("   🚏 Pickup mode enabled")
+			if delivery_promotion.suppress_shipping_income:
+				print(f"   🎯 Promotion matched: {delivery_promotion.rule_name}")
 
-        # STEP 7.6: Apply promo-code discount to the document BEFORE the final
-        # calculate_taxes_and_totals so totals are correct.  Sets discount_amount
-        # + custom_promo_applied=1 so the before_validate hook does not re-apply.
-        try:
-            if promo_codes_list:
-                _promo_codes.apply_promo_evaluation_to_invoice(invoice_doc, promo_eval)
-                print(
-                    "   🎟️ Promo discount applied: "
-                    f"{promo_eval.total_discount:.2f} "
-                    f"(free_delivery={promo_eval.free_delivery})"
-                )
-        except Exception as _promo_apply_err:
-            print(f"   ⚠️ Promo-code application failed: {_promo_apply_err}")
+		# STEP 7.5: Add Delivery Charges (legacy param based)
+		if delivery_charges and not suppress_legacy_delivery_charges:
+			print("\n7️⃣.5️⃣ ADDING DELIVERY CHARGES:")
+			add_delivery_charges_to_taxes(invoice_doc, delivery_charges, "Delivery Charges")
+		else:
+			print("\n7️⃣.5️⃣ SKIPPED: Delivery charges suppressed or not provided")
+			if not delivery_charges:
+				print("   ℹ️ No legacy delivery charges provided")
+			if partner_tax_suppressed:
+				print("   🤝 Sales Partner tax suppression active")
+			if free_shipping_waived:
+				print("   🚚 Free-shipping bundle detected")
+			if bool(pickup):
+				print("   🚏 Pickup mode enabled")
+			if delivery_promotion.suppress_legacy_delivery_charges:
+				print(f"   🎯 Promotion matched: {delivery_promotion.rule_name}")
 
-        # STEP 8: Validate and Calculate Document
-        print("\n8️⃣ DOCUMENT VALIDATION:")
-        _validate_and_calculate_document(invoice_doc, logger)
+		# STEP 7.6: Apply promo-code discount to the document BEFORE the final
+		# calculate_taxes_and_totals so totals are correct.  Sets discount_amount
+		# + custom_promo_applied=1 so the before_validate hook does not re-apply.
+		try:
+			if promo_codes_list:
+				_promo_codes.apply_promo_evaluation_to_invoice(invoice_doc, promo_eval)
+				print(
+					"   🎟️ Promo discount applied: "
+					f"{promo_eval.total_discount:.2f} "
+					f"(free_delivery={promo_eval.free_delivery})"
+				)
+		except Exception as _promo_apply_err:
+			print(f"   ⚠️ Promo-code application failed: {_promo_apply_err}")
 
-        # STEP 8.2: Credit / on-account gate.
-        #
-        # Deliberately HERE — after calculate_taxes_and_totals and before insert:
-        #   * the limit check needs a real `grand_total`, which only exists after
-        #     STEP 8, and
-        #   * `due_date` must be set before insert, because ERPNext's
-        #     `set_missing_values` fills it only when it is empty and would
-        #     otherwise hand this order the customer's default term.
-        # It THROWS rather than degrading: an order the shop is not allowed to
-        # take on credit, or one that breaks their limit, must not exist.
-        #
-        # Normalised, not ``== CREDIT_PAYMENT_METHOD``: STEP 1 has already folded
-        # every credit spelling to the exact option, and asking through the same
-        # predicate the DISPATCH side uses is what guarantees these two can never
-        # disagree about whether an order is on account. An order that reaches
-        # dispatch's credit handler without having passed through here is a debt
-        # with no limit check and no frozen terms.
-        if is_credit_payment_method(payment_method):
-            print("\n8️⃣.2️⃣ CREDIT / ON ACCOUNT:")
-            _apply_credit_terms(
-                invoice_doc, customer_doc, logger, amended_from=amended_from
-            )
+		# STEP 8: Validate and Calculate Document
+		print("\n8️⃣ DOCUMENT VALIDATION:")
+		_validate_and_calculate_document(invoice_doc, logger)
 
-        # STEP 8.3: Counter-paid Employee order gate. Before insert for the same
-        # reason as the credit gate: a branch with no open shift or no till must
-        # refuse the order outright, not leave a submitted invoice whose cash has
-        # nowhere to land. (STEP 3.6 already guaranteed payment_method is Cash, so
-        # the credit gate above can never have run for this order.)
-        #
-        # ONE branch value for the gate and the Payment Entry (STEP 11.4): the shift
-        # that was checked must be the one whose drawer receives the cash.
-        employee_cash_branch = (
-            getattr(invoice_doc, "custom_kanban_profile", None) or pos_profile.name
-        )
-        if is_employee_cash:
-            print("\n8️⃣.3️⃣ EMPLOYEE ORDER PAID AT THE COUNTER:")
-            _employee_cash_till = _ensure_employee_cash_can_be_taken(
-                employee_cash_branch,
-                getattr(invoice_doc, "company", None) or pos_profile.company,
-            )
-            print(f"   🏧 Till resolved: {_employee_cash_till}")
+		# STEP 8.2: Credit / on-account gate.
+		#
+		# Deliberately HERE — after calculate_taxes_and_totals and before insert:
+		#   * the limit check needs a real `grand_total`, which only exists after
+		#     STEP 8, and
+		#   * `due_date` must be set before insert, because ERPNext's
+		#     `set_missing_values` fills it only when it is empty and would
+		#     otherwise hand this order the customer's default term.
+		# It THROWS rather than degrading: an order the shop is not allowed to
+		# take on credit, or one that breaks their limit, must not exist.
+		#
+		# Normalised, not ``== CREDIT_PAYMENT_METHOD``: STEP 1 has already folded
+		# every credit spelling to the exact option, and asking through the same
+		# predicate the DISPATCH side uses is what guarantees these two can never
+		# disagree about whether an order is on account. An order that reaches
+		# dispatch's credit handler without having passed through here is a debt
+		# with no limit check and no frozen terms.
+		if is_credit_payment_method(payment_method):
+			print("\n8️⃣.2️⃣ CREDIT / ON ACCOUNT:")
+			_apply_credit_terms(invoice_doc, customer_doc, logger, amended_from=amended_from)
 
-        # STEP 8.1: Keep POS Sales Invoices accounting-only for all payment flows.
-        # Business Rule: Stock movement must happen via Delivery Note on the delivery flow,
-        # so Sales Invoice creation must never reduce stock directly.
-        try:
-            if hasattr(invoice_doc, 'update_stock'):
-                invoice_doc.update_stock = 0  # int flag expected by ERPNext
-                print("   🚚 Stock update disabled on POS Sales Invoice")
-            else:
-                print("   ℹ️ 'update_stock' field not present on Sales Invoice; skipping suppression")
-        except Exception as _ustk_err:
-            print(f"   ⚠️ Could not suppress stock update: {_ustk_err}")
+		# STEP 8.3: Counter-paid Employee order gate. Before insert for the same
+		# reason as the credit gate: a branch with no open shift or no till must
+		# refuse the order outright, not leave a submitted invoice whose cash has
+		# nowhere to land. (STEP 3.6 already guaranteed payment_method is Cash, so
+		# the credit gate above can never have run for this order.)
+		#
+		# ONE branch value for the gate and the Payment Entry (STEP 11.4): the shift
+		# that was checked must be the one whose drawer receives the cash.
+		employee_cash_branch = getattr(invoice_doc, "custom_kanban_profile", None) or pos_profile.name
+		if is_employee_cash:
+			print("\n8️⃣.3️⃣ EMPLOYEE ORDER PAID AT THE COUNTER:")
+			_employee_cash_till = _ensure_employee_cash_can_be_taken(
+				employee_cash_branch,
+				getattr(invoice_doc, "company", None) or pos_profile.company,
+			)
+			print(f"   🏧 Till resolved: {_employee_cash_till}")
 
-        # STEP 9: Save Document
-        print("\n9️⃣ SAVING DOCUMENT:")
-        _save_document(invoice_doc, delivery_datetime, logger, delivery_end_datetime)
+		# STEP 8.1: Keep POS Sales Invoices accounting-only for all payment flows.
+		# Business Rule: Stock movement must happen via Delivery Note on the delivery flow,
+		# so Sales Invoice creation must never reduce stock directly.
+		try:
+			if hasattr(invoice_doc, "update_stock"):
+				invoice_doc.update_stock = 0  # int flag expected by ERPNext
+				print("   🚚 Stock update disabled on POS Sales Invoice")
+			else:
+				print("   ℹ️ 'update_stock' field not present on Sales Invoice; skipping suppression")
+		except Exception as _ustk_err:
+			print(f"   ⚠️ Could not suppress stock update: {_ustk_err}")
 
-        # STEP 10: Submit Document
-        print("\n🔟 SUBMITTING DOCUMENT:")
-        _submit_document(invoice_doc, logger)
+		# STEP 9: Save Document
+		print("\n9️⃣ SAVING DOCUMENT:")
+		_save_document(invoice_doc, delivery_datetime, logger, delivery_end_datetime)
 
-        # STEP 10.1: Re-stamp the resolved price list. ERPNext's `set_pos_fields` runs on
-        # every is_pos=1 document and overwrites `selling_price_list` from the customer /
-        # customer-group / POS-Profile chain, so the value set at STEP 6 never survives
-        # validation. See `_persist_selling_price_list` for the full incident note.
-        _persist_selling_price_list(invoice_doc, effective_price_list, logger)
+		# STEP 10: Submit Document
+		print("\n🔟 SUBMITTING DOCUMENT:")
+		_submit_document(invoice_doc, logger)
 
-        # STEP 10.5: File a territory / branch exception for review (F-08, F-09).
-        #
-        # Runs here and not earlier because `Jarz Territory Exception.sales_invoice`
-        # is a required Link — the invoice must exist — and because both inputs it
-        # judges are only final now: `territory` (STEP 6.A, possibly re-filled by
-        # set_missing_values in STEP 8) and `pos_profile` (STEP 6).
-        #
-        # This records; it never corrects and never blocks. The owner's ruling on the
-        # 1,285 branch<>territory invoices is that the branch that shipped IS the
-        # fact, so the POS Profile is left exactly as chosen and only the territory is
-        # flagged as possibly needing correction. `record_invoice_territory_exception`
-        # is documented never to raise, but it is still wrapped and still placed off
-        # the critical path: a submitted invoice must never be undone by a log write.
-        _record_territory_exception(invoice_doc, logger)
+		# STEP 10.1: Re-stamp the resolved price list. ERPNext's `set_pos_fields` runs on
+		# every is_pos=1 document and overwrites `selling_price_list` from the customer /
+		# customer-group / POS-Profile chain, so the value set at STEP 6 never survives
+		# validation. See `_persist_selling_price_list` for the full incident note.
+		_persist_selling_price_list(invoice_doc, effective_price_list, logger)
 
-        # STEP 11: If payment_type == 'online' and invoice has a sales partner, create a Payment Entry
-        try:
-            _maybe_register_online_payment_to_partner(invoice_doc, sales_partner, payment_type, logger)
-        except Exception as pay_err:
-            # Don't fail invoice creation if payment step fails; log and proceed
-            print(f"   ❌ Online payment registration failed: {pay_err}")
-            try:
-                logger.warning(f"Online payment registration failed: {pay_err}")
-            except Exception:
-                pass
+		# STEP 10.5: File a territory / branch exception for review (F-08, F-09).
+		#
+		# Runs here and not earlier because `Jarz Territory Exception.sales_invoice`
+		# is a required Link — the invoice must exist — and because both inputs it
+		# judges are only final now: `territory` (STEP 6.A, possibly re-filled by
+		# set_missing_values in STEP 8) and `pos_profile` (STEP 6).
+		#
+		# This records; it never corrects and never blocks. The owner's ruling on the
+		# 1,285 branch<>territory invoices is that the branch that shipped IS the
+		# fact, so the POS Profile is left exactly as chosen and only the territory is
+		# flagged as possibly needing correction. `record_invoice_territory_exception`
+		# is documented never to raise, but it is still wrapped and still placed off
+		# the critical path: a submitted invoice must never be undone by a log write.
+		_record_territory_exception(invoice_doc, logger)
 
-        # STEP 11.4: Counter-paid Employee order — book the cash into the till.
-        #
-        # After submit (a Payment Entry needs a submitted invoice to allocate to)
-        # and BEFORE STEP 11.5 hands the goods over: money in first, like a pickup.
-        # NOT wrapped in a try — unlike the fulfilment below, a failure here must
-        # roll the whole request back. A "cash" order left unpaid would be
-        # deducted from the employee's salary for money already in the drawer.
-        employee_payment_entry = None
-        if is_employee_cash:
-            print("\n💵 EMPLOYEE CASH: settling into the branch till")
-            employee_payment_entry = _register_employee_counter_cash_payment(
-                invoice_doc,
-                employee_cash_branch,
-                logger,
-            )
+		# STEP 11: If payment_type == 'online' and invoice has a sales partner, create a Payment Entry
+		try:
+			_maybe_register_online_payment_to_partner(invoice_doc, sales_partner, payment_type, logger)
+		except Exception as pay_err:
+			# Don't fail invoice creation if payment step fails; log and proceed
+			print(f"   ❌ Online payment registration failed: {pay_err}")
+			try:
+				logger.warning(f"Online payment registration failed: {pay_err}")
+			except Exception:
+				pass
 
-        # STEP 11.5: Deliver-at-Branch auto-fulfilment.
-        #
-        # An "Employee" order is collected at the counter as it is rung in: there
-        # is no courier and no delivery run, so the card must not sit in Recieved
-        # waiting for a dispatch that will never happen.
-        #
-        # This runs HERE, after submit, because everything it does needs a
-        # submitted invoice: the Delivery Note that actually moves the stock
-        # refuses a draft, and the state writes go through the
-        # update-after-submit path. It is deliberately OFF the critical path —
-        # `fulfil_at_branch` never raises and never rolls back, and a failure
-        # only means the card stays in Recieved for staff to drag normally. The
-        # cashier gets their invoice either way.
-        branch_fulfilment_result = None
-        try:
-            if getattr(policy_decision, "deliver_at_branch", False):
-                print("\n🏪 DELIVER AT BRANCH: auto-fulfilling at the counter")
-                branch_fulfilment_result = _branch_fulfilment.fulfil_at_branch(
-                    invoice_doc.name, logger=logger
-                )
-        except Exception as _branch_err:
-            # Belt and braces: fulfil_at_branch is documented not to raise, but a
-            # submitted invoice must never be lost to a bookkeeping convenience.
-            branch_fulfilment_result = {
-                "success": False,
-                "delivery_note": None,
-                "state": None,
-                "error": str(_branch_err),
-            }
-            print(f"   ❌ Deliver-at-Branch fulfilment failed: {_branch_err}")
+		# STEP 11.4: Counter-paid Employee order — book the cash into the till.
+		#
+		# After submit (a Payment Entry needs a submitted invoice to allocate to)
+		# and BEFORE STEP 11.5 hands the goods over: money in first, like a pickup.
+		# NOT wrapped in a try — unlike the fulfilment below, a failure here must
+		# roll the whole request back. A "cash" order left unpaid would be
+		# deducted from the employee's salary for money already in the drawer.
+		employee_payment_entry = None
+		if is_employee_cash:
+			print("\n💵 EMPLOYEE CASH: settling into the branch till")
+			employee_payment_entry = _register_employee_counter_cash_payment(
+				invoice_doc,
+				employee_cash_branch,
+				logger,
+			)
 
-        # STEP 12: Prepare Response
-        print("\n🎯 PREPARING RESPONSE:")
-        if is_employee_order:
-            # The in-memory document predates the Payment Entry and the branch
-            # fulfilment, so its outstanding/status are stale for exactly the
-            # orders whose client needs to show them. Standard orders skip this
-            # and keep a byte-identical response.
-            invoice_doc.reload()
-        result = _prepare_response(invoice_doc, delivery_datetime, logger)
-        try:
-            result["pickup"] = bool(pickup)
-        except Exception:
-            pass
+		# STEP 11.5: Deliver-at-Branch auto-fulfilment.
+		#
+		# An "Employee" order is collected at the counter as it is rung in: there
+		# is no courier and no delivery run, so the card must not sit in Recieved
+		# waiting for a dispatch that will never happen.
+		#
+		# This runs HERE, after submit, because everything it does needs a
+		# submitted invoice: the Delivery Note that actually moves the stock
+		# refuses a draft, and the state writes go through the
+		# update-after-submit path. It is deliberately OFF the critical path —
+		# `fulfil_at_branch` never raises and never rolls back, and a failure
+		# only means the card stays in Recieved for staff to drag normally. The
+		# cashier gets their invoice either way.
+		branch_fulfilment_result = None
+		try:
+			if getattr(policy_decision, "deliver_at_branch", False):
+				print("\n🏪 DELIVER AT BRANCH: auto-fulfilling at the counter")
+				branch_fulfilment_result = _branch_fulfilment.fulfil_at_branch(
+					invoice_doc.name, logger=logger
+				)
+		except Exception as _branch_err:
+			# Belt and braces: fulfil_at_branch is documented not to raise, but a
+			# submitted invoice must never be lost to a bookkeeping convenience.
+			branch_fulfilment_result = {
+				"success": False,
+				"delivery_note": None,
+				"state": None,
+				"error": str(_branch_err),
+			}
+			print(f"   ❌ Deliver-at-Branch fulfilment failed: {_branch_err}")
 
-        # Employee orders only (keys are added, never changed): which money shape
-        # the order took and the state it left the ledger in.
-        if is_employee_order:
-            result["employee_payment"] = employee_payment
-            result["payment_entry"] = employee_payment_entry
-            result["outstanding_amount"] = getattr(invoice_doc, "outstanding_amount", None)
-            result["status"] = getattr(invoice_doc, "status", None)
+		# STEP 12: Prepare Response
+		print("\n🎯 PREPARING RESPONSE:")
+		if is_employee_order:
+			# The in-memory document predates the Payment Entry and the branch
+			# fulfilment, so its outstanding/status are stale for exactly the
+			# orders whose client needs to show them. Standard orders skip this
+			# and keep a byte-identical response.
+			invoice_doc.reload()
+		result = _prepare_response(invoice_doc, delivery_datetime, logger)
+		try:
+			result["pickup"] = bool(pickup)
+		except Exception:
+			pass
 
-        # Surface the auto-fulfilment outcome to the POS. `_prepare_response` has
-        # no warnings convention of its own, so the key is created on demand and
-        # only when there is something to say — a Standard order's response stays
-        # byte-identical.
-        if branch_fulfilment_result is not None:
-            try:
-                result["branch_fulfilment"] = branch_fulfilment_result
-                if not branch_fulfilment_result.get("success"):
-                    _bf_error = str(branch_fulfilment_result.get("error") or "").strip()
-                    result.setdefault("warnings", []).append(
-                        "Order could not be auto-delivered at the branch"
-                        + (f": {_bf_error}" if _bf_error else "")
-                        + ". It is still in the Recieved column and has to be moved "
-                        "through the board manually."
-                    )
-            except Exception:
-                pass
+		# Employee orders only (keys are added, never changed): which money shape
+		# the order took and the state it left the ledger in.
+		if is_employee_order:
+			result["employee_payment"] = employee_payment
+			result["payment_entry"] = employee_payment_entry
+			result["outstanding_amount"] = getattr(invoice_doc, "outstanding_amount", None)
+			result["status"] = getattr(invoice_doc, "status", None)
 
-        print("\n🎉 SUCCESS! Invoice creation completed!")
-        print("=" * 100)
-        return result
+		# Surface the auto-fulfilment outcome to the POS. `_prepare_response` has
+		# no warnings convention of its own, so the key is created on demand and
+		# only when there is something to say — a Standard order's response stays
+		# byte-identical.
+		if branch_fulfilment_result is not None:
+			try:
+				result["branch_fulfilment"] = branch_fulfilment_result
+				if not branch_fulfilment_result.get("success"):
+					_bf_error = str(branch_fulfilment_result.get("error") or "").strip()
+					result.setdefault("warnings", []).append(
+						"Order could not be auto-delivered at the branch"
+						+ (f": {_bf_error}" if _bf_error else "")
+						+ ". It is still in the Recieved column and has to be moved "
+						"through the board manually."
+					)
+			except Exception:
+				pass
 
-    except Exception as e:
-        # Comprehensive error logging following Frappe best practices
-        _handle_invoice_creation_error(e, customer_name, pos_profile_name, logger)
-        raise
+		print("\n🎉 SUCCESS! Invoice creation completed!")
+		print("=" * 100)
+		return result
+
+	except Exception as e:
+		# Comprehensive error logging following Frappe best practices
+		_handle_invoice_creation_error(e, customer_name, pos_profile_name, logger)
+		raise
 
 
 def _parse_delivery_charges(delivery_charges_json, logger):
-    """Parse delivery charges JSON."""
-    delivery_charges = []
-    if delivery_charges_json:
-        try:
-            delivery_charges = frappe.parse_json(delivery_charges_json) if isinstance(delivery_charges_json, str) else delivery_charges_json
-            logger.debug(f"Parsed delivery charges: {len(delivery_charges)} charges")
-            print(f"   📦 Delivery charges parsed: {len(delivery_charges)} charges")
-            for i, charge in enumerate(delivery_charges, 1):
-                print(f"      {i}. {charge.get('charge_type', 'Unknown')}: ${charge.get('amount', 0)}")
-        except (ValueError, TypeError) as e:
-            error_msg = f"Invalid delivery charges JSON format: {_exception_detail(e)}"
-            logger.warning(error_msg)  # pre-throw: see _exception_detail note on log levels
-            print(f"   ❌ {error_msg}")
-            frappe.throw(error_msg)
-    else:
-        print(f"   📦 No delivery charges provided")
-    return delivery_charges
+	"""Parse delivery charges JSON."""
+	delivery_charges = []
+	if delivery_charges_json:
+		try:
+			delivery_charges = (
+				frappe.parse_json(delivery_charges_json)
+				if isinstance(delivery_charges_json, str)
+				else delivery_charges_json
+			)
+			logger.debug(f"Parsed delivery charges: {len(delivery_charges)} charges")
+			print(f"   📦 Delivery charges parsed: {len(delivery_charges)} charges")
+			for i, charge in enumerate(delivery_charges, 1):
+				print(f"      {i}. {charge.get('charge_type', 'Unknown')}: ${charge.get('amount', 0)}")
+		except (ValueError, TypeError) as e:
+			error_msg = f"Invalid delivery charges JSON format: {_exception_detail(e)}"
+			logger.warning(error_msg)  # pre-throw: see _exception_detail note on log levels
+			print(f"   ❌ {error_msg}")
+			frappe.throw(error_msg)
+	else:
+		print(f"   📦 No delivery charges provided")
+	return delivery_charges
 
 
 def _process_cart_items(
-    cart_items,
-    pos_profile,
-    logger,
-    price_list=None,
-    customer=None,
-    enforce_price_list_pricing=False,
-    free_of_charge_order=False,
-    pricing_date=None,
-    apply_deals=False,
+	cart_items,
+	pos_profile,
+	logger,
+	price_list=None,
+	customer=None,
+	enforce_price_list_pricing=False,
+	free_of_charge_order=False,
+	pricing_date=None,
+	apply_deals=False,
 ):
-    """Process all cart items including bundles."""
-    logger.debug(f"Processing {len(cart_items)} cart items")
-    processed_items = []  # Will contain both regular items and bundle items
-    
-    for i, item_data in enumerate(cart_items, 1):
-        print(f"   Processing item {i}: {item_data}")
-        
-        # Extract item details with enhanced validation
-        item_code = item_data.get("item_code")
-        qty = item_data.get("qty", 1)
-        rate = item_data.get("rate") or item_data.get("price", 0)
-        is_bundle = item_data.get("is_bundle", False)
-        
-        # Enhanced logging for debugging
-        print(f"      📋 Item Details:")
-        print(f"         - item_code: {item_code}")
-        print(f"         - qty: {qty}")
-        print(f"         - rate: {rate}")
-        print(f"         - is_bundle: {is_bundle} (type: {type(is_bundle)})")
-        
-        # Additional debug: Check if this item exists in different places
-        is_erpnext_item = frappe.db.exists("Item", item_code)
-        is_bundle_record = frappe.db.exists("Jarz Bundle", item_code)
-        bundle_with_erpnext_item = frappe.get_all("Jarz Bundle", 
-            filters={"erpnext_item": item_code}, 
-            fields=["name", "bundle_name"], 
-            limit=1)
-        
-        print(f"         - ERPNext Item exists: {is_erpnext_item}")
-        print(f"         - Jarz Bundle record exists: {is_bundle_record}")
-        print(f"         - Bundle with this ERPNext item: {bundle_with_erpnext_item}")
-        
-        if is_bundle and not bundle_with_erpnext_item and not is_bundle_record:
-            print(f"         ⚠️ WARNING: is_bundle=True but no bundle found for '{item_code}' (neither as ERPNext item nor bundle ID)")
-        elif is_bundle and (bundle_with_erpnext_item or is_bundle_record):
-            if bundle_with_erpnext_item:
-                print(f"         ✅ Bundle found by erpnext_item: {bundle_with_erpnext_item[0]['name']} ({bundle_with_erpnext_item[0]['bundle_name']})")
-            elif is_bundle_record:
-                bundle_doc = frappe.get_doc("Jarz Bundle", item_code)
-                print(f"         ✅ Bundle found by record ID: {item_code} ({bundle_doc.bundle_name})")
-        
-        # Validate required fields
-        if not item_code:
-            logger.warning(f"Item {i} missing item_code, skipping")
-            print(f"      ❌ Missing item_code, skipping")
-            continue
-            
-        # FIX 2 (bundle half): these used to CLAMP -- qty<=0 became 1, rate<0
-        # became 0 -- and silently. _process_regular_item now rejects both
-        # outright, but it re-reads the raw item_data dict, so the clamp below
-        # was dead for plain lines and fully live for bundles: a cart line
-        # {"item_code": "BUNDLE-X", "qty": -3, "is_bundle": true} quietly became
-        # qty 1. Reject on both paths, for the same reason: a silent clamp is how
-        # a wrong number reaches a SUBMITTED invoice with nobody the wiser.
-        try:
-            qty = float(qty)
-        except (TypeError, ValueError):
-            frappe.throw(f"Invalid quantity for item '{item_code}': {qty}")
-        if qty <= 0:
-            frappe.throw(f"Quantity for item '{item_code}' must be greater than zero")
+	"""Process all cart items including bundles."""
+	logger.debug(f"Processing {len(cart_items)} cart items")
+	processed_items = []  # Will contain both regular items and bundle items
 
-        try:
-            rate = float(rate)
-        except (TypeError, ValueError):
-            frappe.throw(f"Invalid rate for item '{item_code}': {rate}")
-        if rate < 0:
-            frappe.throw(f"Rate for item '{item_code}' must be non-negative")
+	for i, item_data in enumerate(cart_items, 1):
+		print(f"   Processing item {i}: {item_data}")
 
-        selected_items = item_data.get("selected_items") if hasattr(item_data, "get") else None
+		# Extract item details with enhanced validation
+		item_code = item_data.get("item_code")
+		qty = item_data.get("qty", 1)
+		rate = item_data.get("rate") or item_data.get("price", 0)
+		is_bundle = item_data.get("is_bundle", False)
 
-        if is_bundle:
-            # Process bundle item
-            bundle_items = _process_bundle_item(
-                item_code,
-                qty,
-                rate,
-                pos_profile,
-                logger,
-                selected_items=selected_items,
-                price_list=price_list,
-                item_data=item_data,
-            )
-            processed_items.extend(bundle_items)
-        else:
-            # Process regular item
-            regular_item = _process_regular_item(
-                item_data,
-                logger,
-                price_list=price_list,
-                customer=customer,
-                enforce_price_list_pricing=enforce_price_list_pricing,
-                free_of_charge_order=free_of_charge_order,
-                pricing_date=pricing_date,
-                apply_deals=apply_deals,
-            )
-            processed_items.append(regular_item)
-    
-    if not processed_items:
-        error_msg = "No valid items found in cart after processing"
-        logger.warning(error_msg)  # pre-throw: see _exception_detail note on log levels
-        print(f"   ❌ {error_msg}")
-        frappe.throw(error_msg)
-    
-    _log_processing_summary(processed_items, logger)
-    return processed_items
+		# Enhanced logging for debugging
+		print(f"      📋 Item Details:")
+		print(f"         - item_code: {item_code}")
+		print(f"         - qty: {qty}")
+		print(f"         - rate: {rate}")
+		print(f"         - is_bundle: {is_bundle} (type: {type(is_bundle)})")
+
+		# Additional debug: Check if this item exists in different places
+		is_erpnext_item = frappe.db.exists("Item", item_code)
+		is_bundle_record = frappe.db.exists("Jarz Bundle", item_code)
+		bundle_with_erpnext_item = frappe.get_all(
+			"Jarz Bundle", filters={"erpnext_item": item_code}, fields=["name", "bundle_name"], limit=1
+		)
+
+		print(f"         - ERPNext Item exists: {is_erpnext_item}")
+		print(f"         - Jarz Bundle record exists: {is_bundle_record}")
+		print(f"         - Bundle with this ERPNext item: {bundle_with_erpnext_item}")
+
+		if is_bundle and not bundle_with_erpnext_item and not is_bundle_record:
+			print(
+				f"         ⚠️ WARNING: is_bundle=True but no bundle found for '{item_code}' (neither as ERPNext item nor bundle ID)"
+			)
+		elif is_bundle and (bundle_with_erpnext_item or is_bundle_record):
+			if bundle_with_erpnext_item:
+				print(
+					f"         ✅ Bundle found by erpnext_item: {bundle_with_erpnext_item[0]['name']} ({bundle_with_erpnext_item[0]['bundle_name']})"
+				)
+			elif is_bundle_record:
+				bundle_doc = frappe.get_doc("Jarz Bundle", item_code)
+				print(f"         ✅ Bundle found by record ID: {item_code} ({bundle_doc.bundle_name})")
+
+		# Validate required fields
+		if not item_code:
+			logger.warning(f"Item {i} missing item_code, skipping")
+			print(f"      ❌ Missing item_code, skipping")
+			continue
+
+		# FIX 2 (bundle half): these used to CLAMP -- qty<=0 became 1, rate<0
+		# became 0 -- and silently. _process_regular_item now rejects both
+		# outright, but it re-reads the raw item_data dict, so the clamp below
+		# was dead for plain lines and fully live for bundles: a cart line
+		# {"item_code": "BUNDLE-X", "qty": -3, "is_bundle": true} quietly became
+		# qty 1. Reject on both paths, for the same reason: a silent clamp is how
+		# a wrong number reaches a SUBMITTED invoice with nobody the wiser.
+		try:
+			qty = float(qty)
+		except (TypeError, ValueError):
+			frappe.throw(f"Invalid quantity for item '{item_code}': {qty}")
+		if qty <= 0:
+			frappe.throw(f"Quantity for item '{item_code}' must be greater than zero")
+
+		try:
+			rate = float(rate)
+		except (TypeError, ValueError):
+			frappe.throw(f"Invalid rate for item '{item_code}': {rate}")
+		if rate < 0:
+			frappe.throw(f"Rate for item '{item_code}' must be non-negative")
+
+		selected_items = item_data.get("selected_items") if hasattr(item_data, "get") else None
+
+		if is_bundle:
+			# Process bundle item
+			bundle_items = _process_bundle_item(
+				item_code,
+				qty,
+				rate,
+				pos_profile,
+				logger,
+				selected_items=selected_items,
+				price_list=price_list,
+				item_data=item_data,
+			)
+			processed_items.extend(bundle_items)
+		else:
+			# Process regular item
+			regular_item = _process_regular_item(
+				item_data,
+				logger,
+				price_list=price_list,
+				customer=customer,
+				enforce_price_list_pricing=enforce_price_list_pricing,
+				free_of_charge_order=free_of_charge_order,
+				pricing_date=pricing_date,
+				apply_deals=apply_deals,
+			)
+			processed_items.append(regular_item)
+
+	if not processed_items:
+		error_msg = "No valid items found in cart after processing"
+		logger.warning(error_msg)  # pre-throw: see _exception_detail note on log levels
+		print(f"   ❌ {error_msg}")
+		frappe.throw(error_msg)
+
+	_log_processing_summary(processed_items, logger)
+	return processed_items
 
 
-def _process_bundle_item(item_code, qty, rate, pos_profile, logger, selected_items=None, price_list=None, item_data=None):
-    """Process a bundle item."""
-    print(f"      🎁 BUNDLE DETECTED: {item_code}")
-    print(f"      🔌 Processing bundle using ERPNext item: {item_code}")
-    
-    try:
-        # Validate bundle configuration using ERPNext item code
-        is_valid, message, bundle_code = validate_bundle_configuration_by_item(item_code)
-        if not is_valid:
-            error_msg = f"Bundle validation failed for ERPNext item {item_code}: {message}"
-            logger.warning(error_msg)  # pre-throw: see _exception_detail note on log levels
-            print(f"      ❌ {error_msg}")
-            frappe.throw(error_msg)
-        
-        print(f"      ✅ Found bundle: {bundle_code} for ERPNext item: {item_code}")
+def _process_bundle_item(
+	item_code, qty, rate, pos_profile, logger, selected_items=None, price_list=None, item_data=None
+):
+	"""Process a bundle item."""
+	print(f"      🎁 BUNDLE DETECTED: {item_code}")
+	print(f"      🔌 Processing bundle using ERPNext item: {item_code}")
 
-        target_bundle_price = None
-        if isinstance(item_data, dict):
-            target_bundle_price = item_data.get("custom_rate_override")
-            if not _pricing_field_provided(target_bundle_price):
-                target_bundle_price = item_data.get("price_list_rate")
-        if not _pricing_field_provided(target_bundle_price):
-            target_bundle_price = rate
+	try:
+		# Validate bundle configuration using ERPNext item code
+		is_valid, message, bundle_code = validate_bundle_configuration_by_item(item_code)
+		if not is_valid:
+			error_msg = f"Bundle validation failed for ERPNext item {item_code}: {message}"
+			logger.warning(error_msg)  # pre-throw: see _exception_detail note on log levels
+			print(f"      ❌ {error_msg}")
+			frappe.throw(error_msg)
 
-        # FIX 2 (bundle half): the two reads above come straight from the RAW
-        # item_data dict, so they bypass the caller's rate validation entirely --
-        # a negative custom_rate_override or price_list_rate on a bundle line
-        # reached BundleProcessor unchecked, and process_bundle_for_invoice has
-        # no non-negative guard of its own. Validate here, where the value is
-        # actually chosen.
-        try:
-            target_bundle_price = float(target_bundle_price)
-        except (TypeError, ValueError):
-            frappe.throw(
-                f"Invalid bundle price for '{item_code}': {target_bundle_price}"
-            )
-        if target_bundle_price < 0:
-            frappe.throw(f"Bundle price for '{item_code}' must be non-negative")
+		print(f"      ✅ Found bundle: {bundle_code} for ERPNext item: {item_code}")
 
-        # Process bundle using ERPNext item code (not bundle record ID)
-        bundle_items = process_bundle_for_invoice(
-            item_code,
-            qty,
-            selected_items=selected_items,
-            price_list=price_list,
-            target_bundle_price=target_bundle_price,
-        )
-        print(f"      ✅ Bundle processed: {len(bundle_items)} items added")
-        return bundle_items
-    except Exception as bundle_error:
-        error_msg = f"Error processing bundle with ERPNext item {item_code}: {_exception_detail(bundle_error)}"
-        logger.warning(error_msg)  # pre-throw: see _exception_detail note on log levels
-        print(f"      ❌ {error_msg}")
-        frappe.throw(error_msg)
+		target_bundle_price = None
+		if isinstance(item_data, dict):
+			target_bundle_price = item_data.get("custom_rate_override")
+			if not _pricing_field_provided(target_bundle_price):
+				target_bundle_price = item_data.get("price_list_rate")
+		if not _pricing_field_provided(target_bundle_price):
+			target_bundle_price = rate
+
+		# FIX 2 (bundle half): the two reads above come straight from the RAW
+		# item_data dict, so they bypass the caller's rate validation entirely --
+		# a negative custom_rate_override or price_list_rate on a bundle line
+		# reached BundleProcessor unchecked, and process_bundle_for_invoice has
+		# no non-negative guard of its own. Validate here, where the value is
+		# actually chosen.
+		try:
+			target_bundle_price = float(target_bundle_price)
+		except (TypeError, ValueError):
+			frappe.throw(f"Invalid bundle price for '{item_code}': {target_bundle_price}")
+		if target_bundle_price < 0:
+			frappe.throw(f"Bundle price for '{item_code}' must be non-negative")
+
+		# Process bundle using ERPNext item code (not bundle record ID)
+		bundle_items = process_bundle_for_invoice(
+			item_code,
+			qty,
+			selected_items=selected_items,
+			price_list=price_list,
+			target_bundle_price=target_bundle_price,
+		)
+		print(f"      ✅ Bundle processed: {len(bundle_items)} items added")
+		return bundle_items
+	except Exception as bundle_error:
+		error_msg = (
+			f"Error processing bundle with ERPNext item {item_code}: {_exception_detail(bundle_error)}"
+		)
+		logger.warning(error_msg)  # pre-throw: see _exception_detail note on log levels
+		print(f"      ❌ {error_msg}")
+		frappe.throw(error_msg)
 
 
 def _process_regular_item(
-    item_data,
-    logger,
-    price_list=None,
-    customer=None,
-    enforce_price_list_pricing=False,
-    free_of_charge_order=False,
-    pricing_date=None,
-    apply_deals=False,
+	item_data,
+	logger,
+	price_list=None,
+	customer=None,
+	enforce_price_list_pricing=False,
+	free_of_charge_order=False,
+	pricing_date=None,
+	apply_deals=False,
 ):
-    """Process a regular item."""
-    item_code = item_data.get("item_code")
-    qty = item_data.get("qty", 1)
-    provided_list_rate = item_data.get("price_list_rate")
-    rate = (
-        provided_list_rate
-        if provided_list_rate not in (None, "")
-        else item_data.get("rate", 0)
-    )
-    print(f"      📦 REGULAR ITEM: {item_code}")
+	"""Process a regular item."""
+	item_code = item_data.get("item_code")
+	qty = item_data.get("qty", 1)
+	provided_list_rate = item_data.get("price_list_rate")
+	rate = provided_list_rate if provided_list_rate not in (None, "") else item_data.get("rate", 0)
+	print(f"      📦 REGULAR ITEM: {item_code}")
 
-    # FIX 2: _process_cart_items only clamps its OWN local qty/rate; this path is
-    # handed the raw item_data dict and re-reads qty/rate straight from it (see
-    # above), which used to bypass those clamps entirely — a `qty: -1` or a
-    # negative `price_list_rate` sailed straight onto a submitted invoice. Reject
-    # outright instead of clamping: a silent clamp is exactly how a wrong number
-    # reaches a submitted invoice unnoticed.
-    try:
-        qty_value = float(qty)
-    except (TypeError, ValueError):
-        frappe.throw(f"Invalid quantity for item '{item_code}': {qty}")
-    if qty_value <= 0:
-        frappe.throw(f"Quantity for item '{item_code}' must be greater than zero")
-    qty = qty_value
+	# FIX 2: _process_cart_items only clamps its OWN local qty/rate; this path is
+	# handed the raw item_data dict and re-reads qty/rate straight from it (see
+	# above), which used to bypass those clamps entirely — a `qty: -1` or a
+	# negative `price_list_rate` sailed straight onto a submitted invoice. Reject
+	# outright instead of clamping: a silent clamp is exactly how a wrong number
+	# reaches a submitted invoice unnoticed.
+	try:
+		qty_value = float(qty)
+	except (TypeError, ValueError):
+		frappe.throw(f"Invalid quantity for item '{item_code}': {qty}")
+	if qty_value <= 0:
+		frappe.throw(f"Quantity for item '{item_code}' must be greater than zero")
+	qty = qty_value
 
-    if provided_list_rate not in (None, ""):
-        try:
-            provided_list_rate_value = float(provided_list_rate)
-        except (TypeError, ValueError):
-            frappe.throw(
-                f"Invalid price_list_rate for item '{item_code}': {provided_list_rate}"
-            )
-        if provided_list_rate_value < 0:
-            frappe.throw(f"Price list rate for item '{item_code}' must be non-negative")
+	if provided_list_rate not in (None, ""):
+		try:
+			provided_list_rate_value = float(provided_list_rate)
+		except (TypeError, ValueError):
+			frappe.throw(f"Invalid price_list_rate for item '{item_code}': {provided_list_rate}")
+		if provided_list_rate_value < 0:
+			frappe.throw(f"Price list rate for item '{item_code}' must be non-negative")
 
-    try:
-        rate_value = float(rate)
-    except (TypeError, ValueError):
-        frappe.throw(f"Invalid rate for item '{item_code}': {rate}")
-    if rate_value < 0:
-        frappe.throw(f"Rate for item '{item_code}' must be non-negative")
-    rate = rate_value
+	try:
+		rate_value = float(rate)
+	except (TypeError, ValueError):
+		frappe.throw(f"Invalid rate for item '{item_code}': {rate}")
+	if rate_value < 0:
+		frappe.throw(f"Rate for item '{item_code}' must be non-negative")
+	rate = rate_value
 
-    # Validate regular item exists
-    if not frappe.db.exists("Item", item_code):
-        error_msg = f"Item '{item_code}' does not exist"
-        logger.warning(error_msg)  # pre-throw: see _exception_detail note on log levels
-        print(f"         ❌ {error_msg}")
-        frappe.throw(error_msg)
+	# Validate regular item exists
+	if not frappe.db.exists("Item", item_code):
+		error_msg = f"Item '{item_code}' does not exist"
+		logger.warning(error_msg)  # pre-throw: see _exception_detail note on log levels
+		print(f"         ❌ {error_msg}")
+		frappe.throw(error_msg)
 
-    # Get item details for regular item
-    try:
-        item_doc = frappe.get_doc("Item", item_code)
-        logger.debug(f"Item validated: {item_doc.item_name}")
-        print(f"         ✅ {item_doc.item_name} (UOM: {item_doc.stock_uom})")
+	# Get item details for regular item
+	try:
+		item_doc = frappe.get_doc("Item", item_code)
+		logger.debug(f"Item validated: {item_doc.item_name}")
+		print(f"         ✅ {item_doc.item_name} (UOM: {item_doc.stock_uom})")
 
-        catalog_rate, rate_provenance = _resolve_item_rate_with_provenance(
-            item_code,
-            price_list,
-            fallback_rate=rate,
-            customer=customer,
-            on_date=pricing_date,
-            include_deals=apply_deals,
-        )
-        custom_rate_override = item_data.get("custom_rate_override")
-        custom_rate_provided = _pricing_field_provided(custom_rate_override)
-        effective_price_list_rate = float(catalog_rate)
-        client_priced = False
-        if custom_rate_provided:
-            custom_rate_override = float(custom_rate_override)
-            if custom_rate_override < 0:
-                frappe.throw(f"Custom rate override for item '{item_code}' must be non-negative")
-            effective_price_list_rate = custom_rate_override
-        elif rate_provenance == "client":
-            # FIX 3: nothing server-side (this customer's Item Price, a generic Item
-            # Price, or a category rate) backed this rate — it is whatever the client
-            # sent. A matched, sub-100%-discount commercial policy already requires
-            # price-list coverage for exactly this item
-            # (_validate_policy_price_list_coverage); reaching "client" provenance
-            # anyway means that guard was bypassed, so refuse instead of silently
-            # booking the client's own number. A Standard (non-policy) order has
-            # always priced this way — allowed, but a breadcrumb is left.
-            if enforce_price_list_pricing:
-                frappe.throw(
-                    f"Item '{item_code}' has no price configured in price list "
-                    f"'{price_list}' (generic, category, or for this customer), and "
-                    f"no manual rate override was supplied. Add an Item Price / "
-                    f"category rate for this item, or apply an explicit rate override."
-                )
-            if (
-                str(item_doc.item_group or "") in PRICE_LIST_ONLY_ITEM_GROUPS
-                and not free_of_charge_order
-            ):
-                frappe.throw(
-                    f"'{item_code}' is sold only through a price list that prices it "
-                    f"(the B2B list does), and price list '{price_list}' has no price "
-                    f"for it. Place it as a B2B Supply order, or apply an explicit "
-                    f"rate override."
-                )
-            client_priced = True
+		catalog_rate, rate_provenance = _resolve_item_rate_with_provenance(
+			item_code,
+			price_list,
+			fallback_rate=rate,
+			customer=customer,
+			on_date=pricing_date,
+			include_deals=apply_deals,
+		)
+		custom_rate_override = item_data.get("custom_rate_override")
+		custom_rate_provided = _pricing_field_provided(custom_rate_override)
+		effective_price_list_rate = float(catalog_rate)
+		client_priced = False
+		if custom_rate_provided:
+			custom_rate_override = float(custom_rate_override)
+			if custom_rate_override < 0:
+				frappe.throw(f"Custom rate override for item '{item_code}' must be non-negative")
+			effective_price_list_rate = custom_rate_override
+		elif rate_provenance == "client":
+			# FIX 3: nothing server-side (this customer's Item Price, a generic Item
+			# Price, or a category rate) backed this rate — it is whatever the client
+			# sent. A matched, sub-100%-discount commercial policy already requires
+			# price-list coverage for exactly this item
+			# (_validate_policy_price_list_coverage); reaching "client" provenance
+			# anyway means that guard was bypassed, so refuse instead of silently
+			# booking the client's own number. A Standard (non-policy) order has
+			# always priced this way — allowed, but a breadcrumb is left.
+			if enforce_price_list_pricing:
+				frappe.throw(
+					f"Item '{item_code}' has no price configured in price list "
+					f"'{price_list}' (generic, category, or for this customer), and "
+					f"no manual rate override was supplied. Add an Item Price / "
+					f"category rate for this item, or apply an explicit rate override."
+				)
+			if str(item_doc.item_group or "") in PRICE_LIST_ONLY_ITEM_GROUPS and not free_of_charge_order:
+				frappe.throw(
+					f"'{item_code}' is sold only through a price list that prices it "
+					f"(the B2B list does), and price list '{price_list}' has no price "
+					f"for it. Place it as a B2B Supply order, or apply an explicit "
+					f"rate override."
+				)
+			client_priced = True
 
-        discount_percentage = item_data.get("discount_percentage")
-        if _pricing_field_provided(discount_percentage):
-            discount_percentage = float(discount_percentage)
-            if discount_percentage < 0 or discount_percentage > 100:
-                frappe.throw(f"Discount percentage for item '{item_code}' must be between 0 and 100")
+		discount_percentage = item_data.get("discount_percentage")
+		if _pricing_field_provided(discount_percentage):
+			discount_percentage = float(discount_percentage)
+			if discount_percentage < 0 or discount_percentage > 100:
+				frappe.throw(f"Discount percentage for item '{item_code}' must be between 0 and 100")
 
-        discount_amount = item_data.get("discount_amount")
-        if _pricing_field_provided(discount_amount):
-            discount_amount = float(discount_amount)
-            if discount_amount < 0:
-                frappe.throw(f"Discount amount for item '{item_code}' must be non-negative")
-            if effective_price_list_rate > 0 and discount_amount > effective_price_list_rate:
-                frappe.throw(
-                    f"Discount amount for item '{item_code}' cannot exceed the effective unit price"
-                )
+		discount_amount = item_data.get("discount_amount")
+		if _pricing_field_provided(discount_amount):
+			discount_amount = float(discount_amount)
+			if discount_amount < 0:
+				frappe.throw(f"Discount amount for item '{item_code}' must be non-negative")
+			if effective_price_list_rate > 0 and discount_amount > effective_price_list_rate:
+				frappe.throw(f"Discount amount for item '{item_code}' cannot exceed the effective unit price")
 
-        result = {
-            "item_code": item_code,
-            "qty": float(qty),
-            "rate": float(effective_price_list_rate),
-            "price_list_rate": float(effective_price_list_rate),
-            "uom": item_data.get("uom") or item_doc.stock_uom,
-            "is_bundle_item": False,
-        }
-        if custom_rate_provided:
-            result["custom_rate_override"] = float(custom_rate_override)
-            result["original_price_list_rate"] = float(catalog_rate)
-        if _pricing_field_provided(discount_percentage):
-            result["discount_percentage"] = float(discount_percentage)
-        if _pricing_field_provided(discount_amount):
-            result["discount_amount"] = float(discount_amount)
-        if client_priced:
-            result["_client_priced"] = True
-        if rate_provenance == "deal" and not custom_rate_provided:
-            deal = _customer_deals.find_deal_rate(customer, item_code, on_date=pricing_date)
-            if deal:
-                result["_deal"] = deal[1]
+		result = {
+			"item_code": item_code,
+			"qty": float(qty),
+			"rate": float(effective_price_list_rate),
+			"price_list_rate": float(effective_price_list_rate),
+			"uom": item_data.get("uom") or item_doc.stock_uom,
+			"is_bundle_item": False,
+		}
+		if custom_rate_provided:
+			result["custom_rate_override"] = float(custom_rate_override)
+			result["original_price_list_rate"] = float(catalog_rate)
+		if _pricing_field_provided(discount_percentage):
+			result["discount_percentage"] = float(discount_percentage)
+		if _pricing_field_provided(discount_amount):
+			result["discount_amount"] = float(discount_amount)
+		if client_priced:
+			result["_client_priced"] = True
+		if rate_provenance == "deal" and not custom_rate_provided:
+			deal = _customer_deals.find_deal_rate(customer, item_code, on_date=pricing_date)
+			if deal:
+				result["_deal"] = deal[1]
 
-        return result
-    except Exception as e:
-        error_msg = f"Error loading item '{item_code}': {_exception_detail(e)}"
-        logger.warning(error_msg)  # pre-throw: see _exception_detail note on log levels
-        print(f"         ❌ {error_msg}")
-        frappe.throw(error_msg)
+		return result
+	except Exception as e:
+		error_msg = f"Error loading item '{item_code}': {_exception_detail(e)}"
+		logger.warning(error_msg)  # pre-throw: see _exception_detail note on log levels
+		print(f"         ❌ {error_msg}")
+		frappe.throw(error_msg)
 
 
 def _log_processing_summary(processed_items, logger):
-    """Log a detailed summary of processed items."""
-    print(f"   ✅ Processing complete: {len(processed_items)} total items (including bundle items)")
-    
-    # Log summary of processed items
-    bundle_items_count = len([item for item in processed_items if item.get("is_bundle_item", False)])
-    regular_items_count = len(processed_items) - bundle_items_count
-    print(f"      - Regular items: {regular_items_count}")
-    print(f"      - Bundle items: {bundle_items_count}")
-    
-    # CRITICAL DEBUG: List all processed items before moving to validation
-    print(f"   🔍 ALL PROCESSED ITEMS DETAILS:")
-    total_main_items = 0
-    total_child_items = 0
-    total_regular_items = 0
-    
-    for i, item in enumerate(processed_items, 1):
-        bundle_type = item.get("bundle_type", "N/A")
-        is_bundle = item.get("is_bundle_item", False)
-        discount = item.get("discount_amount", 0)
-        rate = item.get("rate", item.get("price_list_rate", 0))  # Fix: fallback to price_list_rate if rate missing
-        
-        # Count items by type
-        if bundle_type == "main":
-            total_main_items += 1
-        elif bundle_type == "child":
-            total_child_items += 1
-        elif not is_bundle:
-            total_regular_items += 1
-        
-        print(f"      Processed Item {i}: {item['item_code']} - Bundle: {is_bundle}, Type: {bundle_type}, Qty: {item['qty']}, Rate: {rate}, Discount: ${discount}")
-    
-    print(f"   📊 PROCESSING SUMMARY:")
-    print(f"      - Total processed items: {len(processed_items)}")
-    print(f"      - Regular items: {total_regular_items}")
-    print(f"      - Bundle main items: {total_main_items}")
-    print(f"      - Bundle child items: {total_child_items}")
-    
-    # Validation: Ensure we have the expected structure
-    expected_items_in_invoice = total_regular_items + total_main_items + total_child_items
-    print(f"      - Expected items in final invoice: {expected_items_in_invoice}")
-    
-    if len(processed_items) != expected_items_in_invoice:
-        print(f"      ⚠️ WARNING: Item count mismatch!")
-    else:
-        print(f"      ✅ Item counts match expected structure")
+	"""Log a detailed summary of processed items."""
+	print(f"   ✅ Processing complete: {len(processed_items)} total items (including bundle items)")
+
+	# Log summary of processed items
+	bundle_items_count = len([item for item in processed_items if item.get("is_bundle_item", False)])
+	regular_items_count = len(processed_items) - bundle_items_count
+	print(f"      - Regular items: {regular_items_count}")
+	print(f"      - Bundle items: {bundle_items_count}")
+
+	# CRITICAL DEBUG: List all processed items before moving to validation
+	print(f"   🔍 ALL PROCESSED ITEMS DETAILS:")
+	total_main_items = 0
+	total_child_items = 0
+	total_regular_items = 0
+
+	for i, item in enumerate(processed_items, 1):
+		bundle_type = item.get("bundle_type", "N/A")
+		is_bundle = item.get("is_bundle_item", False)
+		discount = item.get("discount_amount", 0)
+		rate = item.get(
+			"rate", item.get("price_list_rate", 0)
+		)  # Fix: fallback to price_list_rate if rate missing
+
+		# Count items by type
+		if bundle_type == "main":
+			total_main_items += 1
+		elif bundle_type == "child":
+			total_child_items += 1
+		elif not is_bundle:
+			total_regular_items += 1
+
+		print(
+			f"      Processed Item {i}: {item['item_code']} - Bundle: {is_bundle}, Type: {bundle_type}, Qty: {item['qty']}, Rate: {rate}, Discount: ${discount}"
+		)
+
+	print(f"   📊 PROCESSING SUMMARY:")
+	print(f"      - Total processed items: {len(processed_items)}")
+	print(f"      - Regular items: {total_regular_items}")
+	print(f"      - Bundle main items: {total_main_items}")
+	print(f"      - Bundle child items: {total_child_items}")
+
+	# Validation: Ensure we have the expected structure
+	expected_items_in_invoice = total_regular_items + total_main_items + total_child_items
+	print(f"      - Expected items in final invoice: {expected_items_in_invoice}")
+
+	if len(processed_items) != expected_items_in_invoice:
+		print(f"      ⚠️ WARNING: Item count mismatch!")
+	else:
+		print(f"      ✅ Item counts match expected structure")
 
 
 def _create_invoice_document(logger):
-    """Create a new Sales Invoice document."""
-    logger.debug("Creating new Sales Invoice document")
-    try:
-        # Frappe best practice: Use frappe.new_doc()
-        invoice_doc = frappe.new_doc("Sales Invoice")
-        logger.debug("Sales Invoice document created")
-        print(f"   ✅ New document created")
-        return invoice_doc
-    except Exception as e:
-        error_msg = f"Error creating Sales Invoice document: {_exception_detail(e)}"
-        logger.warning(error_msg)  # pre-throw: see _exception_detail note on log levels
-        print(f"   ❌ {error_msg}")
-        frappe.throw(error_msg)
+	"""Create a new Sales Invoice document."""
+	logger.debug("Creating new Sales Invoice document")
+	try:
+		# Frappe best practice: Use frappe.new_doc()
+		invoice_doc = frappe.new_doc("Sales Invoice")
+		logger.debug("Sales Invoice document created")
+		print(f"   ✅ New document created")
+		return invoice_doc
+	except Exception as e:
+		error_msg = f"Error creating Sales Invoice document: {_exception_detail(e)}"
+		logger.warning(error_msg)  # pre-throw: see _exception_detail note on log levels
+		print(f"   ❌ {error_msg}")
+		frappe.throw(error_msg)
 
 
 _RESOLVED_PRICING_FLAG = "jarz_resolved_item_pricing"
 
 
 def _capture_resolved_item_pricing(invoice_doc):
-    return [
-        {
-            "item_code": item.item_code,
-            "price_list_rate": float(getattr(item, "price_list_rate", 0) or 0),
-            "discount_percentage": float(
-                getattr(item, "discount_percentage", 0) or 0
-            ),
-        }
-        for item in invoice_doc.items
-    ]
+	return [
+		{
+			"item_code": item.item_code,
+			"price_list_rate": float(getattr(item, "price_list_rate", 0) or 0),
+			"discount_percentage": float(getattr(item, "discount_percentage", 0) or 0),
+		}
+		for item in invoice_doc.items
+	]
 
 
 def _attach_resolved_item_pricing(invoice_doc, pricing=None):
-    pricing = pricing or _capture_resolved_item_pricing(invoice_doc)
-    flags = getattr(invoice_doc, "flags", None)
-    if flags is None:
-        flags = frappe._dict()
-        invoice_doc.flags = flags
-    setattr(flags, _RESOLVED_PRICING_FLAG, pricing)
-    return pricing
+	pricing = pricing or _capture_resolved_item_pricing(invoice_doc)
+	flags = getattr(invoice_doc, "flags", None)
+	if flags is None:
+		flags = frappe._dict()
+		invoice_doc.flags = flags
+	setattr(flags, _RESOLVED_PRICING_FLAG, pricing)
+	return pricing
 
 
 def _restore_resolved_item_pricing(invoice_doc, pricing):
-    if len(invoice_doc.items) != len(pricing):
-        frappe.throw("Invoice items changed while preserving resolved pricing")
+	if len(invoice_doc.items) != len(pricing):
+		frappe.throw("Invoice items changed while preserving resolved pricing")
 
-    for item, resolved in zip(invoice_doc.items, pricing, strict=True):
-        if item.item_code != resolved["item_code"]:
-            frappe.throw("Invoice item order changed while preserving resolved pricing")
-        price_list_rate = resolved["price_list_rate"]
-        discount_percentage = resolved["discount_percentage"]
-        item.price_list_rate = price_list_rate
-        item.discount_percentage = discount_percentage
-        item.rate = price_list_rate * (1 - discount_percentage / 100.0)
+	for item, resolved in zip(invoice_doc.items, pricing, strict=True):
+		if item.item_code != resolved["item_code"]:
+			frappe.throw("Invoice item order changed while preserving resolved pricing")
+		price_list_rate = resolved["price_list_rate"]
+		discount_percentage = resolved["discount_percentage"]
+		item.price_list_rate = price_list_rate
+		item.discount_percentage = discount_percentage
+		item.rate = price_list_rate * (1 - discount_percentage / 100.0)
 
 
 def restore_resolved_item_pricing_on_validate(doc, method=None):
-    """Restore Jarz-resolved pricing after the Sales Invoice controller validates."""
-    pricing = getattr(doc.flags, _RESOLVED_PRICING_FLAG, None)
-    if not pricing:
-        return
-    _restore_resolved_item_pricing(doc, pricing)
-    doc.calculate_taxes_and_totals()
+	"""Restore Jarz-resolved pricing after the Sales Invoice controller validates."""
+	pricing = getattr(doc.flags, _RESOLVED_PRICING_FLAG, None)
+	if not pricing:
+		return
+	_restore_resolved_item_pricing(doc, pricing)
+	doc.calculate_taxes_and_totals()
 
 
 def _validate_and_calculate_document(invoice_doc, logger):
-    """Validate and calculate document totals using native ERPNext logic."""
-    logger.debug("Running ERPNext document validation (native discount logic)...")
-    try:
-        print(f"   📋 Pre-calculation item summary:")
-        for idx, item in enumerate(invoice_doc.items, 1):
-            price_list_rate = getattr(item, 'price_list_rate', 0) or 0
-            discount_pct = getattr(item, 'discount_percentage', 0) or 0
-            qty = getattr(item, 'qty', 0) or 0
-            print(f"      {idx}. {item.item_code} | qty={qty} | price_list_rate={price_list_rate} | discount_pct={discount_pct}")
+	"""Validate and calculate document totals using native ERPNext logic."""
+	logger.debug("Running ERPNext document validation (native discount logic)...")
+	try:
+		print(f"   📋 Pre-calculation item summary:")
+		for idx, item in enumerate(invoice_doc.items, 1):
+			price_list_rate = getattr(item, "price_list_rate", 0) or 0
+			discount_pct = getattr(item, "discount_percentage", 0) or 0
+			qty = getattr(item, "qty", 0) or 0
+			print(
+				f"      {idx}. {item.item_code} | qty={qty} | price_list_rate={price_list_rate} | discount_pct={discount_pct}"
+			)
 
-        # ``set_missing_values`` asks ERPNext's Item Price resolver to populate
-        # every line again. Jarz category/customer rates do not necessarily have
-        # a matching Item Price row, so v16 can replace an already resolved rate
-        # with zero. Preserve the pricing decision made while processing the cart,
-        # including bundle and operator discounts, across that native defaults pass.
-        resolved_pricing = _attach_resolved_item_pricing(invoice_doc)
+		# ``set_missing_values`` asks ERPNext's Item Price resolver to populate
+		# every line again. Jarz category/customer rates do not necessarily have
+		# a matching Item Price row, so v16 can replace an already resolved rate
+		# with zero. Preserve the pricing decision made while processing the cart,
+		# including bundle and operator discounts, across that native defaults pass.
+		resolved_pricing = _attach_resolved_item_pricing(invoice_doc)
 
-        print(f"   Running set_missing_values()...")
-        invoice_doc.set_missing_values()
+		print(f"   Running set_missing_values()...")
+		invoice_doc.set_missing_values()
 
-        _restore_resolved_item_pricing(invoice_doc, resolved_pricing)
+		_restore_resolved_item_pricing(invoice_doc, resolved_pricing)
 
-        print(f"   Running calculate_taxes_and_totals()...")
-        invoice_doc.calculate_taxes_and_totals()
+		print(f"   Running calculate_taxes_and_totals()...")
+		invoice_doc.calculate_taxes_and_totals()
 
-        _log_discount_diagnostics_final(invoice_doc)
+		_log_discount_diagnostics_final(invoice_doc)
 
-        logger.debug(f"Document validated - Total: {invoice_doc.grand_total}")
-        print(f"   ✅ Document validated:")
-        print(f"      - Net Total: {invoice_doc.net_total}")
-        print(f"      - Grand Total: {invoice_doc.grand_total}")
-    except Exception as e:
-        error_msg = f"Error during document validation: {_exception_detail(e)}"
-        logger.warning(error_msg)  # pre-throw: see _exception_detail note on log levels
-        print(f"   ❌ {error_msg}")
-        frappe.throw(error_msg)
+		logger.debug(f"Document validated - Total: {invoice_doc.grand_total}")
+		print(f"   ✅ Document validated:")
+		print(f"      - Net Total: {invoice_doc.net_total}")
+		print(f"      - Grand Total: {invoice_doc.grand_total}")
+	except Exception as e:
+		error_msg = f"Error during document validation: {_exception_detail(e)}"
+		logger.warning(error_msg)  # pre-throw: see _exception_detail note on log levels
+		print(f"   ❌ {error_msg}")
+		frappe.throw(error_msg)
 
 
 def _log_discount_diagnostics_final(invoice_doc):
-    """Log final discount application after ERPNext processing."""
-    print(f"   🔍 FINAL DISCOUNT DIAGNOSTICS (after ERPNext processing):")
-    total_discount_amount = 0.0
-    total_net_amount = 0.0
-    
-    for idx, item in enumerate(invoice_doc.items, 1):
-        discount_amt = float(getattr(item, 'discount_amount', 0) or 0)
-        disc_pct = float(getattr(item, 'discount_percentage', 0) or 0)
-        qty = float(item.qty or 0)
-        rate = float(item.rate or 0)
-        amount = float(item.amount or 0)
-        price_list_rate = float(getattr(item, 'price_list_rate', 0) or 0)
-        
-        # ERPNext computed values
-        line_gross = price_list_rate * qty if price_list_rate > 0 else rate * qty
-        line_discount_total = discount_amt * qty if discount_amt > 0 else (line_gross * disc_pct / 100.0)
-        
-        total_discount_amount += line_discount_total
-        total_net_amount += amount
-        
-        print(f"      {idx}. {item.item_code}:")
-        print(f"         qty={qty} | price_list_rate={price_list_rate} | rate={rate} | amount={amount}")
-        print(f"         discount_pct={disc_pct}% | discount_amt={discount_amt} | line_discount_total={line_discount_total}")
-        
-        # Validation: check if ERPNext computed correctly
-        if disc_pct == 100:
-            expected_rate = 0.0
-            if abs(rate - expected_rate) > 0.01:
-                print(f"         ⚠️ Expected rate=0 for 100% discount, got rate={rate}")
-        elif price_list_rate > 0 and disc_pct > 0:
-            expected_rate = price_list_rate * (1 - disc_pct/100)
-            if abs(rate - expected_rate) > 0.01:
-                print(f"         ⚠️ Expected rate={expected_rate}, got rate={rate}")
-    
-    print(f"   💰 FINAL TOTALS:")
-    print(f"      - Total discount applied: {total_discount_amount}")
-    print(f"      - Net amount (sum of line amounts): {total_net_amount}")
-    print(f"      - Document net_total: {invoice_doc.net_total}")
-    print(f"      - Document grand_total: {invoice_doc.grand_total}")
-    
-    # Verify net total matches sum of line amounts
-    if abs(total_net_amount - float(invoice_doc.net_total)) > 0.01:
-        print(f"      ⚠️ Net total mismatch! Line sum: {total_net_amount}, Doc total: {invoice_doc.net_total}")
-    else:
-        print(f"      ✅ Net total verified correctly")
+	"""Log final discount application after ERPNext processing."""
+	print(f"   🔍 FINAL DISCOUNT DIAGNOSTICS (after ERPNext processing):")
+	total_discount_amount = 0.0
+	total_net_amount = 0.0
+
+	for idx, item in enumerate(invoice_doc.items, 1):
+		discount_amt = float(getattr(item, "discount_amount", 0) or 0)
+		disc_pct = float(getattr(item, "discount_percentage", 0) or 0)
+		qty = float(item.qty or 0)
+		rate = float(item.rate or 0)
+		amount = float(item.amount or 0)
+		price_list_rate = float(getattr(item, "price_list_rate", 0) or 0)
+
+		# ERPNext computed values
+		line_gross = price_list_rate * qty if price_list_rate > 0 else rate * qty
+		line_discount_total = discount_amt * qty if discount_amt > 0 else (line_gross * disc_pct / 100.0)
+
+		total_discount_amount += line_discount_total
+		total_net_amount += amount
+
+		print(f"      {idx}. {item.item_code}:")
+		print(f"         qty={qty} | price_list_rate={price_list_rate} | rate={rate} | amount={amount}")
+		print(
+			f"         discount_pct={disc_pct}% | discount_amt={discount_amt} | line_discount_total={line_discount_total}"
+		)
+
+		# Validation: check if ERPNext computed correctly
+		if disc_pct == 100:
+			expected_rate = 0.0
+			if abs(rate - expected_rate) > 0.01:
+				print(f"         ⚠️ Expected rate=0 for 100% discount, got rate={rate}")
+		elif price_list_rate > 0 and disc_pct > 0:
+			expected_rate = price_list_rate * (1 - disc_pct / 100)
+			if abs(rate - expected_rate) > 0.01:
+				print(f"         ⚠️ Expected rate={expected_rate}, got rate={rate}")
+
+	print(f"   💰 FINAL TOTALS:")
+	print(f"      - Total discount applied: {total_discount_amount}")
+	print(f"      - Net amount (sum of line amounts): {total_net_amount}")
+	print(f"      - Document net_total: {invoice_doc.net_total}")
+	print(f"      - Document grand_total: {invoice_doc.grand_total}")
+
+	# Verify net total matches sum of line amounts
+	if abs(total_net_amount - float(invoice_doc.net_total)) > 0.01:
+		print(f"      ⚠️ Net total mismatch! Line sum: {total_net_amount}, Doc total: {invoice_doc.net_total}")
+	else:
+		print(f"      ✅ Net total verified correctly")
 
 
 def _save_document(invoice_doc, delivery_datetime, logger, delivery_end_datetime=None):
-    """Save the invoice document."""
-    logger.debug("Saving document")
-    try:
-        # Set new delivery slot fields before insert if delivery datetime provided
-        if delivery_datetime:
-            _apply_delivery_slot_fields(
-                invoice_doc, delivery_datetime, delivery_end_datetime
-            )
+	"""Save the invoice document."""
+	logger.debug("Saving document")
+	try:
+		# Set new delivery slot fields before insert if delivery datetime provided
+		if delivery_datetime:
+			_apply_delivery_slot_fields(invoice_doc, delivery_datetime, delivery_end_datetime)
 
-        # Frappe best practice: Use insert() for new documents
-        invoice_doc.insert(ignore_permissions=True)
-        logger.info(f"Invoice saved: {invoice_doc.name}")
-        print(f"   ✅ Document saved: {invoice_doc.name}")
-        
-        # Verify delivery datetime field after save
-        if delivery_datetime:
-            _verify_delivery_field_after_save(
-                invoice_doc, delivery_datetime, logger, delivery_end_datetime
-            )
-            
-    except Exception as e:
-        error_msg = f"Error saving document: {_exception_detail(e)}"
-        logger.warning(error_msg)  # pre-throw: see _exception_detail note on log levels
-        print(f"   ❌ {error_msg}")
-        frappe.throw(error_msg)
+		# Frappe best practice: Use insert() for new documents
+		invoice_doc.insert(ignore_permissions=True)
+		logger.info(f"Invoice saved: {invoice_doc.name}")
+		print(f"   ✅ Document saved: {invoice_doc.name}")
+
+		# Verify delivery datetime field after save
+		if delivery_datetime:
+			_verify_delivery_field_after_save(invoice_doc, delivery_datetime, logger, delivery_end_datetime)
+
+	except Exception as e:
+		error_msg = f"Error saving document: {_exception_detail(e)}"
+		logger.warning(error_msg)  # pre-throw: see _exception_detail note on log levels
+		print(f"   ❌ {error_msg}")
+		frappe.throw(error_msg)
 
 
-def _verify_delivery_field_after_save(
-    invoice_doc, delivery_datetime, logger, delivery_end_datetime=None
-):
-    """Verify delivery slot fields were set correctly after save."""
-    print(f"\n🔍 DELIVERY SLOT VERIFICATION AFTER SAVE:")
-    resolved_pricing = _capture_resolved_item_pricing(invoice_doc)
-    # Reload document to get fresh state from database
-    invoice_doc.reload()
-    _attach_resolved_item_pricing(invoice_doc, resolved_pricing)
+def _verify_delivery_field_after_save(invoice_doc, delivery_datetime, logger, delivery_end_datetime=None):
+	"""Verify delivery slot fields were set correctly after save."""
+	print(f"\n🔍 DELIVERY SLOT VERIFICATION AFTER SAVE:")
+	resolved_pricing = _capture_resolved_item_pricing(invoice_doc)
+	# Reload document to get fresh state from database
+	invoice_doc.reload()
+	_attach_resolved_item_pricing(invoice_doc, resolved_pricing)
 
-    # Fetch new fields
-    date_attr = getattr(invoice_doc, "custom_delivery_date", None)
-    time_from_attr = getattr(invoice_doc, "custom_delivery_time_from", None)
-    duration_attr = getattr(invoice_doc, "custom_delivery_duration", None)
+	# Fetch new fields
+	date_attr = getattr(invoice_doc, "custom_delivery_date", None)
+	time_from_attr = getattr(invoice_doc, "custom_delivery_time_from", None)
+	duration_attr = getattr(invoice_doc, "custom_delivery_duration", None)
 
-    print(f"   📊 custom_delivery_date: {date_attr}")
-    print(f"   📊 custom_delivery_time_from: {time_from_attr}")
-    print(f"   📊 custom_delivery_duration: {duration_attr}")
+	print(f"   📊 custom_delivery_date: {date_attr}")
+	print(f"   📊 custom_delivery_time_from: {time_from_attr}")
+	print(f"   📊 custom_delivery_duration: {duration_attr}")
 
-    if not (date_attr and time_from_attr and duration_attr):
-        # Attempt to apply from provided delivery_datetime again
-        try:
-            _apply_delivery_slot_fields(
-                invoice_doc, delivery_datetime, delivery_end_datetime
-            )
-            invoice_doc.save(ignore_permissions=True)
-            # Reload the document after save to sync timestamps
-            invoice_doc.reload()
-            # Reload values
-            date_attr = getattr(invoice_doc, "custom_delivery_date", None)
-            time_from_attr = getattr(invoice_doc, "custom_delivery_time_from", None)
-            duration_attr = getattr(invoice_doc, "custom_delivery_duration", None)
-            print(f"   ✅ Re-saved with delivery slot fields")
-        except Exception as correction_error:
-            print(f"   ❌ Could not set delivery slot fields: {str(correction_error)}")
-            logger.warning(f"Delivery slot fields could not be set: {str(correction_error)}")
+	if not (date_attr and time_from_attr and duration_attr):
+		# Attempt to apply from provided delivery_datetime again
+		try:
+			_apply_delivery_slot_fields(invoice_doc, delivery_datetime, delivery_end_datetime)
+			invoice_doc.save(ignore_permissions=True)
+			# Reload the document after save to sync timestamps
+			invoice_doc.reload()
+			# Reload values
+			date_attr = getattr(invoice_doc, "custom_delivery_date", None)
+			time_from_attr = getattr(invoice_doc, "custom_delivery_time_from", None)
+			duration_attr = getattr(invoice_doc, "custom_delivery_duration", None)
+			print(f"   ✅ Re-saved with delivery slot fields")
+		except Exception as correction_error:
+			print(f"   ❌ Could not set delivery slot fields: {str(correction_error)}")
+			logger.warning(f"Delivery slot fields could not be set: {str(correction_error)}")
 
 
 def _submit_document(invoice_doc, logger):
-    """Submit the invoice document."""
-    logger.debug("Submitting document")
-    try:
-        resolved_pricing = _capture_resolved_item_pricing(invoice_doc)
-        # Reload document to get fresh state from database
-        # Use reload() instead of get_doc() to avoid timestamp mismatch
-        invoice_doc.reload()
-        _attach_resolved_item_pricing(invoice_doc, resolved_pricing)
-        
-        # Frappe best practice: Submit after successful save
-        invoice_doc.submit()
-        logger.info(f"Invoice submitted: {invoice_doc.name}")
-        print(f"   ✅ Document submitted successfully!")
-        
-        # Verify discount amounts persisted after submission
-        verify_invoice_totals(invoice_doc, logger)
-        
-    except Exception as e:
-        error_msg = f"Error submitting document: {_exception_detail(e)}"
-        logger.warning(error_msg)  # pre-throw: see _exception_detail note on log levels
-        print(f"   ❌ {error_msg}")
-        frappe.throw(error_msg)
+	"""Submit the invoice document."""
+	logger.debug("Submitting document")
+	try:
+		resolved_pricing = _capture_resolved_item_pricing(invoice_doc)
+		# Reload document to get fresh state from database
+		# Use reload() instead of get_doc() to avoid timestamp mismatch
+		invoice_doc.reload()
+		_attach_resolved_item_pricing(invoice_doc, resolved_pricing)
+
+		# Frappe best practice: Submit after successful save
+		invoice_doc.submit()
+		logger.info(f"Invoice submitted: {invoice_doc.name}")
+		print(f"   ✅ Document submitted successfully!")
+
+		# Verify discount amounts persisted after submission
+		verify_invoice_totals(invoice_doc, logger)
+
+	except Exception as e:
+		error_msg = f"Error submitting document: {_exception_detail(e)}"
+		logger.warning(error_msg)  # pre-throw: see _exception_detail note on log levels
+		print(f"   ❌ {error_msg}")
+		frappe.throw(error_msg)
 
 
 def _prepare_response(invoice_doc, delivery_datetime, logger):
-    """Prepare the response data."""
-    # Detect if tax suppression was applied (flag set earlier) or by heuristic
-    partner_tax_suppressed = False
-    try:
-        partner_tax_suppressed = bool(getattr(getattr(invoice_doc, "flags", object()), "partner_tax_suppressed", False))
-    except Exception:
-        partner_tax_suppressed = False
-    if not partner_tax_suppressed:
-        # Heuristic: sales_partner present AND no taxes rows
-        try:
-            if getattr(invoice_doc, "sales_partner", None) and len(getattr(invoice_doc, "taxes", []) or []) == 0:
-                partner_tax_suppressed = True
-        except Exception:
-            pass
+	"""Prepare the response data."""
+	# Detect if tax suppression was applied (flag set earlier) or by heuristic
+	partner_tax_suppressed = False
+	try:
+		partner_tax_suppressed = bool(
+			getattr(getattr(invoice_doc, "flags", object()), "partner_tax_suppressed", False)
+		)
+	except Exception:
+		partner_tax_suppressed = False
+	if not partner_tax_suppressed:
+		# Heuristic: sales_partner present AND no taxes rows
+		try:
+			if (
+				getattr(invoice_doc, "sales_partner", None)
+				and len(getattr(invoice_doc, "taxes", []) or []) == 0
+			):
+				partner_tax_suppressed = True
+		except Exception:
+			pass
 
-    result = {
-        "success": True,
-        "invoice_name": invoice_doc.name,
-        "grand_total": invoice_doc.grand_total,
-        "net_total": invoice_doc.net_total,
-        "customer": invoice_doc.customer,
-        "items_count": len(invoice_doc.items),
-        "status": invoice_doc.status,
-        "docstatus": invoice_doc.docstatus,
-        "posting_date": str(invoice_doc.posting_date),
-    "company": invoice_doc.company,
-    "partner_tax_suppressed": partner_tax_suppressed,
-    }
-    
-    # Add delivery information to response if provided
-    if delivery_datetime:
-        try:
-            result["delivery_datetime"] = delivery_datetime.isoformat()
-            result["delivery_date"] = delivery_datetime.date().isoformat()
-            result["delivery_time_from"] = delivery_datetime.time().isoformat()
-            # Duration is stored in seconds; include both seconds and minutes for clients
-            dur_seconds = int(float(getattr(invoice_doc, "custom_delivery_duration", 3600) or 3600))
-            result["delivery_duration_seconds"] = dur_seconds
-            result["delivery_duration_minutes"] = int(round(dur_seconds / 60))
-            # Compute a human-readable label
-            try:
-                end_dt = frappe.utils.add_to_date(delivery_datetime, seconds=dur_seconds)
-                mins = int(round(dur_seconds / 60))
-                hrs = mins // 60
-                rem = mins % 60
-                if hrs > 0 and rem == 0:
-                    dur_label = f"{hrs}h"
-                elif hrs > 0:
-                    dur_label = f"{hrs}h {rem}m"
-                else:
-                    dur_label = f"{mins}m"
-                result["delivery_slot_label"] = f"{delivery_datetime.strftime('%I:%M %p')} - {end_dt.strftime('%I:%M %p')} ({dur_label})"
-            except Exception:
-                pass
-            result["delivery_label"] = delivery_datetime.strftime('%A, %B %d, %Y at %I:%M %p')
-            print(f"      delivery_datetime: {result['delivery_datetime']}")
-            print(f"      delivery_label: {result['delivery_label']}")
-        except Exception:
-            pass
-    
-    logger.info(f"Invoice creation successful: {invoice_doc.name}")
-    print(f"   ✅ Response prepared:")
-    for key, value in result.items():
-        print(f"      {key}: {value}")
-    
-    return result
+	result = {
+		"success": True,
+		"invoice_name": invoice_doc.name,
+		"grand_total": invoice_doc.grand_total,
+		"net_total": invoice_doc.net_total,
+		"customer": invoice_doc.customer,
+		"items_count": len(invoice_doc.items),
+		"status": invoice_doc.status,
+		"docstatus": invoice_doc.docstatus,
+		"posting_date": str(invoice_doc.posting_date),
+		"company": invoice_doc.company,
+		"partner_tax_suppressed": partner_tax_suppressed,
+	}
+
+	# Add delivery information to response if provided
+	if delivery_datetime:
+		try:
+			result["delivery_datetime"] = delivery_datetime.isoformat()
+			result["delivery_date"] = delivery_datetime.date().isoformat()
+			result["delivery_time_from"] = delivery_datetime.time().isoformat()
+			# Duration is stored in seconds; include both seconds and minutes for clients
+			dur_seconds = int(float(getattr(invoice_doc, "custom_delivery_duration", 3600) or 3600))
+			result["delivery_duration_seconds"] = dur_seconds
+			result["delivery_duration_minutes"] = int(round(dur_seconds / 60))
+			# Compute a human-readable label
+			try:
+				end_dt = frappe.utils.add_to_date(delivery_datetime, seconds=dur_seconds)
+				mins = int(round(dur_seconds / 60))
+				hrs = mins // 60
+				rem = mins % 60
+				if hrs > 0 and rem == 0:
+					dur_label = f"{hrs}h"
+				elif hrs > 0:
+					dur_label = f"{hrs}h {rem}m"
+				else:
+					dur_label = f"{mins}m"
+				result["delivery_slot_label"] = (
+					f"{delivery_datetime.strftime('%I:%M %p')} - {end_dt.strftime('%I:%M %p')} ({dur_label})"
+				)
+			except Exception:
+				pass
+			result["delivery_label"] = delivery_datetime.strftime("%A, %B %d, %Y at %I:%M %p")
+			print(f"      delivery_datetime: {result['delivery_datetime']}")
+			print(f"      delivery_label: {result['delivery_label']}")
+		except Exception:
+			pass
+
+	logger.info(f"Invoice creation successful: {invoice_doc.name}")
+	print(f"   ✅ Response prepared:")
+	for key, value in result.items():
+		print(f"      {key}: {value}")
+
+	return result
 
 
-def _maybe_register_online_payment_to_partner(invoice_doc, sales_partner: str | None, payment_type: str | None, logger):
-    """When payment_type == 'online', mark invoice paid and allocate to a Payment Entry whose paid_to is
-    the Sales Partner subaccount under Receivables. This keeps AR by sales partner while clearing customer AR.
-    """
-    if not payment_type or str(payment_type).strip().lower() != "online":
-        return
-    try:
-        # Only proceed for submitted invoices with outstanding
-        if int(invoice_doc.docstatus) != 1:
-            return
-        outstanding = float(getattr(invoice_doc, "outstanding_amount", 0) or 0)
-        if outstanding <= 0.0001:
-            return
+def _maybe_register_online_payment_to_partner(
+	invoice_doc, sales_partner: str | None, payment_type: str | None, logger
+):
+	"""When payment_type == 'online', mark invoice paid and allocate to a Payment Entry whose paid_to is
+	the Sales Partner subaccount under Receivables. This keeps AR by sales partner while clearing customer AR.
+	"""
+	if not payment_type or str(payment_type).strip().lower() != "online":
+		return
+	try:
+		# Only proceed for submitted invoices with outstanding
+		if int(invoice_doc.docstatus) != 1:
+			return
+		outstanding = float(getattr(invoice_doc, "outstanding_amount", 0) or 0)
+		if outstanding <= 0.0001:
+			return
 
-        company = invoice_doc.company
-        receivable = get_company_receivable_account(company)
+		company = invoice_doc.company
+		receivable = get_company_receivable_account(company)
 
-        # Determine destination account centrally
-        paid_to = resolve_online_partner_paid_to(company, sales_partner)
+		# Determine destination account centrally
+		paid_to = resolve_online_partner_paid_to(company, sales_partner)
 
-        try:
-            # Create Payment Entry (Receive)
-            pe = frappe.new_doc("Payment Entry")
-            pe.payment_type = "Receive"
-            pe.party_type = "Customer"
-            pe.party = invoice_doc.customer
-            pe.company = company
-            pe.posting_date = frappe.utils.today()
-            pe.mode_of_payment = None  # optional; could be set to "Online"
-            pe.paid_from = receivable
-            pe.paid_to = paid_to
-            pe.party_account = receivable
-            pe.paid_amount = outstanding
-            pe.received_amount = outstanding
-            pe.append("references", {
-                "reference_doctype": "Sales Invoice",
-                "reference_name": invoice_doc.name,
-                "due_date": getattr(invoice_doc, "due_date", None),
-                "total_amount": float(getattr(invoice_doc, "grand_total", 0) or 0),
-                "outstanding_amount": outstanding,
-                "allocated_amount": outstanding,
-            })
-            pe.flags.ignore_permissions = True
-            try:
-                pe.set_missing_values()
-            except AttributeError:
-                if not getattr(pe, 'party_account', None):
-                    pe.party_account = receivable
-            pe.insert(ignore_permissions=True)
-            pe.submit()
+		try:
+			# Create Payment Entry (Receive)
+			pe = frappe.new_doc("Payment Entry")
+			pe.payment_type = "Receive"
+			pe.party_type = "Customer"
+			pe.party = invoice_doc.customer
+			pe.company = company
+			pe.posting_date = frappe.utils.today()
+			pe.mode_of_payment = None  # optional; could be set to "Online"
+			pe.paid_from = receivable
+			pe.paid_to = paid_to
+			pe.party_account = receivable
+			pe.paid_amount = outstanding
+			pe.received_amount = outstanding
+			pe.append(
+				"references",
+				{
+					"reference_doctype": "Sales Invoice",
+					"reference_name": invoice_doc.name,
+					"due_date": getattr(invoice_doc, "due_date", None),
+					"total_amount": float(getattr(invoice_doc, "grand_total", 0) or 0),
+					"outstanding_amount": outstanding,
+					"allocated_amount": outstanding,
+				},
+			)
+			pe.flags.ignore_permissions = True
+			try:
+				pe.set_missing_values()
+			except AttributeError:
+				if not getattr(pe, "party_account", None):
+					pe.party_account = receivable
+			pe.insert(ignore_permissions=True)
+			pe.submit()
 
-            print(f"   ✅ Online Payment Entry created: {pe.name} → {paid_to}")
-            try:
-                logger.info(f"Online Payment Entry created: {pe.name} to {paid_to}")
-            except Exception:
-                pass
-            try:
-                _delivery.sales_partner_paid_out_for_delivery(invoice_doc.name, payment_mode="Online")
-            except Exception as sp_err:
-                print(f"   ⚠️ Sales Partner paid OFD hook failed: {sp_err}")
-                try:
-                    logger.warning(f"Sales Partner paid OFD hook failed: {sp_err}")
-                except Exception:
-                    pass
-            return
-        except Exception as pe_err:
-            # Fallback: create a Journal Entry to transfer AR -> partner subaccount and knock off invoice
-            print(f"   ⚠️ Payment Entry validation failed, falling back to Journal Entry: {pe_err}")
-            try:
-                je = frappe.new_doc("Journal Entry")
-                je.voucher_type = "Journal Entry"
-                je.company = company
-                je.posting_date = frappe.utils.today()
-                je.title = f"Online Payment – {invoice_doc.name}"
-                # Debit partner AR subaccount
-                je.append("accounts", {
-                    "account": paid_to,
-                    "debit_in_account_currency": outstanding,
-                    "credit_in_account_currency": 0,
-                    "party_type": None,
-                    "party": None,
-                })
-                # Credit customer receivable with reference to SI (to close it)
-                je.append("accounts", {
-                    "account": receivable,
-                    "credit_in_account_currency": outstanding,
-                    "debit_in_account_currency": 0,
-                    "party_type": "Customer",
-                    "party": invoice_doc.customer,
-                    "reference_type": "Sales Invoice",
-                    "reference_name": invoice_doc.name,
-                })
-                je.flags.ignore_permissions = True
-                je.insert(ignore_permissions=True)
-                je.submit()
-                print(f"   ✅ Journal Entry created to transfer AR: {je.name} (Deb {paid_to} / Cr {receivable})")
-                try:
-                    logger.info(f"JE fallback created: {je.name}")
-                except Exception:
-                    pass
-                try:
-                    _delivery.sales_partner_paid_out_for_delivery(invoice_doc.name, payment_mode="Online")
-                except Exception as sp_err:
-                    print(f"   ⚠️ Sales Partner paid OFD hook (JE fallback) failed: {sp_err}")
-                    try:
-                        logger.warning(f"Sales Partner paid OFD hook (JE fallback) failed: {sp_err}")
-                    except Exception:
-                        pass
-                return
-            except Exception as je_err:
-                print(f"   ❌ JE fallback failed: {je_err}")
-                try:
-                    logger.error(f"JE fallback failed: {je_err}")
-                except Exception:
-                    pass
-                # Re-raise original Payment Entry error to be handled by caller
-                raise pe_err
-    except Exception:
-        # Surface exception to caller to log, but do not break invoice creation
-        raise
+			print(f"   ✅ Online Payment Entry created: {pe.name} → {paid_to}")
+			try:
+				logger.info(f"Online Payment Entry created: {pe.name} to {paid_to}")
+			except Exception:
+				pass
+			try:
+				_delivery.sales_partner_paid_out_for_delivery(invoice_doc.name, payment_mode="Online")
+			except Exception as sp_err:
+				print(f"   ⚠️ Sales Partner paid OFD hook failed: {sp_err}")
+				try:
+					logger.warning(f"Sales Partner paid OFD hook failed: {sp_err}")
+				except Exception:
+					pass
+			return
+		except Exception as pe_err:
+			# Fallback: create a Journal Entry to transfer AR -> partner subaccount and knock off invoice
+			print(f"   ⚠️ Payment Entry validation failed, falling back to Journal Entry: {pe_err}")
+			try:
+				je = frappe.new_doc("Journal Entry")
+				je.voucher_type = "Journal Entry"
+				je.company = company
+				je.posting_date = frappe.utils.today()
+				je.title = f"Online Payment – {invoice_doc.name}"
+				# Debit partner AR subaccount
+				je.append(
+					"accounts",
+					{
+						"account": paid_to,
+						"debit_in_account_currency": outstanding,
+						"credit_in_account_currency": 0,
+						"party_type": None,
+						"party": None,
+					},
+				)
+				# Credit customer receivable with reference to SI (to close it)
+				je.append(
+					"accounts",
+					{
+						"account": receivable,
+						"credit_in_account_currency": outstanding,
+						"debit_in_account_currency": 0,
+						"party_type": "Customer",
+						"party": invoice_doc.customer,
+						"reference_type": "Sales Invoice",
+						"reference_name": invoice_doc.name,
+					},
+				)
+				je.flags.ignore_permissions = True
+				je.insert(ignore_permissions=True)
+				je.submit()
+				print(
+					f"   ✅ Journal Entry created to transfer AR: {je.name} (Deb {paid_to} / Cr {receivable})"
+				)
+				try:
+					logger.info(f"JE fallback created: {je.name}")
+				except Exception:
+					pass
+				try:
+					_delivery.sales_partner_paid_out_for_delivery(invoice_doc.name, payment_mode="Online")
+				except Exception as sp_err:
+					print(f"   ⚠️ Sales Partner paid OFD hook (JE fallback) failed: {sp_err}")
+					try:
+						logger.warning(f"Sales Partner paid OFD hook (JE fallback) failed: {sp_err}")
+					except Exception:
+						pass
+				return
+			except Exception as je_err:
+				print(f"   ❌ JE fallback failed: {je_err}")
+				try:
+					logger.error(f"JE fallback failed: {je_err}")
+				except Exception:
+					pass
+				# Re-raise original Payment Entry error to be handled by caller
+				raise pe_err
+	except Exception:
+		# Surface exception to caller to log, but do not break invoice creation
+		raise
 
 
 def _handle_invoice_creation_error(e, customer_name, pos_profile_name, logger):
-    """Handle and log invoice creation errors."""
-    detail = _exception_detail(e)
-    error_msg = f"Error in create_pos_invoice: {detail}"
-    # This ERROR record — the only one on the failure path — is what Sentry's
-    # LoggingIntegration promotes into a single exception event with the full
-    # chained traceback. Every inner pre-throw log is a warning so one failure
-    # files one issue, not two or three.
-    logger.error(error_msg, exc_info=True)
-    print(f"\n❌ FUNCTION ERROR:")
-    print(f"   Type: {type(e).__name__}")
-    print(f"   Message: {detail}")
-    
-    # Log full error details for debugging
-    full_traceback = traceback.format_exc()
-    print(f"   Traceback:")
-    print(full_traceback)
-    
-    # Frappe best practice: Use frappe.log_error for persistent logging
-    frappe.log_error(
-        title=f"POS Invoice Creation Error: {type(e).__name__}",
-        message=f"""
+	"""Handle and log invoice creation errors."""
+	detail = _exception_detail(e)
+	error_msg = f"Error in create_pos_invoice: {detail}"
+	# This ERROR record — the only one on the failure path — is what Sentry's
+	# LoggingIntegration promotes into a single exception event with the full
+	# chained traceback. Every inner pre-throw log is a warning so one failure
+	# files one issue, not two or three.
+	logger.error(error_msg, exc_info=True)
+	print(f"\n❌ FUNCTION ERROR:")
+	print(f"   Type: {type(e).__name__}")
+	print(f"   Message: {detail}")
+
+	# Log full error details for debugging
+	full_traceback = traceback.format_exc()
+	print(f"   Traceback:")
+	print(full_traceback)
+
+	# Frappe best practice: Use frappe.log_error for persistent logging
+	frappe.log_error(
+		title=f"POS Invoice Creation Error: {type(e).__name__}",
+		message=f"""
 FUNCTION: create_pos_invoice
 ERROR: {detail}
 PARAMETERS:
@@ -3851,6 +3840,6 @@ PARAMETERS:
 - pos_profile_name: {pos_profile_name}
 TRACEBACK:
 {full_traceback}
-        """.strip()
-    )
-    print("="*100)
+        """.strip(),
+	)
+	print("=" * 100)

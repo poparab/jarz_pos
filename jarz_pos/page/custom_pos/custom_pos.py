@@ -12,34 +12,31 @@ import traceback
 # Import from our services structure
 from jarz_pos.services.invoice_creation import create_pos_invoice
 from jarz_pos.services.delivery_handling import (
-    mark_courier_outstanding,
-    pay_delivery_expense,
-    courier_delivery_expense_only,
-    get_courier_balances,
-    settle_courier,
-    settle_courier_for_invoice
+	mark_courier_outstanding,
+	pay_delivery_expense,
+	courier_delivery_expense_only,
+	get_courier_balances,
+	settle_courier,
+	settle_courier_for_invoice,
 )
-from jarz_pos.utils.account_utils import (
-    get_account_for_company,
-    get_item_price,
-    create_online_payment_entry
-)
+from jarz_pos.utils.account_utils import get_account_for_company, get_item_price, create_online_payment_entry
 
 # Debug: File loaded timestamp
 print(f"🔄 custom_pos.py loaded at {frappe.utils.now()}")
 
 try:
-    from erpnext.stock.stock_ledger import NegativeStockError
+	from erpnext.stock.stock_ledger import NegativeStockError
 except ImportError:
-    class NegativeStockError(Exception):
-        pass
+
+	class NegativeStockError(Exception):
+		pass
 
 
 @frappe.whitelist()
 def get_context(context):
-    """Page context for custom POS"""
-    context.title = "Jarz POS"
-    return context
+	"""Page context for custom POS"""
+	context.title = "Jarz POS"
+	return context
 
 
 # Re-export main functions for backward compatibility
@@ -57,10 +54,10 @@ create_online_payment_entry = create_online_payment_entry
 
 # Permission functions
 def get_permission_query_conditions(user):
-    """Permission check for accessing the page"""
-    return ""
+	"""Permission check for accessing the page"""
+	return ""
 
 
 def has_permission(doc, user):
-    """Check if user has permission to access the page"""
-    return True
+	"""Check if user has permission to access the page"""
+	return True

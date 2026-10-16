@@ -12,7 +12,9 @@ class TestCourierAPI(unittest.TestCase):
 
 	def _employee_group_doc(self, employee_names):
 		doc = MagicMock()
-		doc.get.side_effect = lambda key: [{"employee": name} for name in employee_names] if key == "employees" else None
+		doc.get.side_effect = (
+			lambda key: [{"employee": name} for name in employee_names] if key == "employees" else None
+		)
 		doc.as_dict.return_value = {}
 		return doc
 

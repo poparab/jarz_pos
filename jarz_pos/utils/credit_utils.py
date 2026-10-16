@@ -49,111 +49,111 @@ CREDIT_INTENT_TOKENS = frozenset({"credit", "onaccount"})
 
 
 def normalize_payment_method_token(value: Any) -> str:
-    """Fold a payment-method label to the token form the predicates compare on.
+	"""Fold a payment-method label to the token form the predicates compare on.
 
-    Case, surrounding whitespace, inner spaces and underscores are all noise:
-    ``"On Account"``, ``"on_account"`` and ``"ONACCOUNT"`` are the same choice.
-    Deliberately does NOT route through
-    ``delivery_handling._normalize_collection_method``, which throws on any
-    method outside its four and would push "Invalid collection method" into the
-    user's message log as a side effect of merely asking a question.
-    """
-    return str(value or "").strip().lower().replace(" ", "").replace("_", "")
+	Case, surrounding whitespace, inner spaces and underscores are all noise:
+	``"On Account"``, ``"on_account"`` and ``"ONACCOUNT"`` are the same choice.
+	Deliberately does NOT route through
+	``delivery_handling._normalize_collection_method``, which throws on any
+	method outside its four and would push "Invalid collection method" into the
+	user's message log as a side effect of merely asking a question.
+	"""
+	return str(value or "").strip().lower().replace(" ", "").replace("_", "")
 
 
 def is_credit_payment_method(value: Any) -> bool:
-    """True when this payment-method VALUE means "on account".
+	"""True when this payment-method VALUE means "on account".
 
-    Use this for gates that run before there is a document to inspect — most
-    importantly the creation gate in ``invoice_creation.create_pos_invoice``,
-    which used to compare ``== "Credit"`` exactly. An order created as
-    ``"on account"`` then skipped ``_apply_credit_terms`` entirely (no permission
-    check, no limit, no due date, no stamp) yet still routed to the credit
-    handler at dispatch, because the dispatch predicates normalise and this one
-    did not.
-    """
-    token = normalize_payment_method_token(value)
-    if not token:
-        return False
-    return token in CREDIT_INTENT_TOKENS
+	Use this for gates that run before there is a document to inspect — most
+	importantly the creation gate in ``invoice_creation.create_pos_invoice``,
+	which used to compare ``== "Credit"`` exactly. An order created as
+	``"on account"`` then skipped ``_apply_credit_terms`` entirely (no permission
+	check, no limit, no due date, no stamp) yet still routed to the credit
+	handler at dispatch, because the dispatch predicates normalise and this one
+	did not.
+	"""
+	token = normalize_payment_method_token(value)
+	if not token:
+		return False
+	return token in CREDIT_INTENT_TOKENS
 
 
 def is_credit_intent_doc(inv: Any) -> bool:
-    """True when this invoice DOCUMENT was taken on account.
+	"""True when this invoice DOCUMENT was taken on account.
 
-    Self-contained and DB-free on purpose: it is read inside dispatch paths that
-    unit tests drive with mocks.
-    """
-    try:
-        raw = (
-            inv.get("custom_payment_method")
-            if hasattr(inv, "get")
-            else getattr(inv, "custom_payment_method", None)
-        )
-    except Exception:
-        raw = getattr(inv, "custom_payment_method", None)
-    return is_credit_payment_method(raw)
+	Self-contained and DB-free on purpose: it is read inside dispatch paths that
+	unit tests drive with mocks.
+	"""
+	try:
+		raw = (
+			inv.get("custom_payment_method")
+			if hasattr(inv, "get")
+			else getattr(inv, "custom_payment_method", None)
+		)
+	except Exception:
+		raw = getattr(inv, "custom_payment_method", None)
+	return is_credit_payment_method(raw)
 
 
 def has_credit_terms_field(doctype: str = "Sales Invoice") -> bool:
-    """Whether the frozen-stamp column exists on this bench.
+	"""Whether the frozen-stamp column exists on this bench.
 
-    Seeded by ``setup/credit_terms.py`` + the fixture, so a site that has not
-    migrated yet has no such column and a query naming it would raise. Every
-    caller degrades to the payment-method-only match rather than breaking the
-    screen it feeds.
-    """
-    import frappe
+	Seeded by ``setup/credit_terms.py`` + the fixture, so a site that has not
+	migrated yet has no such column and a query naming it would raise. Every
+	caller degrades to the payment-method-only match rather than breaking the
+	screen it feeds.
+	"""
+	import frappe
 
-    try:
-        return bool(frappe.get_meta(doctype).get_field(CREDIT_TERMS_FIELD))
-    except Exception:
-        return False
+	try:
+		return bool(frappe.get_meta(doctype).get_field(CREDIT_TERMS_FIELD))
+	except Exception:
+		return False
 
 
 def credit_invoice_or_filters(doctype: str = "Sales Invoice") -> Optional[List[List[Any]]]:
-    """``or_filters`` matching every invoice that WAS taken on credit.
+	"""``or_filters`` matching every invoice that WAS taken on credit.
 
-    Pass alongside (never inside) the caller's own ``filters``::
+	Pass alongside (never inside) the caller's own ``filters``::
 
-        frappe.get_all(
-            "Sales Invoice",
-            filters={"docstatus": 1, "outstanding_amount": [">", 0.005]},
-            or_filters=credit_invoice_or_filters(),
-            ...
-        )
+	    frappe.get_all(
+	        "Sales Invoice",
+	        filters={"docstatus": 1, "outstanding_amount": [">", 0.005]},
+	        or_filters=credit_invoice_or_filters(),
+	        ...
+	    )
 
-    The OR is the whole point, and it is not defensive programming: the payment
-    method is a MUTABLE column that a collection-method change rewrites without
-    moving a single pound, while ``custom_credit_terms_days`` is a stamp written
-    once at creation and never touched again. Matching only the method loses the
-    debt the moment somebody relabels the card; matching only the stamp loses
-    orders created before the stamp existed. Matching either is what makes
-    ``api/credit``, ``api/kanban`` and ``invoice_creation`` agree on the same set
-    of debts.
+	The OR is the whole point, and it is not defensive programming: the payment
+	method is a MUTABLE column that a collection-method change rewrites without
+	moving a single pound, while ``custom_credit_terms_days`` is a stamp written
+	once at creation and never touched again. Matching only the method loses the
+	debt the moment somebody relabels the card; matching only the stamp loses
+	orders created before the stamp existed. Matching either is what makes
+	``api/credit``, ``api/kanban`` and ``invoice_creation`` agree on the same set
+	of debts.
 
-    Returns ``None`` when the stamp column is missing, which is the caller's
-    signal to fall back to the payment-method filter on its own.
-    """
-    if not has_credit_terms_field(doctype):
-        return None
-    return [
-        [doctype, "custom_payment_method", "=", CREDIT_PAYMENT_METHOD],
-        [doctype, CREDIT_TERMS_FIELD, ">", 0],
-    ]
+	Returns ``None`` when the stamp column is missing, which is the caller's
+	signal to fall back to the payment-method filter on its own.
+	"""
+	if not has_credit_terms_field(doctype):
+		return None
+	return [
+		[doctype, "custom_payment_method", "=", CREDIT_PAYMENT_METHOD],
+		[doctype, CREDIT_TERMS_FIELD, ">", 0],
+	]
 
 
 def apply_credit_invoice_match(
-    filters: Dict[str, Any], doctype: str = "Sales Invoice"
+	filters: Dict[str, Any], doctype: str = "Sales Invoice"
 ) -> Optional[List[List[Any]]]:
-    """Add the credit match to *filters*, returning the ``or_filters`` to pass.
+	"""Add the credit match to *filters*, returning the ``or_filters`` to pass.
 
-    Convenience for the common shape: when the stamp column exists the match is
-    an OR (returned, so the caller hands it to ``get_all``); when it does not,
-    the payment-method equality is written straight into *filters* and ``None``
-    is returned. Mutates *filters* in place in the fallback case only.
-    """
-    or_filters = credit_invoice_or_filters(doctype)
-    if or_filters is None:
-        filters["custom_payment_method"] = CREDIT_PAYMENT_METHOD
-    return or_filters
+	Convenience for the common shape: when the stamp column exists the match is
+	an OR (returned, so the caller hands it to ``get_all``); when it does not,
+	the payment-method equality is written straight into *filters* and ``None``
+	is returned. Mutates *filters* in place in the fallback case only.
+	"""
+	or_filters = credit_invoice_or_filters(doctype)
+	if or_filters is None:
+		filters["custom_payment_method"] = CREDIT_PAYMENT_METHOD
+	return or_filters

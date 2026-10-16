@@ -68,27 +68,27 @@ MILKANA_KG_PER_BATCH = 2.5
 #   mango and tiramisu carry less because the fruit and the espresso stretch the
 #   same batch further; their figures are the ones already in the BOMs.
 JAR_MIX_QTY: Dict[str, float] = {
-    "Blueberry Medium": 0.079333,
-    "Chocolate Hazelnut Medium": 0.079333,
-    "Lotus Medium": 0.079333,
-    "Pistachio Medium": 0.079333,
-    "Redvelvet Medium": 0.079333,
-    "Strawberry Medium": 0.079333,
-    "Blueberry Large": 0.123636,
-    "Chocolate Hazelnut Large": 0.123636,
-    "Lotus Large": 0.123636,
-    "Pistachio Large": 0.123636,
-    "Redvelvet Large": 0.123636,
-    "Strawberry Large": 0.123636,
-    "Mango Medium": 0.050106,
-    "Mango Large": 0.065135,
-    "Tiramisu Medium": 0.067143,
-    "Tiramisu Large": 0.091000,
-    # Molten carries no cheesecake mix at all, but it still needs rebuilding:
-    # its Fudge Cake and Chocolate ganache come out of the same freezer as
-    # everyone else's, and without the flag the planner explodes them to flour.
-    "Molten Medium": 0.0,
-    "Molten Large": 0.0,
+	"Blueberry Medium": 0.079333,
+	"Chocolate Hazelnut Medium": 0.079333,
+	"Lotus Medium": 0.079333,
+	"Pistachio Medium": 0.079333,
+	"Redvelvet Medium": 0.079333,
+	"Strawberry Medium": 0.079333,
+	"Blueberry Large": 0.123636,
+	"Chocolate Hazelnut Large": 0.123636,
+	"Lotus Large": 0.123636,
+	"Pistachio Large": 0.123636,
+	"Redvelvet Large": 0.123636,
+	"Strawberry Large": 0.123636,
+	"Mango Medium": 0.050106,
+	"Mango Large": 0.065135,
+	"Tiramisu Medium": 0.067143,
+	"Tiramisu Large": 0.091000,
+	# Molten carries no cheesecake mix at all, but it still needs rebuilding:
+	# its Fudge Cake and Chocolate ganache come out of the same freezer as
+	# everyone else's, and without the flag the planner explodes them to flour.
+	"Molten Medium": 0.0,
+	"Molten Large": 0.0,
 }
 
 # Held in the freezer, so the planner must see the sub-assembly, not its inputs.
@@ -97,25 +97,25 @@ JAR_MIX_QTY: Dict[str, float] = {
 # this script must not strip the flag that
 # ``migrate_fruit_mixes_to_subassembly`` set on them.
 FREEZER_SUB_ASSEMBLIES = (
-    "Butter Biscuit",
-    "Fudge Cake",
-    "Red Velvet Cake",
-    "Sponge Cake",
-    "Savoiardi",
-    "Chocolate ganache",
-    "Mango mix",
-    "Blueberry mix",
-    "strawberry mix",
-    "raspberry mix",
+	"Butter Biscuit",
+	"Fudge Cake",
+	"Red Velvet Cake",
+	"Sponge Cake",
+	"Savoiardi",
+	"Chocolate ganache",
+	"Mango mix",
+	"Blueberry mix",
+	"strawberry mix",
+	"raspberry mix",
 )
 
 # Medium jars must not consume 330 packaging.
 PACKAGING_SWAPS: Dict[str, Dict[str, str]] = {
-    "Mango Medium": {
-        "Glass Jar 330": "Glass Jar",
-        "Jar Lid 330": "Jar Lid",
-        "Mango  Jar Label 330": "Mango Jar Label 212",
-    },
+	"Mango Medium": {
+		"Glass Jar 330": "Glass Jar",
+		"Jar Lid 330": "Jar Lid",
+		"Mango  Jar Label 330": "Mango Jar Label 212",
+	},
 }
 
 # Components a jar must carry that have nothing to do with the mix, declared so
@@ -124,14 +124,14 @@ PACKAGING_SWAPS: Dict[str, Dict[str, str]] = {
 # and nothing downstream could tell: the sugar shares an item code with the mix
 # share, so its absence looked like a successful removal.
 REQUIRED_EXTRA_COMPONENTS: Dict[str, Dict[str, Tuple[float, str]]] = {
-    "Tiramisu Medium": {"powder sugar": (0.004, "Kg")},
-    "Tiramisu Large": {"powder sugar": (0.006, "Kg")},
+	"Tiramisu Medium": {"powder sugar": (0.004, "Kg")},
+	"Tiramisu Large": {"powder sugar": (0.006, "Kg")},
 }
 
 # (qty, uom) corrections that survive the mix rebuild.
 QTY_CORRECTIONS: Dict[str, Dict[str, Tuple[float, str]]] = {
-    # Entered as 0.020 Gram where every sibling uses 0.020 Kg.
-    "Redvelvet Large": {"jelly": (0.020, "Kg")},
+	# Entered as 0.020 Gram where every sibling uses 0.020 Kg.
+	"Redvelvet Large": {"jelly": (0.020, "Kg")},
 }
 
 COST_BASIS = "Valuation Rate"
@@ -151,411 +151,399 @@ DOUBLE_COUNT_TOLERANCE = 0.05
 
 
 def _mix_sugar_line(doc, target_mix: float):
-    """The powder-sugar row that represents the mix share, or ``None``.
+	"""The powder-sugar row that represents the mix share, or ``None``.
 
-    Returns the single closest match within tolerance so a jar carrying sugar
-    for something else — Tiramisu's espresso syrup — keeps it.
-    """
-    share = target_mix * (MIX_SUGAR_KG_PER_BATCH / MIX_YIELD_KG)
-    if share <= 0:
-        return None
+	Returns the single closest match within tolerance so a jar carrying sugar
+	for something else — Tiramisu's espresso syrup — keeps it.
+	"""
+	share = target_mix * (MIX_SUGAR_KG_PER_BATCH / MIX_YIELD_KG)
+	if share <= 0:
+		return None
 
-    best = None
-    best_drift = None
-    for row in doc.items:
-        if row.item_code != MIX_SHARED_COMPONENT:
-            continue
-        drift = abs(flt(row.stock_qty) - share) / share
-        if drift > SUGAR_MATCH_TOLERANCE:
-            continue
-        if best_drift is None or drift < best_drift:
-            best, best_drift = row, drift
-    return best
+	best = None
+	best_drift = None
+	for row in doc.items:
+		if row.item_code != MIX_SHARED_COMPONENT:
+			continue
+		drift = abs(flt(row.stock_qty) - share) / share
+		if drift > SUGAR_MATCH_TOLERANCE:
+			continue
+		if best_drift is None or drift < best_drift:
+			best, best_drift = row, drift
+	return best
 
 
 def _default_bom(item_code: str) -> Optional[str]:
-    return frappe.db.get_value(
-        "BOM", {"item": item_code, "is_default": 1, "docstatus": 1}, "name"
-    )
+	return frappe.db.get_value("BOM", {"item": item_code, "is_default": 1, "docstatus": 1}, "name")
 
 
 def _derive_mix_from_milkana(bom_name: str) -> Optional[float]:
-    """How much mix a jar BOM currently carries, read off its milkana line."""
-    qty = frappe.db.get_value(
-        "BOM Item", {"parent": bom_name, "item_code": "milkana cheese"}, "stock_qty"
-    )
-    if not qty:
-        return None
-    return flt(qty) / (MILKANA_KG_PER_BATCH / MIX_YIELD_KG)
+	"""How much mix a jar BOM currently carries, read off its milkana line."""
+	qty = frappe.db.get_value("BOM Item", {"parent": bom_name, "item_code": "milkana cheese"}, "stock_qty")
+	if not qty:
+		return None
+	return flt(qty) / (MILKANA_KG_PER_BATCH / MIX_YIELD_KG)
 
 
 # ── Step 1: correct the mix BOM ─────────────────────────────────────────
 
 
 def rebuild_mix_bom(apply: bool) -> Dict[str, Any]:
-    current = _default_bom(MIX_ITEM)
-    if not current:
-        return {"ok": False, "reason": f"{MIX_ITEM} has no submitted default BOM"}
+	current = _default_bom(MIX_ITEM)
+	if not current:
+		return {"ok": False, "reason": f"{MIX_ITEM} has no submitted default BOM"}
 
-    doc = frappe.get_doc("BOM", current)
-    vanilla = next((r for r in doc.items if r.item_code == "kamina vanilla"), None)
-    needs = (
-        flt(doc.quantity, 3) != MIX_YIELD_KG
-        or (vanilla is not None and flt(vanilla.stock_qty, 4) != MIX_VANILLA_KG)
-    )
-    if not needs:
-        return {"ok": True, "changed": False, "bom": current}
+	doc = frappe.get_doc("BOM", current)
+	vanilla = next((r for r in doc.items if r.item_code == "kamina vanilla"), None)
+	needs = flt(doc.quantity, 3) != MIX_YIELD_KG or (
+		vanilla is not None and flt(vanilla.stock_qty, 4) != MIX_VANILLA_KG
+	)
+	if not needs:
+		return {"ok": True, "changed": False, "bom": current}
 
-    plan = {
-        "ok": True,
-        "changed": True,
-        "from_bom": current,
-        "quantity": f"{flt(doc.quantity, 3)} -> {MIX_YIELD_KG}",
-        "vanilla": f"{flt(vanilla.stock_qty, 4) if vanilla else 'missing'} -> {MIX_VANILLA_KG}",
-    }
-    if not apply:
-        return plan
+	plan = {
+		"ok": True,
+		"changed": True,
+		"from_bom": current,
+		"quantity": f"{flt(doc.quantity, 3)} -> {MIX_YIELD_KG}",
+		"vanilla": f"{flt(vanilla.stock_qty, 4) if vanilla else 'missing'} -> {MIX_VANILLA_KG}",
+	}
+	if not apply:
+		return plan
 
-    new = frappe.copy_doc(doc)
-    new.quantity = MIX_YIELD_KG
-    new.rm_cost_as_per = COST_BASIS
-    new.is_active = 1
-    new.is_default = 1
-    # The mix is a *planning* quantity, never a stocked one.  A phantom BOM is
-    # expanded into its own components at Work Order time — `get_bom_items_as_dict`
-    # recurses through an `is_phantom_item` row whatever `fetch_exploded` says —
-    # so a jar batch relieves the raw cheese and cream directly and no mix stock
-    # is ever required.  Without this, every jar carrying the new sub-assembly
-    # line would refuse to start against a permanent zero.
-    #
-    # The old comment here claimed `do_not_explode = 0` achieved the same thing.
-    # It does not: that flag only shapes `tabBOM Explosion Item`, which the Work
-    # Order never reads on this site.  See [[bom-precheck-vs-workorder-mismatch]].
-    new.is_phantom_bom = 1
-    for row in new.items:
-        if row.item_code == "kamina vanilla":
-            row.qty = MIX_VANILLA_KG
-            row.uom = "Kg"
-            row.stock_qty = MIX_VANILLA_KG
-    new.insert()
-    new.submit()
-    plan["new_bom"] = new.name
-    return plan
+	new = frappe.copy_doc(doc)
+	new.quantity = MIX_YIELD_KG
+	new.rm_cost_as_per = COST_BASIS
+	new.is_active = 1
+	new.is_default = 1
+	# The mix is a *planning* quantity, never a stocked one.  A phantom BOM is
+	# expanded into its own components at Work Order time — `get_bom_items_as_dict`
+	# recurses through an `is_phantom_item` row whatever `fetch_exploded` says —
+	# so a jar batch relieves the raw cheese and cream directly and no mix stock
+	# is ever required.  Without this, every jar carrying the new sub-assembly
+	# line would refuse to start against a permanent zero.
+	#
+	# The old comment here claimed `do_not_explode = 0` achieved the same thing.
+	# It does not: that flag only shapes `tabBOM Explosion Item`, which the Work
+	# Order never reads on this site.  See [[bom-precheck-vs-workorder-mismatch]].
+	new.is_phantom_bom = 1
+	for row in new.items:
+		if row.item_code == "kamina vanilla":
+			row.qty = MIX_VANILLA_KG
+			row.uom = "Kg"
+			row.stock_qty = MIX_VANILLA_KG
+	new.insert()
+	new.submit()
+	plan["new_bom"] = new.name
+	return plan
 
 
 # ── Step 2: rebuild the jar BOMs ────────────────────────────────────────
 
 
 def _missing_required_extras(doc, item_code: str) -> List[str]:
-    """Declared non-mix components this BOM is missing or carrying at the wrong qty."""
-    missing: List[str] = []
-    for code, (qty, _uom) in REQUIRED_EXTRA_COMPONENTS.get(item_code, {}).items():
-        rows = [r for r in doc.items if r.item_code == code]
-        if not any(abs(flt(r.stock_qty) - qty) <= 1e-6 for r in rows):
-            present = ", ".join(f"{flt(r.stock_qty * 1000, 3)}g" for r in rows) or "absent"
-            missing.append(f"{code} (need {qty * 1000:g}g, have {present})")
-    return missing
+	"""Declared non-mix components this BOM is missing or carrying at the wrong qty."""
+	missing: List[str] = []
+	for code, (qty, _uom) in REQUIRED_EXTRA_COMPONENTS.get(item_code, {}).items():
+		rows = [r for r in doc.items if r.item_code == code]
+		if not any(abs(flt(r.stock_qty) - qty) <= 1e-6 for r in rows):
+			present = ", ".join(f"{flt(r.stock_qty * 1000, 3)}g" for r in rows) or "absent"
+			missing.append(f"{code} (need {qty * 1000:g}g, have {present})")
+	return missing
 
 
 def _already_migrated(doc, target_mix: float, item_code: str = "") -> bool:
-    """True when this BOM already looks the way the migration would leave it.
+	"""True when this BOM already looks the way the migration would leave it.
 
-    Makes a re-run cheap and safe.  Without it every run would stack another
-    BOM version on all 18 jars, which is not wrong but buries the one version
-    that actually changed under a pile of identical ones.
-    """
-    if any(r.item_code in MIX_ONLY_COMPONENTS for r in doc.items):
-        return False
-    if (doc.rm_cost_as_per or "") != COST_BASIS:
-        return False
-    if item_code and _missing_required_extras(doc, item_code):
-        return False
-    if any(
-        r.item_code in FREEZER_SUB_ASSEMBLIES and not r.do_not_explode for r in doc.items
-    ):
-        return False
+	Makes a re-run cheap and safe.  Without it every run would stack another
+	BOM version on all 18 jars, which is not wrong but buries the one version
+	that actually changed under a pile of identical ones.
+	"""
+	if any(r.item_code in MIX_ONLY_COMPONENTS for r in doc.items):
+		return False
+	if (doc.rm_cost_as_per or "") != COST_BASIS:
+		return False
+	if item_code and _missing_required_extras(doc, item_code):
+		return False
+	if any(r.item_code in FREEZER_SUB_ASSEMBLIES and not r.do_not_explode for r in doc.items):
+		return False
 
-    mix_row = next((r for r in doc.items if r.item_code == MIX_ITEM), None)
-    if target_mix > 0:
-        if mix_row is None or abs(flt(mix_row.stock_qty) - target_mix) > 1e-6:
-            return False
-        # Must still explode: the mix is never stocked.
-        if mix_row.do_not_explode:
-            return False
-    elif mix_row is not None:
-        return False
-    return True
+	mix_row = next((r for r in doc.items if r.item_code == MIX_ITEM), None)
+	if target_mix > 0:
+		if mix_row is None or abs(flt(mix_row.stock_qty) - target_mix) > 1e-6:
+			return False
+		# Must still explode: the mix is never stocked.
+		if mix_row.do_not_explode:
+			return False
+	elif mix_row is not None:
+		return False
+	return True
 
 
 def _plan_jar(item_code: str, mix_bom: str) -> Dict[str, Any]:
-    bom_name = _default_bom(item_code)
-    if not bom_name:
-        return {"item_code": item_code, "skipped": "no default BOM"}
+	bom_name = _default_bom(item_code)
+	if not bom_name:
+		return {"item_code": item_code, "skipped": "no default BOM"}
 
-    doc = frappe.get_doc("BOM", bom_name)
-    target_mix = JAR_MIX_QTY[item_code]
+	doc = frappe.get_doc("BOM", bom_name)
+	target_mix = JAR_MIX_QTY[item_code]
 
-    if _already_migrated(doc, target_mix, item_code):
-        return {"item_code": item_code, "skipped": "already migrated"}
+	if _already_migrated(doc, target_mix, item_code):
+		return {"item_code": item_code, "skipped": "already migrated"}
 
-    restored = _missing_required_extras(doc, item_code)
+	restored = _missing_required_extras(doc, item_code)
 
-    derived = _derive_mix_from_milkana(bom_name)
-    warning = None
-    note = None
-    if derived is not None:
-        expected_factor = DOUBLE_COUNTED_JARS.get(item_code, 1.0)
-        drift = abs(derived - target_mix * expected_factor) / (target_mix * expected_factor)
-        if expected_factor != 1.0:
-            tolerance = DOUBLE_COUNT_TOLERANCE
-            note = (
-                f"carries the mix {expected_factor:g}x today (double-counted); "
-                f"derived {derived:.6f} collapses to {target_mix:.6f}"
-            )
-        else:
-            tolerance = MIX_DERIVATION_TOLERANCE
-        if drift > tolerance:
-            warning = (
-                f"BOM implies {derived:.6f} Kg of mix but the table expects "
-                f"{target_mix * expected_factor:.6f} ({drift * 100:.1f}% apart) — "
-                f"check before applying"
-            )
+	derived = _derive_mix_from_milkana(bom_name)
+	warning = None
+	note = None
+	if derived is not None:
+		expected_factor = DOUBLE_COUNTED_JARS.get(item_code, 1.0)
+		drift = abs(derived - target_mix * expected_factor) / (target_mix * expected_factor)
+		if expected_factor != 1.0:
+			tolerance = DOUBLE_COUNT_TOLERANCE
+			note = (
+				f"carries the mix {expected_factor:g}x today (double-counted); "
+				f"derived {derived:.6f} collapses to {target_mix:.6f}"
+			)
+		else:
+			tolerance = MIX_DERIVATION_TOLERANCE
+		if drift > tolerance:
+			warning = (
+				f"BOM implies {derived:.6f} Kg of mix but the table expects "
+				f"{target_mix * expected_factor:.6f} ({drift * 100:.1f}% apart) — "
+				f"check before applying"
+			)
 
-    removed: List[str] = []
-    adjusted: List[str] = []
-    swapped: List[str] = []
-    corrected: List[str] = []
+	removed: List[str] = []
+	adjusted: List[str] = []
+	swapped: List[str] = []
+	corrected: List[str] = []
 
-    sugar_row = _mix_sugar_line(doc, target_mix)
-    for row in doc.items:
-        if row.item_code in MIX_ONLY_COMPONENTS:
-            removed.append(f"{row.item_code} {flt(row.stock_qty * 1000, 3)}g")
-        elif row.item_code == MIX_SHARED_COMPONENT:
-            # Identity, not `.name`: copy_doc leaves every child row's name as
-            # None, so comparing names matched None == None on every sugar row
-            # and dropped Tiramisu's espresso syrup along with the mix share.
-            if sugar_row is not None and row is sugar_row:
-                removed.append(f"{row.item_code} {flt(row.stock_qty * 1000, 3)}g (mix share)")
-            else:
-                adjusted.append(
-                    f"{row.item_code} {flt(row.stock_qty * 1000, 3)}g kept (not the mix share)"
-                )
+	sugar_row = _mix_sugar_line(doc, target_mix)
+	for row in doc.items:
+		if row.item_code in MIX_ONLY_COMPONENTS:
+			removed.append(f"{row.item_code} {flt(row.stock_qty * 1000, 3)}g")
+		elif row.item_code == MIX_SHARED_COMPONENT:
+			# Identity, not `.name`: copy_doc leaves every child row's name as
+			# None, so comparing names matched None == None on every sugar row
+			# and dropped Tiramisu's espresso syrup along with the mix share.
+			if sugar_row is not None and row is sugar_row:
+				removed.append(f"{row.item_code} {flt(row.stock_qty * 1000, 3)}g (mix share)")
+			else:
+				adjusted.append(f"{row.item_code} {flt(row.stock_qty * 1000, 3)}g kept (not the mix share)")
 
-    for old, new in PACKAGING_SWAPS.get(item_code, {}).items():
-        if any(r.item_code == old for r in doc.items):
-            swapped.append(f"{old} -> {new}")
+	for old, new in PACKAGING_SWAPS.get(item_code, {}).items():
+		if any(r.item_code == old for r in doc.items):
+			swapped.append(f"{old} -> {new}")
 
-    for code, (qty, uom) in QTY_CORRECTIONS.get(item_code, {}).items():
-        row = next((r for r in doc.items if r.item_code == code), None)
-        if row and (flt(row.qty, 6) != qty or (row.uom or "") != uom):
-            corrected.append(f"{code} {flt(row.qty, 6)} {row.uom} -> {qty} {uom}")
+	for code, (qty, uom) in QTY_CORRECTIONS.get(item_code, {}).items():
+		row = next((r for r in doc.items if r.item_code == code), None)
+		if row and (flt(row.qty, 6) != qty or (row.uom or "") != uom):
+			corrected.append(f"{code} {flt(row.qty, 6)} {row.uom} -> {qty} {uom}")
 
-    explode_fixes = [
-        r.item_code
-        for r in doc.items
-        if r.item_code in FREEZER_SUB_ASSEMBLIES and not r.do_not_explode
-    ]
+	explode_fixes = [
+		r.item_code for r in doc.items if r.item_code in FREEZER_SUB_ASSEMBLIES and not r.do_not_explode
+	]
 
-    has_mix_line = any(r.item_code == MIX_ITEM for r in doc.items)
+	has_mix_line = any(r.item_code == MIX_ITEM for r in doc.items)
 
-    return {
-        "item_code": item_code,
-        "from_bom": bom_name,
-        "old_cost": flt(doc.raw_material_cost, 2),
-        "mix_qty": target_mix,
-        "mix_line": "update" if has_mix_line else "add",
-        "removed": removed,
-        "adjusted": adjusted,
-        "swapped": swapped,
-        "corrected": corrected,
-        "do_not_explode": explode_fixes,
-        "restored": restored,
-        "warning": warning,
-        "note": note,
-    }
+	return {
+		"item_code": item_code,
+		"from_bom": bom_name,
+		"old_cost": flt(doc.raw_material_cost, 2),
+		"mix_qty": target_mix,
+		"mix_line": "update" if has_mix_line else "add",
+		"removed": removed,
+		"adjusted": adjusted,
+		"swapped": swapped,
+		"corrected": corrected,
+		"do_not_explode": explode_fixes,
+		"restored": restored,
+		"warning": warning,
+		"note": note,
+	}
 
 
 def _rebuild_jar(plan: Dict[str, Any], mix_bom: str) -> Dict[str, Any]:
-    doc = frappe.get_doc("BOM", plan["from_bom"])
-    new = frappe.copy_doc(doc)
-    new.rm_cost_as_per = COST_BASIS
-    new.is_active = 1
-    new.is_default = 1
+	doc = frappe.get_doc("BOM", plan["from_bom"])
+	new = frappe.copy_doc(doc)
+	new.rm_cost_as_per = COST_BASIS
+	new.is_active = 1
+	new.is_default = 1
 
-    target_mix = plan["mix_qty"]
-    swaps = PACKAGING_SWAPS.get(plan["item_code"], {})
-    corrections = QTY_CORRECTIONS.get(plan["item_code"], {})
-    # Matched on the copy, so the row identity lines up with what is iterated.
-    sugar_row = _mix_sugar_line(new, target_mix)
+	target_mix = plan["mix_qty"]
+	swaps = PACKAGING_SWAPS.get(plan["item_code"], {})
+	corrections = QTY_CORRECTIONS.get(plan["item_code"], {})
+	# Matched on the copy, so the row identity lines up with what is iterated.
+	sugar_row = _mix_sugar_line(new, target_mix)
 
-    kept = []
-    for row in new.items:
-        if row.item_code in MIX_ONLY_COMPONENTS:
-            continue
-        if row.item_code == MIX_ITEM:
-            continue  # re-added below at the canonical quantity
-        if row.item_code == MIX_SHARED_COMPONENT:
-            # Identity, not `.name`: copy_doc leaves every child row's name as
-            # None, so comparing names matched None == None on every sugar row
-            # and dropped Tiramisu's espresso syrup along with the mix share.
-            if sugar_row is not None and row is sugar_row:
-                continue  # the mix's share; the sub-assembly carries it now
-            # Any other powder-sugar line belongs to something else and stays.
-        if row.item_code in swaps:
-            row.item_code = swaps[row.item_code]
-            row.item_name = frappe.db.get_value("Item", row.item_code, "item_name")
-        if row.item_code in corrections:
-            qty, uom = corrections[row.item_code]
-            row.qty = qty
-            row.uom = uom
-            row.stock_qty = qty
-        if row.item_code in FREEZER_SUB_ASSEMBLIES:
-            # Netted against freezer stock instead of exploded to flour.
-            row.do_not_explode = 1
-        kept.append(row)
+	kept = []
+	for row in new.items:
+		if row.item_code in MIX_ONLY_COMPONENTS:
+			continue
+		if row.item_code == MIX_ITEM:
+			continue  # re-added below at the canonical quantity
+		if row.item_code == MIX_SHARED_COMPONENT:
+			# Identity, not `.name`: copy_doc leaves every child row's name as
+			# None, so comparing names matched None == None on every sugar row
+			# and dropped Tiramisu's espresso syrup along with the mix share.
+			if sugar_row is not None and row is sugar_row:
+				continue  # the mix's share; the sub-assembly carries it now
+			# Any other powder-sugar line belongs to something else and stays.
+		if row.item_code in swaps:
+			row.item_code = swaps[row.item_code]
+			row.item_name = frappe.db.get_value("Item", row.item_code, "item_name")
+		if row.item_code in corrections:
+			qty, uom = corrections[row.item_code]
+			row.qty = qty
+			row.uom = uom
+			row.stock_qty = qty
+		if row.item_code in FREEZER_SUB_ASSEMBLIES:
+			# Netted against freezer stock instead of exploded to flour.
+			row.do_not_explode = 1
+		kept.append(row)
 
-    new.set("items", [])
-    for row in kept:
-        new.append("items", row.as_dict())
+	new.set("items", [])
+	for row in kept:
+		new.append("items", row.as_dict())
 
-    # Restore any declared non-mix component this BOM has lost.
-    for code, (qty, uom) in REQUIRED_EXTRA_COMPONENTS.get(plan["item_code"], {}).items():
-        if not any(abs(flt(r.stock_qty) - qty) <= 1e-6 for r in new.items if r.item_code == code):
-            new.append(
-                "items",
-                {"item_code": code, "qty": qty, "uom": uom, "stock_qty": qty},
-            )
+	# Restore any declared non-mix component this BOM has lost.
+	for code, (qty, uom) in REQUIRED_EXTRA_COMPONENTS.get(plan["item_code"], {}).items():
+		if not any(abs(flt(r.stock_qty) - qty) <= 1e-6 for r in new.items if r.item_code == code):
+			new.append(
+				"items",
+				{"item_code": code, "qty": qty, "uom": uom, "stock_qty": qty},
+			)
 
-    if target_mix > 0:
-        new.append(
-            "items",
-            {
-                "item_code": MIX_ITEM,
-                "item_name": MIX_ITEM,
-                "qty": target_mix,
-                "uom": "Kg",
-                "stock_qty": target_mix,
-                "bom_no": mix_bom,
-                # Never stored, so it must keep exploding to raw cheese.
-                "do_not_explode": 0,
-                # `do_not_explode = 0` alone does NOT achieve that. It shapes
-                # `tabBOM Explosion Item`, and a Work Order on this site reads
-                # the one-level `tabBOM Item` rows instead, so it would demand
-                # the mix as stock and refuse against a permanent zero.
-                #
-                # `is_phantom_item` is what actually makes the line expand:
-                # `get_bom_items_as_dict` recurses into `bom_no` for a phantom
-                # row regardless of `fetch_exploded` (bom.py:1429), so the Work
-                # Order and the app's precheck agree and both see raw cheese.
-                #
-                # ERPNext normally copies this from the sub-BOM's
-                # `is_phantom_bom` inside `get_bom_material_detail`, but this
-                # row is built by hand and never goes through that helper — so
-                # it is stated here, mirroring what `rebuild_mix_bom` set.
-                "is_phantom_item": 1,
-            },
-        )
+	if target_mix > 0:
+		new.append(
+			"items",
+			{
+				"item_code": MIX_ITEM,
+				"item_name": MIX_ITEM,
+				"qty": target_mix,
+				"uom": "Kg",
+				"stock_qty": target_mix,
+				"bom_no": mix_bom,
+				# Never stored, so it must keep exploding to raw cheese.
+				"do_not_explode": 0,
+				# `do_not_explode = 0` alone does NOT achieve that. It shapes
+				# `tabBOM Explosion Item`, and a Work Order on this site reads
+				# the one-level `tabBOM Item` rows instead, so it would demand
+				# the mix as stock and refuse against a permanent zero.
+				#
+				# `is_phantom_item` is what actually makes the line expand:
+				# `get_bom_items_as_dict` recurses into `bom_no` for a phantom
+				# row regardless of `fetch_exploded` (bom.py:1429), so the Work
+				# Order and the app's precheck agree and both see raw cheese.
+				#
+				# ERPNext normally copies this from the sub-BOM's
+				# `is_phantom_bom` inside `get_bom_material_detail`, but this
+				# row is built by hand and never goes through that helper — so
+				# it is stated here, mirroring what `rebuild_mix_bom` set.
+				"is_phantom_item": 1,
+			},
+		)
 
-    new.insert()
-    new.submit()
-    return {"new_bom": new.name, "new_cost": flt(new.raw_material_cost, 2)}
+	new.insert()
+	new.submit()
+	return {"new_bom": new.name, "new_cost": flt(new.raw_material_cost, 2)}
 
 
 # ── Step 3: deactivate everything superseded ────────────────────────────
 
 
 def deactivate_superseded(apply: bool) -> Dict[str, Any]:
-    rows = frappe.db.sql(
-        """
+	rows = frappe.db.sql(
+		"""
         SELECT name, item FROM `tabBOM`
         WHERE docstatus = 1 AND is_default = 0 AND is_active = 1
         ORDER BY item, name
         """,
-        as_dict=True,
-    )
-    if apply:
-        for row in rows:
-            frappe.db.set_value("BOM", row["name"], "is_active", 0, update_modified=False)
-        frappe.db.commit()
-    return {"count": len(rows), "boms": [r["name"] for r in rows]}
+		as_dict=True,
+	)
+	if apply:
+		for row in rows:
+			frappe.db.set_value("BOM", row["name"], "is_active", 0, update_modified=False)
+		frappe.db.commit()
+	return {"count": len(rows), "boms": [r["name"] for r in rows]}
 
 
 # ── Runner ──────────────────────────────────────────────────────────────
 
 
 def apply_now() -> Dict[str, Any]:
-    """Run the migration for real.
+	"""Run the migration for real.
 
-    A no-argument entry point on purpose.  ``--kwargs "{'apply':True}"`` has to
-    survive PowerShell, ssh, bash and click before it reaches Python, and the
-    quoting is stripped somewhere in that chain often enough that the call
-    silently degrades to a dry run — or worse, dies with a NameError after the
-    operator believes it ran.  Naming the intent removes the question.
-    """
-    return run(apply=True)
+	A no-argument entry point on purpose.  ``--kwargs "{'apply':True}"`` has to
+	survive PowerShell, ssh, bash and click before it reaches Python, and the
+	quoting is stripped somewhere in that chain often enough that the call
+	silently degrades to a dry run — or worse, dies with a NameError after the
+	operator believes it ran.  Naming the intent removes the question.
+	"""
+	return run(apply=True)
 
 
 def run(apply: Any = False) -> Dict[str, Any]:
-    apply = bool(apply)
-    print("=" * 96)
-    print("JARZ — cheesecake mix to sub-assembly" + ("" if apply else "   (DRY RUN)"))
-    print("=" * 96)
+	apply = bool(apply)
+	print("=" * 96)
+	print("JARZ — cheesecake mix to sub-assembly" + ("" if apply else "   (DRY RUN)"))
+	print("=" * 96)
 
-    mix = rebuild_mix_bom(apply)
-    print(f"\n[1] Mix BOM: {mix}")
-    if not mix.get("ok"):
-        return {"ok": False, "mix": mix}
+	mix = rebuild_mix_bom(apply)
+	print(f"\n[1] Mix BOM: {mix}")
+	if not mix.get("ok"):
+		return {"ok": False, "mix": mix}
 
-    mix_bom = mix.get("new_bom") or _default_bom(MIX_ITEM)
+	mix_bom = mix.get("new_bom") or _default_bom(MIX_ITEM)
 
-    plans = []
-    for item_code in JAR_MIX_QTY:
-        plan = _plan_jar(item_code, mix_bom)
-        plans.append(plan)
+	plans = []
+	for item_code in JAR_MIX_QTY:
+		plan = _plan_jar(item_code, mix_bom)
+		plans.append(plan)
 
-    blocking = [p for p in plans if p.get("warning")]
-    print(f"\n[2] Jar BOMs — {len(plans)} planned, {len(blocking)} with warnings\n")
-    for plan in plans:
-        if plan.get("skipped"):
-            print(f"  SKIP {plan['item_code']}: {plan['skipped']}")
-            continue
-        print(f"  {plan['item_code']}  [{plan['from_bom']}]  cost {plan['old_cost']}")
-        print(f"      mix line: {plan['mix_line']} {plan['mix_qty']:.6f} Kg")
-        for label in ("removed", "adjusted", "swapped", "corrected", "restored"):
-            for entry in plan[label]:
-                print(f"      {label}: {entry}")
-        if plan["do_not_explode"]:
-            print(f"      do_not_explode -> 1: {', '.join(plan['do_not_explode'])}")
-        if plan.get("note"):
-            print(f"      note: {plan['note']}")
-        if plan.get("warning"):
-            print(f"      !! {plan['warning']}")
+	blocking = [p for p in plans if p.get("warning")]
+	print(f"\n[2] Jar BOMs — {len(plans)} planned, {len(blocking)} with warnings\n")
+	for plan in plans:
+		if plan.get("skipped"):
+			print(f"  SKIP {plan['item_code']}: {plan['skipped']}")
+			continue
+		print(f"  {plan['item_code']}  [{plan['from_bom']}]  cost {plan['old_cost']}")
+		print(f"      mix line: {plan['mix_line']} {plan['mix_qty']:.6f} Kg")
+		for label in ("removed", "adjusted", "swapped", "corrected", "restored"):
+			for entry in plan[label]:
+				print(f"      {label}: {entry}")
+		if plan["do_not_explode"]:
+			print(f"      do_not_explode -> 1: {', '.join(plan['do_not_explode'])}")
+		if plan.get("note"):
+			print(f"      note: {plan['note']}")
+		if plan.get("warning"):
+			print(f"      !! {plan['warning']}")
 
-    if blocking and apply:
-        print("\nRefusing to apply: resolve the warnings above first.")
-        return {"ok": False, "blocked_by": [p["item_code"] for p in blocking]}
+	if blocking and apply:
+		print("\nRefusing to apply: resolve the warnings above first.")
+		return {"ok": False, "blocked_by": [p["item_code"] for p in blocking]}
 
-    results = []
-    if apply:
-        for plan in plans:
-            if plan.get("skipped"):
-                continue
-            outcome = _rebuild_jar(plan, mix_bom)
-            results.append({**plan, **outcome})
-            print(
-                f"  built {plan['item_code']}: {outcome['new_bom']}  "
-                f"cost {plan['old_cost']} -> {outcome['new_cost']}"
-            )
-        frappe.db.commit()
+	results = []
+	if apply:
+		for plan in plans:
+			if plan.get("skipped"):
+				continue
+			outcome = _rebuild_jar(plan, mix_bom)
+			results.append({**plan, **outcome})
+			print(
+				f"  built {plan['item_code']}: {outcome['new_bom']}  "
+				f"cost {plan['old_cost']} -> {outcome['new_cost']}"
+			)
+		frappe.db.commit()
 
-    superseded = deactivate_superseded(apply)
-    print(f"\n[3] Superseded BOMs deactivated: {superseded['count']}"
-          + ("" if apply else " (would be)"))
+	superseded = deactivate_superseded(apply)
+	print(f"\n[3] Superseded BOMs deactivated: {superseded['count']}" + ("" if apply else " (would be)"))
 
-    return {
-        "ok": True,
-        "apply": apply,
-        "mix": mix,
-        "jars": results or plans,
-        "deactivated": superseded["count"],
-    }
+	return {
+		"ok": True,
+		"apply": apply,
+		"mix": mix,
+		"jars": results or plans,
+		"deactivated": superseded["count"],
+	}

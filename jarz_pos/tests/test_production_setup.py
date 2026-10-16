@@ -95,8 +95,7 @@ class FakePermissions:
 		if doctype == "Custom DocPerm":
 			filters = name or {}
 			return any(
-				row["role"] == filters.get("role")
-				and row.get("permlevel", 0) == filters.get("permlevel", 0)
+				row["role"] == filters.get("role") and row.get("permlevel", 0) == filters.get("permlevel", 0)
 				for row in self.custom.get(filters.get("parent"), [])
 			)
 		return False

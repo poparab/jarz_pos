@@ -21,18 +21,17 @@ _CODE_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 
 
 class DeliveryFailureReason(Document):
-    def validate(self):
-        code = str(self.code or "").strip().upper()
-        if not code:
-            frappe.throw(_("Code is required"))
-        if not _CODE_RE.match(code):
-            frappe.throw(
-                _(
-                    "Code must be uppercase letters, digits and underscores only "
-                    "(got '{0}')."
-                ).format(self.code)
-            )
-        self.code = code
+	def validate(self):
+		code = str(self.code or "").strip().upper()
+		if not code:
+			frappe.throw(_("Code is required"))
+		if not _CODE_RE.match(code):
+			frappe.throw(
+				_("Code must be uppercase letters, digits and underscores only " "(got '{0}').").format(
+					self.code
+				)
+			)
+		self.code = code
 
-        if not str(self.label_en or "").strip():
-            frappe.throw(_("Label (English) is required"))
+		if not str(self.label_en or "").strip():
+			frappe.throw(_("Label (English) is required"))

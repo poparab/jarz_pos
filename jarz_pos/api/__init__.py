@@ -14,27 +14,28 @@ _base = _import_module("jarz_pos.api")
 
 # Ensure submodule discovery works by borrowing the base package path
 try:
-    __path__ = _base.__path__  # type: ignore[attr-defined]
+	__path__ = _base.__path__  # type: ignore[attr-defined]
 except Exception:
-    pass
+	pass
 
 # Optional: export common names from the base package (not strictly required)
 for _name in getattr(_base, "__all__", []):
-    try:
-        globals()[_name] = getattr(_base, _name)
-    except Exception:
-        pass
+	try:
+		globals()[_name] = getattr(_base, _name)
+	except Exception:
+		pass
+
 
 def __getattr__(name: str):
-    """Lazily import submodules (e.g., user, couriers) under this shim.
+	"""Lazily import submodules (e.g., user, couriers) under this shim.
 
-    This lets `import jarz_pos.jarz_pos.api.user` work by mapping to
-    `jarz_pos.api.user` under the hood and caching the alias in sys.modules.
-    """
-    # Do not intercept Python's magic attributes
-    if name.startswith("__"):
-        raise AttributeError(name)
-    # Try to import the corresponding submodule from the base package
-    mod = _import_module(f"jarz_pos.api.{name}")
-    _sys.modules[__name__ + "." + name] = mod
-    return mod
+	This lets `import jarz_pos.jarz_pos.api.user` work by mapping to
+	`jarz_pos.api.user` under the hood and caching the alias in sys.modules.
+	"""
+	# Do not intercept Python's magic attributes
+	if name.startswith("__"):
+		raise AttributeError(name)
+	# Try to import the corresponding submodule from the base package
+	mod = _import_module(f"jarz_pos.api.{name}")
+	_sys.modules[__name__ + "." + name] = mod
+	return mod

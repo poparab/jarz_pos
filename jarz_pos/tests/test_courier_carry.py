@@ -27,9 +27,7 @@ class TestCourierCarry(unittest.TestCase):
 		from jarz_pos.services.courier_carry import normalize_acknowledgement
 
 		self.assertEqual(
-			normalize_acknowledgement(
-				[{"courier_transaction": "CT-0001"}, {"name": "CT-0002"}]
-			),
+			normalize_acknowledgement([{"courier_transaction": "CT-0001"}, {"name": "CT-0002"}]),
 			["CT-0001", "CT-0002"],
 		)
 
@@ -60,11 +58,11 @@ class TestCourierCarry(unittest.TestCase):
 			},
 		]
 
-		with patch("jarz_pos.services.courier_carry.frappe", mock_frappe), \
-				 patch("jarz_pos.services.courier_carry.now_datetime", return_value=_FIXED_NOW):
-			result = stamp_carried(
-				rows, opening_entry="POS-OPE-2026-00003", user="staff@example.com"
-			)
+		with (
+			patch("jarz_pos.services.courier_carry.frappe", mock_frappe),
+			patch("jarz_pos.services.courier_carry.now_datetime", return_value=_FIXED_NOW),
+		):
+			result = stamp_carried(rows, opening_entry="POS-OPE-2026-00003", user="staff@example.com")
 
 		self.assertEqual(result["count"], 2)
 		self.assertEqual(result["net_balance"], 160)
@@ -88,8 +86,10 @@ class TestCourierCarry(unittest.TestCase):
 		mock_frappe = _make_mock_frappe()
 		mock_frappe.db.set_value.side_effect = [Exception("locked"), None]
 
-		with patch("jarz_pos.services.courier_carry.frappe", mock_frappe), \
-				 patch("jarz_pos.services.courier_carry.now_datetime", return_value=_FIXED_NOW):
+		with (
+			patch("jarz_pos.services.courier_carry.frappe", mock_frappe),
+			patch("jarz_pos.services.courier_carry.now_datetime", return_value=_FIXED_NOW),
+		):
 			result = stamp_carried(
 				[
 					{"courier_transaction": "CT-0001", "net_balance": 90},
@@ -106,12 +106,14 @@ class TestCourierCarry(unittest.TestCase):
 
 		mock_frappe = _make_mock_frappe()
 
-		with patch("jarz_pos.services.courier_carry.frappe", mock_frappe), \
-				 patch("jarz_pos.services.courier_carry.now_datetime", return_value=_FIXED_NOW), \
-				 patch(
-					 "jarz_pos.utils.access_control.get_open_shift_for_profile",
-					 return_value={"name": "POS-OPE-2026-00009"},
-				 ):
+		with (
+			patch("jarz_pos.services.courier_carry.frappe", mock_frappe),
+			patch("jarz_pos.services.courier_carry.now_datetime", return_value=_FIXED_NOW),
+			patch(
+				"jarz_pos.utils.access_control.get_open_shift_for_profile",
+				return_value={"name": "POS-OPE-2026-00009"},
+			),
+		):
 			done = mark_settled(["CT-0001"], pos_profile="Dokki")
 
 		self.assertEqual(done, ["CT-0001"])
@@ -131,8 +133,10 @@ class TestCourierCarry(unittest.TestCase):
 		mock_frappe = _make_mock_frappe()
 		mock_frappe.db.has_column.return_value = False
 
-		with patch("jarz_pos.services.courier_carry.frappe", mock_frappe), \
-				 patch("jarz_pos.services.courier_carry.now_datetime", return_value=_FIXED_NOW):
+		with (
+			patch("jarz_pos.services.courier_carry.frappe", mock_frappe),
+			patch("jarz_pos.services.courier_carry.now_datetime", return_value=_FIXED_NOW),
+		):
 			done = mark_settled(["CT-0001"], pos_profile="Dokki")
 
 		self.assertEqual(done, ["CT-0001"])
@@ -145,8 +149,10 @@ class TestCourierCarry(unittest.TestCase):
 		mock_frappe = _make_mock_frappe()
 		mock_frappe.db.has_column.return_value = False
 
-		with patch("jarz_pos.services.courier_carry.frappe", mock_frappe), \
-				 patch("jarz_pos.services.courier_carry.now_datetime", return_value=_FIXED_NOW):
+		with (
+			patch("jarz_pos.services.courier_carry.frappe", mock_frappe),
+			patch("jarz_pos.services.courier_carry.now_datetime", return_value=_FIXED_NOW),
+		):
 			result = stamp_carried(
 				[{"courier_transaction": "CT-0001", "net_balance": 90}],
 				opening_entry="POS-OPE-2026-00003",
@@ -163,8 +169,10 @@ class TestCourierCarry(unittest.TestCase):
 
 		mock_frappe = _make_mock_frappe()
 
-		with patch("jarz_pos.services.courier_carry.frappe", mock_frappe), \
-				 patch("jarz_pos.services.courier_carry.now_datetime", return_value=_FIXED_NOW):
+		with (
+			patch("jarz_pos.services.courier_carry.frappe", mock_frappe),
+			patch("jarz_pos.services.courier_carry.now_datetime", return_value=_FIXED_NOW),
+		):
 			done = mark_settled(["CT-0001"], extra={"journal_entry": "JE-0001"})
 
 		self.assertEqual(done, ["CT-0001"])
