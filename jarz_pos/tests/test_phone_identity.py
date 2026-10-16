@@ -14,7 +14,6 @@ from jarz_pos.utils.phone import normalize_phone, phone_search_terms, phone_vari
 
 
 class TestNormalizePhone(unittest.TestCase):
-
 	def test_egyptian_spellings_fold_to_the_local_form(self):
 		cases = {
 			"01111034268": "01111034268",
@@ -42,7 +41,6 @@ class TestNormalizePhone(unittest.TestCase):
 
 
 class TestPhoneVariants(unittest.TestCase):
-
 	def test_covers_every_stored_spelling(self):
 		variants = phone_variants("01111034268")
 		for expected in ("01111034268", "+201111034268", "201111034268"):
@@ -63,7 +61,6 @@ class TestPhoneVariants(unittest.TestCase):
 
 
 class TestPhoneSearchTerms(unittest.TestCase):
-
 	def test_includes_the_national_number_shared_by_every_spelling(self):
 		self.assertIn("1111034268", phone_search_terms("01111034268"))
 		self.assertIn("1111034268", phone_search_terms("+201111034268"))
@@ -102,8 +99,10 @@ class TestCreateCustomerDuplicateGuard(unittest.TestCase):
 			_operator, candidates = values
 			return any(candidate in existing_values for candidate in candidates)
 
-		with patch.object(customer_api.frappe.db, "exists", side_effect=_exists), \
-			 patch.object(customer_api.frappe, "throw", side_effect=RuntimeError("blocked")):
+		with (
+			patch.object(customer_api.frappe.db, "exists", side_effect=_exists),
+			patch.object(customer_api.frappe, "throw", side_effect=RuntimeError("blocked")),
+		):
 			with self.assertRaises(RuntimeError):
 				customer_api.create_customer(
 					customer_name="Test",

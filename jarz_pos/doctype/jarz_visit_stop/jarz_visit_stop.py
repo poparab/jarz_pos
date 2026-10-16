@@ -21,4 +21,4 @@ from frappe.model.document import Document
 
 
 class JarzVisitStop(Document):
-    pass
+	pass

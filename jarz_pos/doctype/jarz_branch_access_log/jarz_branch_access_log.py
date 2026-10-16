@@ -22,41 +22,41 @@ from frappe.model.document import Document
 
 
 def _full_name(user: str | None) -> str | None:
-    if not user:
-        return None
-    return frappe.db.get_value("User", user, "full_name") or user
+	if not user:
+		return None
+	return frappe.db.get_value("User", user, "full_name") or user
 
 
 class JarzBranchAccessLog(Document):
-    def before_insert(self):
-        """Freeze the names as they were at the moment of the change.
+	def before_insert(self):
+		"""Freeze the names as they were at the moment of the change.
 
-        Stored rather than fetched because a log that re-reads names later
-        would silently rename history when a user record is edited.
-        ``changed_by`` falls back to the session user so a caller that forgets
-        it still records an author instead of failing the whole change on a
-        mandatory-field error.
-        """
-        if not self.changed_by:
-            self.changed_by = frappe.session.user
-        self.user_full_name = _full_name(self.user)
-        self.changed_by_name = _full_name(self.changed_by)
+		Stored rather than fetched because a log that re-reads names later
+		would silently rename history when a user record is edited.
+		``changed_by`` falls back to the session user so a caller that forgets
+		it still records an author instead of failing the whole change on a
+		mandatory-field error.
+		"""
+		if not self.changed_by:
+			self.changed_by = frappe.session.user
+		self.user_full_name = _full_name(self.user)
+		self.changed_by_name = _full_name(self.changed_by)
 
-    def validate(self):
-        if not self.is_new():
-            frappe.throw(
-                _("Branch access log entries cannot be edited."),
-                title=_("Read Only"),
-            )
+	def validate(self):
+		if not self.is_new():
+			frappe.throw(
+				_("Branch access log entries cannot be edited."),
+				title=_("Read Only"),
+			)
 
-    def on_trash(self):
-        """Only Administrator may delete, and only as a deliberate data repair.
+	def on_trash(self):
+		"""Only Administrator may delete, and only as a deliberate data repair.
 
-        Managers already have no delete DocPerm; this also stops server code
-        running with ignore_permissions from quietly pruning the trail.
-        """
-        if frappe.session.user != "Administrator":
-            frappe.throw(
-                _("Branch access log entries cannot be deleted."),
-                title=_("Read Only"),
-            )
+		Managers already have no delete DocPerm; this also stops server code
+		running with ignore_permissions from quietly pruning the trail.
+		"""
+		if frappe.session.user != "Administrator":
+			frappe.throw(
+				_("Branch access log entries cannot be deleted."),
+				title=_("Read Only"),
+			)

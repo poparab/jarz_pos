@@ -35,86 +35,83 @@ from jarz_pos.services.state_log import record_state_change
 
 RETURNED_BOARD_STATE = "Returned"
 STATE_FIELD_ALIASES = (
-    "custom_sales_invoice_state",
-    "sales_invoice_state",
-    "custom_state",
-    "state",
+	"custom_sales_invoice_state",
+	"sales_invoice_state",
+	"custom_state",
+	"state",
 )
 
 
 def ensure_returned_board_state() -> None:
-    try:
-        meta = frappe.get_meta("Sales Invoice")
-    except Exception:
-        return
+	try:
+		meta = frappe.get_meta("Sales Invoice")
+	except Exception:
+		return
 
-    if not meta.get_field("custom_return_status"):
-        # Return workflow was never installed on this site.
-        return
+	if not meta.get_field("custom_return_status"):
+		# Return workflow was never installed on this site.
+		return
 
-    fields = [f for f in STATE_FIELD_ALIASES if meta.get_field(f)]
-    if not fields:
-        return
+	fields = [f for f in STATE_FIELD_ALIASES if meta.get_field(f)]
+	if not fields:
+		return
 
-    # Writing a value the Select does not allow would trip _validate_selects on
-    # the next full save of each document. If the fixture has not landed yet,
-    # do nothing and let the next migrate pick it up.
-    state_field = meta.get_field(fields[0])
-    options = [o.strip() for o in (state_field.options or "").split("\n") if o.strip()]
-    if RETURNED_BOARD_STATE not in options:
-        frappe.log_error(
-            message=(
-                f"'{RETURNED_BOARD_STATE}' is not an option on {fields[0]} "
-                f"(found: {options}). Skipping — this reconciler retries on the "
-                "next migrate. If it persists, another app's fixture is "
-                "overwriting the Custom Field."
-            ),
-            title="Returned board state skipped",
-        )
-        return
+	# Writing a value the Select does not allow would trip _validate_selects on
+	# the next full save of each document. If the fixture has not landed yet,
+	# do nothing and let the next migrate pick it up.
+	state_field = meta.get_field(fields[0])
+	options = [o.strip() for o in (state_field.options or "").split("\n") if o.strip()]
+	if RETURNED_BOARD_STATE not in options:
+		frappe.log_error(
+			message=(
+				f"'{RETURNED_BOARD_STATE}' is not an option on {fields[0]} "
+				f"(found: {options}). Skipping — this reconciler retries on the "
+				"next migrate. If it persists, another app's fixture is "
+				"overwriting the Custom Field."
+			),
+			title="Returned board state skipped",
+		)
+		return
 
-    stuck = frappe.get_all(
-        "Sales Invoice",
-        filters={
-            "docstatus": 1,
-            "is_return": 0,
-            "custom_return_status": "Fully Returned",
-            fields[0]: ["!=", RETURNED_BOARD_STATE],
-        },
-        pluck="name",
-    )
-    if not stuck:
-        return
+	stuck = frappe.get_all(
+		"Sales Invoice",
+		filters={
+			"docstatus": 1,
+			"is_return": 0,
+			"custom_return_status": "Fully Returned",
+			fields[0]: ["!=", RETURNED_BOARD_STATE],
+		},
+		pluck="name",
+	)
+	if not stuck:
+		return
 
-    for name in stuck:
-        try:
-            previous_state = frappe.db.get_value("Sales Invoice", name, fields[0])
-            frappe.db.set_value(
-                "Sales Invoice",
-                name,
-                {field: RETURNED_BOARD_STATE for field in fields},
-                update_modified=False,
-            )
-            # set_value bypasses doc hooks, so log the move explicitly (never raises).
-            record_state_change(
-                name, previous_state, RETURNED_BOARD_STATE, "return_reconcile"
-            )
-        except Exception:
-            frappe.log_error(
-                frappe.get_traceback(),
-                f"Returned board state failed for {name}",
-            )
+	for name in stuck:
+		try:
+			previous_state = frappe.db.get_value("Sales Invoice", name, fields[0])
+			frappe.db.set_value(
+				"Sales Invoice",
+				name,
+				{field: RETURNED_BOARD_STATE for field in fields},
+				update_modified=False,
+			)
+			# set_value bypasses doc hooks, so log the move explicitly (never raises).
+			record_state_change(name, previous_state, RETURNED_BOARD_STATE, "return_reconcile")
+		except Exception:
+			frappe.log_error(
+				frappe.get_traceback(),
+				f"Returned board state failed for {name}",
+			)
 
-    frappe.db.commit()
+	frappe.db.commit()
 
-    # log_error is the only level that survives the servers' ERROR-level logger
-    # (see memory: frappe.logger().info() is silent off a dev box), and a data
-    # reconciliation is worth an audit trail.
-    frappe.log_error(
-        message=(
-            f"Moved {len(stuck)} fully-returned invoice(s) to "
-            f"'{RETURNED_BOARD_STATE}': {', '.join(stuck[:50])}"
-            + (" ..." if len(stuck) > 50 else "")
-        ),
-        title="Returned board state reconciled",
-    )
+	# log_error is the only level that survives the servers' ERROR-level logger
+	# (see memory: frappe.logger().info() is silent off a dev box), and a data
+	# reconciliation is worth an audit trail.
+	frappe.log_error(
+		message=(
+			f"Moved {len(stuck)} fully-returned invoice(s) to "
+			f"'{RETURNED_BOARD_STATE}': {', '.join(stuck[:50])}" + (" ..." if len(stuck) > 50 else "")
+		),
+		title="Returned board state reconciled",
+	)

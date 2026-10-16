@@ -40,310 +40,308 @@ creation.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any
 
 import frappe
 from frappe import _
 from frappe.utils import flt
 
 from jarz_pos.utils.invoice_utils import (
-    _derive_bundle_code_from_parent_item,
-    _derive_bundle_group_metadata,
+	_derive_bundle_code_from_parent_item,
+	_derive_bundle_group_metadata,
 )
 
 
 def _flag(row: Any, fieldname: str) -> bool:
-    """Return a boolean for a custom flag field that may be None on legacy rows."""
-    value = getattr(row, fieldname, None)
-    if value in (None, ""):
-        return False
-    return bool(int(value)) if isinstance(value, (int, float)) else bool(value)
+	"""Return a boolean for a custom flag field that may be None on legacy rows."""
+	value = getattr(row, fieldname, None)
+	if value in (None, ""):
+		return False
+	return bool(int(value)) if isinstance(value, (int, float)) else bool(value)
 
 
 def _text(row: Any, fieldname: str) -> str:
-    return str(getattr(row, fieldname, None) or "").strip()
+	return str(getattr(row, fieldname, None) or "").strip()
 
 
 def _is_bundle_parent_row(row: Any) -> bool:
-    return _flag(row, "is_bundle_parent") or bool(_text(row, "bundle_code"))
+	return _flag(row, "is_bundle_parent") or bool(_text(row, "bundle_code"))
 
 
 def _is_bundle_child_row(row: Any) -> bool:
-    return _flag(row, "is_bundle_child") or bool(_text(row, "parent_bundle"))
+	return _flag(row, "is_bundle_child") or bool(_text(row, "parent_bundle"))
 
 
-def _bundle_exists(bundle_code: str, cache: Dict[str, bool]) -> bool:
-    """Return whether ``bundle_code`` still names a live Jarz Bundle record."""
-    if bundle_code not in cache:
-        try:
-            cache[bundle_code] = bool(frappe.db.exists("Jarz Bundle", bundle_code))
-        except Exception:
-            # A lookup failure must not turn a rebuildable invoice into an error:
-            # trust the stored code, which is the pre-existing behaviour.
-            cache[bundle_code] = True
-    return cache[bundle_code]
+def _bundle_exists(bundle_code: str, cache: dict[str, bool]) -> bool:
+	"""Return whether ``bundle_code`` still names a live Jarz Bundle record."""
+	if bundle_code not in cache:
+		try:
+			cache[bundle_code] = bool(frappe.db.exists("Jarz Bundle", bundle_code))
+		except Exception:
+			# A lookup failure must not turn a rebuildable invoice into an error:
+			# trust the stored code, which is the pre-existing behaviour.
+			cache[bundle_code] = True
+	return cache[bundle_code]
 
 
 def _resolve_bundle_code(
-    row: Any,
-    bundle_code_cache: Dict[str, str],
-    bundle_exists_cache: Dict[str, bool],
+	row: Any,
+	bundle_code_cache: dict[str, str],
+	bundle_exists_cache: dict[str, bool],
 ) -> str:
-    """Return the Jarz Bundle this parent row should be rebuilt against.
+	"""Return the Jarz Bundle this parent row should be rebuilt against.
 
-    The stored ``bundle_code`` is preferred but only when the record still
-    exists.  Woo-created invoices routinely carry the id of a bundle that was
-    later deleted and recreated; trusting it blindly makes every group lookup
-    return nothing and the rebuild fails with "has no bundle group recorded"
-    even though the parent item still maps to a perfectly good bundle.
-    """
-    stored_code = _text(row, "bundle_code")
-    if stored_code and _bundle_exists(stored_code, bundle_exists_cache):
-        return stored_code
-    return _derive_bundle_code_from_parent_item(row.item_code, bundle_code_cache)
-
-
-def _owning_parent_index(
-    child_index: int, candidate_parents: List[int], child_row: Any, invoice: Any
-) -> int:
-    """Return the row index of the bundle parent that owns the child at ``child_index``.
-
-    ``candidate_parents`` holds, in invoice order, every parent row whose resolved
-    bundle code the child names. Rows are written parent-then-its-children, so the
-    owner is the nearest candidate ABOVE the child.
-
-    A child sitting above every candidate should never happen. With a single
-    candidate there is only one bundle it can belong to, so it is attached there —
-    exactly what the code-keyed attribution always did, so single-instance
-    invoices rebuild unchanged. With several candidates, picking one would be a
-    guess that either overfills one instance or (if the processor tolerated it)
-    silently moves a paid line between bundles, so the rebuild is refused instead,
-    the same stance taken for orphaned children on multi-bundle invoices.
-    """
-    owner = None
-    for parent_index in candidate_parents:
-        if parent_index >= child_index:
-            break
-        owner = parent_index
-    if owner is not None:
-        return owner
-    if len(candidate_parents) == 1:
-        return candidate_parents[0]
-    frappe.throw(
-        _(
-            "Bundle child '{0}' on invoice {1} appears before its bundle row, and the "
-            "order holds that bundle more than once, so the order cannot be rebuilt "
-            "automatically."
-        ).format(getattr(child_row, "item_code", ""), getattr(invoice, "name", ""))
-    )
-    return candidate_parents[0]  # pragma: no cover - frappe.throw does not return
+	The stored ``bundle_code`` is preferred but only when the record still
+	exists.  Woo-created invoices routinely carry the id of a bundle that was
+	later deleted and recreated; trusting it blindly makes every group lookup
+	return nothing and the rebuild fails with "has no bundle group recorded"
+	even though the parent item still maps to a perfectly good bundle.
+	"""
+	stored_code = _text(row, "bundle_code")
+	if stored_code and _bundle_exists(stored_code, bundle_exists_cache):
+		return stored_code
+	return _derive_bundle_code_from_parent_item(row.item_code, bundle_code_cache)
 
 
-def build_amendment_cart_from_invoice(invoice: Any) -> List[Dict[str, Any]]:
-    """Return the POS cart payload that reproduces ``invoice`` line-for-line.
+def _owning_parent_index(child_index: int, candidate_parents: list[int], child_row: Any, invoice: Any) -> int:
+	"""Return the row index of the bundle parent that owns the child at ``child_index``.
 
-    Bundle parents become a single ``is_bundle`` cart row whose ``selected_items``
-    are keyed by the persisted ``bundle_group_key`` — the same key
-    :func:`jarz_pos.services.bundle_processing.BundleProcessor._aggregate_selected_items`
-    matches on — so bundles that repeat an item group survive the round trip.
-    Rows that never stored a key (nearly every Woo-created invoice) fall back to
-    the group name, which the same method splits across the repeated rows.
+	``candidate_parents`` holds, in invoice order, every parent row whose resolved
+	bundle code the child names. Rows are written parent-then-its-children, so the
+	owner is the nearest candidate ABOVE the child.
 
-    Raises a ValidationError when the invoice cannot be expressed as a cart
-    (missing bundle code, orphaned children, fractional bundle quantities) rather
-    than silently emitting a cart that would rebuild the invoice incorrectly.
-    """
-    rows = list(getattr(invoice, "items", None) or [])
-    if not rows:
-        frappe.throw(_("Invoice {0} has no items to rebuild.").format(getattr(invoice, "name", "")))
+	A child sitting above every candidate should never happen. With a single
+	candidate there is only one bundle it can belong to, so it is attached there —
+	exactly what the code-keyed attribution always did, so single-instance
+	invoices rebuild unchanged. With several candidates, picking one would be a
+	guess that either overfills one instance or (if the processor tolerated it)
+	silently moves a paid line between bundles, so the rebuild is refused instead,
+	the same stance taken for orphaned children on multi-bundle invoices.
+	"""
+	owner = None
+	for parent_index in candidate_parents:
+		if parent_index >= child_index:
+			break
+		owner = parent_index
+	if owner is not None:
+		return owner
+	if len(candidate_parents) == 1:
+		return candidate_parents[0]
+	frappe.throw(
+		_(
+			"Bundle child '{0}' on invoice {1} appears before its bundle row, and the "
+			"order holds that bundle more than once, so the order cannot be rebuilt "
+			"automatically."
+		).format(getattr(child_row, "item_code", ""), getattr(invoice, "name", ""))
+	)
+	return candidate_parents[0]  # pragma: no cover - frappe.throw does not return
 
-    bundle_code_cache: Dict[str, str] = {}
-    bundle_exists_cache: Dict[str, bool] = {}
-    group_metadata_cache: Dict[str, Dict[str, Dict[str, str]]] = {}
 
-    # Resolve each parent row's bundle code up front so children can be attached.
-    parent_bundle_codes: Dict[int, str] = {}
-    # Every parent row index per resolved code, in invoice order. More than one
-    # entry means the order holds the same bundle more than once.
-    parent_indexes_by_code: Dict[str, List[int]] = {}
-    # Children point at whatever code the parent row stored. When that code is
-    # stale it is replaced above, so keep the translation to re-attach them.
-    resolved_by_stored_code: Dict[str, str] = {}
-    for index, row in enumerate(rows):
-        if _is_bundle_child_row(row) or not _is_bundle_parent_row(row):
-            continue
-        bundle_code = _resolve_bundle_code(row, bundle_code_cache, bundle_exists_cache)
-        if not bundle_code:
-            frappe.throw(
-                _(
-                    "Bundle row '{0}' on invoice {1} has no linked Jarz Bundle, "
-                    "so the order cannot be rebuilt automatically."
-                ).format(row.item_code, getattr(invoice, "name", ""))
-            )
-        parent_bundle_codes[index] = bundle_code
-        parent_indexes_by_code.setdefault(bundle_code, []).append(index)
-        stored_code = _text(row, "bundle_code")
-        if stored_code:
-            resolved_by_stored_code[stored_code] = bundle_code
+def build_amendment_cart_from_invoice(invoice: Any) -> list[dict[str, Any]]:
+	"""Return the POS cart payload that reproduces ``invoice`` line-for-line.
 
-    # Keyed by the parent ROW index, not the bundle code: two instances of one
-    # bundle share a code, and keying by it handed every child to both parents.
-    children_by_parent: Dict[int, List[Any]] = {}
-    orphan_children: List[Any] = []
-    for index, row in enumerate(rows):
-        if not _is_bundle_child_row(row):
-            continue
-        parent_bundle = _text(row, "parent_bundle")
-        parent_bundle = resolved_by_stored_code.get(parent_bundle, parent_bundle)
-        # A child pointing at a bundle no parent row resolved to is treated as an
-        # orphan rather than quietly dropped from the rebuilt cart — dropping it
-        # would produce a replacement invoice missing a line the customer paid for.
-        candidate_parents = parent_indexes_by_code.get(parent_bundle) if parent_bundle else None
-        if not candidate_parents:
-            orphan_children.append(row)
-            continue
-        children_by_parent.setdefault(
-            _owning_parent_index(index, candidate_parents, row, invoice), []
-        ).append(row)
+	Bundle parents become a single ``is_bundle`` cart row whose ``selected_items``
+	are keyed by the persisted ``bundle_group_key`` — the same key
+	:func:`jarz_pos.services.bundle_processing.BundleProcessor._aggregate_selected_items`
+	matches on — so bundles that repeat an item group survive the round trip.
+	Rows that never stored a key (nearly every Woo-created invoice) fall back to
+	the group name, which the same method splits across the repeated rows.
 
-    # Legacy rows sometimes lost `parent_bundle`. That is only recoverable when the
-    # invoice holds exactly one bundle — anything else would be a guess.
-    if orphan_children:
-        if len(parent_bundle_codes) != 1:
-            frappe.throw(
-                _(
-                    "Invoice {0} has bundle child rows with no parent bundle recorded, "
-                    "so the order cannot be rebuilt automatically."
-                ).format(getattr(invoice, "name", ""))
-            )
-        only_parent_index = next(iter(parent_bundle_codes))
-        children_by_parent.setdefault(only_parent_index, []).extend(orphan_children)
+	Raises a ValidationError when the invoice cannot be expressed as a cart
+	(missing bundle code, orphaned children, fractional bundle quantities) rather
+	than silently emitting a cart that would rebuild the invoice incorrectly.
+	"""
+	rows = list(getattr(invoice, "items", None) or [])
+	if not rows:
+		frappe.throw(_("Invoice {0} has no items to rebuild.").format(getattr(invoice, "name", "")))
 
-    cart: List[Dict[str, Any]] = []
-    for index, row in enumerate(rows):
-        if _is_bundle_child_row(row):
-            continue  # emitted as part of its bundle parent
+	bundle_code_cache: dict[str, str] = {}
+	bundle_exists_cache: dict[str, bool] = {}
+	group_metadata_cache: dict[str, dict[str, dict[str, str]]] = {}
 
-        if index in parent_bundle_codes:
-            cart.append(
-                _build_bundle_cart_row(
-                    invoice=invoice,
-                    parent_row=row,
-                    bundle_code=parent_bundle_codes[index],
-                    children=children_by_parent.get(index, []),
-                    group_metadata_cache=group_metadata_cache,
-                )
-            )
-            continue
+	# Resolve each parent row's bundle code up front so children can be attached.
+	parent_bundle_codes: dict[int, str] = {}
+	# Every parent row index per resolved code, in invoice order. More than one
+	# entry means the order holds the same bundle more than once.
+	parent_indexes_by_code: dict[str, list[int]] = {}
+	# Children point at whatever code the parent row stored. When that code is
+	# stale it is replaced above, so keep the translation to re-attach them.
+	resolved_by_stored_code: dict[str, str] = {}
+	for index, row in enumerate(rows):
+		if _is_bundle_child_row(row) or not _is_bundle_parent_row(row):
+			continue
+		bundle_code = _resolve_bundle_code(row, bundle_code_cache, bundle_exists_cache)
+		if not bundle_code:
+			frappe.throw(
+				_(
+					"Bundle row '{0}' on invoice {1} has no linked Jarz Bundle, "
+					"so the order cannot be rebuilt automatically."
+				).format(row.item_code, getattr(invoice, "name", ""))
+			)
+		parent_bundle_codes[index] = bundle_code
+		parent_indexes_by_code.setdefault(bundle_code, []).append(index)
+		stored_code = _text(row, "bundle_code")
+		if stored_code:
+			resolved_by_stored_code[stored_code] = bundle_code
 
-        item_code = str(row.item_code or "").strip()
-        if not item_code:
-            continue
-        unit_rate = flt(row.price_list_rate) or flt(row.rate)
-        plain_row: Dict[str, Any] = {
-            "item_code": item_code,
-            "qty": flt(row.qty),
-            "rate": unit_rate,
-        }
-        # Preserve a manual line discount; the catalog rate is re-resolved by the
-        # invoice engine, so only the discount has to be carried across.
-        discount_percentage = flt(getattr(row, "discount_percentage", None))
-        if discount_percentage > 0:
-            plain_row["discount_percentage"] = discount_percentage
-        cart.append(plain_row)
+	# Keyed by the parent ROW index, not the bundle code: two instances of one
+	# bundle share a code, and keying by it handed every child to both parents.
+	children_by_parent: dict[int, list[Any]] = {}
+	orphan_children: list[Any] = []
+	for index, row in enumerate(rows):
+		if not _is_bundle_child_row(row):
+			continue
+		parent_bundle = _text(row, "parent_bundle")
+		parent_bundle = resolved_by_stored_code.get(parent_bundle, parent_bundle)
+		# A child pointing at a bundle no parent row resolved to is treated as an
+		# orphan rather than quietly dropped from the rebuilt cart — dropping it
+		# would produce a replacement invoice missing a line the customer paid for.
+		candidate_parents = parent_indexes_by_code.get(parent_bundle) if parent_bundle else None
+		if not candidate_parents:
+			orphan_children.append(row)
+			continue
+		children_by_parent.setdefault(
+			_owning_parent_index(index, candidate_parents, row, invoice), []
+		).append(row)
 
-    if not cart:
-        frappe.throw(
-            _("Invoice {0} produced an empty cart when rebuilt.").format(getattr(invoice, "name", ""))
-        )
-    return cart
+	# Legacy rows sometimes lost `parent_bundle`. That is only recoverable when the
+	# invoice holds exactly one bundle — anything else would be a guess.
+	if orphan_children:
+		if len(parent_bundle_codes) != 1:
+			frappe.throw(
+				_(
+					"Invoice {0} has bundle child rows with no parent bundle recorded, "
+					"so the order cannot be rebuilt automatically."
+				).format(getattr(invoice, "name", ""))
+			)
+		only_parent_index = next(iter(parent_bundle_codes))
+		children_by_parent.setdefault(only_parent_index, []).extend(orphan_children)
+
+	cart: list[dict[str, Any]] = []
+	for index, row in enumerate(rows):
+		if _is_bundle_child_row(row):
+			continue  # emitted as part of its bundle parent
+
+		if index in parent_bundle_codes:
+			cart.append(
+				_build_bundle_cart_row(
+					invoice=invoice,
+					parent_row=row,
+					bundle_code=parent_bundle_codes[index],
+					children=children_by_parent.get(index, []),
+					group_metadata_cache=group_metadata_cache,
+				)
+			)
+			continue
+
+		item_code = str(row.item_code or "").strip()
+		if not item_code:
+			continue
+		unit_rate = flt(row.price_list_rate) or flt(row.rate)
+		plain_row: dict[str, Any] = {
+			"item_code": item_code,
+			"qty": flt(row.qty),
+			"rate": unit_rate,
+		}
+		# Preserve a manual line discount; the catalog rate is re-resolved by the
+		# invoice engine, so only the discount has to be carried across.
+		discount_percentage = flt(getattr(row, "discount_percentage", None))
+		if discount_percentage > 0:
+			plain_row["discount_percentage"] = discount_percentage
+		cart.append(plain_row)
+
+	if not cart:
+		frappe.throw(
+			_("Invoice {0} produced an empty cart when rebuilt.").format(getattr(invoice, "name", ""))
+		)
+	return cart
 
 
 def _build_bundle_cart_row(
-    *,
-    invoice: Any,
-    parent_row: Any,
-    bundle_code: str,
-    children: List[Any],
-    group_metadata_cache: Dict[str, Dict[str, Dict[str, str]]],
-) -> Dict[str, Any]:
-    """Return one ``is_bundle`` cart row rebuilt from its persisted invoice rows."""
-    invoice_name = getattr(invoice, "name", "")
-    if not children:
-        frappe.throw(
-            _("Bundle '{0}' on invoice {1} has no child rows, so it cannot be rebuilt.").format(
-                parent_row.item_code, invoice_name
-            )
-        )
+	*,
+	invoice: Any,
+	parent_row: Any,
+	bundle_code: str,
+	children: list[Any],
+	group_metadata_cache: dict[str, dict[str, dict[str, str]]],
+) -> dict[str, Any]:
+	"""Return one ``is_bundle`` cart row rebuilt from its persisted invoice rows."""
+	invoice_name = getattr(invoice, "name", "")
+	if not children:
+		frappe.throw(
+			_("Bundle '{0}' on invoice {1} has no child rows, so it cannot be rebuilt.").format(
+				parent_row.item_code, invoice_name
+			)
+		)
 
-    bundle_qty = int(flt(parent_row.qty) or 1)
-    if bundle_qty <= 0:
-        bundle_qty = 1
+	bundle_qty = int(flt(parent_row.qty) or 1)
+	if bundle_qty <= 0:
+		bundle_qty = 1
 
-    selected_items: Dict[str, List[Dict[str, Any]]] = {}
-    for child in children:
-        group_key = _text(child, "bundle_group_key")
-        group_name = _text(child, "bundle_group_name")
-        if group_key:
-            # The invoice recorded the exact Jarz Bundle Item Group row: use it.
-            selection_key = group_key
-        else:
-            derived_key, derived_name = _derive_bundle_group_metadata(
-                bundle_code, child.item_code, group_metadata_cache
-            )
-            group_name = group_name or derived_name
-            # Nothing was recorded, so the row can only be inferred from group
-            # membership — and that inference maps an item to ONE group row, so on
-            # a bundle repeating an item group it always answers with the last of
-            # them (4 selections would be posted against a row needing 1). Key by
-            # the group NAME instead and let BundleProcessor, which knows each
-            # row's required quantity, split the list across the rows.
-            selection_key = group_name or derived_key
-        if not selection_key:
-            frappe.throw(
-                _(
-                    "Bundle child '{0}' on invoice {1} has no bundle group recorded, "
-                    "so the order cannot be rebuilt automatically."
-                ).format(child.item_code, invoice_name)
-            )
+	selected_items: dict[str, list[dict[str, Any]]] = {}
+	for child in children:
+		group_key = _text(child, "bundle_group_key")
+		group_name = _text(child, "bundle_group_name")
+		if group_key:
+			# The invoice recorded the exact Jarz Bundle Item Group row: use it.
+			selection_key = group_key
+		else:
+			derived_key, derived_name = _derive_bundle_group_metadata(
+				bundle_code, child.item_code, group_metadata_cache
+			)
+			group_name = group_name or derived_name
+			# Nothing was recorded, so the row can only be inferred from group
+			# membership — and that inference maps an item to ONE group row, so on
+			# a bundle repeating an item group it always answers with the last of
+			# them (4 selections would be posted against a row needing 1). Key by
+			# the group NAME instead and let BundleProcessor, which knows each
+			# row's required quantity, split the list across the rows.
+			selection_key = group_name or derived_key
+		if not selection_key:
+			frappe.throw(
+				_(
+					"Bundle child '{0}' on invoice {1} has no bundle group recorded, "
+					"so the order cannot be rebuilt automatically."
+				).format(child.item_code, invoice_name)
+			)
 
-        total_qty = flt(child.qty)
-        # Child quantities are stored as (per-bundle qty x bundle qty). A remainder
-        # means the invoice was hand-edited and the split is not recoverable.
-        if total_qty <= 0 or (total_qty % bundle_qty) != 0:
-            frappe.throw(
-                _(
-                    "Bundle child '{0}' on invoice {1} has quantity {2}, which is not a "
-                    "multiple of the bundle quantity {3}."
-                ).format(child.item_code, invoice_name, total_qty, bundle_qty)
-            )
-        per_bundle_qty = int(total_qty // bundle_qty)
+		total_qty = flt(child.qty)
+		# Child quantities are stored as (per-bundle qty x bundle qty). A remainder
+		# means the invoice was hand-edited and the split is not recoverable.
+		if total_qty <= 0 or (total_qty % bundle_qty) != 0:
+			frappe.throw(
+				_(
+					"Bundle child '{0}' on invoice {1} has quantity {2}, which is not a "
+					"multiple of the bundle quantity {3}."
+				).format(child.item_code, invoice_name, total_qty, bundle_qty)
+			)
+		per_bundle_qty = int(total_qty // bundle_qty)
 
-        selected_items.setdefault(selection_key, []).append(
-            {
-                "id": child.item_code,
-                "item_code": child.item_code,
-                "name": child.item_code,
-                "selected_quantity": per_bundle_qty,
-                # Reuse the stored unit price so the child discount split reproduces
-                # the source invoice exactly instead of drifting with the catalog.
-                "price": flt(child.price_list_rate) or flt(child.rate),
-            }
-        )
+		selected_items.setdefault(selection_key, []).append(
+			{
+				"id": child.item_code,
+				"item_code": child.item_code,
+				"name": child.item_code,
+				"selected_quantity": per_bundle_qty,
+				# Reuse the stored unit price so the child discount split reproduces
+				# the source invoice exactly instead of drifting with the catalog.
+				"price": flt(child.price_list_rate) or flt(child.rate),
+			}
+		)
 
-    bundle_price = flt(parent_row.price_list_rate) or flt(parent_row.rate)
-    if bundle_price <= 0:
-        frappe.throw(
-            _("Bundle '{0}' on invoice {1} has no price recorded, so it cannot be rebuilt.").format(
-                parent_row.item_code, invoice_name
-            )
-        )
+	bundle_price = flt(parent_row.price_list_rate) or flt(parent_row.rate)
+	if bundle_price <= 0:
+		frappe.throw(
+			_("Bundle '{0}' on invoice {1} has no price recorded, so it cannot be rebuilt.").format(
+				parent_row.item_code, invoice_name
+			)
+		)
 
-    return {
-        "item_code": bundle_code,
-        "qty": bundle_qty,
-        "rate": bundle_price,
-        "price_list_rate": bundle_price,
-        "is_bundle": True,
-        "selected_items": selected_items,
-    }
+	return {
+		"item_code": bundle_code,
+		"qty": bundle_qty,
+		"rate": bundle_price,
+		"price_list_rate": bundle_price,
+		"is_bundle": True,
+		"selected_items": selected_items,
+	}

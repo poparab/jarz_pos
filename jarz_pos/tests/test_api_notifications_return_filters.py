@@ -18,155 +18,154 @@ from unittest.mock import patch
 
 
 class TestNotificationReturnFilters(unittest.TestCase):
+	@staticmethod
+	def _sales_invoice_filter_recorder(captured, result=None):
+		"""Record filters from Sales Invoice reads only.
 
-    @staticmethod
-    def _sales_invoice_filter_recorder(captured, result=None):
-        """Record filters from Sales Invoice reads only.
+		Patching ``frappe.get_all`` wholesale also catches the framework's own
+		lookups — ``frappe.utils.now()`` alone pulls System Settings — so the
+		recorder has to select by doctype rather than count calls.
 
-        Patching ``frappe.get_all`` wholesale also catches the framework's own
-        lookups — ``frappe.utils.now()`` alone pulls System Settings — so the
-        recorder has to select by doctype rather than count calls.
+		*result* must match what the patched callable really returns: rows for
+		``get_all``, an int for ``db.count``. Handing ``check_for_updates`` a
+		list makes its arithmetic raise, and it swallows that into
+		``success: False`` — a green-looking filter assertion over a dead call.
+		"""
+		rows = [] if result is None else result
 
-        *result* must match what the patched callable really returns: rows for
-        ``get_all``, an int for ``db.count``. Handing ``check_for_updates`` a
-        list makes its arithmetic raise, and it swallows that into
-        ``success: False`` — a green-looking filter assertion over a dead call.
-        """
-        rows = [] if result is None else result
+		def fake_get_all(doctype, filters=None, **kwargs):
+			if doctype == "Sales Invoice":
+				captured.append(filters or {})
+			return rows
 
-        def fake_get_all(doctype, filters=None, **kwargs):
-            if doctype == "Sales Invoice":
-                captured.append(filters or {})
-            return rows
+		return fake_get_all
 
-        return fake_get_all
+	def _assert_pos_order_scoped(self, captured, expected_queries):
+		self.assertEqual(len(captured), expected_queries)
+		for filters in captured:
+			self.assertEqual(filters.get("docstatus"), 1)
+			self.assertEqual(filters.get("is_pos"), 1)
+			self.assertEqual(filters.get("is_return"), 0)
 
-    def _assert_pos_order_scoped(self, captured, expected_queries):
-        self.assertEqual(len(captured), expected_queries)
-        for filters in captured:
-            self.assertEqual(filters.get("docstatus"), 1)
-            self.assertEqual(filters.get("is_pos"), 1)
-            self.assertEqual(filters.get("is_return"), 0)
+	# ── Query filters ────────────────────────────────────────────────────────
 
-    # ── Query filters ────────────────────────────────────────────────────────
+	def test_pos_order_filters_exclude_returns_and_non_pos(self):
+		from jarz_pos.api import notifications
 
-    def test_pos_order_filters_exclude_returns_and_non_pos(self):
-        from jarz_pos.api import notifications
+		self.assertEqual(
+			notifications.POS_ORDER_FILTERS,
+			{"docstatus": 1, "is_pos": 1, "is_return": 0},
+		)
 
-        self.assertEqual(
-            notifications.POS_ORDER_FILTERS,
-            {"docstatus": 1, "is_pos": 1, "is_return": 0},
-        )
+	def test_pending_alert_query_filters_out_credit_notes(self):
+		from jarz_pos.api import notifications
 
-    def test_pending_alert_query_filters_out_credit_notes(self):
-        from jarz_pos.api import notifications
+		captured = []
 
-        captured = []
+		with patch.object(
+			notifications.frappe,
+			"get_all",
+			side_effect=self._sales_invoice_filter_recorder(captured),
+		):
+			notifications._get_pending_alert_rows_for_profiles(["Nasr city"], "2026-08-05 00:00:00")
 
-        with patch.object(
-            notifications.frappe,
-            "get_all",
-            side_effect=self._sales_invoice_filter_recorder(captured),
-        ):
-            notifications._get_pending_alert_rows_for_profiles(["Nasr city"], "2026-08-05 00:00:00")
+		# The effective-profile query and the legacy pos_profile fallback.
+		self._assert_pos_order_scoped(captured, expected_queries=2)
 
-        # The effective-profile query and the legacy pos_profile fallback.
-        self._assert_pos_order_scoped(captured, expected_queries=2)
+	def test_recent_invoice_polling_filters_out_credit_notes(self):
+		from jarz_pos.api import notifications
 
-    def test_recent_invoice_polling_filters_out_credit_notes(self):
-        from jarz_pos.api import notifications
+		captured = []
 
-        captured = []
+		with patch.object(
+			notifications.frappe,
+			"get_all",
+			side_effect=self._sales_invoice_filter_recorder(captured),
+		):
+			result = notifications.get_recent_invoices(minutes=5)
 
-        with patch.object(
-            notifications.frappe,
-            "get_all",
-            side_effect=self._sales_invoice_filter_recorder(captured),
-        ):
-            result = notifications.get_recent_invoices(minutes=5)
+		self.assertTrue(result["success"])
+		# Newly created and recently modified.
+		self._assert_pos_order_scoped(captured, expected_queries=2)
 
-        self.assertTrue(result["success"])
-        # Newly created and recently modified.
-        self._assert_pos_order_scoped(captured, expected_queries=2)
+	def test_update_check_counts_match_the_recent_invoice_filters(self):
+		from jarz_pos.api import notifications
 
-    def test_update_check_counts_match_the_recent_invoice_filters(self):
-        from jarz_pos.api import notifications
+		captured = []
 
-        captured = []
+		with patch.object(
+			notifications.frappe.db,
+			"count",
+			side_effect=self._sales_invoice_filter_recorder(captured, result=0),
+		):
+			result = notifications.check_for_updates()
 
-        with patch.object(
-            notifications.frappe.db,
-            "count",
-            side_effect=self._sales_invoice_filter_recorder(captured, result=0),
-        ):
-            result = notifications.check_for_updates()
+		self.assertTrue(result["success"])
+		self._assert_pos_order_scoped(captured, expected_queries=2)
 
-        self.assertTrue(result["success"])
-        self._assert_pos_order_scoped(captured, expected_queries=2)
+	# ── on_submit push path ──────────────────────────────────────────────────
 
-    # ── on_submit push path ──────────────────────────────────────────────────
+	def _submitting_doc(self, **overrides):
+		base = {
+			"name": "ACC-SINV-2026-17056",
+			"is_return": 1,
+			"is_pos": 0,
+			"custom_kanban_profile": "Nasr city",
+			"pos_profile": "Nasr city",
+		}
+		base.update(overrides)
+		return SimpleNamespace(**base)
 
-    def _submitting_doc(self, **overrides):
-        base = {
-            "name": "ACC-SINV-2026-17056",
-            "is_return": 1,
-            "is_pos": 0,
-            "custom_kanban_profile": "Nasr city",
-            "pos_profile": "Nasr city",
-        }
-        base.update(overrides)
-        return SimpleNamespace(**base)
+	def test_credit_note_submit_sends_no_new_order_push(self):
+		"""The path that actually reached staff — a bare `is_return` short-circuit."""
+		from jarz_pos.api import notifications
 
-    def test_credit_note_submit_sends_no_new_order_push(self):
-        """The path that actually reached staff — a bare `is_return` short-circuit."""
-        from jarz_pos.api import notifications
+		with (
+			patch.object(notifications, "_build_invoice_alert_payload") as build,
+			patch.object(notifications, "_publish_invoice_alert") as publish,
+			patch.object(notifications, "_push_new_invoice") as push,
+		):
+			notifications.handle_invoice_submission(self._submitting_doc())
 
-        with patch.object(notifications, "_build_invoice_alert_payload") as build, patch.object(
-            notifications, "_publish_invoice_alert"
-        ) as publish, patch.object(notifications, "_push_new_invoice") as push:
-            notifications.handle_invoice_submission(self._submitting_doc())
+		build.assert_not_called()
+		publish.assert_not_called()
+		push.assert_not_called()
 
-        build.assert_not_called()
-        publish.assert_not_called()
-        push.assert_not_called()
+	def test_ordinary_pos_invoice_still_pushes(self):
+		"""The guard must not silence the case the hook exists for."""
+		from jarz_pos.api import notifications
 
-    def test_ordinary_pos_invoice_still_pushes(self):
-        """The guard must not silence the case the hook exists for."""
-        from jarz_pos.api import notifications
+		payload = {"invoice_id": "ACC-SINV-2026-17055-1", "requires_acceptance": True}
 
-        payload = {"invoice_id": "ACC-SINV-2026-17055-1", "requires_acceptance": True}
+		with (
+			patch.object(notifications, "_build_invoice_alert_payload", return_value=payload),
+			patch.object(notifications, "_resolve_recipients_for_payload", return_value=["staff@jarz.test"]),
+			patch.object(notifications, "_publish_invoice_alert") as publish,
+			patch.object(notifications, "_push_new_invoice", return_value={"fcm": {}, "vapid": {}}) as push,
+		):
+			notifications.handle_invoice_submission(
+				self._submitting_doc(name="ACC-SINV-2026-17055-1", is_return=0, is_pos=1)
+			)
 
-        with patch.object(
-            notifications, "_build_invoice_alert_payload", return_value=payload
-        ), patch.object(
-            notifications, "_resolve_recipients_for_payload", return_value=["staff@jarz.test"]
-        ), patch.object(
-            notifications, "_publish_invoice_alert"
-        ) as publish, patch.object(
-            notifications, "_push_new_invoice", return_value={"fcm": {}, "vapid": {}}
-        ) as push:
-            notifications.handle_invoice_submission(
-                self._submitting_doc(name="ACC-SINV-2026-17055-1", is_return=0, is_pos=1)
-            )
+		publish.assert_called_once()
+		push.assert_called_once()
 
-        publish.assert_called_once()
-        push.assert_called_once()
+	# ── Acceptance guard ─────────────────────────────────────────────────────
 
-    # ── Acceptance guard ─────────────────────────────────────────────────────
+	def test_credit_note_cannot_be_acknowledged(self):
+		from jarz_pos.api import notifications
 
-    def test_credit_note_cannot_be_acknowledged(self):
-        from jarz_pos.api import notifications
+		doc = SimpleNamespace(name="ACC-SINV-2026-17056", docstatus=1, is_return=1)
 
-        doc = SimpleNamespace(name="ACC-SINV-2026-17056", docstatus=1, is_return=1)
+		with (
+			patch.object(notifications.frappe, "get_doc", return_value=doc),
+			patch.object(notifications, "_ensure_user_can_accept") as can_accept,
+		):
+			with self.assertRaises(Exception):
+				notifications.acknowledge_invoice("ACC-SINV-2026-17056")
 
-        with patch.object(notifications.frappe, "get_doc", return_value=doc), patch.object(
-            notifications, "_ensure_user_can_accept"
-        ) as can_accept:
-            with self.assertRaises(Exception):
-                notifications.acknowledge_invoice("ACC-SINV-2026-17056")
-
-        can_accept.assert_not_called()
+		can_accept.assert_not_called()
 
 
 if __name__ == "__main__":
-    unittest.main()
+	unittest.main()

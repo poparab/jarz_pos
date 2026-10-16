@@ -39,7 +39,11 @@ frappe.ui.form.on("Delivery Partner", {
 		});
 
 		frm.add_custom_button(__("Settle Partner"), () => _settlement_dialog(frm), __("Actions"));
-		frm.add_custom_button(__("View Unbilled Trips"), () => _unbilled_dialog(frm), __("Actions"));
+		frm.add_custom_button(
+			__("View Unbilled Trips"),
+			() => _unbilled_dialog(frm),
+			__("Actions")
+		);
 		if (flt(frm.doc.recurring_fee_amount) > 0) {
 			// The scheduler does this every hour; the button is for right after the
 			// fee is set up or its start date is moved back.
@@ -126,7 +130,9 @@ function _settlement_dialog(frm) {
 					options: "Account",
 					default: "",
 					get_query: () => ({ filters: { is_group: 0, account_type: "Bank" } }),
-					description: __("Leave blank to use the partner's own bank account, then the company default."),
+					description: __(
+						"Leave blank to use the partner's own bank account, then the company default."
+					),
 				},
 				{ fieldtype: "Section Break", label: __("Trips on this invoice") },
 				{
@@ -214,7 +220,10 @@ function _settlement_dialog(frm) {
 				const picked = (d.get_value("trips") || []).filter((t) => t.__checked);
 				const charges = (d.get_value("extra_charges") || [])
 					.filter((c) => flt(c.amount) !== 0)
-					.map((c) => ({ description: c.description || __("Fixed charge"), amount: flt(c.amount) }));
+					.map((c) => ({
+						description: c.description || __("Fixed charge"),
+						amount: flt(c.amount),
+					}));
 
 				if (!picked.length && !charges.length) {
 					frappe.msgprint(__("Select at least one trip, or add a fixed charge."));
@@ -263,7 +272,10 @@ function _settlement_dialog(frm) {
 			const fees = (d.get_value("trips") || [])
 				.filter((t) => t.__checked)
 				.reduce((sum, t) => sum + flt(t.fee), 0);
-			const extra = (d.get_value("extra_charges") || []).reduce((sum, c) => sum + flt(c.amount), 0);
+			const extra = (d.get_value("extra_charges") || []).reduce(
+				(sum, c) => sum + flt(c.amount),
+				0
+			);
 			d.get_field("total_html").$wrapper.html(
 				`<table class="table table-bordered table-sm"><tbody>
 					<tr><td>${__("Trip fees")}</td><td class="text-right">${format_currency(fees)}</td></tr>

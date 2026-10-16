@@ -5,6 +5,6 @@ from frappe.model.document import Document
 
 
 class JarzMaterialShareItem(Document):
-    """One material inside a share. See ``Jarz Material Share``."""
+	"""One material inside a share. See ``Jarz Material Share``."""
 
-    pass
+	pass

@@ -68,18 +68,90 @@ WORKSPACE_SEQUENCE = 1
 
 # Tiles across the top of the page. ``type`` is DocType | Page | Report.
 SHORTCUTS = [
-    {"label": "Executive Overview", "type": "Page", "link_to": "executive-analytics", "color": "#FF6B35", "icon": "dashboard"},
-    {"label": "Product Analytics", "type": "Page", "link_to": "product-analytics", "color": "#7B61FF", "icon": "box"},
-    {"label": "Shipping Analytics", "type": "Page", "link_to": "shipping-analytics", "color": "#FF6B35", "icon": "truck"},
-    {"label": "Customer Analytics", "type": "Page", "link_to": "customer-analytics", "color": "#2980b9", "icon": "users"},
-    {"label": "Inventory Intelligence", "type": "Page", "link_to": "inventory-analytics", "color": "#16a085", "icon": "stock"},
-    {"label": "B2B Sales & Clients", "type": "Page", "link_to": "b2b-analytics", "color": "#2980b9", "icon": "users"},
-    {"label": "Recurring Expenses", "type": "Page", "link_to": "recurring-expenses", "color": "#8e44ad", "icon": "payments"},
-    {"label": "Sales Invoice", "type": "DocType", "link_to": "Sales Invoice", "color": "#3498db", "icon": "file"},
-    {"label": "POS Profile", "type": "DocType", "link_to": "POS Profile", "color": "#e74c3c", "icon": "setting-gear"},
-    {"label": "Jarz POS Settings", "type": "DocType", "link_to": "Jarz POS Settings", "color": "#34495e", "icon": "setting-gear"},
-    {"label": "Jarz Forecast Settings", "type": "DocType", "link_to": "Jarz Forecast Settings", "color": "#27ae60", "icon": "bar-chart"},
-    {"label": "Production SOPs", "type": "DocType", "link_to": "Jarz SOP", "color": "#e67e22", "icon": "list"},
+	{
+		"label": "Executive Overview",
+		"type": "Page",
+		"link_to": "executive-analytics",
+		"color": "#FF6B35",
+		"icon": "dashboard",
+	},
+	{
+		"label": "Product Analytics",
+		"type": "Page",
+		"link_to": "product-analytics",
+		"color": "#7B61FF",
+		"icon": "box",
+	},
+	{
+		"label": "Shipping Analytics",
+		"type": "Page",
+		"link_to": "shipping-analytics",
+		"color": "#FF6B35",
+		"icon": "truck",
+	},
+	{
+		"label": "Customer Analytics",
+		"type": "Page",
+		"link_to": "customer-analytics",
+		"color": "#2980b9",
+		"icon": "users",
+	},
+	{
+		"label": "Inventory Intelligence",
+		"type": "Page",
+		"link_to": "inventory-analytics",
+		"color": "#16a085",
+		"icon": "stock",
+	},
+	{
+		"label": "B2B Sales & Clients",
+		"type": "Page",
+		"link_to": "b2b-analytics",
+		"color": "#2980b9",
+		"icon": "users",
+	},
+	{
+		"label": "Recurring Expenses",
+		"type": "Page",
+		"link_to": "recurring-expenses",
+		"color": "#8e44ad",
+		"icon": "payments",
+	},
+	{
+		"label": "Sales Invoice",
+		"type": "DocType",
+		"link_to": "Sales Invoice",
+		"color": "#3498db",
+		"icon": "file",
+	},
+	{
+		"label": "POS Profile",
+		"type": "DocType",
+		"link_to": "POS Profile",
+		"color": "#e74c3c",
+		"icon": "setting-gear",
+	},
+	{
+		"label": "Jarz POS Settings",
+		"type": "DocType",
+		"link_to": "Jarz POS Settings",
+		"color": "#34495e",
+		"icon": "setting-gear",
+	},
+	{
+		"label": "Jarz Forecast Settings",
+		"type": "DocType",
+		"link_to": "Jarz Forecast Settings",
+		"color": "#27ae60",
+		"icon": "bar-chart",
+	},
+	{
+		"label": "Production SOPs",
+		"type": "DocType",
+		"link_to": "Jarz SOP",
+		"color": "#e67e22",
+		"icon": "list",
+	},
 ]
 
 # Card sections rendered under a "Reports & Masters" header, three to a row.
@@ -89,115 +161,139 @@ SHORTCUTS = [
 # title, script or content, so linking it would render a tile that opens a blank
 # screen.
 CARDS = [
-    {
-        "label": "Dashboards",
-        "links": [
-            {"label": "Executive Overview", "link_type": "Page", "link_to": "executive-analytics"},
-            {"label": "Product Analytics", "link_type": "Page", "link_to": "product-analytics"},
-            {"label": "Shipping Analytics", "link_type": "Page", "link_to": "shipping-analytics"},
-            {"label": "Customer Analytics", "link_type": "Page", "link_to": "customer-analytics"},
-            {"label": "Inventory Intelligence", "link_type": "Page", "link_to": "inventory-analytics"},
-            {"label": "B2B Sales & Clients", "link_type": "Page", "link_to": "b2b-analytics"},
-            {"label": "Recurring Expenses", "link_type": "Page", "link_to": "recurring-expenses"},
-        ],
-    },
-    {
-        "label": "POS Operations",
-        "links": [
-            {"label": "Sales Invoice", "link_type": "DocType", "link_to": "Sales Invoice"},
-            {"label": "POS Profile", "link_type": "DocType", "link_to": "POS Profile"},
-            {"label": "POS Profile Timetable", "link_type": "DocType", "link_to": "POS Profile Timetable"},
-            {"label": "POS Payment Receipt", "link_type": "DocType", "link_to": "POS Payment Receipt"},
-            {"label": "Jarz Invoice Note", "link_type": "DocType", "link_to": "Jarz Invoice Note"},
-            {"label": "POS Opening Entry", "link_type": "DocType", "link_to": "POS Opening Entry"},
-            {"label": "POS Closing Entry", "link_type": "DocType", "link_to": "POS Closing Entry"},
-        ],
-    },
-    {
-        "label": "Delivery & Couriers",
-        "links": [
-            {"label": "Delivery Partner", "link_type": "DocType", "link_to": "Delivery Partner"},
-            {"label": "Delivery Trip", "link_type": "DocType", "link_to": "Delivery Trip"},
-            {"label": "Courier Transaction", "link_type": "DocType", "link_to": "Courier Transaction"},
-            {"label": "Custom Shipping Request", "link_type": "DocType", "link_to": "Custom Shipping Request"},
-            {"label": "Sales Partner Transactions", "link_type": "DocType", "link_to": "Sales Partner Transactions"},
-            {"label": "City", "link_type": "DocType", "link_to": "City"},
-            {"label": "Territory", "link_type": "DocType", "link_to": "Territory"},
-        ],
-    },
-    {
-        "label": "Catalog & Inventory",
-        "links": [
-            {"label": "Jarz Bundle", "link_type": "DocType", "link_to": "Jarz Bundle"},
-            {"label": "Item", "link_type": "DocType", "link_to": "Item"},
-            {"label": "Item Group", "link_type": "DocType", "link_to": "Item Group"},
-            {"label": "Warehouse Count Profile", "link_type": "DocType", "link_to": "Warehouse Count Profile"},
-        ],
-    },
-    {
-        "label": "Promotions",
-        "links": [
-            {"label": "Jarz Promo Code", "link_type": "DocType", "link_to": "Jarz Promo Code"},
-            {"label": "Jarz Promo Redemption", "link_type": "DocType", "link_to": "Jarz Promo Redemption"},
-            {"label": "Jarz Promotion Rule", "link_type": "DocType", "link_to": "Jarz Promotion Rule"},
-        ],
-    },
-    {
-        "label": "B2B & Pricing",
-        "links": [
-            {"label": "Jarz Commercial Policy", "link_type": "DocType", "link_to": "Jarz Commercial Policy"},
-            {"label": "Jarz Price List Category Rate", "link_type": "DocType", "link_to": "Jarz Price List Category Rate"},
-            {"label": "Price List", "link_type": "DocType", "link_to": "Price List"},
-            {"label": "Customer", "link_type": "DocType", "link_to": "Customer"},
-            {"label": "Customer Label", "link_type": "DocType", "link_to": "Jarz Customer Label"},
-            {"label": "Label Print Order", "link_type": "DocType", "link_to": "Jarz Label Print Order"},
-            {"label": "Label Movement", "link_type": "DocType", "link_to": "Jarz Label Movement"},
-        ],
-    },
-    {
-        "label": "CRM & Leads",
-        "links": [
-            {"label": "Lead", "link_type": "DocType", "link_to": "Lead"},
-            {"label": "Opportunity", "link_type": "DocType", "link_to": "Opportunity"},
-            {"label": "Jarz Lead Category", "link_type": "DocType", "link_to": "Jarz Lead Category"},
-            {"label": "Sales Material", "link_type": "DocType", "link_to": "Jarz Sales Material"},
-            {"label": "Material Share", "link_type": "DocType", "link_to": "Jarz Material Share"},
-        ],
-    },
-    {
-        "label": "Production",
-        "links": [
-            {"label": "Jarz SOP", "link_type": "DocType", "link_to": "Jarz SOP"},
-            {"label": "Jarz SOP Execution Log", "link_type": "DocType", "link_to": "Jarz SOP Execution Log"},
-            {"label": "Work Order", "link_type": "DocType", "link_to": "Work Order"},
-        ],
-    },
-    {
-        "label": "Expenses",
-        "links": [
-            {"label": "Jarz Expense Request", "link_type": "DocType", "link_to": "Jarz Expense Request"},
-            {"label": "Jarz Recurring Expense", "link_type": "DocType", "link_to": "Jarz Recurring Expense"},
-        ],
-    },
-    {
-        "label": "Meta Chat Orders",
-        "links": [
-            {"label": "Meta CAPI Event", "link_type": "DocType", "link_to": "Meta CAPI Event"},
-            {"label": "Meta CAPI Daily", "link_type": "Report", "link_to": "Meta CAPI Daily"},
-            {"label": "Meta CAPI Settings", "link_type": "DocType", "link_to": "Meta CAPI Settings"},
-        ],
-    },
-    {
-        "label": "Settings",
-        "links": [
-            {"label": "Jarz POS Settings", "link_type": "DocType", "link_to": "Jarz POS Settings"},
-            {"label": "Jarz Forecast Settings", "link_type": "DocType", "link_to": "Jarz Forecast Settings"},
-            {"label": "Jarz Segmentation Settings", "link_type": "DocType", "link_to": "Jarz Segmentation Settings"},
-            {"label": "Custom Settings", "link_type": "DocType", "link_to": "Custom Settings"},
-            {"label": "Jarz Mobile Device", "link_type": "DocType", "link_to": "Jarz Mobile Device"},
-            {"label": "Jarz Web Push Subscription", "link_type": "DocType", "link_to": "Jarz Web Push Subscription"},
-        ],
-    },
+	{
+		"label": "Dashboards",
+		"links": [
+			{"label": "Executive Overview", "link_type": "Page", "link_to": "executive-analytics"},
+			{"label": "Product Analytics", "link_type": "Page", "link_to": "product-analytics"},
+			{"label": "Shipping Analytics", "link_type": "Page", "link_to": "shipping-analytics"},
+			{"label": "Customer Analytics", "link_type": "Page", "link_to": "customer-analytics"},
+			{"label": "Inventory Intelligence", "link_type": "Page", "link_to": "inventory-analytics"},
+			{"label": "B2B Sales & Clients", "link_type": "Page", "link_to": "b2b-analytics"},
+			{"label": "Recurring Expenses", "link_type": "Page", "link_to": "recurring-expenses"},
+		],
+	},
+	{
+		"label": "POS Operations",
+		"links": [
+			{"label": "Sales Invoice", "link_type": "DocType", "link_to": "Sales Invoice"},
+			{"label": "POS Profile", "link_type": "DocType", "link_to": "POS Profile"},
+			{"label": "POS Profile Timetable", "link_type": "DocType", "link_to": "POS Profile Timetable"},
+			{"label": "POS Payment Receipt", "link_type": "DocType", "link_to": "POS Payment Receipt"},
+			{"label": "Jarz Invoice Note", "link_type": "DocType", "link_to": "Jarz Invoice Note"},
+			{"label": "POS Opening Entry", "link_type": "DocType", "link_to": "POS Opening Entry"},
+			{"label": "POS Closing Entry", "link_type": "DocType", "link_to": "POS Closing Entry"},
+		],
+	},
+	{
+		"label": "Delivery & Couriers",
+		"links": [
+			{"label": "Delivery Partner", "link_type": "DocType", "link_to": "Delivery Partner"},
+			{"label": "Delivery Trip", "link_type": "DocType", "link_to": "Delivery Trip"},
+			{"label": "Courier Transaction", "link_type": "DocType", "link_to": "Courier Transaction"},
+			{
+				"label": "Custom Shipping Request",
+				"link_type": "DocType",
+				"link_to": "Custom Shipping Request",
+			},
+			{
+				"label": "Sales Partner Transactions",
+				"link_type": "DocType",
+				"link_to": "Sales Partner Transactions",
+			},
+			{"label": "City", "link_type": "DocType", "link_to": "City"},
+			{"label": "Territory", "link_type": "DocType", "link_to": "Territory"},
+		],
+	},
+	{
+		"label": "Catalog & Inventory",
+		"links": [
+			{"label": "Jarz Bundle", "link_type": "DocType", "link_to": "Jarz Bundle"},
+			{"label": "Item", "link_type": "DocType", "link_to": "Item"},
+			{"label": "Item Group", "link_type": "DocType", "link_to": "Item Group"},
+			{
+				"label": "Warehouse Count Profile",
+				"link_type": "DocType",
+				"link_to": "Warehouse Count Profile",
+			},
+		],
+	},
+	{
+		"label": "Promotions",
+		"links": [
+			{"label": "Jarz Promo Code", "link_type": "DocType", "link_to": "Jarz Promo Code"},
+			{"label": "Jarz Promo Redemption", "link_type": "DocType", "link_to": "Jarz Promo Redemption"},
+			{"label": "Jarz Promotion Rule", "link_type": "DocType", "link_to": "Jarz Promotion Rule"},
+		],
+	},
+	{
+		"label": "B2B & Pricing",
+		"links": [
+			{"label": "Jarz Commercial Policy", "link_type": "DocType", "link_to": "Jarz Commercial Policy"},
+			{
+				"label": "Jarz Price List Category Rate",
+				"link_type": "DocType",
+				"link_to": "Jarz Price List Category Rate",
+			},
+			{"label": "Price List", "link_type": "DocType", "link_to": "Price List"},
+			{"label": "Customer", "link_type": "DocType", "link_to": "Customer"},
+			{"label": "Customer Label", "link_type": "DocType", "link_to": "Jarz Customer Label"},
+			{"label": "Label Print Order", "link_type": "DocType", "link_to": "Jarz Label Print Order"},
+			{"label": "Label Movement", "link_type": "DocType", "link_to": "Jarz Label Movement"},
+		],
+	},
+	{
+		"label": "CRM & Leads",
+		"links": [
+			{"label": "Lead", "link_type": "DocType", "link_to": "Lead"},
+			{"label": "Opportunity", "link_type": "DocType", "link_to": "Opportunity"},
+			{"label": "Jarz Lead Category", "link_type": "DocType", "link_to": "Jarz Lead Category"},
+			{"label": "Sales Material", "link_type": "DocType", "link_to": "Jarz Sales Material"},
+			{"label": "Material Share", "link_type": "DocType", "link_to": "Jarz Material Share"},
+		],
+	},
+	{
+		"label": "Production",
+		"links": [
+			{"label": "Jarz SOP", "link_type": "DocType", "link_to": "Jarz SOP"},
+			{"label": "Jarz SOP Execution Log", "link_type": "DocType", "link_to": "Jarz SOP Execution Log"},
+			{"label": "Work Order", "link_type": "DocType", "link_to": "Work Order"},
+		],
+	},
+	{
+		"label": "Expenses",
+		"links": [
+			{"label": "Jarz Expense Request", "link_type": "DocType", "link_to": "Jarz Expense Request"},
+			{"label": "Jarz Recurring Expense", "link_type": "DocType", "link_to": "Jarz Recurring Expense"},
+		],
+	},
+	{
+		"label": "Meta Chat Orders",
+		"links": [
+			{"label": "Meta CAPI Event", "link_type": "DocType", "link_to": "Meta CAPI Event"},
+			{"label": "Meta CAPI Daily", "link_type": "Report", "link_to": "Meta CAPI Daily"},
+			{"label": "Meta CAPI Settings", "link_type": "DocType", "link_to": "Meta CAPI Settings"},
+		],
+	},
+	{
+		"label": "Settings",
+		"links": [
+			{"label": "Jarz POS Settings", "link_type": "DocType", "link_to": "Jarz POS Settings"},
+			{"label": "Jarz Forecast Settings", "link_type": "DocType", "link_to": "Jarz Forecast Settings"},
+			{
+				"label": "Jarz Segmentation Settings",
+				"link_type": "DocType",
+				"link_to": "Jarz Segmentation Settings",
+			},
+			{"label": "Custom Settings", "link_type": "DocType", "link_to": "Custom Settings"},
+			{"label": "Jarz Mobile Device", "link_type": "DocType", "link_to": "Jarz Mobile Device"},
+			{
+				"label": "Jarz Web Push Subscription",
+				"link_type": "DocType",
+				"link_to": "Jarz Web Push Subscription",
+			},
+		],
+	},
 ]
 
 # The nav rail beside the workspace. ``Workspace Sidebar`` autonames on
@@ -208,94 +304,118 @@ SIDEBAR_ICON = "shopping-cart"
 
 # Rows under a "Section Break" need child=1 to nest beneath it. Order matters.
 SIDEBAR_SECTIONS = [
-    {
-        "label": "Dashboards",
-        "links": [
-            {"label": "Executive Overview", "link_type": "Page", "link_to": "executive-analytics"},
-            {"label": "Product Analytics", "link_type": "Page", "link_to": "product-analytics"},
-            {"label": "Shipping Analytics", "link_type": "Page", "link_to": "shipping-analytics"},
-            {"label": "Customer Analytics", "link_type": "Page", "link_to": "customer-analytics"},
-            {"label": "Inventory Intelligence", "link_type": "Page", "link_to": "inventory-analytics"},
-            {"label": "B2B Sales & Clients", "link_type": "Page", "link_to": "b2b-analytics"},
-            {"label": "Recurring Expenses", "link_type": "Page", "link_to": "recurring-expenses"},
-        ],
-    },
-    {
-        "label": "POS Operations",
-        "links": [
-            {"label": "Sales Invoice", "link_type": "DocType", "link_to": "Sales Invoice"},
-            {"label": "POS Profile", "link_type": "DocType", "link_to": "POS Profile"},
-            {"label": "POS Profile Timetable", "link_type": "DocType", "link_to": "POS Profile Timetable"},
-            {"label": "POS Payment Receipt", "link_type": "DocType", "link_to": "POS Payment Receipt"},
-            {"label": "Jarz Invoice Note", "link_type": "DocType", "link_to": "Jarz Invoice Note"},
-        ],
-    },
-    {
-        "label": "Delivery & Couriers",
-        "links": [
-            {"label": "Delivery Partner", "link_type": "DocType", "link_to": "Delivery Partner"},
-            {"label": "Delivery Trip", "link_type": "DocType", "link_to": "Delivery Trip"},
-            {"label": "Courier Transaction", "link_type": "DocType", "link_to": "Courier Transaction"},
-            {"label": "Custom Shipping Request", "link_type": "DocType", "link_to": "Custom Shipping Request"},
-            {"label": "Sales Partner Transactions", "link_type": "DocType", "link_to": "Sales Partner Transactions"},
-            {"label": "City", "link_type": "DocType", "link_to": "City"},
-        ],
-    },
-    {
-        "label": "Catalog & Promotions",
-        "links": [
-            {"label": "Jarz Bundle", "link_type": "DocType", "link_to": "Jarz Bundle"},
-            {"label": "Warehouse Count Profile", "link_type": "DocType", "link_to": "Warehouse Count Profile"},
-            {"label": "Jarz Promo Code", "link_type": "DocType", "link_to": "Jarz Promo Code"},
-            {"label": "Jarz Promo Redemption", "link_type": "DocType", "link_to": "Jarz Promo Redemption"},
-            {"label": "Jarz Promotion Rule", "link_type": "DocType", "link_to": "Jarz Promotion Rule"},
-        ],
-    },
-    {
-        "label": "B2B & CRM",
-        "links": [
-            {"label": "Jarz Commercial Policy", "link_type": "DocType", "link_to": "Jarz Commercial Policy"},
-            {"label": "Jarz Price List Category Rate", "link_type": "DocType", "link_to": "Jarz Price List Category Rate"},
-            {"label": "Lead", "link_type": "DocType", "link_to": "Lead"},
-            {"label": "Opportunity", "link_type": "DocType", "link_to": "Opportunity"},
-            {"label": "Jarz Lead Category", "link_type": "DocType", "link_to": "Jarz Lead Category"},
-            {"label": "Sales Material", "link_type": "DocType", "link_to": "Jarz Sales Material"},
-            {"label": "Material Share", "link_type": "DocType", "link_to": "Jarz Material Share"},
-        ],
-    },
-    {
-        "label": "Production",
-        "links": [
-            {"label": "Jarz SOP", "link_type": "DocType", "link_to": "Jarz SOP"},
-            {"label": "Jarz SOP Execution Log", "link_type": "DocType", "link_to": "Jarz SOP Execution Log"},
-        ],
-    },
-    {
-        "label": "Expenses",
-        "links": [
-            {"label": "Jarz Expense Request", "link_type": "DocType", "link_to": "Jarz Expense Request"},
-            {"label": "Jarz Recurring Expense", "link_type": "DocType", "link_to": "Jarz Recurring Expense"},
-        ],
-    },
-    {
-        "label": "Meta Chat Orders",
-        "links": [
-            {"label": "Meta CAPI Event", "link_type": "DocType", "link_to": "Meta CAPI Event"},
-            {"label": "Meta CAPI Daily", "link_type": "Report", "link_to": "Meta CAPI Daily"},
-            {"label": "Meta CAPI Settings", "link_type": "DocType", "link_to": "Meta CAPI Settings"},
-        ],
-    },
-    {
-        "label": "Settings",
-        "links": [
-            {"label": "Jarz POS Settings", "link_type": "DocType", "link_to": "Jarz POS Settings"},
-            {"label": "Jarz Forecast Settings", "link_type": "DocType", "link_to": "Jarz Forecast Settings"},
-            {"label": "Jarz Segmentation Settings", "link_type": "DocType", "link_to": "Jarz Segmentation Settings"},
-            {"label": "Custom Settings", "link_type": "DocType", "link_to": "Custom Settings"},
-            {"label": "Jarz Mobile Device", "link_type": "DocType", "link_to": "Jarz Mobile Device"},
-            {"label": "Jarz Web Push Subscription", "link_type": "DocType", "link_to": "Jarz Web Push Subscription"},
-        ],
-    },
+	{
+		"label": "Dashboards",
+		"links": [
+			{"label": "Executive Overview", "link_type": "Page", "link_to": "executive-analytics"},
+			{"label": "Product Analytics", "link_type": "Page", "link_to": "product-analytics"},
+			{"label": "Shipping Analytics", "link_type": "Page", "link_to": "shipping-analytics"},
+			{"label": "Customer Analytics", "link_type": "Page", "link_to": "customer-analytics"},
+			{"label": "Inventory Intelligence", "link_type": "Page", "link_to": "inventory-analytics"},
+			{"label": "B2B Sales & Clients", "link_type": "Page", "link_to": "b2b-analytics"},
+			{"label": "Recurring Expenses", "link_type": "Page", "link_to": "recurring-expenses"},
+		],
+	},
+	{
+		"label": "POS Operations",
+		"links": [
+			{"label": "Sales Invoice", "link_type": "DocType", "link_to": "Sales Invoice"},
+			{"label": "POS Profile", "link_type": "DocType", "link_to": "POS Profile"},
+			{"label": "POS Profile Timetable", "link_type": "DocType", "link_to": "POS Profile Timetable"},
+			{"label": "POS Payment Receipt", "link_type": "DocType", "link_to": "POS Payment Receipt"},
+			{"label": "Jarz Invoice Note", "link_type": "DocType", "link_to": "Jarz Invoice Note"},
+		],
+	},
+	{
+		"label": "Delivery & Couriers",
+		"links": [
+			{"label": "Delivery Partner", "link_type": "DocType", "link_to": "Delivery Partner"},
+			{"label": "Delivery Trip", "link_type": "DocType", "link_to": "Delivery Trip"},
+			{"label": "Courier Transaction", "link_type": "DocType", "link_to": "Courier Transaction"},
+			{
+				"label": "Custom Shipping Request",
+				"link_type": "DocType",
+				"link_to": "Custom Shipping Request",
+			},
+			{
+				"label": "Sales Partner Transactions",
+				"link_type": "DocType",
+				"link_to": "Sales Partner Transactions",
+			},
+			{"label": "City", "link_type": "DocType", "link_to": "City"},
+		],
+	},
+	{
+		"label": "Catalog & Promotions",
+		"links": [
+			{"label": "Jarz Bundle", "link_type": "DocType", "link_to": "Jarz Bundle"},
+			{
+				"label": "Warehouse Count Profile",
+				"link_type": "DocType",
+				"link_to": "Warehouse Count Profile",
+			},
+			{"label": "Jarz Promo Code", "link_type": "DocType", "link_to": "Jarz Promo Code"},
+			{"label": "Jarz Promo Redemption", "link_type": "DocType", "link_to": "Jarz Promo Redemption"},
+			{"label": "Jarz Promotion Rule", "link_type": "DocType", "link_to": "Jarz Promotion Rule"},
+		],
+	},
+	{
+		"label": "B2B & CRM",
+		"links": [
+			{"label": "Jarz Commercial Policy", "link_type": "DocType", "link_to": "Jarz Commercial Policy"},
+			{
+				"label": "Jarz Price List Category Rate",
+				"link_type": "DocType",
+				"link_to": "Jarz Price List Category Rate",
+			},
+			{"label": "Lead", "link_type": "DocType", "link_to": "Lead"},
+			{"label": "Opportunity", "link_type": "DocType", "link_to": "Opportunity"},
+			{"label": "Jarz Lead Category", "link_type": "DocType", "link_to": "Jarz Lead Category"},
+			{"label": "Sales Material", "link_type": "DocType", "link_to": "Jarz Sales Material"},
+			{"label": "Material Share", "link_type": "DocType", "link_to": "Jarz Material Share"},
+		],
+	},
+	{
+		"label": "Production",
+		"links": [
+			{"label": "Jarz SOP", "link_type": "DocType", "link_to": "Jarz SOP"},
+			{"label": "Jarz SOP Execution Log", "link_type": "DocType", "link_to": "Jarz SOP Execution Log"},
+		],
+	},
+	{
+		"label": "Expenses",
+		"links": [
+			{"label": "Jarz Expense Request", "link_type": "DocType", "link_to": "Jarz Expense Request"},
+			{"label": "Jarz Recurring Expense", "link_type": "DocType", "link_to": "Jarz Recurring Expense"},
+		],
+	},
+	{
+		"label": "Meta Chat Orders",
+		"links": [
+			{"label": "Meta CAPI Event", "link_type": "DocType", "link_to": "Meta CAPI Event"},
+			{"label": "Meta CAPI Daily", "link_type": "Report", "link_to": "Meta CAPI Daily"},
+			{"label": "Meta CAPI Settings", "link_type": "DocType", "link_to": "Meta CAPI Settings"},
+		],
+	},
+	{
+		"label": "Settings",
+		"links": [
+			{"label": "Jarz POS Settings", "link_type": "DocType", "link_to": "Jarz POS Settings"},
+			{"label": "Jarz Forecast Settings", "link_type": "DocType", "link_to": "Jarz Forecast Settings"},
+			{
+				"label": "Jarz Segmentation Settings",
+				"link_type": "DocType",
+				"link_to": "Jarz Segmentation Settings",
+			},
+			{"label": "Custom Settings", "link_type": "DocType", "link_to": "Custom Settings"},
+			{"label": "Jarz Mobile Device", "link_type": "DocType", "link_to": "Jarz Mobile Device"},
+			{
+				"label": "Jarz Web Push Subscription",
+				"link_type": "DocType",
+				"link_to": "Jarz Web Push Subscription",
+			},
+		],
+	},
 ]
 
 # The Desk landing page is ERPNext's ``Home`` workspace. Jarz adds one tile and
@@ -303,12 +423,12 @@ SIDEBAR_SECTIONS = [
 HOME_WORKSPACE = "Home"
 HOME_ENTRY_LABEL = "Jarz POS"
 HOME_CARD_LINKS = [
-    {"label": "Executive Overview", "link_type": "Page", "link_to": "executive-analytics"},
-    {"label": "B2B Sales & Clients", "link_type": "Page", "link_to": "b2b-analytics"},
-    {"label": "Recurring Expenses", "link_type": "Page", "link_to": "recurring-expenses"},
-    {"label": "Sales Invoice", "link_type": "DocType", "link_to": "Sales Invoice"},
-    {"label": "POS Profile", "link_type": "DocType", "link_to": "POS Profile"},
-    {"label": "Jarz POS Settings", "link_type": "DocType", "link_to": "Jarz POS Settings"},
+	{"label": "Executive Overview", "link_type": "Page", "link_to": "executive-analytics"},
+	{"label": "B2B Sales & Clients", "link_type": "Page", "link_to": "b2b-analytics"},
+	{"label": "Recurring Expenses", "link_type": "Page", "link_to": "recurring-expenses"},
+	{"label": "Sales Invoice", "link_type": "DocType", "link_to": "Sales Invoice"},
+	{"label": "POS Profile", "link_type": "DocType", "link_to": "POS Profile"},
+	{"label": "Jarz POS Settings", "link_type": "DocType", "link_to": "Jarz POS Settings"},
 ]
 
 # ``link_type`` / shortcut ``type`` -> the DocType holding those records.
@@ -316,357 +436,395 @@ _TARGET_DOCTYPE = {"DocType": "DocType", "Page": "Page", "Report": "Report"}
 
 
 def ensure_jarz_desk():
-    """Build every Jarz Desk surface. Single ``after_migrate`` entry point.
+	"""Build every Jarz Desk surface. Single ``after_migrate`` entry point.
 
-    Each step is independently guarded so a failure in one does not cost the
-    others — a broken Home entry must not also lose you the sidebar.
-    """
-    ensure_jarz_workspace()
-    ensure_jarz_sidebar()
-    ensure_home_entry()
+	Each step is independently guarded so a failure in one does not cost the
+	others — a broken Home entry must not also lose you the sidebar.
+	"""
+	ensure_jarz_workspace()
+	ensure_jarz_sidebar()
+	ensure_home_entry()
 
 
 def ensure_jarz_workspace():
-    """Create or rebuild the JARZ POS workspace. Called from ``after_migrate``."""
-    try:
-        shortcuts = [s for s in SHORTCUTS if _target_exists(s["type"], s["link_to"])]
-        cards = _resolve_cards()
+	"""Create or rebuild the JARZ POS workspace. Called from ``after_migrate``."""
+	try:
+		shortcuts = [s for s in SHORTCUTS if _target_exists(s["type"], s["link_to"])]
+		cards = _resolve_cards()
 
-        if not shortcuts and not cards:
-            # Nothing to point at — jarz_pos is installed but not migrated yet.
-            # Leave whatever is already there rather than blanking the page.
-            return
+		if not shortcuts and not cards:
+			# Nothing to point at — jarz_pos is installed but not migrated yet.
+			# Leave whatever is already there rather than blanking the page.
+			return
 
-        is_new = not frappe.db.exists("Workspace", WORKSPACE_NAME)
-        ws = _load_or_new()
-        ws.label = WORKSPACE_LABEL
-        ws.title = WORKSPACE_LABEL
-        ws.module = WORKSPACE_MODULE
-        ws.icon = WORKSPACE_ICON
-        ws.public = 1
-        ws.is_hidden = 0
-        ws.hide_custom = 0
-        ws.sequence_id = WORKSPACE_SEQUENCE
+		is_new = not frappe.db.exists("Workspace", WORKSPACE_NAME)
+		ws = _load_or_new()
+		ws.label = WORKSPACE_LABEL
+		ws.title = WORKSPACE_LABEL
+		ws.module = WORKSPACE_MODULE
+		ws.icon = WORKSPACE_ICON
+		ws.public = 1
+		ws.is_hidden = 0
+		ws.hide_custom = 0
+		ws.sequence_id = WORKSPACE_SEQUENCE
 
-        ws.set("shortcuts", [])
-        for sc in shortcuts:
-            ws.append("shortcuts", {
-                "label": sc["label"],
-                "type": sc["type"],
-                "link_to": sc["link_to"],
-                "color": sc.get("color"),
-                "icon": sc.get("icon"),
-            })
+		ws.set("shortcuts", [])
+		for sc in shortcuts:
+			ws.append(
+				"shortcuts",
+				{
+					"label": sc["label"],
+					"type": sc["type"],
+					"link_to": sc["link_to"],
+					"color": sc.get("color"),
+					"icon": sc.get("icon"),
+				},
+			)
 
-        ws.set("links", [])
-        for card in cards:
-            ws.append("links", {
-                "type": "Card Break",
-                "label": card["label"],
-                "link_count": len(card["links"]),
-                "hidden": 0,
-                "onboard": 0,
-            })
-            for link in card["links"]:
-                ws.append("links", {
-                    "type": "Link",
-                    "label": link["label"],
-                    "link_type": link["link_type"],
-                    "link_to": link["link_to"],
-                    "hidden": 0,
-                    "onboard": 0,
-                    "is_query_report": 0,
-                    "dependencies": "",
-                })
+		ws.set("links", [])
+		for card in cards:
+			ws.append(
+				"links",
+				{
+					"type": "Card Break",
+					"label": card["label"],
+					"link_count": len(card["links"]),
+					"hidden": 0,
+					"onboard": 0,
+				},
+			)
+			for link in card["links"]:
+				ws.append(
+					"links",
+					{
+						"type": "Link",
+						"label": link["label"],
+						"link_type": link["link_type"],
+						"link_to": link["link_to"],
+						"hidden": 0,
+						"onboard": 0,
+						"is_query_report": 0,
+						"dependencies": "",
+					},
+				)
 
-        ws.content = json.dumps(_content_blocks(shortcuts, cards))
-        ws.flags.ignore_mandatory = True
-        ws.flags.ignore_permissions = True
-        ws.flags.ignore_links = True
+		ws.content = json.dumps(_content_blocks(shortcuts, cards))
+		ws.flags.ignore_mandatory = True
+		ws.flags.ignore_permissions = True
+		ws.flags.ignore_links = True
 
-        if is_new:
-            ws.insert(set_name=WORKSPACE_NAME)
-        else:
-            ws.save()
+		if is_new:
+			ws.insert(set_name=WORKSPACE_NAME)
+		else:
+			ws.save()
 
-        frappe.db.commit()
-        frappe.logger("jarz_workspace").info(
-            "[Workspace] Rebuilt %s: %s shortcuts, %s cards",
-            WORKSPACE_NAME, len(shortcuts), len(cards),
-        )
-    except Exception:
-        # Never let a cosmetic workspace problem fail a migration / deploy.
-        frappe.db.rollback()
-        frappe.log_error(frappe.get_traceback(), "ensure_jarz_workspace failed")
+		frappe.db.commit()
+		frappe.logger("jarz_workspace").info(
+			"[Workspace] Rebuilt %s: %s shortcuts, %s cards",
+			WORKSPACE_NAME,
+			len(shortcuts),
+			len(cards),
+		)
+	except Exception:
+		# Never let a cosmetic workspace problem fail a migration / deploy.
+		frappe.db.rollback()
+		frappe.log_error(frappe.get_traceback(), "ensure_jarz_workspace failed")
 
 
 def ensure_jarz_sidebar():
-    """Create or rebuild the ``Jarz POS`` Workspace Sidebar (the nav rail).
+	"""Create or rebuild the ``Jarz POS`` Workspace Sidebar (the nav rail).
 
-    Declaring this record is also what stops Frappe auto-generating a sidebar
-    for the module — see the note at the top of this file for what the fallback
-    produced.
+	Declaring this record is also what stops Frappe auto-generating a sidebar
+	for the module — see the note at the top of this file for what the fallback
+	produced.
 
-    Sibling apps may contribute their own section to this record — the
-    WooCommerce integration adds one, writing it through plain Frappe document
-    APIs rather than importing anything from here, because the two apps are
-    kept fully independent. This rebuild wipes such a section; that is safe
-    because ``after_migrate`` hooks run in installed-app order, so jarz_pos
-    rebuilds first and the contributing app re-adds its section afterwards.
-    """
-    try:
-        sections = _resolve_sections()
-        if not sections:
-            return
+	Sibling apps may contribute their own section to this record — the
+	WooCommerce integration adds one, writing it through plain Frappe document
+	APIs rather than importing anything from here, because the two apps are
+	kept fully independent. This rebuild wipes such a section; that is safe
+	because ``after_migrate`` hooks run in installed-app order, so jarz_pos
+	rebuilds first and the contributing app re-adds its section afterwards.
+	"""
+	try:
+		sections = _resolve_sections()
+		if not sections:
+			return
 
-        is_new = not frappe.db.exists("Workspace Sidebar", SIDEBAR_NAME)
-        if is_new:
-            sb = frappe.new_doc("Workspace Sidebar")
-            sb.name = SIDEBAR_NAME
-        else:
-            sb = frappe.get_doc("Workspace Sidebar", SIDEBAR_NAME)
+		is_new = not frappe.db.exists("Workspace Sidebar", SIDEBAR_NAME)
+		if is_new:
+			sb = frappe.new_doc("Workspace Sidebar")
+			sb.name = SIDEBAR_NAME
+		else:
+			sb = frappe.get_doc("Workspace Sidebar", SIDEBAR_NAME)
 
-        sb.title = SIDEBAR_NAME
-        sb.module = WORKSPACE_MODULE
-        sb.app = "jarz_pos"
-        sb.header_icon = SIDEBAR_ICON
+		sb.title = SIDEBAR_NAME
+		sb.module = WORKSPACE_MODULE
+		sb.app = "jarz_pos"
+		sb.header_icon = SIDEBAR_ICON
 
-        sb.set("items", [])
-        # The hub page first, unnested, so the sidebar header links somewhere.
-        if frappe.db.exists("Workspace", WORKSPACE_NAME):
-            sb.append("items", {
-                "type": "Link",
-                "label": WORKSPACE_LABEL,
-                "link_type": "Workspace",
-                "link_to": WORKSPACE_NAME,
-                "icon": WORKSPACE_ICON,
-                "child": 0,
-                "collapsible": 1,
-            })
-        for section in sections:
-            _append_sidebar_section(sb, section)
+		sb.set("items", [])
+		# The hub page first, unnested, so the sidebar header links somewhere.
+		if frappe.db.exists("Workspace", WORKSPACE_NAME):
+			sb.append(
+				"items",
+				{
+					"type": "Link",
+					"label": WORKSPACE_LABEL,
+					"link_type": "Workspace",
+					"link_to": WORKSPACE_NAME,
+					"icon": WORKSPACE_ICON,
+					"child": 0,
+					"collapsible": 1,
+				},
+			)
+		for section in sections:
+			_append_sidebar_section(sb, section)
 
-        sb.flags.ignore_mandatory = True
-        sb.flags.ignore_permissions = True
-        sb.flags.ignore_links = True
-        if is_new:
-            sb.insert(set_name=SIDEBAR_NAME)
-        else:
-            sb.save()
-        frappe.db.commit()
-        frappe.logger("jarz_workspace").info(
-            "[Sidebar] Rebuilt %s with %s sections", SIDEBAR_NAME, len(sections)
-        )
-    except Exception:
-        frappe.db.rollback()
-        frappe.log_error(frappe.get_traceback(), "ensure_jarz_sidebar failed")
+		sb.flags.ignore_mandatory = True
+		sb.flags.ignore_permissions = True
+		sb.flags.ignore_links = True
+		if is_new:
+			sb.insert(set_name=SIDEBAR_NAME)
+		else:
+			sb.save()
+		frappe.db.commit()
+		frappe.logger("jarz_workspace").info(
+			"[Sidebar] Rebuilt %s with %s sections", SIDEBAR_NAME, len(sections)
+		)
+	except Exception:
+		frappe.db.rollback()
+		frappe.log_error(frappe.get_traceback(), "ensure_jarz_sidebar failed")
 
 
 def _append_sidebar_section(sb, section):
-    sb.append("items", {
-        "type": "Section Break",
-        "label": section["label"],
-        "child": 0,
-        "collapsible": 1,
-        "keep_closed": section.get("keep_closed", 0),
-    })
-    for link in section["links"]:
-        sb.append("items", {
-            "type": "Link",
-            "label": link["label"],
-            "link_type": link["link_type"],
-            "link_to": link.get("link_to"),
-            "url": link.get("url"),
-            "icon": link.get("icon"),
-            # child=1 is what nests the row under the Section Break above it.
-            "child": 1,
-            "collapsible": 1,
-            "indent": 0,
-        })
+	sb.append(
+		"items",
+		{
+			"type": "Section Break",
+			"label": section["label"],
+			"child": 0,
+			"collapsible": 1,
+			"keep_closed": section.get("keep_closed", 0),
+		},
+	)
+	for link in section["links"]:
+		sb.append(
+			"items",
+			{
+				"type": "Link",
+				"label": link["label"],
+				"link_type": link["link_type"],
+				"link_to": link.get("link_to"),
+				"url": link.get("url"),
+				"icon": link.get("icon"),
+				# child=1 is what nests the row under the Section Break above it.
+				"child": 1,
+				"collapsible": 1,
+				"indent": 0,
+			},
+		)
 
 
 def _sidebar_target_exists(link):
-    """Sidebar links reach Workspaces and URLs too, which the card links cannot."""
-    kind = link["link_type"]
-    if kind == "URL":
-        return bool(link.get("url"))
-    if kind == "Workspace":
-        return bool(frappe.db.exists("Workspace", link["link_to"]))
-    return _target_exists(kind, link["link_to"])
+	"""Sidebar links reach Workspaces and URLs too, which the card links cannot."""
+	kind = link["link_type"]
+	if kind == "URL":
+		return bool(link.get("url"))
+	if kind == "Workspace":
+		return bool(frappe.db.exists("Workspace", link["link_to"]))
+	return _target_exists(kind, link["link_to"])
 
 
 def _resolve_sections():
-    resolved = []
-    for section in SIDEBAR_SECTIONS:
-        links = [l for l in section["links"] if _sidebar_target_exists(l)]
-        if links:
-            resolved.append({"label": section["label"], "links": links})
-    return resolved
+	resolved = []
+	for section in SIDEBAR_SECTIONS:
+		links = [l for l in section["links"] if _sidebar_target_exists(l)]
+		if links:
+			resolved.append({"label": section["label"], "links": links})
+	return resolved
 
 
 def ensure_home_entry():
-    """Add a Jarz tile and card to ERPNext's ``Home`` workspace — additively.
+	"""Add a Jarz tile and card to ERPNext's ``Home`` workspace — additively.
 
-    Home belongs to ERPNext, so this only ever appends and only when the entry
-    is absent. It never rewrites Home's shortcuts, links or layout, because an
-    ERPNext upgrade is entitled to change them and a rebuild here would fight
-    it. Re-running after such an upgrade simply re-adds what went missing.
-    """
-    try:
-        if not frappe.db.exists("Workspace", HOME_WORKSPACE):
-            return
-        links = [l for l in HOME_CARD_LINKS if _target_exists(l["link_type"], l["link_to"])]
-        if not links:
-            return
+	Home belongs to ERPNext, so this only ever appends and only when the entry
+	is absent. It never rewrites Home's shortcuts, links or layout, because an
+	ERPNext upgrade is entitled to change them and a rebuild here would fight
+	it. Re-running after such an upgrade simply re-adds what went missing.
+	"""
+	try:
+		if not frappe.db.exists("Workspace", HOME_WORKSPACE):
+			return
+		links = [l for l in HOME_CARD_LINKS if _target_exists(l["link_type"], l["link_to"])]
+		if not links:
+			return
 
-        ws = frappe.get_doc("Workspace", HOME_WORKSPACE)
-        changed = False
+		ws = frappe.get_doc("Workspace", HOME_WORKSPACE)
+		changed = False
 
-        if not any(s.label == HOME_ENTRY_LABEL for s in (ws.shortcuts or [])):
-            ws.append("shortcuts", {
-                "label": HOME_ENTRY_LABEL,
-                "type": "URL",
-                "url": "/desk/jarz-pos",
-                "icon": WORKSPACE_ICON,
-                "color": "#FF6B35",
-            })
-            changed = True
+		if not any(s.label == HOME_ENTRY_LABEL for s in (ws.shortcuts or [])):
+			ws.append(
+				"shortcuts",
+				{
+					"label": HOME_ENTRY_LABEL,
+					"type": "URL",
+					"url": "/desk/jarz-pos",
+					"icon": WORKSPACE_ICON,
+					"color": "#FF6B35",
+				},
+			)
+			changed = True
 
-        if not any(l.type == "Card Break" and l.label == HOME_ENTRY_LABEL for l in (ws.links or [])):
-            ws.append("links", {
-                "type": "Card Break",
-                "label": HOME_ENTRY_LABEL,
-                "link_count": len(links),
-                "hidden": 0,
-                "onboard": 0,
-            })
-            for link in links:
-                ws.append("links", {
-                    "type": "Link",
-                    "label": link["label"],
-                    "link_type": link["link_type"],
-                    "link_to": link["link_to"],
-                    "hidden": 0,
-                    "onboard": 0,
-                    "is_query_report": 0,
-                    "dependencies": "",
-                })
-            changed = True
+		if not any(l.type == "Card Break" and l.label == HOME_ENTRY_LABEL for l in (ws.links or [])):
+			ws.append(
+				"links",
+				{
+					"type": "Card Break",
+					"label": HOME_ENTRY_LABEL,
+					"link_count": len(links),
+					"hidden": 0,
+					"onboard": 0,
+				},
+			)
+			for link in links:
+				ws.append(
+					"links",
+					{
+						"type": "Link",
+						"label": link["label"],
+						"link_type": link["link_type"],
+						"link_to": link["link_to"],
+						"hidden": 0,
+						"onboard": 0,
+						"is_query_report": 0,
+						"dependencies": "",
+					},
+				)
+			changed = True
 
-        if _add_home_blocks(ws):
-            changed = True
+		if _add_home_blocks(ws):
+			changed = True
 
-        if not changed:
-            return
+		if not changed:
+			return
 
-        ws.flags.ignore_mandatory = True
-        ws.flags.ignore_permissions = True
-        ws.flags.ignore_links = True
-        ws.save()
-        frappe.db.commit()
-        frappe.logger("jarz_workspace").info("[Home] Added the Jarz entry to the Home workspace")
-    except Exception:
-        frappe.db.rollback()
-        frappe.log_error(frappe.get_traceback(), "ensure_home_entry failed")
+		ws.flags.ignore_mandatory = True
+		ws.flags.ignore_permissions = True
+		ws.flags.ignore_links = True
+		ws.save()
+		frappe.db.commit()
+		frappe.logger("jarz_workspace").info("[Home] Added the Jarz entry to the Home workspace")
+	except Exception:
+		frappe.db.rollback()
+		frappe.log_error(frappe.get_traceback(), "ensure_home_entry failed")
 
 
 def _add_home_blocks(ws):
-    """Slot the tile after Home's last shortcut and the card after its last card.
+	"""Slot the tile after Home's last shortcut and the card after its last card.
 
-    Appending both to the end would drop a lone tile below the card grid, which
-    reads as a rendering bug rather than a shortcut.
-    """
-    try:
-        blocks = json.loads(ws.content or "[]")
-    except (ValueError, TypeError):
-        return False
+	Appending both to the end would drop a lone tile below the card grid, which
+	reads as a rendering bug rather than a shortcut.
+	"""
+	try:
+		blocks = json.loads(ws.content or "[]")
+	except (ValueError, TypeError):
+		return False
 
-    have_shortcut = any(
-        b.get("type") == "shortcut" and b.get("data", {}).get("shortcut_name") == HOME_ENTRY_LABEL
-        for b in blocks
-    )
-    have_card = any(
-        b.get("type") == "card" and b.get("data", {}).get("card_name") == HOME_ENTRY_LABEL
-        for b in blocks
-    )
-    if have_shortcut and have_card:
-        return False
+	have_shortcut = any(
+		b.get("type") == "shortcut" and b.get("data", {}).get("shortcut_name") == HOME_ENTRY_LABEL
+		for b in blocks
+	)
+	have_card = any(
+		b.get("type") == "card" and b.get("data", {}).get("card_name") == HOME_ENTRY_LABEL for b in blocks
+	)
+	if have_shortcut and have_card:
+		return False
 
-    if not have_card:
-        last_card = max(
-            (i for i, b in enumerate(blocks) if b.get("type") == "card"), default=len(blocks) - 1
-        )
-        blocks.insert(last_card + 1, {
-            "id": "jarz_home_card",
-            "type": "card",
-            "data": {"card_name": HOME_ENTRY_LABEL, "col": 4},
-        })
+	if not have_card:
+		last_card = max((i for i, b in enumerate(blocks) if b.get("type") == "card"), default=len(blocks) - 1)
+		blocks.insert(
+			last_card + 1,
+			{
+				"id": "jarz_home_card",
+				"type": "card",
+				"data": {"card_name": HOME_ENTRY_LABEL, "col": 4},
+			},
+		)
 
-    if not have_shortcut:
-        last_shortcut = max(
-            (i for i, b in enumerate(blocks) if b.get("type") == "shortcut"), default=-1
-        )
-        blocks.insert(last_shortcut + 1, {
-            "id": "jarz_home_shortcut",
-            "type": "shortcut",
-            "data": {"shortcut_name": HOME_ENTRY_LABEL, "col": 3},
-        })
+	if not have_shortcut:
+		last_shortcut = max((i for i, b in enumerate(blocks) if b.get("type") == "shortcut"), default=-1)
+		blocks.insert(
+			last_shortcut + 1,
+			{
+				"id": "jarz_home_shortcut",
+				"type": "shortcut",
+				"data": {"shortcut_name": HOME_ENTRY_LABEL, "col": 3},
+			},
+		)
 
-    ws.content = json.dumps(blocks)
-    return True
+	ws.content = json.dumps(blocks)
+	return True
 
 
 def _load_or_new():
-    if frappe.db.exists("Workspace", WORKSPACE_NAME):
-        return frappe.get_doc("Workspace", WORKSPACE_NAME)
-    ws = frappe.new_doc("Workspace")
-    ws.name = WORKSPACE_NAME
-    return ws
+	if frappe.db.exists("Workspace", WORKSPACE_NAME):
+		return frappe.get_doc("Workspace", WORKSPACE_NAME)
+	ws = frappe.new_doc("Workspace")
+	ws.name = WORKSPACE_NAME
+	return ws
 
 
 def _target_exists(kind: str, name: str) -> bool:
-    """True when the DocType / Page / Report is actually installed on this site."""
-    parent = _TARGET_DOCTYPE.get(kind)
-    if not parent:
-        return False
-    try:
-        return bool(frappe.db.exists(parent, name))
-    except Exception:
-        return False
+	"""True when the DocType / Page / Report is actually installed on this site."""
+	parent = _TARGET_DOCTYPE.get(kind)
+	if not parent:
+		return False
+	try:
+		return bool(frappe.db.exists(parent, name))
+	except Exception:
+		return False
 
 
 def _resolve_cards():
-    """Drop links whose target is missing, then drop cards left with no links."""
-    resolved = []
-    for card in CARDS:
-        links = [l for l in card["links"] if _target_exists(l["link_type"], l["link_to"])]
-        if links:
-            resolved.append({"label": card["label"], "links": links})
-    return resolved
+	"""Drop links whose target is missing, then drop cards left with no links."""
+	resolved = []
+	for card in CARDS:
+		links = [l for l in card["links"] if _target_exists(l["link_type"], l["link_to"])]
+		if links:
+			resolved.append({"label": card["label"], "links": links})
+	return resolved
 
 
 def _content_blocks(shortcuts, cards):
-    blocks = [{
-        "id": "jarz_hdr",
-        "type": "header",
-        "data": {"text": '<span class="h4"><b>Jarz POS</b></span>', "col": 12},
-    }]
-    for i, sc in enumerate(shortcuts):
-        blocks.append({
-            "id": f"jarz_sc_{i:02d}",
-            "type": "shortcut",
-            "data": {"shortcut_name": sc["label"], "col": 3},
-        })
-    if cards:
-        blocks.append({
-            "id": "jarz_hdr_cards",
-            "type": "header",
-            "data": {"text": '<span class="h4"><b>Reports &amp; Masters</b></span>', "col": 12},
-        })
-        for i, card in enumerate(cards):
-            blocks.append({
-                "id": f"jarz_card_{i:02d}",
-                "type": "card",
-                "data": {"card_name": card["label"], "col": 4},
-            })
-    return blocks
+	blocks = [
+		{
+			"id": "jarz_hdr",
+			"type": "header",
+			"data": {"text": '<span class="h4"><b>Jarz POS</b></span>', "col": 12},
+		}
+	]
+	for i, sc in enumerate(shortcuts):
+		blocks.append(
+			{
+				"id": f"jarz_sc_{i:02d}",
+				"type": "shortcut",
+				"data": {"shortcut_name": sc["label"], "col": 3},
+			}
+		)
+	if cards:
+		blocks.append(
+			{
+				"id": "jarz_hdr_cards",
+				"type": "header",
+				"data": {"text": '<span class="h4"><b>Reports &amp; Masters</b></span>', "col": 12},
+			}
+		)
+		for i, card in enumerate(cards):
+			blocks.append(
+				{
+					"id": f"jarz_card_{i:02d}",
+					"type": "card",
+					"data": {"card_name": card["label"], "col": 4},
+				}
+			)
+	return blocks

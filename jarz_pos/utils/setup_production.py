@@ -10,7 +10,7 @@ the old hook cached resolves to the new builder instead of raising.
 
 from __future__ import annotations
 
-from jarz_pos.utils.setup_workspace import WORKSPACE_NAME, ensure_jarz_desk  # noqa: F401
+from jarz_pos.utils.setup_workspace import WORKSPACE_NAME, ensure_jarz_desk
 
 # Historical entry point. Now builds every Jarz Desk surface.
 ensure_production_workspace_shortcuts = ensure_jarz_desk

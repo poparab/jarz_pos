@@ -30,7 +30,7 @@ incident.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Optional, Union
 
 import frappe
 from frappe import _
@@ -38,8 +38,8 @@ from frappe.utils import add_days, flt, getdate, nowdate
 
 from jarz_pos.constants import ROLES
 from jarz_pos.utils.credit_utils import (
-    CREDIT_PAYMENT_METHOD,  # noqa: F401  (re-export; see the note below)
-    apply_credit_invoice_match,
+	CREDIT_PAYMENT_METHOD,
+	apply_credit_invoice_match,
 )
 
 # ``CREDIT_PAYMENT_METHOD`` is re-exported here for the callers that already
@@ -62,59 +62,59 @@ _CREDIT_LEDGER_DEFAULT_DAYS = 90
 
 
 def _log_credit_error(summary: str) -> None:
-    """Log a failure without ever *becoming* the failure.
+	"""Log a failure without ever *becoming* the failure.
 
-    ``frappe.log_error`` writes an Error Log row, so it can itself raise (read-only
-    replica, disk full, the DocType missing mid-migrate). Called from ``except``
-    blocks that would otherwise turn a degraded section into a 500.
-    """
-    try:
-        frappe.log_error(frappe.get_traceback(), summary)
-    except Exception:
-        pass
+	``frappe.log_error`` writes an Error Log row, so it can itself raise (read-only
+	replica, disk full, the DocType missing mid-migrate). Called from ``except``
+	blocks that would otherwise turn a degraded section into a 500.
+	"""
+	try:
+		frappe.log_error(frappe.get_traceback(), summary)
+	except Exception:
+		pass
 
 
 def _credit_currency() -> str:
-    """Presentation currency for the ledger totals.
+	"""Presentation currency for the ledger totals.
 
-    Every amount here is company-currency, so one label for the whole payload is
-    honest. Falls back to EGP exactly as ``manager._employee_ledger_currency``.
-    """
-    try:
-        company = frappe.defaults.get_global_default("company")
-        if company:
-            currency = frappe.get_cached_value("Company", company, "default_currency")
-            if currency:
-                return str(currency)
-    except Exception:
-        pass
-    return "EGP"
+	Every amount here is company-currency, so one label for the whole payload is
+	honest. Falls back to EGP exactly as ``manager._employee_ledger_currency``.
+	"""
+	try:
+		company = frappe.defaults.get_global_default("company")
+		if company:
+			currency = frappe.get_cached_value("Company", company, "default_currency")
+			if currency:
+				return str(currency)
+	except Exception:
+		pass
+	return "EGP"
 
 
 def _branch_field() -> str:
-    """Sales Invoice field that carries the operational branch.
+	"""Sales Invoice field that carries the operational branch.
 
-    Same resolution ``manager.get_manager_orders`` uses: ``custom_kanban_profile``
-    is the branch an order currently belongs to (it moves on transfer),
-    ``pos_profile`` is where it was created and is read-only after submit.
-    """
-    try:
-        meta = frappe.get_meta("Sales Invoice")
-        return "custom_kanban_profile" if meta.get_field("custom_kanban_profile") else "pos_profile"
-    except Exception:
-        return "pos_profile"
+	Same resolution ``manager.get_manager_orders`` uses: ``custom_kanban_profile``
+	is the branch an order currently belongs to (it moves on transfer),
+	``pos_profile`` is where it was created and is read-only after submit.
+	"""
+	try:
+		meta = frappe.get_meta("Sales Invoice")
+		return "custom_kanban_profile" if meta.get_field("custom_kanban_profile") else "pos_profile"
+	except Exception:
+		return "pos_profile"
 
 
 def _ensure_credit_ledger_access() -> None:
-    """Read gate for the credit screens.
+	"""Read gate for the credit screens.
 
-    Same tier as the Manager Dashboard (``manager._ensure_manager_dashboard_access``):
-    a line manager runs a branch and chases its debts, so they are in; a POS
-    cashier is not.
-    """
-    from jarz_pos.api.manager import _ensure_manager_dashboard_access
+	Same tier as the Manager Dashboard (``manager._ensure_manager_dashboard_access``):
+	a line manager runs a branch and chases its debts, so they are in; a POS
+	cashier is not.
+	"""
+	from jarz_pos.api.manager import _ensure_manager_dashboard_access
 
-    _ensure_manager_dashboard_access()
+	_ensure_manager_dashboard_access()
 
 
 #: Takes the shop's order at checkout, so it may see that ONE shop's credit
@@ -123,30 +123,30 @@ B2B_SALES_REP_ROLE = "B2B Sales Rep"
 
 
 def _ensure_credit_profile_access() -> None:
-    """Read gate for a single customer's credit profile (the checkout lookup).
+	"""Read gate for a single customer's credit profile (the checkout lookup).
 
-    Wider than :func:`_ensure_credit_ledger_access`: a B2B Sales Rep places and
-    edits the shop's orders, and without the profile the POS cannot offer them
-    Credit at all. The creation gate (``_apply_credit_terms``) still enforces the
-    approval and the limit whoever submits; this only decides who may see them.
-    """
-    if B2B_SALES_REP_ROLE in set(frappe.get_roles() or []):
-        return
-    _ensure_credit_ledger_access()
+	Wider than :func:`_ensure_credit_ledger_access`: a B2B Sales Rep places and
+	edits the shop's orders, and without the profile the POS cannot offer them
+	Credit at all. The creation gate (``_apply_credit_terms``) still enforces the
+	approval and the limit whoever submits; this only decides who may see them.
+	"""
+	if B2B_SALES_REP_ROLE in set(frappe.get_roles() or []):
+		return
+	_ensure_credit_ledger_access()
 
 
 def _ensure_credit_payment_access() -> None:
-    """Write gate for taking money against a credit balance.
+	"""Write gate for taking money against a credit balance.
 
-    Deliberately the SAME set the other money endpoints use
-    (``api/couriers._ensure_collection_change_access``) rather than a new one:
-    this posts a submitted Payment Entry into a branch drawer, which is exactly
-    the authority "change collection method" already carries.
-    """
-    roles = {str(role or "").strip() for role in (frappe.get_roles() or []) if str(role or "").strip()}
-    allowed = ROLES.ADMIN | ROLES.LINE_MANAGER_TIER
-    if not roles.intersection(allowed):
-        frappe.throw(_("Not permitted: Manager access required"), frappe.PermissionError)
+	Deliberately the SAME set the other money endpoints use
+	(``api/couriers._ensure_collection_change_access``) rather than a new one:
+	this posts a submitted Payment Entry into a branch drawer, which is exactly
+	the authority "change collection method" already carries.
+	"""
+	roles = {str(role or "").strip() for role in (frappe.get_roles() or []) if str(role or "").strip()}
+	allowed = ROLES.ADMIN | ROLES.LINE_MANAGER_TIER
+	if not roles.intersection(allowed):
+		frappe.throw(_("Not permitted: Manager access required"), frappe.PermissionError)
 
 
 #: Who may GRANT credit. Narrower than the payment gate on purpose: taking a
@@ -154,169 +154,169 @@ def _ensure_credit_payment_access() -> None:
 #: often with no limit — is a management decision, and a line manager has no
 #: B2B remit. Same idea as ``ROLES.TASK_MANAGER``, plus the accounts owners.
 CREDIT_SETTINGS_ROLES = frozenset(
-    {
-        ROLES.JARZ_MANAGER,
-        ROLES.SYSTEM_MANAGER,
-        ROLES.ADMINISTRATOR,
-        "Accounts Manager",
-        "POS Manager",
-    }
+	{
+		ROLES.JARZ_MANAGER,
+		ROLES.SYSTEM_MANAGER,
+		ROLES.ADMINISTRATOR,
+		"Accounts Manager",
+		"POS Manager",
+	}
 )
 
 
 def _can_manage_credit_settings() -> bool:
-    """May the caller switch a shop's credit on/off and set its days / limit?
+	"""May the caller switch a shop's credit on/off and set its days / limit?
 
-    Non-throwing, so the profile can tell the app whether to show the edit
-    button. A rep, cashier or line manager sees the settings, never sets them.
-    """
-    roles = {str(role or "").strip() for role in (frappe.get_roles() or []) if str(role or "").strip()}
-    return bool(roles.intersection(CREDIT_SETTINGS_ROLES))
-
-
-def _allowed_profiles() -> List[str]:
-    from jarz_pos.api.manager import _current_user_allowed_profiles
-
-    return _current_user_allowed_profiles() or []
+	Non-throwing, so the profile can tell the app whether to show the edit
+	button. A rep, cashier or line manager sees the settings, never sets them.
+	"""
+	roles = {str(role or "").strip() for role in (frappe.get_roles() or []) if str(role or "").strip()}
+	return bool(roles.intersection(CREDIT_SETTINGS_ROLES))
 
 
-def _customer_credit_settings(customer: str) -> Dict[str, Any]:
-    """The three credit columns off a Customer, failing CLOSED.
+def _allowed_profiles() -> list[str]:
+	from jarz_pos.api.manager import _current_user_allowed_profiles
 
-    Every field is seeded by ``setup/credit_terms.py``, so on a bench that has
-    not migrated the read raises rather than returning ``None``. That must
-    degrade to "credit not allowed" and never to "allowed with no limit".
-    """
-    result: Dict[str, Any] = {"allowed": False, "days": 0, "limit": 0.0}
-    name = str(customer or "").strip()
-    if not name:
-        return result
-    try:
-        row = frappe.db.get_value(
-            "Customer",
-            name,
-            ["custom_credit_allowed", "custom_credit_days", "custom_credit_limit_amount"],
-            as_dict=True,
-        )
-    except Exception:
-        return result
-    if not row:
-        return result
-    try:
-        result["allowed"] = bool(int(row.get("custom_credit_allowed") or 0))
-    except Exception:
-        result["allowed"] = bool(row.get("custom_credit_allowed"))
-    try:
-        result["days"] = max(0, int(row.get("custom_credit_days") or 0))
-    except Exception:
-        result["days"] = 0
-    try:
-        result["limit"] = max(0.0, flt(row.get("custom_credit_limit_amount")))
-    except Exception:
-        result["limit"] = 0.0
-    return result
+	return _current_user_allowed_profiles() or []
 
 
-def _open_credit_invoice_fields() -> List[str]:
-    fields = [
-        "name",
-        "customer",
-        "customer_name",
-        "posting_date",
-        "due_date",
-        "grand_total",
-        "outstanding_amount",
-        "status",
-        _branch_field(),
-        # The shop's door (B2B branch): per-branch Invoice-after-Invoice
-        # settlement reads it via ``b2b_branches.tag_invoice_branches``.
-        "shipping_address_name",
-        "customer_address",
-    ]
-    try:
-        if frappe.get_meta("Sales Invoice").get_field("custom_credit_terms_days"):
-            fields.append("custom_credit_terms_days")
-    except Exception:
-        pass
-    # de-dup while preserving order (branch field may already be in the list)
-    seen: set = set()
-    ordered: List[str] = []
-    for field in fields:
-        if field not in seen:
-            seen.add(field)
-            ordered.append(field)
-    return ordered
+def _customer_credit_settings(customer: str) -> dict[str, Any]:
+	"""The three credit columns off a Customer, failing CLOSED.
+
+	Every field is seeded by ``setup/credit_terms.py``, so on a bench that has
+	not migrated the read raises rather than returning ``None``. That must
+	degrade to "credit not allowed" and never to "allowed with no limit".
+	"""
+	result: dict[str, Any] = {"allowed": False, "days": 0, "limit": 0.0}
+	name = str(customer or "").strip()
+	if not name:
+		return result
+	try:
+		row = frappe.db.get_value(
+			"Customer",
+			name,
+			["custom_credit_allowed", "custom_credit_days", "custom_credit_limit_amount"],
+			as_dict=True,
+		)
+	except Exception:
+		return result
+	if not row:
+		return result
+	try:
+		result["allowed"] = bool(int(row.get("custom_credit_allowed") or 0))
+	except Exception:
+		result["allowed"] = bool(row.get("custom_credit_allowed"))
+	try:
+		result["days"] = max(0, int(row.get("custom_credit_days") or 0))
+	except Exception:
+		result["days"] = 0
+	try:
+		result["limit"] = max(0.0, flt(row.get("custom_credit_limit_amount")))
+	except Exception:
+		result["limit"] = 0.0
+	return result
+
+
+def _open_credit_invoice_fields() -> list[str]:
+	fields = [
+		"name",
+		"customer",
+		"customer_name",
+		"posting_date",
+		"due_date",
+		"grand_total",
+		"outstanding_amount",
+		"status",
+		_branch_field(),
+		# The shop's door (B2B branch): per-branch Invoice-after-Invoice
+		# settlement reads it via ``b2b_branches.tag_invoice_branches``.
+		"shipping_address_name",
+		"customer_address",
+	]
+	try:
+		if frappe.get_meta("Sales Invoice").get_field("custom_credit_terms_days"):
+			fields.append("custom_credit_terms_days")
+	except Exception:
+		pass
+	# de-dup while preserving order (branch field may already be in the list)
+	seen: set = set()
+	ordered: list[str] = []
+	for field in fields:
+		if field not in seen:
+			seen.add(field)
+			ordered.append(field)
+	return ordered
 
 
 def _open_credit_invoices(
-    *,
-    customers: Optional[List[str]] = None,
-    profiles: Optional[List[str]] = None,
-) -> List[Dict[str, Any]]:
-    """Every OPEN credit invoice, oldest first. Never date-filtered.
+	*,
+	customers: list[str] | None = None,
+	profiles: list[str] | None = None,
+) -> list[dict[str, Any]]:
+	"""Every OPEN credit invoice, oldest first. Never date-filtered.
 
-    This is the BALANCE query. It is deliberately uncapped and deliberately
-    all-time: truncating a list loses rows, truncating a balance states the
-    wrong amount of money — and the older the debt, the more certainly a date
-    window would hide exactly the row somebody is hunting for.
+	This is the BALANCE query. It is deliberately uncapped and deliberately
+	all-time: truncating a list loses rows, truncating a balance states the
+	wrong amount of money — and the older the debt, the more certainly a date
+	window would hide exactly the row somebody is hunting for.
 
-    **The credit match is an OR, and that is load-bearing.**
-    ``custom_payment_method`` is a MUTABLE column: ``change_payment_collection_method``
-    rewrites it on every collection-method change, and its ``unpaid_online_retarget``
-    branch posts NO voucher — the outstanding stays exactly where it was. Keyed on
-    the method alone, a manager tapping "Change collection method -> Instapay" on a
-    credit card made a real debt disappear from this query: out of the ledger, out of
-    the customer's used limit, and unreachable by ``record_credit_payment``'s FIFO
-    allocation. ``custom_credit_terms_days`` is the stamp
-    ``_apply_credit_terms`` freezes at creation and nothing ever rewrites, so it is
-    permanent provenance. ``api/kanban`` and ``invoice_creation.get_open_credit_balance``
-    use the same predicate; see ``utils/credit_utils``.
+	**The credit match is an OR, and that is load-bearing.**
+	``custom_payment_method`` is a MUTABLE column: ``change_payment_collection_method``
+	rewrites it on every collection-method change, and its ``unpaid_online_retarget``
+	branch posts NO voucher — the outstanding stays exactly where it was. Keyed on
+	the method alone, a manager tapping "Change collection method -> Instapay" on a
+	credit card made a real debt disappear from this query: out of the ledger, out of
+	the customer's used limit, and unreachable by ``record_credit_payment``'s FIFO
+	allocation. ``custom_credit_terms_days`` is the stamp
+	``_apply_credit_terms`` freezes at creation and nothing ever rewrites, so it is
+	permanent provenance. ``api/kanban`` and ``invoice_creation.get_open_credit_balance``
+	use the same predicate; see ``utils/credit_utils``.
 
-    ``is_return: 0`` is KEPT deliberately. A credit note against an unpaid credit
-    invoice does not sit here waiting to be netted off: ``services/invoice_return``
-    posts a ``JE_AR_KNOCKOFF`` that credits Debtors against the ORIGINAL invoice, so
-    the surviving row's ``outstanding_amount`` is already reduced by the return and
-    the credit note's own outstanding is zero. Admitting returns would not correct a
-    balance — it would hand ``record_credit_payment`` a negative-outstanding row to
-    allocate a Receive Payment Entry against.
-    """
-    filters: Dict[str, Any] = {
-        "docstatus": 1,
-        "outstanding_amount": [">", 0.005],
-        "is_return": 0,
-    }
-    or_filters = apply_credit_invoice_match(filters)
-    if customers is not None:
-        if not customers:
-            return []
-        filters["customer"] = ["in", customers]
-    if profiles is not None:
-        if not profiles:
-            return []
-        filters[_branch_field()] = ["in", profiles]
-    try:
-        return (
-            frappe.get_all(
-                "Sales Invoice",
-                filters=filters,
-                or_filters=or_filters,
-                fields=_open_credit_invoice_fields(),
-                # FIFO order, and the same order the allocation below walks in.
-                order_by="posting_date asc, creation asc",
-                limit_page_length=0,
-            )
-            or []
-        )
-    except Exception:
-        _log_credit_error("Credit ledger: open credit invoice query failed")
-        return []
+	``is_return: 0`` is KEPT deliberately. A credit note against an unpaid credit
+	invoice does not sit here waiting to be netted off: ``services/invoice_return``
+	posts a ``JE_AR_KNOCKOFF`` that credits Debtors against the ORIGINAL invoice, so
+	the surviving row's ``outstanding_amount`` is already reduced by the return and
+	the credit note's own outstanding is zero. Admitting returns would not correct a
+	balance — it would hand ``record_credit_payment`` a negative-outstanding row to
+	allocate a Receive Payment Entry against.
+	"""
+	filters: dict[str, Any] = {
+		"docstatus": 1,
+		"outstanding_amount": [">", 0.005],
+		"is_return": 0,
+	}
+	or_filters = apply_credit_invoice_match(filters)
+	if customers is not None:
+		if not customers:
+			return []
+		filters["customer"] = ["in", customers]
+	if profiles is not None:
+		if not profiles:
+			return []
+		filters[_branch_field()] = ["in", profiles]
+	try:
+		return (
+			frappe.get_all(
+				"Sales Invoice",
+				filters=filters,
+				or_filters=or_filters,
+				fields=_open_credit_invoice_fields(),
+				# FIFO order, and the same order the allocation below walks in.
+				order_by="posting_date asc, creation asc",
+				limit_page_length=0,
+			)
+			or []
+		)
+	except Exception:
+		_log_credit_error("Credit ledger: open credit invoice query failed")
+		return []
 
 
 def _age_days(posting_date: Any) -> int:
-    try:
-        return max(0, int((getdate(nowdate()) - getdate(posting_date)).days))
-    except Exception:
-        return 0
+	try:
+		return max(0, int((getdate(nowdate()) - getdate(posting_date)).days))
+	except Exception:
+		return 0
 
 
 # ---------------------------------------------------------------------------
@@ -326,419 +326,413 @@ def _age_days(posting_date: Any) -> int:
 
 @frappe.whitelist(allow_guest=False)
 def get_credit_ledger(
-    customer: Optional[str] = None,
-    pos_profile: Optional[str] = None,
-    from_date: Optional[str] = None,
-    to_date: Optional[str] = None,
-    limit: Union[int, str, None] = 200,
-) -> Dict[str, Any]:
-    """What each customer owes on account, with their open invoices oldest-first.
+	customer: str | None = None,
+	pos_profile: str | None = None,
+	from_date: str | None = None,
+	to_date: str | None = None,
+	limit: int | str | None = 200,
+) -> dict[str, Any]:
+	"""What each customer owes on account, with their open invoices oldest-first.
 
-    **THE DATE WINDOW DESCRIBES ACTIVITY. IT NEVER LIMITS THE BALANCE.**
+	**THE DATE WINDOW DESCRIBES ACTIVITY. IT NEVER LIMITS THE BALANCE.**
 
-    Read that twice before changing anything here, because collapsing the two
-    back into one filtered query is a very natural "simplification" and it
-    silently breaks the only number on the screen that matters. This is the
-    customer analogue of :func:`jarz_pos.api.manager.get_employee_ledger` and it
-    copies its semantics exactly:
+	Read that twice before changing anything here, because collapsing the two
+	back into one filtered query is a very natural "simplification" and it
+	silently breaks the only number on the screen that matters. This is the
+	customer analogue of :func:`jarz_pos.api.manager.get_employee_ledger` and it
+	copies its semantics exactly:
 
-    * ``invoices`` is the ROWS LISTED, and it honours ``from_date`` /
-      ``to_date``. This is the activity feed — what was sold on credit in the
-      window, paid or not.
-    * ``summary.total_outstanding``, ``customers[].outstanding`` and
-      ``customers[].open_invoices`` are the BALANCE, computed over EVERY open
-      credit invoice regardless of date. An invoice unpaid since March is
-      exactly the debt somebody is hunting for; under a windowed total it would
-      contribute nothing while the client still labelled the figure "total
-      outstanding". The older and more delinquent the debt, the more certainly
-      it would disappear. ``summary.outstanding_is_all_time`` is always ``True``
-      so the client can say so out loud.
+	* ``invoices`` is the ROWS LISTED, and it honours ``from_date`` /
+	  ``to_date``. This is the activity feed — what was sold on credit in the
+	  window, paid or not.
+	* ``summary.total_outstanding``, ``customers[].outstanding`` and
+	  ``customers[].open_invoices`` are the BALANCE, computed over EVERY open
+	  credit invoice regardless of date. An invoice unpaid since March is
+	  exactly the debt somebody is hunting for; under a windowed total it would
+	  contribute nothing while the client still labelled the figure "total
+	  outstanding". The older and more delinquent the debt, the more certainly
+	  it would disappear. ``summary.outstanding_is_all_time`` is always ``True``
+	  so the client can say so out loud.
 
-    A consequence, and it is correct: a shop can appear in ``customers`` with a
-    real balance and an EMPTY ``invoices`` list, because all their activity
-    predates the window. The rollup is driven by what is owed, not by what is
-    listed. The reverse also holds — a shop whose only credit order in the
-    window was already paid appears with a zero balance.
+	A consequence, and it is correct: a shop can appear in ``customers`` with a
+	real balance and an EMPTY ``invoices`` list, because all their activity
+	predates the window. The rollup is driven by what is owed, not by what is
+	listed. The reverse also holds — a shop whose only credit order in the
+	window was already paid appears with a zero balance.
 
-    Dates default to the **last 90 days**, not to today: a rolling settlement
-    pattern ("they pay the first when I hand them the second") has no meaningful
-    single day. The listed section is capped at ``limit`` (200 by default, 500
-    max); if it is truncated the payload says so via
-    ``notice_code = "results_truncated"`` rather than dropping rows quietly. The
-    balance queries are deliberately UNCAPPED.
+	Dates default to the **last 90 days**, not to today: a rolling settlement
+	pattern ("they pay the first when I hand them the second") has no meaningful
+	single day. The listed section is capped at ``limit`` (200 by default, 500
+	max); if it is truncated the payload says so via
+	``notice_code = "results_truncated"`` rather than dropping rows quietly. The
+	balance queries are deliberately UNCAPPED.
 
-    Branch scoping is the same as everywhere else: the caller sees only orders
-    belonging to the POS Profiles they are assigned to (Administrator excepted).
-    A shop that orders from two branches therefore shows a *different* balance
-    to a manager of one branch than to an administrator — which is honest, and
-    is why ``filters.branch`` is echoed back.
+	Branch scoping is the same as everywhere else: the caller sees only orders
+	belonging to the POS Profiles they are assigned to (Administrator excepted).
+	A shop that orders from two branches therefore shows a *different* balance
+	to a manager of one branch than to an administrator — which is honest, and
+	is why ``filters.branch`` is echoed back.
 
-    Args:
-        customer: Restrict to one Customer. Omitted means every customer with an
-            open credit balance in the caller's branches.
-        pos_profile: Branch to narrow to; omitted or "all" means every assigned
-            branch. A branch the caller is not assigned to returns an empty
-            ledger with ``notice_code = "branch_not_permitted"``.
-        from_date: Start of the ACTIVITY window (default: 89 days before today).
-            Does not affect any outstanding figure.
-        to_date: End of the ACTIVITY window (default: today). Likewise.
-        limit: Max rows in the LISTED ``invoices`` section. Capped at 500. The
-            balance is never capped.
+	Args:
+	    customer: Restrict to one Customer. Omitted means every customer with an
+	        open credit balance in the caller's branches.
+	    pos_profile: Branch to narrow to; omitted or "all" means every assigned
+	        branch. A branch the caller is not assigned to returns an empty
+	        ledger with ``notice_code = "branch_not_permitted"``.
+	    from_date: Start of the ACTIVITY window (default: 89 days before today).
+	        Does not affect any outstanding figure.
+	    to_date: End of the ACTIVITY window (default: today). Likewise.
+	    limit: Max rows in the LISTED ``invoices`` section. Capped at 500. The
+	        balance is never capped.
 
-    Returns:
-        ``success``, ``filters``, ``summary``, ``customers`` (rollup, biggest
-        balance first, each with ``open_invoices`` oldest-first), ``invoices``
-        (the activity feed), plus optional ``notice_code`` / ``notice``.
-    """
-    _ensure_credit_ledger_access()
+	Returns:
+	    ``success``, ``filters``, ``summary``, ``customers`` (rollup, biggest
+	    balance first, each with ``open_invoices`` oldest-first), ``invoices``
+	    (the activity feed), plus optional ``notice_code`` / ``notice``.
+	"""
+	_ensure_credit_ledger_access()
 
-    try:
-        limit_value = max(1, min(int(limit or 200), 500))
-    except Exception:
-        limit_value = 200
+	try:
+		limit_value = max(1, min(int(limit or 200), 500))
+	except Exception:
+		limit_value = 200
 
-    end_date = getdate(to_date) if to_date else getdate(nowdate())
-    start_date = (
-        getdate(from_date)
-        if from_date
-        else getdate(add_days(nowdate(), -(_CREDIT_LEDGER_DEFAULT_DAYS - 1)))
-    )
-    if start_date > end_date:
-        frappe.throw(_("From date cannot be later than To date"))
+	end_date = getdate(to_date) if to_date else getdate(nowdate())
+	start_date = (
+		getdate(from_date) if from_date else getdate(add_days(nowdate(), -(_CREDIT_LEDGER_DEFAULT_DAYS - 1)))
+	)
+	if start_date > end_date:
+		frappe.throw(_("From date cannot be later than To date"))
 
-    selected_customer = str(customer or "").strip()
-    selected_branch = str(pos_profile or "").strip()
-    currency = _credit_currency()
-    filters_echo: Dict[str, Any] = {
-        "from_date": str(start_date),
-        "to_date": str(end_date),
-        "customer": selected_customer or None,
-        "branch": selected_branch or None,
-    }
+	selected_customer = str(customer or "").strip()
+	selected_branch = str(pos_profile or "").strip()
+	currency = _credit_currency()
+	filters_echo: dict[str, Any] = {
+		"from_date": str(start_date),
+		"to_date": str(end_date),
+		"customer": selected_customer or None,
+		"branch": selected_branch or None,
+	}
 
-    def _empty(notice_code: str, notice: str) -> Dict[str, Any]:
-        return {
-            "success": True,
-            "filters": filters_echo,
-            "summary": {
-                "total_outstanding": 0.0,
-                "customer_count": 0,
-                "invoice_count": 0,
-                "listed_count": 0,
-                "oldest_invoice_date": None,
-                "currency": currency,
-                "outstanding_is_all_time": True,
-            },
-            "customers": [],
-            "invoices": [],
-            "notice_code": notice_code,
-            "notice": notice,
-        }
+	def _empty(notice_code: str, notice: str) -> dict[str, Any]:
+		return {
+			"success": True,
+			"filters": filters_echo,
+			"summary": {
+				"total_outstanding": 0.0,
+				"customer_count": 0,
+				"invoice_count": 0,
+				"listed_count": 0,
+				"oldest_invoice_date": None,
+				"currency": currency,
+				"outstanding_is_all_time": True,
+			},
+			"customers": [],
+			"invoices": [],
+			"notice_code": notice_code,
+			"notice": notice,
+		}
 
-    allowed = _allowed_profiles()
-    if not allowed:
-        # Passing the role gate while owning no branch is a setup problem, not an
-        # empty ledger — say which, exactly as the other dashboards do.
-        return _empty(
-            "no_branch_assigned",
-            _(
-                "You are not assigned to any branch (POS Profile). Ask an "
-                "administrator to add you to the branches you manage."
-            ),
-        )
+	allowed = _allowed_profiles()
+	if not allowed:
+		# Passing the role gate while owning no branch is a setup problem, not an
+		# empty ledger — say which, exactly as the other dashboards do.
+		return _empty(
+			"no_branch_assigned",
+			_(
+				"You are not assigned to any branch (POS Profile). Ask an "
+				"administrator to add you to the branches you manage."
+			),
+		)
 
-    profiles = list(allowed)
-    if selected_branch and selected_branch.lower() != "all":
-        if selected_branch not in allowed:
-            return _empty(
-                "branch_not_permitted",
-                _("You are not assigned to branch {0}.").format(selected_branch),
-            )
-        profiles = [selected_branch]
+	profiles = list(allowed)
+	if selected_branch and selected_branch.lower() != "all":
+		if selected_branch not in allowed:
+			return _empty(
+				"branch_not_permitted",
+				_("You are not assigned to branch {0}.").format(selected_branch),
+			)
+		profiles = [selected_branch]
 
-    customers_filter = [selected_customer] if selected_customer else None
-    branch_field = _branch_field()
+	customers_filter = [selected_customer] if selected_customer else None
+	branch_field = _branch_field()
 
-    # --- What is OWED: every open credit invoice, all time -------------------
-    open_rows = _open_credit_invoices(customers=customers_filter, profiles=profiles)
+	# --- What is OWED: every open credit invoice, all time -------------------
+	open_rows = _open_credit_invoices(customers=customers_filter, profiles=profiles)
 
-    # --- What is LISTED: the activity window ---------------------------------
-    listed_rows: List[Dict[str, Any]] = []
-    listed_truncated = False
-    try:
-        activity_filters: Dict[str, Any] = {
-            "docstatus": 1,
-            "posting_date": ["between", [str(start_date), str(end_date)]],
-            branch_field: ["in", profiles],
-        }
-        # Same OR as the balance query above, for the same reason: the payment
-        # method is rewritten by a collection-method change, the frozen terms
-        # stamp is not. Without it an order relabelled after dispatch vanishes
-        # from the activity feed too, so the screen would not even show the row
-        # a manager is trying to reconcile.
-        activity_or_filters = apply_credit_invoice_match(activity_filters)
-        if selected_customer:
-            activity_filters["customer"] = selected_customer
-        listed_rows = (
-            frappe.get_all(
-                "Sales Invoice",
-                filters=activity_filters,
-                or_filters=activity_or_filters,
-                fields=_open_credit_invoice_fields(),
-                order_by="posting_date desc, creation desc",
-                # One extra row is asked for so truncation can be DETECTED rather
-                # than guessed from "len == limit", which is wrong exactly when
-                # the count lands on the cap.
-                limit_page_length=limit_value + 1,
-            )
-            or []
-        )
-        if len(listed_rows) > limit_value:
-            listed_truncated = True
-            listed_rows = listed_rows[:limit_value]
-    except Exception:
-        _log_credit_error("Credit ledger: activity query failed")
-        listed_rows = []
+	# --- What is LISTED: the activity window ---------------------------------
+	listed_rows: list[dict[str, Any]] = []
+	listed_truncated = False
+	try:
+		activity_filters: dict[str, Any] = {
+			"docstatus": 1,
+			"posting_date": ["between", [str(start_date), str(end_date)]],
+			branch_field: ["in", profiles],
+		}
+		# Same OR as the balance query above, for the same reason: the payment
+		# method is rewritten by a collection-method change, the frozen terms
+		# stamp is not. Without it an order relabelled after dispatch vanishes
+		# from the activity feed too, so the screen would not even show the row
+		# a manager is trying to reconcile.
+		activity_or_filters = apply_credit_invoice_match(activity_filters)
+		if selected_customer:
+			activity_filters["customer"] = selected_customer
+		listed_rows = (
+			frappe.get_all(
+				"Sales Invoice",
+				filters=activity_filters,
+				or_filters=activity_or_filters,
+				fields=_open_credit_invoice_fields(),
+				order_by="posting_date desc, creation desc",
+				# One extra row is asked for so truncation can be DETECTED rather
+				# than guessed from "len == limit", which is wrong exactly when
+				# the count lands on the cap.
+				limit_page_length=limit_value + 1,
+			)
+			or []
+		)
+		if len(listed_rows) > limit_value:
+			listed_truncated = True
+			listed_rows = listed_rows[:limit_value]
+	except Exception:
+		_log_credit_error("Credit ledger: activity query failed")
+		listed_rows = []
 
-    # --- Rollup ---------------------------------------------------------------
-    people: Dict[str, Dict[str, Any]] = {}
+	# --- Rollup ---------------------------------------------------------------
+	people: dict[str, dict[str, Any]] = {}
 
-    def _bucket(name: str, display: str) -> Dict[str, Any]:
-        row = people.get(name)
-        if row is None:
-            settings = _customer_credit_settings(name)
-            row = {
-                "customer": name,
-                "customer_name": display or name,
-                "outstanding": 0.0,
-                "invoice_count": 0,
-                "oldest_invoice_date": None,
-                "oldest_age_days": 0,
-                "credit_allowed": bool(settings["allowed"]),
-                "credit_days": int(settings["days"] or DEFAULT_CREDIT_DAYS),
-                "credit_limit": flt(settings["limit"], 2),
-                "open_invoices": [],
-            }
-            people[name] = row
-        return row
+	def _bucket(name: str, display: str) -> dict[str, Any]:
+		row = people.get(name)
+		if row is None:
+			settings = _customer_credit_settings(name)
+			row = {
+				"customer": name,
+				"customer_name": display or name,
+				"outstanding": 0.0,
+				"invoice_count": 0,
+				"oldest_invoice_date": None,
+				"oldest_age_days": 0,
+				"credit_allowed": bool(settings["allowed"]),
+				"credit_days": int(settings["days"] or DEFAULT_CREDIT_DAYS),
+				"credit_limit": flt(settings["limit"], 2),
+				"open_invoices": [],
+			}
+			people[name] = row
+		return row
 
-    total_outstanding = 0.0
-    oldest_overall: Optional[str] = None
+	total_outstanding = 0.0
+	oldest_overall: str | None = None
 
-    for row in open_rows:
-        name = str(row.get("customer") or "")
-        if not name:
-            continue
-        outstanding = flt(row.get("outstanding_amount"))
-        if outstanding <= 0.005:
-            continue
-        bucket = _bucket(name, str(row.get("customer_name") or name))
-        bucket["outstanding"] += outstanding
-        bucket["invoice_count"] += 1
-        posting_date = str(row.get("posting_date") or "") or None
-        # ``open_rows`` is already oldest-first, so the first one wins.
-        if posting_date and not bucket["oldest_invoice_date"]:
-            bucket["oldest_invoice_date"] = posting_date
-            bucket["oldest_age_days"] = _age_days(posting_date)
-        if posting_date and (oldest_overall is None or posting_date < oldest_overall):
-            oldest_overall = posting_date
-        bucket["open_invoices"].append(
-            {
-                "invoice": row.get("name"),
-                "posting_date": posting_date,
-                "due_date": str(row.get("due_date") or "") or None,
-                "grand_total": flt(row.get("grand_total"), 2),
-                "outstanding_amount": flt(outstanding, 2),
-                "age_days": _age_days(posting_date),
-                "credit_terms_days": int(row.get("custom_credit_terms_days") or 0),
-                "branch": str(row.get(branch_field) or ""),
-                "status": row.get("status"),
-            }
-        )
-        total_outstanding += outstanding
+	for row in open_rows:
+		name = str(row.get("customer") or "")
+		if not name:
+			continue
+		outstanding = flt(row.get("outstanding_amount"))
+		if outstanding <= 0.005:
+			continue
+		bucket = _bucket(name, str(row.get("customer_name") or name))
+		bucket["outstanding"] += outstanding
+		bucket["invoice_count"] += 1
+		posting_date = str(row.get("posting_date") or "") or None
+		# ``open_rows`` is already oldest-first, so the first one wins.
+		if posting_date and not bucket["oldest_invoice_date"]:
+			bucket["oldest_invoice_date"] = posting_date
+			bucket["oldest_age_days"] = _age_days(posting_date)
+		if posting_date and (oldest_overall is None or posting_date < oldest_overall):
+			oldest_overall = posting_date
+		bucket["open_invoices"].append(
+			{
+				"invoice": row.get("name"),
+				"posting_date": posting_date,
+				"due_date": str(row.get("due_date") or "") or None,
+				"grand_total": flt(row.get("grand_total"), 2),
+				"outstanding_amount": flt(outstanding, 2),
+				"age_days": _age_days(posting_date),
+				"credit_terms_days": int(row.get("custom_credit_terms_days") or 0),
+				"branch": str(row.get(branch_field) or ""),
+				"status": row.get("status"),
+			}
+		)
+		total_outstanding += outstanding
 
-    customers_payload: List[Dict[str, Any]] = []
-    for row in people.values():
-        row["outstanding"] = flt(row["outstanding"], 2)
-        limit_amount = flt(row["credit_limit"])
-        row["available_credit"] = (
-            flt(max(0.0, limit_amount - row["outstanding"]), 2) if limit_amount > 0 else None
-        )
-        customers_payload.append(row)
-    # Biggest debt first; the name breaks ties so the order is stable between
-    # requests (a jumping table reads as data changing when it has not).
-    customers_payload.sort(
-        key=lambda r: (-r["outstanding"], str(r.get("customer_name") or ""))
-    )
+	customers_payload: list[dict[str, Any]] = []
+	for row in people.values():
+		row["outstanding"] = flt(row["outstanding"], 2)
+		limit_amount = flt(row["credit_limit"])
+		row["available_credit"] = (
+			flt(max(0.0, limit_amount - row["outstanding"]), 2) if limit_amount > 0 else None
+		)
+		customers_payload.append(row)
+	# Biggest debt first; the name breaks ties so the order is stable between
+	# requests (a jumping table reads as data changing when it has not).
+	customers_payload.sort(key=lambda r: (-r["outstanding"], str(r.get("customer_name") or "")))
 
-    invoices_payload: List[Dict[str, Any]] = []
-    for row in listed_rows:
-        posting_date = str(row.get("posting_date") or "") or None
-        invoices_payload.append(
-            {
-                "invoice": row.get("name"),
-                "customer": row.get("customer"),
-                "customer_name": row.get("customer_name") or row.get("customer"),
-                "posting_date": posting_date,
-                "due_date": str(row.get("due_date") or "") or None,
-                "grand_total": flt(row.get("grand_total"), 2),
-                "outstanding_amount": flt(row.get("outstanding_amount"), 2),
-                "age_days": _age_days(posting_date),
-                "credit_terms_days": int(row.get("custom_credit_terms_days") or 0),
-                "branch": str(row.get(branch_field) or ""),
-                "status": row.get("status"),
-            }
-        )
+	invoices_payload: list[dict[str, Any]] = []
+	for row in listed_rows:
+		posting_date = str(row.get("posting_date") or "") or None
+		invoices_payload.append(
+			{
+				"invoice": row.get("name"),
+				"customer": row.get("customer"),
+				"customer_name": row.get("customer_name") or row.get("customer"),
+				"posting_date": posting_date,
+				"due_date": str(row.get("due_date") or "") or None,
+				"grand_total": flt(row.get("grand_total"), 2),
+				"outstanding_amount": flt(row.get("outstanding_amount"), 2),
+				"age_days": _age_days(posting_date),
+				"credit_terms_days": int(row.get("custom_credit_terms_days") or 0),
+				"branch": str(row.get(branch_field) or ""),
+				"status": row.get("status"),
+			}
+		)
 
-    payload: Dict[str, Any] = {
-        "success": True,
-        "filters": filters_echo,
-        "summary": {
-            # All-time, by design. See the docstring.
-            "total_outstanding": flt(total_outstanding, 2),
-            "customer_count": sum(1 for r in customers_payload if r["outstanding"] > 0.005),
-            "invoice_count": sum(int(r["invoice_count"]) for r in customers_payload),
-            # Activity count: rows listed inside the window.
-            "listed_count": len(invoices_payload),
-            "oldest_invoice_date": oldest_overall,
-            "currency": currency,
-            "outstanding_is_all_time": True,
-        },
-        "customers": customers_payload,
-        "invoices": invoices_payload,
-    }
+	payload: dict[str, Any] = {
+		"success": True,
+		"filters": filters_echo,
+		"summary": {
+			# All-time, by design. See the docstring.
+			"total_outstanding": flt(total_outstanding, 2),
+			"customer_count": sum(1 for r in customers_payload if r["outstanding"] > 0.005),
+			"invoice_count": sum(int(r["invoice_count"]) for r in customers_payload),
+			# Activity count: rows listed inside the window.
+			"listed_count": len(invoices_payload),
+			"oldest_invoice_date": oldest_overall,
+			"currency": currency,
+			"outstanding_is_all_time": True,
+		},
+		"customers": customers_payload,
+		"invoices": invoices_payload,
+	}
 
-    if listed_truncated:
-        # Truncation is reported, never silent. The wording is careful: only the
-        # LIST is cut. The outstanding totals are all-time and uncapped, so they
-        # remain correct — saying otherwise would send a manager chasing a
-        # shortfall that does not exist.
-        payload["notice_code"] = "results_truncated"
-        payload["notice"] = _(
-            "Showing the first {0} orders. The outstanding totals are complete; "
-            "only this list is cut short. Narrow the date range, a branch or a "
-            "customer to see the rest."
-        ).format(limit_value)
+	if listed_truncated:
+		# Truncation is reported, never silent. The wording is careful: only the
+		# LIST is cut. The outstanding totals are all-time and uncapped, so they
+		# remain correct — saying otherwise would send a manager chasing a
+		# shortfall that does not exist.
+		payload["notice_code"] = "results_truncated"
+		payload["notice"] = _(
+			"Showing the first {0} orders. The outstanding totals are complete; "
+			"only this list is cut short. Narrow the date range, a branch or a "
+			"customer to see the rest."
+		).format(limit_value)
 
-    return payload
+	return payload
 
 
 @frappe.whitelist(allow_guest=False)
-def get_invoice_shop_branches(customer: str, invoices: Any = None) -> Dict[str, Any]:
-    """Which of the shop's branches (delivery doors) each invoice went to.
+def get_invoice_shop_branches(customer: str, invoices: Any = None) -> dict[str, Any]:
+	"""Which of the shop's branches (delivery doors) each invoice went to.
 
-    The account statement groups a shop's orders under its branches. Asked for
-    at send time, for the chosen invoices only, rather than stamped on every
-    ledger row: the ledger lists every credit customer, and resolving a shop's
-    branches reads its whole address book.
+	The account statement groups a shop's orders under its branches. Asked for
+	at send time, for the chosen invoices only, rather than stamped on every
+	ledger row: the ledger lists every credit customer, and resolving a shop's
+	branches reads its whole address book.
 
-    Only the caller's own POS Profiles' invoices of *customer* are answered;
-    any other name is simply left out. An invoice that matches no branch of a
-    multi-branch shop comes back with an empty ``branch_name``.
+	Only the caller's own POS Profiles' invoices of *customer* are answered;
+	any other name is simply left out. An invoice that matches no branch of a
+	multi-branch shop comes back with an empty ``branch_name``.
 
-    Returns ``{"success", "branch_count", "invoices": {name: {branch, branch_name}}}``.
-    """
-    _ensure_credit_ledger_access()
-    customer = str(customer or "").strip()
-    if not customer:
-        frappe.throw(_("Customer is required"))
-    names = invoices
-    if isinstance(names, str):
-        names = frappe.parse_json(names) if names.strip() else []
-    names = [str(n).strip() for n in names or [] if str(n or "").strip()][:200]
-    allowed = list(_allowed_profiles() or [])
-    if not names or not allowed:
-        return {"success": True, "branch_count": 0, "invoices": {}}
+	Returns ``{"success", "branch_count", "invoices": {name: {branch, branch_name}}}``.
+	"""
+	_ensure_credit_ledger_access()
+	customer = str(customer or "").strip()
+	if not customer:
+		frappe.throw(_("Customer is required"))
+	names = invoices
+	if isinstance(names, str):
+		names = frappe.parse_json(names) if names.strip() else []
+	names = [str(n).strip() for n in names or [] if str(n or "").strip()][:200]
+	allowed = list(_allowed_profiles() or [])
+	if not names or not allowed:
+		return {"success": True, "branch_count": 0, "invoices": {}}
 
-    rows = (
-        frappe.get_all(
-            "Sales Invoice",
-            filters={
-                "name": ["in", names],
-                "customer": customer,
-                "docstatus": 1,
-                _branch_field(): ["in", allowed],
-            },
-            fields=["name", "shipping_address_name", "customer_address"],
-        )
-        or []
-    )
-    from jarz_pos.services.b2b_branches import customer_branches, tag_invoice_branches
+	rows = (
+		frappe.get_all(
+			"Sales Invoice",
+			filters={
+				"name": ["in", names],
+				"customer": customer,
+				"docstatus": 1,
+				_branch_field(): ["in", allowed],
+			},
+			fields=["name", "shipping_address_name", "customer_address"],
+		)
+		or []
+	)
+	from jarz_pos.services.b2b_branches import customer_branches, tag_invoice_branches
 
-    try:
-        branch_count = len(customer_branches(customer))
-    except Exception:
-        branch_count = 0
-    tagged = tag_invoice_branches(customer, [dict(r) for r in rows])
-    return {
-        "success": True,
-        "branch_count": branch_count,
-        "invoices": {
-            str(r.get("name")): {
-                "branch": str(r.get("branch") or ""),
-                "branch_name": str(r.get("branch_name") or ""),
-            }
-            for r in tagged
-        },
-    }
+	try:
+		branch_count = len(customer_branches(customer))
+	except Exception:
+		branch_count = 0
+	tagged = tag_invoice_branches(customer, [dict(r) for r in rows])
+	return {
+		"success": True,
+		"branch_count": branch_count,
+		"invoices": {
+			str(r.get("name")): {
+				"branch": str(r.get("branch") or ""),
+				"branch_name": str(r.get("branch_name") or ""),
+			}
+			for r in tagged
+		},
+	}
 
 
 @frappe.whitelist(allow_guest=False)
-def get_customer_credit_profile(customer: str) -> Dict[str, Any]:
-    """Whether this shop may order on credit, and how much room is left.
+def get_customer_credit_profile(customer: str) -> dict[str, Any]:
+	"""Whether this shop may order on credit, and how much room is left.
 
-    Called by the POS the moment a customer is selected, so the checkout screen
-    can decide whether to offer the Credit button at all. Read-only and cheap.
+	Called by the POS the moment a customer is selected, so the checkout screen
+	can decide whether to offer the Credit button at all. Read-only and cheap.
 
-    ``current_balance`` is ALL-TIME and NOT branch-scoped, unlike
-    :func:`get_credit_ledger`: this number gates the next order against the
-    customer's limit, and a branch-scoped exposure figure would let the same
-    shop run up the limit once per branch. It matches exactly what
-    ``services/invoice_creation._apply_credit_terms`` will check at submit, which
-    is the point — the POS must not offer a button the server will refuse.
+	``current_balance`` is ALL-TIME and NOT branch-scoped, unlike
+	:func:`get_credit_ledger`: this number gates the next order against the
+	customer's limit, and a branch-scoped exposure figure would let the same
+	shop run up the limit once per branch. It matches exactly what
+	``services/invoice_creation._apply_credit_terms`` will check at submit, which
+	is the point — the POS must not offer a button the server will refuse.
 
-    ``available_credit`` is ``None`` (not 0) when no limit is set. Zero means
-    "no room left"; ``None`` means "no ceiling", and the two must never be
-    confused by a client that would grey out the button on either.
-    """
-    _ensure_credit_profile_access()
+	``available_credit`` is ``None`` (not 0) when no limit is set. Zero means
+	"no room left"; ``None`` means "no ceiling", and the two must never be
+	confused by a client that would grey out the button on either.
+	"""
+	_ensure_credit_profile_access()
 
-    name = str(customer or "").strip()
-    if not name:
-        frappe.throw(_("customer is required"))
-    if not frappe.db.exists("Customer", name):
-        frappe.throw(_("Customer {0} was not found").format(name))
-    frappe.has_permission("Customer", "read", doc=name, throw=True)
+	name = str(customer or "").strip()
+	if not name:
+		frappe.throw(_("customer is required"))
+	if not frappe.db.exists("Customer", name):
+		frappe.throw(_("Customer {0} was not found").format(name))
+	frappe.has_permission("Customer", "read", doc=name, throw=True)
 
-    settings = _customer_credit_settings(name)
+	settings = _customer_credit_settings(name)
 
-    from jarz_pos.services.invoice_creation import get_open_credit_balance
+	from jarz_pos.services.invoice_creation import get_open_credit_balance
 
-    current_balance = flt(get_open_credit_balance(name), 2)
-    limit_amount = flt(settings["limit"], 2)
+	current_balance = flt(get_open_credit_balance(name), 2)
+	limit_amount = flt(settings["limit"], 2)
 
-    open_rows = _open_credit_invoices(customers=[name])
-    oldest = str(open_rows[0].get("posting_date") or "") if open_rows else None
+	open_rows = _open_credit_invoices(customers=[name])
+	oldest = str(open_rows[0].get("posting_date") or "") if open_rows else None
 
-    return {
-        "success": True,
-        "customer": name,
-        "customer_name": frappe.db.get_value("Customer", name, "customer_name") or name,
-        "credit_allowed": bool(settings["allowed"]),
-        "credit_days": int(settings["days"] or DEFAULT_CREDIT_DAYS),
-        "credit_limit": limit_amount,
-        "current_balance": current_balance,
-        "available_credit": (
-            flt(max(0.0, limit_amount - current_balance), 2) if limit_amount > 0 else None
-        ),
-        "open_invoice_count": len(open_rows),
-        "oldest_invoice_date": oldest or None,
-        "currency": _credit_currency(),
-        "can_edit_settings": _can_manage_credit_settings(),
-        # What is STORED (0 = use the default), so an editor can round-trip it
-        # without turning "default" into a pinned 30.
-        "credit_days_setting": int(settings["days"] or 0),
-    }
+	return {
+		"success": True,
+		"customer": name,
+		"customer_name": frappe.db.get_value("Customer", name, "customer_name") or name,
+		"credit_allowed": bool(settings["allowed"]),
+		"credit_days": int(settings["days"] or DEFAULT_CREDIT_DAYS),
+		"credit_limit": limit_amount,
+		"current_balance": current_balance,
+		"available_credit": (flt(max(0.0, limit_amount - current_balance), 2) if limit_amount > 0 else None),
+		"open_invoice_count": len(open_rows),
+		"oldest_invoice_date": oldest or None,
+		"currency": _credit_currency(),
+		"can_edit_settings": _can_manage_credit_settings(),
+		# What is STORED (0 = use the default), so an editor can round-trip it
+		# without turning "default" into a pinned 30.
+		"credit_days_setting": int(settings["days"] or 0),
+	}
 
 
 #: Upper bound on credit days. Anything past a year is a typo, not a term.
@@ -747,467 +741,465 @@ MAX_CREDIT_DAYS = 365
 
 @frappe.whitelist(allow_guest=False)
 def update_customer_credit_settings(
-    customer: str,
-    credit_allowed: Union[int, str, bool],
-    credit_days: Optional[Union[int, str]] = None,
-    credit_limit: Optional[Union[float, str]] = None,
-) -> Dict[str, Any]:
-    """Switch a shop's credit on or off and set its days / limit, from the app.
+	customer: str,
+	credit_allowed: int | str | bool,
+	credit_days: int | str | None = None,
+	credit_limit: float | str | None = None,
+) -> dict[str, Any]:
+	"""Switch a shop's credit on or off and set its days / limit, from the app.
 
-    The same three Customer columns Desk edits (``custom_credit_allowed`` /
-    ``custom_credit_days`` / ``custom_credit_limit_amount``). ``None`` for days
-    or limit leaves that column as it is, so a plain on/off toggle cannot
-    silently wipe a limit.
+	The same three Customer columns Desk edits (``custom_credit_allowed`` /
+	``custom_credit_days`` / ``custom_credit_limit_amount``). ``None`` for days
+	or limit leaves that column as it is, so a plain on/off toggle cannot
+	silently wipe a limit.
 
-    * ``credit_limit`` 0 means NO LIMIT — the same convention the invoice gate
-      and the profile use.
-    * ``credit_days`` 0 falls back to ``DEFAULT_CREDIT_DAYS`` at order time.
-    * Turning credit OFF blocks new credit orders only. What the shop already
-      owes stays open and collectable, and an open credit order can still be
-      amended (``invoice_creation._apply_credit_terms``); the response carries
-      the balance so the app can say so.
+	* ``credit_limit`` 0 means NO LIMIT — the same convention the invoice gate
+	  and the profile use.
+	* ``credit_days`` 0 falls back to ``DEFAULT_CREDIT_DAYS`` at order time.
+	* Turning credit OFF blocks new credit orders only. What the shop already
+	  owes stays open and collectable, and an open credit order can still be
+	  amended (``invoice_creation._apply_credit_terms``); the response carries
+	  the balance so the app can say so.
 
-    Written with ``db.set_value`` rather than ``doc.save`` so an unrelated
-    validation on the Customer (a dangling link, a v16 default) cannot block a
-    credit decision; the change is recorded as a Comment on the Customer so the
-    audit trail survives.
-    """
-    if not _can_manage_credit_settings():
-        frappe.throw(_("Not permitted: Manager access required"), frappe.PermissionError)
+	Written with ``db.set_value`` rather than ``doc.save`` so an unrelated
+	validation on the Customer (a dangling link, a v16 default) cannot block a
+	credit decision; the change is recorded as a Comment on the Customer so the
+	audit trail survives.
+	"""
+	if not _can_manage_credit_settings():
+		frappe.throw(_("Not permitted: Manager access required"), frappe.PermissionError)
 
-    name = str(customer or "").strip()
-    if not name:
-        frappe.throw(_("customer is required"))
-    if not frappe.db.exists("Customer", name):
-        frappe.throw(_("Customer {0} was not found").format(name))
-    # db.set_value below bypasses DocPerm and User Permissions, so the doc-level
-    # check has to happen here, before the write, not after it.
-    frappe.has_permission("Customer", "write", doc=name, throw=True)
-    for column in ("custom_credit_allowed", "custom_credit_days", "custom_credit_limit_amount"):
-        if not frappe.db.has_column("Customer", column):
-            frappe.throw(_("Credit fields are not installed on this site. Run bench migrate."))
+	name = str(customer or "").strip()
+	if not name:
+		frappe.throw(_("customer is required"))
+	if not frappe.db.exists("Customer", name):
+		frappe.throw(_("Customer {0} was not found").format(name))
+	# db.set_value below bypasses DocPerm and User Permissions, so the doc-level
+	# check has to happen here, before the write, not after it.
+	frappe.has_permission("Customer", "write", doc=name, throw=True)
+	for column in ("custom_credit_allowed", "custom_credit_days", "custom_credit_limit_amount"):
+		if not frappe.db.has_column("Customer", column):
+			frappe.throw(_("Credit fields are not installed on this site. Run bench migrate."))
 
-    allowed = str(credit_allowed).strip().lower() in {"1", "true", "yes", "on"}
-    updates: Dict[str, Any] = {"custom_credit_allowed": 1 if allowed else 0}
+	allowed = str(credit_allowed).strip().lower() in {"1", "true", "yes", "on"}
+	updates: dict[str, Any] = {"custom_credit_allowed": 1 if allowed else 0}
 
-    if credit_days not in (None, ""):
-        # int()/float() directly, never flt(): flt("abc") is 0, and 0 here
-        # means "the default" — a typo must be refused, not quietly accepted.
-        try:
-            days_value = float(str(credit_days).strip())
-            days = int(days_value) if days_value == int(days_value) else -1
-        except Exception:
-            days = -1
-        if days < 0 or days > MAX_CREDIT_DAYS:
-            frappe.throw(_("Credit days must be between 0 and {0}.").format(MAX_CREDIT_DAYS))
-        updates["custom_credit_days"] = days
+	if credit_days not in (None, ""):
+		# int()/float() directly, never flt(): flt("abc") is 0, and 0 here
+		# means "the default" — a typo must be refused, not quietly accepted.
+		try:
+			days_value = float(str(credit_days).strip())
+			days = int(days_value) if days_value == int(days_value) else -1
+		except Exception:
+			days = -1
+		if days < 0 or days > MAX_CREDIT_DAYS:
+			frappe.throw(_("Credit days must be between 0 and {0}.").format(MAX_CREDIT_DAYS))
+		updates["custom_credit_days"] = days
 
-    if credit_limit not in (None, ""):
-        # Same reason, and it matters more: flt("abc") is 0 and a limit of 0 is
-        # NO LIMIT. nan / inf are refused too (they would 500 in MariaDB).
-        import math
+	if credit_limit not in (None, ""):
+		# Same reason, and it matters more: flt("abc") is 0 and a limit of 0 is
+		# NO LIMIT. nan / inf are refused too (they would 500 in MariaDB).
+		import math
 
-        try:
-            limit = float(str(credit_limit).strip())
-        except Exception:
-            limit = -1.0
-        if not math.isfinite(limit):
-            limit = -1.0
-        limit = round(limit, 2)
-        if limit < 0:
-            frappe.throw(_("Credit limit cannot be negative. Use 0 for no limit."))
-        updates["custom_credit_limit_amount"] = limit
+		try:
+			limit = float(str(credit_limit).strip())
+		except Exception:
+			limit = -1.0
+		if not math.isfinite(limit):
+			limit = -1.0
+		limit = round(limit, 2)
+		if limit < 0:
+			frappe.throw(_("Credit limit cannot be negative. Use 0 for no limit."))
+		updates["custom_credit_limit_amount"] = limit
 
-    before = _customer_credit_settings(name)
-    frappe.db.set_value("Customer", name, updates, update_modified=True)
+	before = _customer_credit_settings(name)
+	frappe.db.set_value("Customer", name, updates, update_modified=True)
 
-    after = _customer_credit_settings(name)
-    changes = []
-    if before["allowed"] != after["allowed"]:
-        changes.append(_("credit {0}").format(_("enabled") if after["allowed"] else _("disabled")))
-    if before["days"] != after["days"]:
-        changes.append(_("days {0} → {1}").format(before["days"], after["days"]))
-    if flt(before["limit"], 2) != flt(after["limit"], 2):
-        changes.append(
-            _("limit {0} → {1}").format(
-                flt(before["limit"], 2) or _("none"), flt(after["limit"], 2) or _("none")
-            )
-        )
-    if changes:
-        try:
-            frappe.get_doc("Customer", name).add_comment(
-                "Info", _("Credit settings changed from the app: {0}").format(", ".join(changes))
-            )
-        except Exception:
-            _log_credit_error(f"update_customer_credit_settings: audit comment failed for {name}")
+	after = _customer_credit_settings(name)
+	changes = []
+	if before["allowed"] != after["allowed"]:
+		changes.append(_("credit {0}").format(_("enabled") if after["allowed"] else _("disabled")))
+	if before["days"] != after["days"]:
+		changes.append(_("days {0} → {1}").format(before["days"], after["days"]))
+	if flt(before["limit"], 2) != flt(after["limit"], 2):
+		changes.append(
+			_("limit {0} → {1}").format(
+				flt(before["limit"], 2) or _("none"), flt(after["limit"], 2) or _("none")
+			)
+		)
+	if changes:
+		try:
+			frappe.get_doc("Customer", name).add_comment(
+				"Info", _("Credit settings changed from the app: {0}").format(", ".join(changes))
+			)
+		except Exception:
+			_log_credit_error(f"update_customer_credit_settings: audit comment failed for {name}")
 
-    profile = get_customer_credit_profile(name)
-    profile["changed"] = bool(changes)
-    return profile
+	profile = get_customer_credit_profile(name)
+	profile["changed"] = bool(changes)
+	return profile
 
 
 def _existing_credit_payment(
-    *,
-    customer: str,
-    reference_no: Optional[str],
-    amount: float,
-    paid_to: str,
-    invoice: Optional[str] = None,
-) -> Optional[str]:
-    """A Payment Entry that already recorded THIS handover, or ``None``.
+	*,
+	customer: str,
+	reference_no: str | None,
+	amount: float,
+	paid_to: str,
+	invoice: str | None = None,
+) -> str | None:
+	"""A Payment Entry that already recorded THIS handover, or ``None``.
 
-    Double submission is the realistic failure here: the operator taps "Record
-    payment", the phone loses the connection while the server is committing, and
-    the app retries. Without a guard that books the money twice and clears
-    invoices nobody paid for.
+	Double submission is the realistic failure here: the operator taps "Record
+	payment", the phone loses the connection while the server is committing, and
+	the app retries. Without a guard that books the money twice and clears
+	invoices nobody paid for.
 
-    Two levels, strongest first:
+	Two levels, strongest first:
 
-    * an ``idempotency_token`` supplied by the client becomes the PE's
-      ``reference_no``; an exact match is a definitive replay.
-    * otherwise, an identical (customer, amount, destination account) PE
-      submitted in the last two minutes. Deliberately narrow: a shop paying the
-      same round figure twice in one minute is possible, so this window is short
-      enough that a genuine second handover is not swallowed, and the caller is
-      told which PE was reused either way. When the handover names an
-      ``invoice``, only a recent PE that paid THAT invoice counts: paying order
-      A then order B for the same figure is two payments, not one.
-    """
-    try:
-        if reference_no:
-            existing = frappe.get_all(
-                "Payment Entry",
-                filters={
-                    "docstatus": 1,
-                    "party_type": "Customer",
-                    "party": customer,
-                    "reference_no": reference_no,
-                },
-                pluck="name",
-                limit_page_length=1,
-            )
-            if existing:
-                return str(existing[0])
-            return None
+	* an ``idempotency_token`` supplied by the client becomes the PE's
+	  ``reference_no``; an exact match is a definitive replay.
+	* otherwise, an identical (customer, amount, destination account) PE
+	  submitted in the last two minutes. Deliberately narrow: a shop paying the
+	  same round figure twice in one minute is possible, so this window is short
+	  enough that a genuine second handover is not swallowed, and the caller is
+	  told which PE was reused either way. When the handover names an
+	  ``invoice``, only a recent PE that paid THAT invoice counts: paying order
+	  A then order B for the same figure is two payments, not one.
+	"""
+	try:
+		if reference_no:
+			existing = frappe.get_all(
+				"Payment Entry",
+				filters={
+					"docstatus": 1,
+					"party_type": "Customer",
+					"party": customer,
+					"reference_no": reference_no,
+				},
+				pluck="name",
+				limit_page_length=1,
+			)
+			if existing:
+				return str(existing[0])
+			return None
 
-        cutoff = frappe.utils.add_to_date(frappe.utils.now_datetime(), seconds=-120)
-        recent = frappe.get_all(
-            "Payment Entry",
-            filters={
-                "docstatus": 1,
-                "party_type": "Customer",
-                "party": customer,
-                "paid_to": paid_to,
-                "paid_amount": ["between", [amount - 0.005, amount + 0.005]],
-                "creation": [">=", cutoff],
-            },
-            pluck="name",
-            limit_page_length=20 if invoice else 1,
-        )
-        if recent and invoice:
-            recent = frappe.get_all(
-                "Payment Entry Reference",
-                filters={
-                    "parenttype": "Payment Entry",
-                    "parent": ["in", recent],
-                    "reference_doctype": "Sales Invoice",
-                    "reference_name": invoice,
-                },
-                pluck="parent",
-                limit_page_length=1,
-            )
-        if recent:
-            return str(recent[0])
-    except Exception:
-        # A failed idempotency probe must not block a legitimate payment; the
-        # DB-level lock below still serialises concurrent callers.
-        _log_credit_error("record_credit_payment: idempotency probe failed")
-    return None
+		cutoff = frappe.utils.add_to_date(frappe.utils.now_datetime(), seconds=-120)
+		recent = frappe.get_all(
+			"Payment Entry",
+			filters={
+				"docstatus": 1,
+				"party_type": "Customer",
+				"party": customer,
+				"paid_to": paid_to,
+				"paid_amount": ["between", [amount - 0.005, amount + 0.005]],
+				"creation": [">=", cutoff],
+			},
+			pluck="name",
+			limit_page_length=20 if invoice else 1,
+		)
+		if recent and invoice:
+			recent = frappe.get_all(
+				"Payment Entry Reference",
+				filters={
+					"parenttype": "Payment Entry",
+					"parent": ["in", recent],
+					"reference_doctype": "Sales Invoice",
+					"reference_name": invoice,
+				},
+				pluck="parent",
+				limit_page_length=1,
+			)
+		if recent:
+			return str(recent[0])
+	except Exception:
+		# A failed idempotency probe must not block a legitimate payment; the
+		# DB-level lock below still serialises concurrent callers.
+		_log_credit_error("record_credit_payment: idempotency probe failed")
+	return None
 
 
 @frappe.whitelist(allow_guest=False)
 def record_credit_payment(
-    customer: str,
-    amount: Union[float, str],
-    pos_profile: str,
-    payment_method: str = "Cash",
-    posting_date: Optional[str] = None,
-    remarks: Optional[str] = None,
-    idempotency_token: Optional[str] = None,
-    invoice: Optional[str] = None,
-) -> Dict[str, Any]:
-    """Take one payment against a shop's credit balance, allocated FIFO.
+	customer: str,
+	amount: float | str,
+	pos_profile: str,
+	payment_method: str = "Cash",
+	posting_date: str | None = None,
+	remarks: str | None = None,
+	idempotency_token: str | None = None,
+	invoice: str | None = None,
+) -> dict[str, Any]:
+	"""Take one payment against a shop's credit balance, allocated FIFO.
 
-    THIS IS THE OWNER'S USUAL PATTERN, and it is why ``invoice`` is optional:
-    "a lot of cases it is an invoice after invoice, so when I send them the
-    second invoice they pay the first invoice." The shop hands over money that
-    clears the previous invoice(s). Usually they do not name one, and an
-    endpoint that made them name one would be recording a fiction.
+	THIS IS THE OWNER'S USUAL PATTERN, and it is why ``invoice`` is optional:
+	"a lot of cases it is an invoice after invoice, so when I send them the
+	second invoice they pay the first invoice." The shop hands over money that
+	clears the previous invoice(s). Usually they do not name one, and an
+	endpoint that made them name one would be recording a fiction.
 
-    So: ONE Receive Payment Entry, allocated oldest-invoice-first across every
-    open credit invoice of that customer.
+	So: ONE Receive Payment Entry, allocated oldest-invoice-first across every
+	open credit invoice of that customer.
 
-    **Unless they DO name one.** Sometimes the shop pays for the order that just
-    arrived and leaves the older one open (owner, 2026-09-25). ``invoice`` then
-    goes to the front of the queue: it is filled first, and anything left over
-    falls back to oldest-first across the rest, so an over-payment still clears
-    real debt instead of being stranded as an advance.
+	**Unless they DO name one.** Sometimes the shop pays for the order that just
+	arrived and leaves the older one open (owner, 2026-09-25). ``invoice`` then
+	goes to the front of the queue: it is filled first, and anything left over
+	falls back to oldest-first across the rest, so an over-payment still clears
+	real debt instead of being stranded as an advance.
 
-    * **Partial payment** part-allocates the oldest invoice and stops. The rest
-      of that invoice stays outstanding and keeps its place at the front of the
-      queue.
-    * **Excess** beyond every open invoice is NOT refused. It stays unallocated
-      on the Payment Entry, which in ERPNext is an advance against the customer —
-      the honest record of "they paid more than they owed". The response says so
-      explicitly (``unallocated_amount`` + ``notice_code = "recorded_as_advance"``)
-      rather than letting it be discovered later.
-    * **Nothing open at all** is still recorded, as a pure advance, for the same
-      reason. Refusing would leave real money with nowhere to go.
+	* **Partial payment** part-allocates the oldest invoice and stops. The rest
+	  of that invoice stays outstanding and keeps its place at the front of the
+	  queue.
+	* **Excess** beyond every open invoice is NOT refused. It stays unallocated
+	  on the Payment Entry, which in ERPNext is an advance against the customer —
+	  the honest record of "they paid more than they owed". The response says so
+	  explicitly (``unallocated_amount`` + ``notice_code = "recorded_as_advance"``)
+	  rather than letting it be discovered later.
+	* **Nothing open at all** is still recorded, as a pure advance, for the same
+	  reason. Refusing would leave real money with nowhere to go.
 
-    Allocation is NOT branch-scoped, although the endpoint is: the debt is one
-    debt to one company, and a shop handing over cash is clearing "the last
-    invoice", not "the last invoice from this branch". Each allocation reports
-    its own branch so the payload stays auditable. The caller must still manage
-    the branch whose drawer receives the money, and that branch's shift must be
-    open — cash lands in the POS Profile's own drawer via ``get_pos_cash_account``
-    so the shift close expects it.
+	Allocation is NOT branch-scoped, although the endpoint is: the debt is one
+	debt to one company, and a shop handing over cash is clearing "the last
+	invoice", not "the last invoice from this branch". Each allocation reports
+	its own branch so the payload stays auditable. The caller must still manage
+	the branch whose drawer receives the money, and that branch's shift must be
+	open — cash lands in the POS Profile's own drawer via ``get_pos_cash_account``
+	so the shift close expects it.
 
-    Args:
-        customer: Customer whose balance is being paid down.
-        amount: Money handed over. Must be > 0.
-        pos_profile: Branch receiving it. Decides the drawer AND the shift.
-        payment_method: "Cash" (default), "Instapay", "Mobile Wallet" or
-            "Payment Gateway". Non-cash lands in the matching online ledger
-            instead of the drawer.
-        posting_date: Defaults to today. A back-dated payment posts into the day
-            it names, which is what a reconciliation of last week's cash needs.
-        remarks: Free text stored on the Payment Entry.
-        idempotency_token: Optional client-supplied replay key. Stored as the
-            PE's ``reference_no``; resending the same token returns the original
-            entry instead of taking the money twice.
-        invoice: Optional Sales Invoice to pay first. Must be one of this
-            customer's open credit invoices, or the call is refused.
+	Args:
+	    customer: Customer whose balance is being paid down.
+	    amount: Money handed over. Must be > 0.
+	    pos_profile: Branch receiving it. Decides the drawer AND the shift.
+	    payment_method: "Cash" (default), "Instapay", "Mobile Wallet" or
+	        "Payment Gateway". Non-cash lands in the matching online ledger
+	        instead of the drawer.
+	    posting_date: Defaults to today. A back-dated payment posts into the day
+	        it names, which is what a reconciliation of last week's cash needs.
+	    remarks: Free text stored on the Payment Entry.
+	    idempotency_token: Optional client-supplied replay key. Stored as the
+	        PE's ``reference_no``; resending the same token returns the original
+	        entry instead of taking the money twice.
+	    invoice: Optional Sales Invoice to pay first. Must be one of this
+	        customer's open credit invoices, or the call is refused.
 
-    Returns:
-        ``success``, ``payment_entry``, ``amount``, ``allocated_amount``,
-        ``unallocated_amount``, ``allocations`` (per invoice, oldest first),
-        ``remaining_balance``, ``cash_account``, plus optional ``notice_code`` /
-        ``notice`` and ``already_recorded`` on a replay.
-    """
-    from jarz_pos.services.delivery_handling import (
-        _get_online_collection_account,
-        _get_receivable_account,
-        _is_cash_collection_method,
-        _normalize_collection_method,
-    )
-    from jarz_pos.utils.access_control import ensure_open_shift
-    from jarz_pos.utils.account_utils import get_pos_cash_account, validate_account_exists
+	Returns:
+	    ``success``, ``payment_entry``, ``amount``, ``allocated_amount``,
+	    ``unallocated_amount``, ``allocations`` (per invoice, oldest first),
+	    ``remaining_balance``, ``cash_account``, plus optional ``notice_code`` /
+	    ``notice`` and ``already_recorded`` on a replay.
+	"""
+	from jarz_pos.services.delivery_handling import (
+		_get_online_collection_account,
+		_get_receivable_account,
+		_is_cash_collection_method,
+		_normalize_collection_method,
+	)
+	from jarz_pos.utils.access_control import ensure_open_shift
+	from jarz_pos.utils.account_utils import get_pos_cash_account, validate_account_exists
 
-    _ensure_credit_payment_access()
+	_ensure_credit_payment_access()
 
-    customer = str(customer or "").strip()
-    pos_profile = str(pos_profile or "").strip()
-    remarks = (remarks or "").strip() or None
-    idempotency_token = (idempotency_token or "").strip() or None
-    invoice = str(invoice or "").strip() or None
+	customer = str(customer or "").strip()
+	pos_profile = str(pos_profile or "").strip()
+	remarks = (remarks or "").strip() or None
+	idempotency_token = (idempotency_token or "").strip() or None
+	invoice = str(invoice or "").strip() or None
 
-    if not customer:
-        frappe.throw(_("customer is required"))
-    if not pos_profile:
-        frappe.throw(_("pos_profile is required"))
-    try:
-        amount = flt(amount)
-    except Exception:
-        amount = 0.0
-    if amount <= 0.005:
-        frappe.throw(_("Enter the amount the customer handed over."))
+	if not customer:
+		frappe.throw(_("customer is required"))
+	if not pos_profile:
+		frappe.throw(_("pos_profile is required"))
+	try:
+		amount = flt(amount)
+	except Exception:
+		amount = 0.0
+	if amount <= 0.005:
+		frappe.throw(_("Enter the amount the customer handed over."))
 
-    if not frappe.db.exists("Customer", customer):
-        frappe.throw(_("Customer {0} was not found").format(customer))
+	if not frappe.db.exists("Customer", customer):
+		frappe.throw(_("Customer {0} was not found").format(customer))
 
-    # Note the shape: an EMPTY allowed list refuses, it does not wave through.
-    # ``get_user_pos_profiles`` hands Administrator every enabled profile, so
-    # empty genuinely means "assigned to no branch" — and the money is about to
-    # land in a specific branch's drawer, which such a user cannot answer for.
-    allowed = _allowed_profiles()
-    if pos_profile not in allowed:
-        frappe.throw(
-            _("You are not assigned to branch {0}.").format(pos_profile),
-            frappe.PermissionError,
-        )
-    # Cash is about to land in this branch's drawer, so the branch has to be open
-    # — otherwise the payment falls outside every shift window and the next cash
-    # count cannot possibly reconcile.
-    ensure_open_shift(pos_profile, action_label="recording a credit payment")
+	# Note the shape: an EMPTY allowed list refuses, it does not wave through.
+	# ``get_user_pos_profiles`` hands Administrator every enabled profile, so
+	# empty genuinely means "assigned to no branch" — and the money is about to
+	# land in a specific branch's drawer, which such a user cannot answer for.
+	allowed = _allowed_profiles()
+	if pos_profile not in allowed:
+		frappe.throw(
+			_("You are not assigned to branch {0}.").format(pos_profile),
+			frappe.PermissionError,
+		)
+	# Cash is about to land in this branch's drawer, so the branch has to be open
+	# — otherwise the payment falls outside every shift window and the next cash
+	# count cannot possibly reconcile.
+	ensure_open_shift(pos_profile, action_label="recording a credit payment")
 
-    company = frappe.db.get_value("POS Profile", pos_profile, "company")
-    if not company:
-        frappe.throw(_("POS Profile {0} has no company").format(pos_profile))
+	company = frappe.db.get_value("POS Profile", pos_profile, "company")
+	if not company:
+		frappe.throw(_("POS Profile {0} has no company").format(pos_profile))
 
-    normalized_method = _normalize_collection_method(payment_method)
-    if _is_cash_collection_method(normalized_method):
-        paid_to = get_pos_cash_account(pos_profile, company)
-    else:
-        paid_to = _get_online_collection_account(normalized_method, company)
-    validate_account_exists(paid_to)
-    paid_from = _get_receivable_account(company)
+	normalized_method = _normalize_collection_method(payment_method)
+	if _is_cash_collection_method(normalized_method):
+		paid_to = get_pos_cash_account(pos_profile, company)
+	else:
+		paid_to = _get_online_collection_account(normalized_method, company)
+	validate_account_exists(paid_to)
+	paid_from = _get_receivable_account(company)
 
-    # Serialise concurrent callers on the customer row BEFORE reading the open
-    # invoices: two operators recording the same handover at once would otherwise
-    # both read the same outstanding and both allocate it.
-    try:
-        frappe.db.sql("SELECT name FROM `tabCustomer` WHERE name=%s FOR UPDATE", (customer,))
-    except Exception:
-        pass
+	# Serialise concurrent callers on the customer row BEFORE reading the open
+	# invoices: two operators recording the same handover at once would otherwise
+	# both read the same outstanding and both allocate it.
+	try:
+		frappe.db.sql("SELECT name FROM `tabCustomer` WHERE name=%s FOR UPDATE", (customer,))
+	except Exception:
+		pass
 
-    replay = _existing_credit_payment(
-        customer=customer,
-        reference_no=idempotency_token,
-        amount=amount,
-        paid_to=paid_to,
-        invoice=invoice,
-    )
-    if replay:
-        return {
-            "success": True,
-            "already_recorded": True,
-            "payment_entry": replay,
-            "customer": customer,
-            "amount": flt(amount, 2),
-            "cash_account": paid_to,
-            "notice_code": "already_recorded",
-            "notice": _(
-                "This payment was already recorded ({0}); it has not been taken twice."
-            ).format(replay),
-        }
+	replay = _existing_credit_payment(
+		customer=customer,
+		reference_no=idempotency_token,
+		amount=amount,
+		paid_to=paid_to,
+		invoice=invoice,
+	)
+	if replay:
+		return {
+			"success": True,
+			"already_recorded": True,
+			"payment_entry": replay,
+			"customer": customer,
+			"amount": flt(amount, 2),
+			"cash_account": paid_to,
+			"notice_code": "already_recorded",
+			"notice": _("This payment was already recorded ({0}); it has not been taken twice.").format(
+				replay
+			),
+		}
 
-    open_rows = _open_credit_invoices(customers=[customer])
+	open_rows = _open_credit_invoices(customers=[customer])
 
-    if invoice:
-        # Refused rather than silently falling back to FIFO: the operator was
-        # told this order would be cleared, and quietly clearing another one is
-        # exactly the surprise the targeted payment exists to prevent.
-        target = [r for r in open_rows if r.get("name") == invoice]
-        if not target or flt(target[0].get("outstanding_amount")) <= 0.005:
-            frappe.throw(
-                _("Invoice {0} is not an open credit invoice of {1}.").format(invoice, customer)
-            )
-        open_rows = target + [r for r in open_rows if r.get("name") != invoice]
+	if invoice:
+		# Refused rather than silently falling back to FIFO: the operator was
+		# told this order would be cleared, and quietly clearing another one is
+		# exactly the surprise the targeted payment exists to prevent.
+		target = [r for r in open_rows if r.get("name") == invoice]
+		if not target or flt(target[0].get("outstanding_amount")) <= 0.005:
+			frappe.throw(_("Invoice {0} is not an open credit invoice of {1}.").format(invoice, customer))
+		open_rows = target + [r for r in open_rows if r.get("name") != invoice]
 
-    posting = getdate(posting_date) if posting_date else getdate(nowdate())
+	posting = getdate(posting_date) if posting_date else getdate(nowdate())
 
-    pe = frappe.new_doc("Payment Entry")
-    pe.payment_type = "Receive"
-    pe.company = company
-    pe.posting_date = posting
-    try:
-        pe.posting_time = frappe.utils.nowtime()
-    except Exception:
-        pass
-    pe.mode_of_payment = normalized_method if _is_cash_collection_method(normalized_method) else None
-    pe.party_type = "Customer"
-    pe.party = customer
-    pe.paid_from = paid_from
-    pe.party_account = paid_from
-    pe.paid_to = paid_to
-    pe.paid_amount = amount
-    pe.received_amount = amount
-    # Always set, not only when a token was supplied: ERPNext makes
-    # reference_no/reference_date MANDATORY the moment ``paid_to`` is a Bank-type
-    # account, so an Instapay/wallet settlement with no token would fail to
-    # insert. When a token IS supplied it doubles as the replay key probed above.
-    pe.reference_no = idempotency_token or f"CREDIT-{customer}"
-    pe.reference_date = posting
-    if remarks:
-        pe.remarks = remarks
+	pe = frappe.new_doc("Payment Entry")
+	pe.payment_type = "Receive"
+	pe.company = company
+	pe.posting_date = posting
+	try:
+		pe.posting_time = frappe.utils.nowtime()
+	except Exception:
+		pass
+	pe.mode_of_payment = normalized_method if _is_cash_collection_method(normalized_method) else None
+	pe.party_type = "Customer"
+	pe.party = customer
+	pe.paid_from = paid_from
+	pe.party_account = paid_from
+	pe.paid_to = paid_to
+	pe.paid_amount = amount
+	pe.received_amount = amount
+	# Always set, not only when a token was supplied: ERPNext makes
+	# reference_no/reference_date MANDATORY the moment ``paid_to`` is a Bank-type
+	# account, so an Instapay/wallet settlement with no token would fail to
+	# insert. When a token IS supplied it doubles as the replay key probed above.
+	pe.reference_no = idempotency_token or f"CREDIT-{customer}"
+	pe.reference_date = posting
+	if remarks:
+		pe.remarks = remarks
 
-    # Branch provenance, when the column exists — the same optional stamp the
-    # kanban's partner Payment Entry writes.
-    try:
-        if frappe.get_meta("Payment Entry").get_field("custom_kanban_profile"):
-            pe.custom_kanban_profile = pos_profile
-    except Exception:
-        pass
+	# Branch provenance, when the column exists — the same optional stamp the
+	# kanban's partner Payment Entry writes.
+	try:
+		if frappe.get_meta("Payment Entry").get_field("custom_kanban_profile"):
+			pe.custom_kanban_profile = pos_profile
+	except Exception:
+		pass
 
-    branch_field = _branch_field()
-    remaining = amount
-    allocations: List[Dict[str, Any]] = []
-    for row in open_rows:
-        if remaining <= 0.005:
-            break
-        outstanding = flt(row.get("outstanding_amount"))
-        if outstanding <= 0.005:
-            continue
-        # FIFO: fill the oldest invoice completely, then move on. A partial
-        # payment part-allocates this one and the loop stops on the next pass.
-        allocated = min(remaining, outstanding)
-        pe.append(
-            "references",
-            {
-                "reference_doctype": "Sales Invoice",
-                "reference_name": row.get("name"),
-                "due_date": row.get("due_date"),
-                "total_amount": flt(row.get("grand_total")),
-                "outstanding_amount": outstanding,
-                "allocated_amount": allocated,
-            },
-        )
-        allocations.append(
-            {
-                "invoice": row.get("name"),
-                "posting_date": str(row.get("posting_date") or "") or None,
-                "due_date": str(row.get("due_date") or "") or None,
-                "outstanding_before": flt(outstanding, 2),
-                "allocated_amount": flt(allocated, 2),
-                "fully_settled": bool(allocated >= outstanding - 0.005),
-                "branch": str(row.get(branch_field) or ""),
-            }
-        )
-        remaining = flt(remaining - allocated, 2)
+	branch_field = _branch_field()
+	remaining = amount
+	allocations: list[dict[str, Any]] = []
+	for row in open_rows:
+		if remaining <= 0.005:
+			break
+		outstanding = flt(row.get("outstanding_amount"))
+		if outstanding <= 0.005:
+			continue
+		# FIFO: fill the oldest invoice completely, then move on. A partial
+		# payment part-allocates this one and the loop stops on the next pass.
+		allocated = min(remaining, outstanding)
+		pe.append(
+			"references",
+			{
+				"reference_doctype": "Sales Invoice",
+				"reference_name": row.get("name"),
+				"due_date": row.get("due_date"),
+				"total_amount": flt(row.get("grand_total")),
+				"outstanding_amount": outstanding,
+				"allocated_amount": allocated,
+			},
+		)
+		allocations.append(
+			{
+				"invoice": row.get("name"),
+				"posting_date": str(row.get("posting_date") or "") or None,
+				"due_date": str(row.get("due_date") or "") or None,
+				"outstanding_before": flt(outstanding, 2),
+				"allocated_amount": flt(allocated, 2),
+				"fully_settled": bool(allocated >= outstanding - 0.005),
+				"branch": str(row.get(branch_field) or ""),
+			}
+		)
+		remaining = flt(remaining - allocated, 2)
 
-    allocated_total = flt(amount - remaining, 2)
-    unallocated = flt(max(0.0, remaining), 2)
+	allocated_total = flt(amount - remaining, 2)
+	unallocated = flt(max(0.0, remaining), 2)
 
-    pe.flags.ignore_permissions = True
-    try:
-        pe.insert(ignore_permissions=True)
-        pe.submit()
-    except Exception:
-        _log_credit_error(f"record_credit_payment: could not post payment for {customer}")
-        raise
+	pe.flags.ignore_permissions = True
+	try:
+		pe.insert(ignore_permissions=True)
+		pe.submit()
+	except Exception:
+		_log_credit_error(f"record_credit_payment: could not post payment for {customer}")
+		raise
 
-    remaining_balance = flt(
-        max(0.0, sum(flt(r.get("outstanding_amount")) for r in open_rows) - allocated_total), 2
-    )
+	remaining_balance = flt(
+		max(0.0, sum(flt(r.get("outstanding_amount")) for r in open_rows) - allocated_total), 2
+	)
 
-    payload: Dict[str, Any] = {
-        "success": True,
-        "payment_entry": pe.name,
-        "customer": customer,
-        "customer_name": frappe.db.get_value("Customer", customer, "customer_name") or customer,
-        "pos_profile": pos_profile,
-        "payment_method": normalized_method,
-        "posting_date": str(posting),
-        "amount": flt(amount, 2),
-        "allocated_amount": allocated_total,
-        "unallocated_amount": unallocated,
-        "allocations": allocations,
-        "remaining_balance": remaining_balance,
-        "target_invoice": invoice,
-        "cash_account": paid_to,
-        "currency": _credit_currency(),
-    }
+	payload: dict[str, Any] = {
+		"success": True,
+		"payment_entry": pe.name,
+		"customer": customer,
+		"customer_name": frappe.db.get_value("Customer", customer, "customer_name") or customer,
+		"pos_profile": pos_profile,
+		"payment_method": normalized_method,
+		"posting_date": str(posting),
+		"amount": flt(amount, 2),
+		"allocated_amount": allocated_total,
+		"unallocated_amount": unallocated,
+		"allocations": allocations,
+		"remaining_balance": remaining_balance,
+		"target_invoice": invoice,
+		"cash_account": paid_to,
+		"currency": _credit_currency(),
+	}
 
-    if unallocated > 0.005:
-        # Said out loud rather than left to be discovered: the money IS recorded,
-        # but part of it is now an advance sitting on the customer rather than a
-        # cleared invoice, and the person at the counter should know before the
-        # shop walks away.
-        payload["notice_code"] = "recorded_as_advance"
-        payload["notice"] = _(
-            "{0} of this payment was more than {1} currently owes on credit. It "
-            "is recorded as an advance on their account and will clear their next "
-            "credit order."
-        ).format(frappe.utils.fmt_money(unallocated, currency=_credit_currency()), customer)
+	if unallocated > 0.005:
+		# Said out loud rather than left to be discovered: the money IS recorded,
+		# but part of it is now an advance sitting on the customer rather than a
+		# cleared invoice, and the person at the counter should know before the
+		# shop walks away.
+		payload["notice_code"] = "recorded_as_advance"
+		payload["notice"] = _(
+			"{0} of this payment was more than {1} currently owes on credit. It "
+			"is recorded as an advance on their account and will clear their next "
+			"credit order."
+		).format(frappe.utils.fmt_money(unallocated, currency=_credit_currency()), customer)
 
-    return payload
+	return payload

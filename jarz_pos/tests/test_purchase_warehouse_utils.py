@@ -12,7 +12,6 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-
 if "frappe" not in sys.modules:
 	fake_frappe = types.ModuleType("frappe")
 
@@ -49,7 +48,6 @@ if "frappe" not in sys.modules:
 	sys.modules["frappe"] = fake_frappe
 
 from jarz_pos.utils import warehouse_utils
-
 
 COMPANY = "Jarz"
 RAW_STORE = "Raw Materials - J"
@@ -120,9 +118,7 @@ def _route(item_group, warehouse):
 
 class TestResolvePurchaseWarehouse(unittest.TestCase):
 	def setUp(self):
-		self.get_value = patch.object(
-			warehouse_utils.frappe.db, "get_value", side_effect=_fake_get_value
-		)
+		self.get_value = patch.object(warehouse_utils.frappe.db, "get_value", side_effect=_fake_get_value)
 		self.get_value.start()
 		self.addCleanup(self.get_value.stop)
 
@@ -173,9 +169,7 @@ class TestResolvePurchaseWarehouse(unittest.TestCase):
 		self.assertEqual(self._resolve("RM-TOMATO", settings), RAW_STORE)
 
 	def test_route_on_child_group_overrides_parent(self):
-		settings = _Settings(
-			routes=[_route("Raw Material", RAW_STORE), _route("Vegetables", ITEM_STORE)]
-		)
+		settings = _Settings(routes=[_route("Raw Material", RAW_STORE), _route("Vegetables", ITEM_STORE)])
 		self.assertEqual(self._resolve("RM-TOMATO", settings), ITEM_STORE)
 
 	def test_consumable_routes_separately_from_raw_material(self):
@@ -196,9 +190,7 @@ class TestResolvePurchaseWarehouse(unittest.TestCase):
 		self.assertEqual(self._resolve("MISC-THING", settings), RAW_STORE)
 
 	def test_route_to_unusable_warehouse_is_skipped(self):
-		settings = _Settings(
-			routes=[_route("Raw Material", "Retired - J")], default_warehouse=RAW_STORE
-		)
+		settings = _Settings(routes=[_route("Raw Material", "Retired - J")], default_warehouse=RAW_STORE)
 		self.assertEqual(self._resolve("RM-TOMATO", settings), RAW_STORE)
 
 	# -- defaults and failure --------------------------------------------

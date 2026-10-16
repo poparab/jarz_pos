@@ -1,18 +1,17 @@
 /* jshint esversion: 9 */
-/* globals frappe */
 
-frappe.pages['product-analytics'].on_page_load = function (wrapper) {
+frappe.pages["product-analytics"].on_page_load = function (wrapper) {
 	let page = frappe.ui.make_app_page({
 		parent: wrapper,
-		title: __('Product Analytics'),
+		title: __("Product Analytics"),
 		single_column: true,
 	});
 	let dash = new ProductAnalyticsDashboard(page);
-	$(wrapper).data('pa_dash', dash);
+	$(wrapper).data("pa_dash", dash);
 };
 
-frappe.pages['product-analytics'].on_page_show = function (wrapper) {
-	let dash = $(wrapper).data('pa_dash');
+frappe.pages["product-analytics"].on_page_show = function (wrapper) {
+	let dash = $(wrapper).data("pa_dash");
 	if (dash) dash.refresh();
 };
 
@@ -34,9 +33,9 @@ class ProductAnalyticsDashboard {
 		let me = this;
 
 		this.page.add_field({
-			fieldtype: 'Date',
-			fieldname: 'from_date',
-			label: __('From'),
+			fieldtype: "Date",
+			fieldname: "from_date",
+			label: __("From"),
 			change() {
 				me.from_date = me.page.fields_dict.from_date.get_value() || me.from_date;
 				me.refresh();
@@ -45,9 +44,9 @@ class ProductAnalyticsDashboard {
 		this.page.fields_dict.from_date.set_value(this.from_date);
 
 		this.page.add_field({
-			fieldtype: 'Date',
-			fieldname: 'to_date',
-			label: __('To'),
+			fieldtype: "Date",
+			fieldname: "to_date",
+			label: __("To"),
 			change() {
 				me.to_date = me.page.fields_dict.to_date.get_value() || me.to_date;
 				me.refresh();
@@ -55,7 +54,7 @@ class ProductAnalyticsDashboard {
 		});
 		this.page.fields_dict.to_date.set_value(this.to_date);
 
-		this.page.add_inner_button(__('This Month'), () => {
+		this.page.add_inner_button(__("This Month"), () => {
 			this.from_date = frappe.datetime.month_start();
 			this.to_date = frappe.datetime.month_end();
 			this.page.fields_dict.from_date.set_value(this.from_date);
@@ -63,7 +62,7 @@ class ProductAnalyticsDashboard {
 			this.refresh();
 		});
 
-		this.page.add_inner_button(__('Last 30 Days'), () => {
+		this.page.add_inner_button(__("Last 30 Days"), () => {
 			this.to_date = frappe.datetime.nowdate();
 			this.from_date = frappe.datetime.add_days(this.to_date, -30);
 			this.page.fields_dict.from_date.set_value(this.from_date);
@@ -71,7 +70,7 @@ class ProductAnalyticsDashboard {
 			this.refresh();
 		});
 
-		this.page.add_inner_button(__('Last 90 Days'), () => {
+		this.page.add_inner_button(__("Last 90 Days"), () => {
 			this.to_date = frappe.datetime.nowdate();
 			this.from_date = frappe.datetime.add_days(this.to_date, -90);
 			this.page.fields_dict.from_date.set_value(this.from_date);
@@ -243,75 +242,78 @@ class ProductAnalyticsDashboard {
 	// ── Data loading ─────────────────────────────────────────────────────────
 
 	refresh() {
-		$('#pa-kpis').html('<div class="pa-loading">Loading…</div>');
+		$("#pa-kpis").html('<div class="pa-loading">Loading…</div>');
 
-		frappe.call({
-			method: 'jarz_pos.api.product_analytics.get_product_analytics',
-			args: { date_from: this.from_date, date_to: this.to_date },
-		}).then(r => {
-			if (!r.message) return;
-			let d = r.message;
-			this._render_kpis(d.summary);
-			this._render_type_breakdown(d.by_product_type || []);
-			this._render_top_products(d.top_products || []);
-			this._render_territory(d.by_territory || []);
-			this._render_trend(d.trend || []);
-			this._render_bundle_composition(d.bundle_composition || []);
-			this._render_margin_watch(d.top_products || []);
-		});
+		frappe
+			.call({
+				method: "jarz_pos.api.product_analytics.get_product_analytics",
+				args: { date_from: this.from_date, date_to: this.to_date },
+			})
+			.then((r) => {
+				if (!r.message) return;
+				let d = r.message;
+				this._render_kpis(d.summary);
+				this._render_type_breakdown(d.by_product_type || []);
+				this._render_top_products(d.top_products || []);
+				this._render_territory(d.by_territory || []);
+				this._render_trend(d.trend || []);
+				this._render_bundle_composition(d.bundle_composition || []);
+				this._render_margin_watch(d.top_products || []);
+			});
 	}
 
 	// ── Renderers ────────────────────────────────────────────────────────────
 
 	_render_kpis(s) {
-		let margin_pct = s.total_revenue > 0
-			? ((s.total_gross_profit / s.total_revenue) * 100).toFixed(1)
-			: 0;
-		let margin_cls = margin_pct >= 40 ? 'pos' : margin_pct >= 20 ? 'info' : 'warn';
-		let best = s.best_selling_product && s.best_selling_product.item_name
-			? _short(s.best_selling_product.item_name, 20)
-			: '—';
-		let top_terr = s.top_territory && s.top_territory.territory
-			? _short(s.top_territory.territory, 20)
-			: '—';
+		let margin_pct =
+			s.total_revenue > 0 ? ((s.total_gross_profit / s.total_revenue) * 100).toFixed(1) : 0;
+		let margin_cls = margin_pct >= 40 ? "pos" : margin_pct >= 20 ? "info" : "warn";
+		let best =
+			s.best_selling_product && s.best_selling_product.item_name
+				? _short(s.best_selling_product.item_name, 20)
+				: "—";
+		let top_terr =
+			s.top_territory && s.top_territory.territory
+				? _short(s.top_territory.territory, 20)
+				: "—";
 
-		$('#pa-kpis').html(`
-			${_kpi('Total Revenue',    _egp(s.total_revenue),        '')}
-			${_kpi('Total Orders',     s.total_orders,               '')}
-			${_kpi('Gross Profit',     _egp(s.total_gross_profit),   'pos')}
-			${_kpi('Gross Margin',     margin_pct + '%',             margin_cls)}
-			${_kpi('Avg Order Value',  _egp(s.avg_order_value),      'info')}
-			${_kpi('Best Seller',      best,                         '')}
-			${_kpi('Top Territory',    top_terr,                     '')}
+		$("#pa-kpis").html(`
+			${_kpi("Total Revenue", _egp(s.total_revenue), "")}
+			${_kpi("Total Orders", s.total_orders, "")}
+			${_kpi("Gross Profit", _egp(s.total_gross_profit), "pos")}
+			${_kpi("Gross Margin", margin_pct + "%", margin_cls)}
+			${_kpi("Avg Order Value", _egp(s.avg_order_value), "info")}
+			${_kpi("Best Seller", best, "")}
+			${_kpi("Top Territory", top_terr, "")}
 		`);
 	}
 
 	_render_type_breakdown(rows) {
 		if (!rows.length) return;
 
-		_chart('pa-chart-type-rev', {
-			type: 'donut',
+		_chart("pa-chart-type-rev", {
+			type: "donut",
 			height: 260,
 			data: {
-				labels: rows.map(r => r.type),
-				datasets: [{ values: rows.map(r => r.revenue) }],
+				labels: rows.map((r) => r.type),
+				datasets: [{ values: rows.map((r) => r.revenue) }],
 			},
 			// One slice per type, in the API's order: Bundle, Small, Medium, Large.
-			colors: ['#7B61FF', '#0EA5E9', '#22C55E', '#F97316'],
-			tooltipOptions: { formatTooltipY: v => _egp(v) },
+			colors: ["#7B61FF", "#0EA5E9", "#22C55E", "#F97316"],
+			tooltipOptions: { formatTooltipY: (v) => _egp(v) },
 		});
 
-		_chart('pa-chart-type-units', {
-			type: 'bar',
+		_chart("pa-chart-type-units", {
+			type: "bar",
 			height: 260,
 			data: {
-				labels: rows.map(r => r.type),
-				datasets: [{ name: 'Units Sold', values: rows.map(r => r.units) }],
+				labels: rows.map((r) => r.type),
+				datasets: [{ name: "Units Sold", values: rows.map((r) => r.units) }],
 			},
-			colors: ['#7B61FF', '#0EA5E9', '#22C55E', '#F97316'],
+			colors: ["#7B61FF", "#0EA5E9", "#22C55E", "#F97316"],
 		});
 
-		$('#pa-table-type').html(`
+		$("#pa-table-type").html(`
 			<table class="pa-table">
 				<thead><tr>
 					<th>Type</th>
@@ -323,35 +325,40 @@ class ProductAnalyticsDashboard {
 					<th></th>
 				</tr></thead>
 				<tbody>
-					${rows.map(r => {
-						let m = parseFloat(r.margin_pct || 0);
-						let fill_cls = m >= 40 ? 'margin-good' : m >= 20 ? 'margin-ok' : 'margin-poor';
-						let fill_w = Math.min(100, Math.max(0, m));
-						return `<tr>
+					${rows
+						.map((r) => {
+							let m = parseFloat(r.margin_pct || 0);
+							let fill_cls =
+								m >= 40 ? "margin-good" : m >= 20 ? "margin-ok" : "margin-poor";
+							let fill_w = Math.min(100, Math.max(0, m));
+							return `<tr>
 							<td><span class="badge ${_type_badge(r.type)}">${r.type}</span></td>
 							<td>${r.units.toLocaleString()}</td>
 							<td>${_egp(r.revenue)}</td>
-							<td class="muted">${r.cost > 0 ? _egp(r.cost) : '—'}</td>
-							<td class="green">${r.profit > 0 ? _egp(r.profit) : '—'}</td>
-							<td>${m > 0 ? m.toFixed(1) + '%' : '—'}</td>
+							<td class="muted">${r.cost > 0 ? _egp(r.cost) : "—"}</td>
+							<td class="green">${r.profit > 0 ? _egp(r.profit) : "—"}</td>
+							<td>${m > 0 ? m.toFixed(1) + "%" : "—"}</td>
 							<td>
 								<span class="margin-bar">
 									<span class="margin-fill ${fill_cls}" style="width:${fill_w}%"></span>
 								</span>
 							</td>
 						</tr>`;
-					}).join('')}
+						})
+						.join("")}
 				</tbody>
 			</table>`);
 	}
 
 	_render_top_products(rows) {
 		if (!rows.length) {
-			$('#pa-table-products').html('<div class="pa-loading">No product data in range.</div>');
+			$("#pa-table-products").html(
+				'<div class="pa-loading">No product data in range.</div>'
+			);
 			return;
 		}
 
-		$('#pa-table-products').html(`
+		$("#pa-table-products").html(`
 			<table class="pa-table">
 				<thead><tr>
 					<th>#</th>
@@ -364,20 +371,23 @@ class ProductAnalyticsDashboard {
 					<th>Margin %</th>
 				</tr></thead>
 				<tbody>
-					${rows.slice(0, 15).map((r, i) => {
-						let m = parseFloat(r.margin_pct || 0);
-						let m_cls = m >= 40 ? 'green' : m >= 20 ? '' : m > 0 ? 'red' : 'muted';
-						return `<tr>
+					${rows
+						.slice(0, 15)
+						.map((r, i) => {
+							let m = parseFloat(r.margin_pct || 0);
+							let m_cls = m >= 40 ? "green" : m >= 20 ? "" : m > 0 ? "red" : "muted";
+							return `<tr>
 							<td class="muted">${i + 1}</td>
 							<td>${r.item_name || r.item_code}</td>
 							<td><span class="badge ${_type_badge(r.type)}">${r.type}</span></td>
 							<td>${parseFloat(r.total_qty || 0).toLocaleString()}</td>
 							<td>${_egp(r.total_revenue)}</td>
-							<td class="muted">${r.bom_cost_per_unit > 0 ? _egp(r.bom_cost_per_unit) : '—'}</td>
-							<td class="green">${r.gross_profit > 0 ? _egp(r.gross_profit) : '—'}</td>
-							<td class="${m_cls}">${m > 0 ? m.toFixed(1) + '%' : '—'}</td>
+							<td class="muted">${r.bom_cost_per_unit > 0 ? _egp(r.bom_cost_per_unit) : "—"}</td>
+							<td class="green">${r.gross_profit > 0 ? _egp(r.gross_profit) : "—"}</td>
+							<td class="${m_cls}">${m > 0 ? m.toFixed(1) + "%" : "—"}</td>
 						</tr>`;
-					}).join('')}
+						})
+						.join("")}
 				</tbody>
 			</table>`);
 	}
@@ -387,29 +397,29 @@ class ProductAnalyticsDashboard {
 
 		let top7 = rows.slice(0, 7);
 
-		_chart('pa-chart-territory-rev', {
-			type: 'bar',
+		_chart("pa-chart-territory-rev", {
+			type: "bar",
 			height: 280,
 			data: {
-				labels: top7.map(r => _short(r.territory)),
-				datasets: [{ name: 'Revenue', values: top7.map(r => r.revenue) }],
+				labels: top7.map((r) => _short(r.territory)),
+				datasets: [{ name: "Revenue", values: top7.map((r) => r.revenue) }],
 			},
-			colors: ['#2980b9'],
-			tooltipOptions: { formatTooltipY: v => _egp(v) },
+			colors: ["#2980b9"],
+			tooltipOptions: { formatTooltipY: (v) => _egp(v) },
 		});
 
-		_chart('pa-chart-territory-profit', {
-			type: 'bar',
+		_chart("pa-chart-territory-profit", {
+			type: "bar",
 			height: 280,
 			data: {
-				labels: top7.map(r => _short(r.territory)),
-				datasets: [{ name: 'Gross Profit', values: top7.map(r => r.profit) }],
+				labels: top7.map((r) => _short(r.territory)),
+				datasets: [{ name: "Gross Profit", values: top7.map((r) => r.profit) }],
 			},
-			colors: ['#27ae60'],
-			tooltipOptions: { formatTooltipY: v => _egp(v) },
+			colors: ["#27ae60"],
+			tooltipOptions: { formatTooltipY: (v) => _egp(v) },
 		});
 
-		$('#pa-table-territory').html(`
+		$("#pa-table-territory").html(`
 			<table class="pa-table">
 				<thead><tr>
 					<th>Territory</th>
@@ -419,60 +429,62 @@ class ProductAnalyticsDashboard {
 					<th>Margin %</th>
 				</tr></thead>
 				<tbody>
-					${rows.map(r => {
-						let m = r.revenue > 0 ? ((r.profit / r.revenue) * 100).toFixed(1) : 0;
-						return `<tr>
+					${rows
+						.map((r) => {
+							let m = r.revenue > 0 ? ((r.profit / r.revenue) * 100).toFixed(1) : 0;
+							return `<tr>
 							<td>${r.territory}</td>
 							<td>${r.orders}</td>
 							<td>${_egp(r.revenue)}</td>
-							<td class="green">${r.profit > 0 ? _egp(r.profit) : '—'}</td>
-							<td>${m > 0 ? m + '%' : '—'}</td>
+							<td class="green">${r.profit > 0 ? _egp(r.profit) : "—"}</td>
+							<td>${m > 0 ? m + "%" : "—"}</td>
 						</tr>`;
-					}).join('')}
+						})
+						.join("")}
 				</tbody>
 			</table>`);
 	}
 
 	_render_trend(rows) {
 		if (!rows.length) {
-			$('#pa-chart-trend').html('<div class="pa-loading">No data in range.</div>');
+			$("#pa-chart-trend").html('<div class="pa-loading">No data in range.</div>');
 			return;
 		}
 
-		_chart('pa-chart-trend', {
-			type: 'axis-mixed',
+		_chart("pa-chart-trend", {
+			type: "axis-mixed",
 			height: 300,
 			data: {
-				labels: rows.map(r => r.date),
+				labels: rows.map((r) => r.date),
 				datasets: [
-					{ name: 'Orders',       type: 'bar',  values: rows.map(r => r.orders) },
-					{ name: 'Revenue (EGP)', type: 'line', values: rows.map(r => r.revenue) },
+					{ name: "Orders", type: "bar", values: rows.map((r) => r.orders) },
+					{ name: "Revenue (EGP)", type: "line", values: rows.map((r) => r.revenue) },
 				],
 			},
-			colors: ['#95a5a6', '#7B61FF'],
+			colors: ["#95a5a6", "#7B61FF"],
 		});
 	}
 
 	_render_bundle_composition(rows) {
 		if (!rows.length) {
-			$('#pa-section-bundles').hide();
+			$("#pa-section-bundles").hide();
 			return;
 		}
-		$('#pa-section-bundles').show();
+		$("#pa-section-bundles").show();
 
 		let top10 = rows.slice(0, 10);
 
-		_chart('pa-chart-bundle', {
-			type: 'bar',
+		_chart("pa-chart-bundle", {
+			type: "bar",
 			height: 280,
 			data: {
-				labels: top10.map(r => _short(r.item_name || r.item_code)),
-				datasets: [{ name: 'Times Picked', values: top10.map(r => r.times_in_bundle) }],
+				labels: top10.map((r) => _short(r.item_name || r.item_code)),
+				datasets: [{ name: "Times Picked", values: top10.map((r) => r.times_in_bundle) }],
 			},
-			colors: ['#7B61FF'],
+			colors: ["#7B61FF"],
 		});
 
-		$('#pa-table-bundle').html(`
+		$("#pa-table-bundle").html(`
 			<table class="pa-table">
 				<thead><tr>
 					<th>Component</th>
@@ -481,30 +493,36 @@ class ProductAnalyticsDashboard {
 					<th>Revenue</th>
 				</tr></thead>
 				<tbody>
-					${rows.map(r => `<tr>
+					${rows
+						.map(
+							(r) => `<tr>
 						<td>${r.item_name || r.item_code}</td>
-						<td class="muted">${r.item_group || '—'}</td>
+						<td class="muted">${r.item_group || "—"}</td>
 						<td>${r.times_in_bundle.toLocaleString()}</td>
 						<td>${_egp(r.revenue)}</td>
-					</tr>`).join('')}
+					</tr>`
+						)
+						.join("")}
 				</tbody>
 			</table>`);
 	}
 
 	_render_margin_watch(rows) {
 		// Flag products that actually have a BOM cost but a thin gross margin.
-		let low = (rows || []).filter(r => {
-			let m = parseFloat(r.margin_pct || 0);
-			return r.total_revenue > 0 && r.bom_cost_per_unit > 0 && m > 0 && m < 20;
-		}).sort((a, b) => a.margin_pct - b.margin_pct);
+		let low = (rows || [])
+			.filter((r) => {
+				let m = parseFloat(r.margin_pct || 0);
+				return r.total_revenue > 0 && r.bom_cost_per_unit > 0 && m > 0 && m < 20;
+			})
+			.sort((a, b) => a.margin_pct - b.margin_pct);
 
 		if (!low.length) {
-			$('#pa-section-margin').hide();
+			$("#pa-section-margin").hide();
 			return;
 		}
-		$('#pa-section-margin').show();
+		$("#pa-section-margin").show();
 
-		$('#pa-table-margin').html(`
+		$("#pa-table-margin").html(`
 			<table class="pa-table">
 				<thead><tr>
 					<th>Product</th>
@@ -516,15 +534,19 @@ class ProductAnalyticsDashboard {
 					<th>Margin %</th>
 				</tr></thead>
 				<tbody>
-					${low.map(r => `<tr>
+					${low
+						.map(
+							(r) => `<tr>
 						<td>${r.item_name || r.item_code}</td>
 						<td><span class="badge ${_type_badge(r.type)}">${r.type}</span></td>
 						<td>${parseFloat(r.total_qty || 0).toLocaleString()}</td>
 						<td>${_egp(r.total_revenue)}</td>
 						<td class="muted">${_egp(r.bom_cost_per_unit)}</td>
-						<td class="green">${r.gross_profit > 0 ? _egp(r.gross_profit) : '—'}</td>
+						<td class="green">${r.gross_profit > 0 ? _egp(r.gross_profit) : "—"}</td>
 						<td class="red">${parseFloat(r.margin_pct).toFixed(1)}%</td>
-					</tr>`).join('')}
+					</tr>`
+						)
+						.join("")}
 				</tbody>
 			</table>`);
 	}
@@ -534,15 +556,18 @@ class ProductAnalyticsDashboard {
 
 function _egp(v) {
 	let n = parseFloat(v || 0);
-	return 'EGP ' + n.toLocaleString('en', {
-		minimumFractionDigits: 0,
-		maximumFractionDigits: 0,
-	});
+	return (
+		"EGP " +
+		n.toLocaleString("en", {
+			minimumFractionDigits: 0,
+			maximumFractionDigits: 0,
+		})
+	);
 }
 
 function _short(label, max = 18) {
-	if (!label) return '—';
-	return label.length > max ? label.slice(0, max - 1) + '…' : label;
+	if (!label) return "—";
+	return label.length > max ? label.slice(0, max - 1) + "…" : label;
 }
 
 function _kpi(label, value, cls) {
@@ -553,16 +578,16 @@ function _kpi(label, value, cls) {
 }
 
 function _type_badge(type) {
-	if (type === 'Bundle') return 'badge-bundle';
-	if (type === 'Small') return 'badge-small';
-	if (type === 'Medium') return 'badge-medium';
-	return 'badge-large';
+	if (type === "Bundle") return "badge-bundle";
+	if (type === "Small") return "badge-small";
+	if (type === "Medium") return "badge-medium";
+	return "badge-large";
 }
 
 function _chart(id, opts) {
 	let el = document.getElementById(id);
 	if (!el) return;
-	el.innerHTML = '';
+	el.innerHTML = "";
 	try {
 		new frappe.Chart(el, opts);
 	} catch (e) {

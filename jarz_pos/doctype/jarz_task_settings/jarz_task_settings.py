@@ -53,12 +53,8 @@ class JarzTaskSettings(Document):
 		self.set("full_access_users", rows)
 
 		stored = stored_full_access_users()
-		if sorted(seen) != stored and not may_change_full_access(
-			frappe.session.user, stored, frappe.flags
-		):
+		if sorted(seen) != stored and not may_change_full_access(frappe.session.user, stored, frappe.flags):
 			frappe.throw(
-				frappe._(
-					"Only Administrator or a user already on the full-access list can change it."
-				),
+				frappe._("Only Administrator or a user already on the full-access list can change it."),
 				frappe.PermissionError,
 			)

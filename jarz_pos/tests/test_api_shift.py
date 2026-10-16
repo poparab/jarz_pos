@@ -76,11 +76,13 @@ class TestShiftAPI(unittest.TestCase):
 		mock_frappe = _make_mock_frappe()
 		mock_frappe.get_doc.return_value = MagicMock(company="JARZ", branch="Dokki")
 
-		with patch("jarz_pos.api.shift.frappe", mock_frappe), \
-				 patch("jarz_pos.api.shift._assert_user_has_profile_access"), \
-				 patch("jarz_pos.api.shift._get_profile_primary_mode_of_payment", return_value="Cash"), \
-				 patch("jarz_pos.api.shift._resolve_pos_profile_account", return_value="Dokki - J"), \
-				 patch("jarz_pos.api.shift._ensure_mode_of_payment_account"):
+		with (
+			patch("jarz_pos.api.shift.frappe", mock_frappe),
+			patch("jarz_pos.api.shift._assert_user_has_profile_access"),
+			patch("jarz_pos.api.shift._get_profile_primary_mode_of_payment", return_value="Cash"),
+			patch("jarz_pos.api.shift._resolve_pos_profile_account", return_value="Dokki - J"),
+			patch("jarz_pos.api.shift._ensure_mode_of_payment_account"),
+		):
 			result = get_shift_payment_methods("Dokki")
 
 		self.assertEqual(len(result), 1)
@@ -131,12 +133,14 @@ class TestShiftAPI(unittest.TestCase):
 			name="POS-OPE-2026-00001",
 		)
 
-		with patch("jarz_pos.api.shift.frappe", mock_frappe), \
-				 patch("jarz_pos.api.shift._assert_user_has_profile_access"), \
-				 patch("jarz_pos.api.shift._get_latest_opening_entry", return_value=None), \
-				 patch("jarz_pos.api.shift._resolve_pos_profile_account", return_value="Dokki - J"), \
-				 patch("jarz_pos.api.shift._ensure_mode_of_payment_account"), \
-				 patch("jarz_pos.api.shift._get_account_balance", return_value=1250.0):
+		with (
+			patch("jarz_pos.api.shift.frappe", mock_frappe),
+			patch("jarz_pos.api.shift._assert_user_has_profile_access"),
+			patch("jarz_pos.api.shift._get_latest_opening_entry", return_value=None),
+			patch("jarz_pos.api.shift._resolve_pos_profile_account", return_value="Dokki - J"),
+			patch("jarz_pos.api.shift._ensure_mode_of_payment_account"),
+			patch("jarz_pos.api.shift._get_account_balance", return_value=1250.0),
+		):
 			with self.assertRaises(Exception):
 				start_shift(
 					"Dokki",
@@ -169,21 +173,23 @@ class TestShiftAPI(unittest.TestCase):
 		carry_frappe = _make_mock_frappe()
 		carry_frappe.db.sql.return_value = []
 
-		with patch("jarz_pos.api.shift.frappe", mock_frappe), \
-				 patch("jarz_pos.services.courier_carry.frappe", carry_frappe), \
-				 patch("jarz_pos.api.shift.make_closing_entry_from_opening", return_value=closing_draft), \
-				 patch("jarz_pos.api.shift._resolve_pos_profile_account", return_value="Dokki - J"), \
-				 patch(
-					"jarz_pos.api.shift._get_shift_account_movements",
-					return_value=[
-						{
-							"voucher_type": "Sales Invoice",
-							"voucher_no": "ACC-SINV-0001",
-							"debit": 500,
-							"credit": 0,
-						}
-					],
-				 ):
+		with (
+			patch("jarz_pos.api.shift.frappe", mock_frappe),
+			patch("jarz_pos.services.courier_carry.frappe", carry_frappe),
+			patch("jarz_pos.api.shift.make_closing_entry_from_opening", return_value=closing_draft),
+			patch("jarz_pos.api.shift._resolve_pos_profile_account", return_value="Dokki - J"),
+			patch(
+				"jarz_pos.api.shift._get_shift_account_movements",
+				return_value=[
+					{
+						"voucher_type": "Sales Invoice",
+						"voucher_no": "ACC-SINV-0001",
+						"debit": 500,
+						"credit": 0,
+					}
+				],
+			),
+		):
 			result = get_shift_summary("POS-OPE-2026-00001")
 
 		self.assertEqual(result["amounts_hidden"], 1)
@@ -223,11 +229,24 @@ class TestShiftAPI(unittest.TestCase):
 			MagicMock(mode_of_payment="", opening_amount=0),
 		]
 
-		with patch("jarz_pos.api.shift.frappe", mock_frappe), \
-				 patch("jarz_pos.api.shift.make_closing_entry_from_opening", return_value=closing_draft), \
-				 patch("jarz_pos.api.shift._resolve_pos_profile_account", return_value="Dokki - J"), \
-				 patch("jarz_pos.api.shift._get_shift_account_movements", return_value=[]), \
-				 patch("jarz_pos.api.shift._get_shift_courier_close_block", return_value={"blocked": False, "pos_profile": "Dokki", "transaction_count": 0, "invoice_count": 0, "party_count": 0, "net_balance": 0.0, "parties": []}):
+		with (
+			patch("jarz_pos.api.shift.frappe", mock_frappe),
+			patch("jarz_pos.api.shift.make_closing_entry_from_opening", return_value=closing_draft),
+			patch("jarz_pos.api.shift._resolve_pos_profile_account", return_value="Dokki - J"),
+			patch("jarz_pos.api.shift._get_shift_account_movements", return_value=[]),
+			patch(
+				"jarz_pos.api.shift._get_shift_courier_close_block",
+				return_value={
+					"blocked": False,
+					"pos_profile": "Dokki",
+					"transaction_count": 0,
+					"invoice_count": 0,
+					"party_count": 0,
+					"net_balance": 0.0,
+					"parties": [],
+				},
+			),
+		):
 			result = get_shift_summary("POS-OPE-2026-00001")
 
 		self.assertEqual(result["payment_reconciliation"], [{"mode_of_payment": "Cash"}])
@@ -251,11 +270,24 @@ class TestShiftAPI(unittest.TestCase):
 		closing_draft.total_quantity = 0
 		closing_draft.payment_reconciliation = []
 
-		with patch("jarz_pos.api.shift.frappe", mock_frappe), \
-				 patch("jarz_pos.api.shift.make_closing_entry_from_opening", return_value=closing_draft), \
-				 patch("jarz_pos.api.shift._resolve_pos_profile_account", return_value="Dokki - J"), \
-				 patch("jarz_pos.api.shift._get_shift_account_movements", return_value=[]), \
-				 patch("jarz_pos.api.shift._get_shift_courier_close_block", return_value={"blocked": False, "pos_profile": "Dokki", "transaction_count": 0, "invoice_count": 0, "party_count": 0, "net_balance": 0.0, "parties": []}):
+		with (
+			patch("jarz_pos.api.shift.frappe", mock_frappe),
+			patch("jarz_pos.api.shift.make_closing_entry_from_opening", return_value=closing_draft),
+			patch("jarz_pos.api.shift._resolve_pos_profile_account", return_value="Dokki - J"),
+			patch("jarz_pos.api.shift._get_shift_account_movements", return_value=[]),
+			patch(
+				"jarz_pos.api.shift._get_shift_courier_close_block",
+				return_value={
+					"blocked": False,
+					"pos_profile": "Dokki",
+					"transaction_count": 0,
+					"invoice_count": 0,
+					"party_count": 0,
+					"net_balance": 0.0,
+					"parties": [],
+				},
+			),
+		):
 			with self.assertRaises(Exception) as ctx:
 				get_shift_summary("POS-OPE-2026-00001")
 
@@ -277,10 +309,12 @@ class TestShiftAPI(unittest.TestCase):
 		closing = MagicMock()
 		closing.payment_reconciliation = [MagicMock(mode_of_payment="Cash")]
 
-		with patch("jarz_pos.api.shift.frappe", mock_frappe), \
-				 patch("jarz_pos.api.shift.make_closing_entry_from_opening", return_value=closing), \
-				 patch("jarz_pos.api.shift._resolve_pos_profile_account", return_value="Dokki - J"), \
-				 patch("jarz_pos.api.shift._get_account_balance", return_value=25876.66):
+		with (
+			patch("jarz_pos.api.shift.frappe", mock_frappe),
+			patch("jarz_pos.api.shift.make_closing_entry_from_opening", return_value=closing),
+			patch("jarz_pos.api.shift._resolve_pos_profile_account", return_value="Dokki - J"),
+			patch("jarz_pos.api.shift._get_account_balance", return_value=25876.66),
+		):
 			with self.assertRaises(Exception):
 				end_shift(
 					"POS-OPE-2026-00001",
@@ -309,12 +343,14 @@ class TestShiftAPI(unittest.TestCase):
 		closing.net_total = 0
 		closing.total_quantity = 0
 
-		with patch("jarz_pos.api.shift.frappe", mock_frappe), \
-				 patch("jarz_pos.api.shift.make_closing_entry_from_opening", return_value=closing), \
-				 patch("jarz_pos.api.shift._resolve_pos_profile_account", return_value="Dokki - J"), \
-				 patch("jarz_pos.api.shift._get_account_balance", return_value=25876.66), \
-				 patch("jarz_pos.api.shift._get_shift_account_movements", return_value=[]), \
-				 patch("jarz_pos.api.shift._throw_if_shift_has_unsettled_courier_transactions"):
+		with (
+			patch("jarz_pos.api.shift.frappe", mock_frappe),
+			patch("jarz_pos.api.shift.make_closing_entry_from_opening", return_value=closing),
+			patch("jarz_pos.api.shift._resolve_pos_profile_account", return_value="Dokki - J"),
+			patch("jarz_pos.api.shift._get_account_balance", return_value=25876.66),
+			patch("jarz_pos.api.shift._get_shift_account_movements", return_value=[]),
+			patch("jarz_pos.api.shift._throw_if_shift_has_unsettled_courier_transactions"),
+		):
 			result = end_shift(
 				"POS-OPE-2026-00001",
 				'[{"closing_amount":25876.66,"mode_of_payment":"Cash"}]',
@@ -352,12 +388,14 @@ class TestShiftAPI(unittest.TestCase):
 		closing.net_total = 0
 		closing.total_quantity = 0
 
-		with patch("jarz_pos.api.shift.frappe", mock_frappe), \
-				 patch("jarz_pos.api.shift.make_closing_entry_from_opening", return_value=closing), \
-				 patch("jarz_pos.api.shift._resolve_pos_profile_account", return_value="Dokki - J"), \
-				 patch("jarz_pos.api.shift._get_account_balance", return_value=25876.66), \
-				 patch("jarz_pos.api.shift._get_shift_account_movements", return_value=[]), \
-				 patch("jarz_pos.api.shift._throw_if_shift_has_unsettled_courier_transactions"):
+		with (
+			patch("jarz_pos.api.shift.frappe", mock_frappe),
+			patch("jarz_pos.api.shift.make_closing_entry_from_opening", return_value=closing),
+			patch("jarz_pos.api.shift._resolve_pos_profile_account", return_value="Dokki - J"),
+			patch("jarz_pos.api.shift._get_account_balance", return_value=25876.66),
+			patch("jarz_pos.api.shift._get_shift_account_movements", return_value=[]),
+			patch("jarz_pos.api.shift._throw_if_shift_has_unsettled_courier_transactions"),
+		):
 			result = end_shift(
 				"POS-OPE-2026-00001",
 				[{"closing_amount": 25876.66, "mode_of_payment": "Cash"}],
@@ -435,7 +473,10 @@ class TestShiftAPI(unittest.TestCase):
 			]
 		}
 
-		with patch("jarz_pos.api.shift.frappe", mock_frappe), 				 patch("jarz_pos.api.shift._get_shift_courier_close_block", return_value=block):
+		with (
+			patch("jarz_pos.api.shift.frappe", mock_frappe),
+			patch("jarz_pos.api.shift._get_shift_courier_close_block", return_value=block),
+		):
 			result = _assert_courier_acknowledgement("Dokki", ["CT-0001", "CT-0002"])
 
 		self.assertIs(result, block)
@@ -452,7 +493,10 @@ class TestShiftAPI(unittest.TestCase):
 			]
 		}
 
-		with patch("jarz_pos.api.shift.frappe", mock_frappe), 				 patch("jarz_pos.api.shift._get_shift_courier_close_block", return_value=block):
+		with (
+			patch("jarz_pos.api.shift.frappe", mock_frappe),
+			patch("jarz_pos.api.shift._get_shift_courier_close_block", return_value=block),
+		):
 			with self.assertRaises(Exception):
 				_assert_courier_acknowledgement("Dokki", ["CT-0001"])
 
@@ -472,7 +516,10 @@ class TestShiftAPI(unittest.TestCase):
 			]
 		}
 
-		with patch("jarz_pos.api.shift.frappe", mock_frappe), 				 patch("jarz_pos.api.shift._get_shift_courier_close_block", return_value=block):
+		with (
+			patch("jarz_pos.api.shift.frappe", mock_frappe),
+			patch("jarz_pos.api.shift._get_shift_courier_close_block", return_value=block),
+		):
 			with self.assertRaises(Exception):
 				_assert_courier_acknowledgement("Dokki", ["CT-0001"])
 
@@ -492,16 +539,21 @@ class TestShiftAPI(unittest.TestCase):
 		closing = MagicMock()
 		closing.payment_reconciliation = [MagicMock(mode_of_payment="Cash", opening_amount=500)]
 
-		with patch("jarz_pos.api.shift.frappe", mock_frappe), \
-				 patch("jarz_pos.api.shift.make_closing_entry_from_opening", return_value=closing), \
-				 patch("jarz_pos.api.shift._get_shift_courier_close_block", return_value={
-					 "blocked": True,
-					 "transaction_count": 2,
-					 "party_count": 1,
-					 "invoice_count": 1,
-				 }), \
-				 patch("jarz_pos.api.shift._resolve_pos_profile_account", return_value="Dokki - J"), \
-				 patch("jarz_pos.api.shift._get_account_balance", return_value=25876.66):
+		with (
+			patch("jarz_pos.api.shift.frappe", mock_frappe),
+			patch("jarz_pos.api.shift.make_closing_entry_from_opening", return_value=closing),
+			patch(
+				"jarz_pos.api.shift._get_shift_courier_close_block",
+				return_value={
+					"blocked": True,
+					"transaction_count": 2,
+					"party_count": 1,
+					"invoice_count": 1,
+				},
+			),
+			patch("jarz_pos.api.shift._resolve_pos_profile_account", return_value="Dokki - J"),
+			patch("jarz_pos.api.shift._get_account_balance", return_value=25876.66),
+		):
 			with self.assertRaises(Exception):
 				end_shift(
 					"POS-OPE-2026-00001",

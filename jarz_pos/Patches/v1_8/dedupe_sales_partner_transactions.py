@@ -19,63 +19,70 @@ Rules, in order of caution:
 
 Idempotent: a second run finds no duplicates and does nothing.
 """
+
 from __future__ import annotations
 
 import frappe
 
 
 def execute():
-    if not frappe.db.table_exists("Sales Partner Transactions"):
-        return
+	if not frappe.db.table_exists("Sales Partner Transactions"):
+		return
 
-    groups = frappe.db.sql(
-        """
+	groups = frappe.db.sql(
+		"""
         select reference_invoice
         from `tabSales Partner Transactions`
         where ifnull(reference_invoice, '') != ''
         group by reference_invoice
         having count(*) > 1
         """,
-        as_dict=True,
-    )
-    removed: list[str] = []
-    flagged: list[dict] = []
-    for group in groups:
-        invoice = group.get("reference_invoice")
-        rows = frappe.get_all(
-            "Sales Partner Transactions",
-            filters={"reference_invoice": invoice},
-            fields=["name", "status", "partner_fees", "idempotency_token", "journal_entry", "creation"],
-            order_by="creation asc",
-        )
-        keep, extras = rows[0], rows[1:]
-        for row in extras:
-            if str(row.get("status") or "").strip() == "Unsettled" and not row.get("journal_entry"):
-                frappe.delete_doc(
-                    "Sales Partner Transactions", row["name"],
-                    ignore_permissions=True, force=True,
-                )
-                removed.append(f"{invoice}:{row['name']}")
-            else:
-                flagged.append({
-                    "invoice": invoice,
-                    "kept": keep["name"],
-                    "settled_duplicate": row["name"],
-                    "partner_fees": row.get("partner_fees"),
-                    "journal_entry": row.get("journal_entry"),
-                })
+		as_dict=True,
+	)
+	removed: list[str] = []
+	flagged: list[dict] = []
+	for group in groups:
+		invoice = group.get("reference_invoice")
+		rows = frappe.get_all(
+			"Sales Partner Transactions",
+			filters={"reference_invoice": invoice},
+			fields=["name", "status", "partner_fees", "idempotency_token", "journal_entry", "creation"],
+			order_by="creation asc",
+		)
+		keep, extras = rows[0], rows[1:]
+		for row in extras:
+			if str(row.get("status") or "").strip() == "Unsettled" and not row.get("journal_entry"):
+				frappe.delete_doc(
+					"Sales Partner Transactions",
+					row["name"],
+					ignore_permissions=True,
+					force=True,
+				)
+				removed.append(f"{invoice}:{row['name']}")
+			else:
+				flagged.append(
+					{
+						"invoice": invoice,
+						"kept": keep["name"],
+						"settled_duplicate": row["name"],
+						"partner_fees": row.get("partner_fees"),
+						"journal_entry": row.get("journal_entry"),
+					}
+				)
 
-    if flagged:
-        lines = [
-            f"{f['invoice']}: duplicate {f['settled_duplicate']} (kept {f['kept']}), "
-            f"fee {f['partner_fees']}, journal entry {f['journal_entry'] or '-'}"
-            for f in flagged
-        ]
-        frappe.log_error(
-            title="Sales Partner Transaction: settled duplicate needs manual reversal",
-            message="These invoices carry a SECOND, already-settled partner transaction. "
-            "The fee was posted twice; reverse one fee journal by hand.\n\n" + "\n".join(lines),
-        )
-    frappe.db.commit()
-    print(f"dedupe_sales_partner_transactions: removed {len(removed)} unsettled duplicate(s), "
-          f"flagged {len(flagged)} settled duplicate(s) for manual reversal")
+	if flagged:
+		lines = [
+			f"{f['invoice']}: duplicate {f['settled_duplicate']} (kept {f['kept']}), "
+			f"fee {f['partner_fees']}, journal entry {f['journal_entry'] or '-'}"
+			for f in flagged
+		]
+		frappe.log_error(
+			title="Sales Partner Transaction: settled duplicate needs manual reversal",
+			message="These invoices carry a SECOND, already-settled partner transaction. "
+			"The fee was posted twice; reverse one fee journal by hand.\n\n" + "\n".join(lines),
+		)
+	frappe.db.commit()
+	print(
+		f"dedupe_sales_partner_transactions: removed {len(removed)} unsettled duplicate(s), "
+		f"flagged {len(flagged)} settled duplicate(s) for manual reversal"
+	)

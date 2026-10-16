@@ -12,957 +12,956 @@ from unittest.mock import MagicMock, patch
 
 
 def passthrough_translate():
-    """Neutralise ``from frappe import _`` for tests that trip ``frappe.throw``.
+	"""Neutralise ``from frappe import _`` for tests that trip ``frappe.throw``.
 
-    ``patch("...sop.frappe")`` does not cover that binding, and the real
-    translator needs a request context to resolve a language.
-    """
-    return patch("jarz_pos.api.sop._", new=lambda msg: msg)
+	``patch("...sop.frappe")`` does not cover that binding, and the real
+	translator needs a request context to resolve a language.
+	"""
+	return patch("jarz_pos.api.sop._", new=lambda msg: msg)
 
 
 _TAGS = re.compile(r"<[^>]+>")
 
 
 def fake_strip_html(html):
-    return _TAGS.sub("", html or "")
+	return _TAGS.sub("", html or "")
 
 
 class StubRow(dict):
-    """A child row that answers to both attribute and key access."""
+	"""A child row that answers to both attribute and key access."""
 
-    def __getattr__(self, item):
-        try:
-            return self[item]
-        except KeyError as exc:  # pragma: no cover - defensive
-            raise AttributeError(item) from exc
+	def __getattr__(self, item):
+		try:
+			return self[item]
+		except KeyError as exc:  # pragma: no cover - defensive
+			raise AttributeError(item) from exc
 
 
 class StubDoc:
-    def __init__(self, **fields):
-        self.__dict__.update(fields)
+	def __init__(self, **fields):
+		self.__dict__.update(fields)
 
 
 # One BOM batch of the cake: 1.83 Kg of spread, 0.5 Kg of flour.
 MATERIAL_ROWS = [
-    {"item_code": "PIST-SPR", "item_name": "Pistachio spread", "uom": "Kg", "required_qty": 1.83},
-    {"item_code": "FLOUR", "item_name": "Cake flour", "uom": "Kg", "required_qty": 0.5},
+	{"item_code": "PIST-SPR", "item_name": "Pistachio spread", "uom": "Kg", "required_qty": 1.83},
+	{"item_code": "FLOUR", "item_name": "Cake flour", "uom": "Kg", "required_qty": 0.5},
 ]
 
 
 def sop_doc(name="SOP-0001", version=1, **overrides):
-    fields = {
-        "name": name,
-        "item_code": "PIST-CAKE",
-        "item_name": "Pistachio cake",
-        "bom": "BOM-PIST-CAKE-001",
-        "version": version,
-        "yield_percent": 95,
-        "prep_time_mins": 20,
-        "equipment": "Planetary mixer",
-        "steps": [
-            StubRow(
-                step_no=1,
-                idx=1,
-                title="Weigh the spread",
-                instruction="<p>Weigh {{item:PIST-SPR}} into the bowl.</p>",
-                image="/files/step1.png",
-                duration_mins=4,
-                scaling_mode="Per Batch",
-                requires_confirmation=1,
-                capture_type="Number",
-                capture_label="Weighed (kg)",
-                capture_min=1.5,
-                capture_max=2.5,
-            ),
-            StubRow(
-                step_no=2,
-                idx=2,
-                title="Preheat",
-                instruction="<p>Preheat to 180C.</p>",
-                image=None,
-                duration_mins=15,
-                scaling_mode="Fixed",
-                requires_confirmation=0,
-                capture_type="None",
-                capture_label=None,
-                capture_min=0,
-                capture_max=0,
-            ),
-        ],
-    }
-    fields.update(overrides)
-    return StubDoc(**fields)
+	fields = {
+		"name": name,
+		"item_code": "PIST-CAKE",
+		"item_name": "Pistachio cake",
+		"bom": "BOM-PIST-CAKE-001",
+		"version": version,
+		"yield_percent": 95,
+		"prep_time_mins": 20,
+		"equipment": "Planetary mixer",
+		"steps": [
+			StubRow(
+				step_no=1,
+				idx=1,
+				title="Weigh the spread",
+				instruction="<p>Weigh {{item:PIST-SPR}} into the bowl.</p>",
+				image="/files/step1.png",
+				duration_mins=4,
+				scaling_mode="Per Batch",
+				requires_confirmation=1,
+				capture_type="Number",
+				capture_label="Weighed (kg)",
+				capture_min=1.5,
+				capture_max=2.5,
+			),
+			StubRow(
+				step_no=2,
+				idx=2,
+				title="Preheat",
+				instruction="<p>Preheat to 180C.</p>",
+				image=None,
+				duration_mins=15,
+				scaling_mode="Fixed",
+				requires_confirmation=0,
+				capture_type="None",
+				capture_label=None,
+				capture_min=0,
+				capture_max=0,
+			),
+		],
+	}
+	fields.update(overrides)
+	return StubDoc(**fields)
 
 
 class SopApiTestCase(unittest.TestCase):
-    """Shared harness: patches every resolver the payload builder reaches."""
+	"""Shared harness: patches every resolver the payload builder reaches."""
 
-    def _stack(
-        self,
-        stack,
-        *,
-        active_sop="SOP-0001",
-        doc=None,
-        bom_row=None,
-        material_rows=None,
-        direct_rows=None,
-        default_bom=None,
-        translate=False,
-    ):
-        stack.enter_context(patch("jarz_pos.api.sop._ensure_production_view_access"))
-        mocks = {
-            "active": stack.enter_context(
-                patch("jarz_pos.api.sop._resolve_active_sop", return_value=active_sop)
-            ),
-            "doc": stack.enter_context(
-                patch("jarz_pos.api.sop._resolve_sop_doc", return_value=doc or sop_doc())
-            ),
-            "bom": stack.enter_context(
-                patch(
-                    "jarz_pos.api.sop._resolve_bom_row",
-                    return_value=bom_row if bom_row is not None else {"quantity": 10, "company": "Jarz Co"},
-                )
-            ),
-            "default_bom": stack.enter_context(
-                patch("jarz_pos.api.sop._resolve_default_bom", return_value=default_bom)
-            ),
-            # Empty by default so the older tests keep exercising the material
-            # reader alone, exactly as they did before direct lines existed.
-            "direct": stack.enter_context(
-                patch(
-                    "jarz_pos.api.sop._resolve_direct_bom_lines",
-                    return_value=[] if direct_rows is None else direct_rows,
-                )
-            ),
-            "materials": stack.enter_context(
-                patch(
-                    "jarz_pos.api.sop._resolve_required_material_rows",
-                    return_value=MagicMock(
-                        return_value=MATERIAL_ROWS if material_rows is None else material_rows
-                    ),
-                )
-            ),
-            "strip": stack.enter_context(
-                patch("jarz_pos.api.sop._resolve_strip_html", return_value=fake_strip_html)
-            ),
-        }
-        if translate:
-            stack.enter_context(passthrough_translate())
-        mocks["frappe"] = stack.enter_context(patch("jarz_pos.api.sop.frappe"))
-        return mocks
+	def _stack(
+		self,
+		stack,
+		*,
+		active_sop="SOP-0001",
+		doc=None,
+		bom_row=None,
+		material_rows=None,
+		direct_rows=None,
+		default_bom=None,
+		translate=False,
+	):
+		stack.enter_context(patch("jarz_pos.api.sop._ensure_production_view_access"))
+		mocks = {
+			"active": stack.enter_context(
+				patch("jarz_pos.api.sop._resolve_active_sop", return_value=active_sop)
+			),
+			"doc": stack.enter_context(
+				patch("jarz_pos.api.sop._resolve_sop_doc", return_value=doc or sop_doc())
+			),
+			"bom": stack.enter_context(
+				patch(
+					"jarz_pos.api.sop._resolve_bom_row",
+					return_value=bom_row if bom_row is not None else {"quantity": 10, "company": "Jarz Co"},
+				)
+			),
+			"default_bom": stack.enter_context(
+				patch("jarz_pos.api.sop._resolve_default_bom", return_value=default_bom)
+			),
+			# Empty by default so the older tests keep exercising the material
+			# reader alone, exactly as they did before direct lines existed.
+			"direct": stack.enter_context(
+				patch(
+					"jarz_pos.api.sop._resolve_direct_bom_lines",
+					return_value=[] if direct_rows is None else direct_rows,
+				)
+			),
+			"materials": stack.enter_context(
+				patch(
+					"jarz_pos.api.sop._resolve_required_material_rows",
+					return_value=MagicMock(
+						return_value=MATERIAL_ROWS if material_rows is None else material_rows
+					),
+				)
+			),
+			"strip": stack.enter_context(
+				patch("jarz_pos.api.sop._resolve_strip_html", return_value=fake_strip_html)
+			),
+		}
+		if translate:
+			stack.enter_context(passthrough_translate())
+		mocks["frappe"] = stack.enter_context(patch("jarz_pos.api.sop.frappe"))
+		return mocks
 
 
 class TestGetSopForItem(SopApiTestCase):
-    def test_missing_sop_returns_has_sop_false_without_throwing(self):
-        # The board calls this for every card and most items have no SOP.  A
-        # throw here would blank the whole screen instead of one card.
-        from jarz_pos.api import sop
+	def test_missing_sop_returns_has_sop_false_without_throwing(self):
+		# The board calls this for every card and most items have no SOP.  A
+		# throw here would blank the whole screen instead of one card.
+		from jarz_pos.api import sop
 
-        with ExitStack() as stack:
-            mocks = self._stack(stack, active_sop=None)
-            result = sop.get_sop_for_item("PLAIN-ITEM")
+		with ExitStack() as stack:
+			mocks = self._stack(stack, active_sop=None)
+			result = sop.get_sop_for_item("PLAIN-ITEM")
 
-        self.assertEqual({"has_sop": False, "item_code": "PLAIN-ITEM"}, result)
-        mocks["doc"].assert_not_called()
-        mocks["frappe"].throw.assert_not_called()
+		self.assertEqual({"has_sop": False, "item_code": "PLAIN-ITEM"}, result)
+		mocks["doc"].assert_not_called()
+		mocks["frappe"].throw.assert_not_called()
 
-    def test_a_blank_item_code_is_not_an_error_either(self):
-        from jarz_pos.api import sop
+	def test_a_blank_item_code_is_not_an_error_either(self):
+		from jarz_pos.api import sop
 
-        with ExitStack() as stack:
-            mocks = self._stack(stack, active_sop=None)
-            result = sop.get_sop_for_item("")
+		with ExitStack() as stack:
+			mocks = self._stack(stack, active_sop=None)
+			result = sop.get_sop_for_item("")
 
-        self.assertFalse(result["has_sop"])
-        mocks["frappe"].throw.assert_not_called()
+		self.assertFalse(result["has_sop"])
+		mocks["frappe"].throw.assert_not_called()
 
-    def test_a_lookup_failure_degrades_to_has_sop_false_and_logs(self):
-        from jarz_pos.api import sop
+	def test_a_lookup_failure_degrades_to_has_sop_false_and_logs(self):
+		from jarz_pos.api import sop
 
-        with ExitStack() as stack:
-            mocks = self._stack(stack)
-            mocks["active"].side_effect = Exception("table is missing")
+		with ExitStack() as stack:
+			mocks = self._stack(stack)
+			mocks["active"].side_effect = Exception("table is missing")
 
-            result = sop.get_sop_for_item("PIST-CAKE")
+			result = sop.get_sop_for_item("PIST-CAKE")
 
-        self.assertEqual({"has_sop": False, "item_code": "PIST-CAKE"}, result)
-        # Degrade if you must, but never silently.
-        mocks["frappe"].log_error.assert_called()
+		self.assertEqual({"has_sop": False, "item_code": "PIST-CAKE"}, result)
+		# Degrade if you must, but never silently.
+		mocks["frappe"].log_error.assert_called()
 
-    def test_an_unrenderable_sop_degrades_to_has_sop_false_and_logs(self):
-        from jarz_pos.api import sop
+	def test_an_unrenderable_sop_degrades_to_has_sop_false_and_logs(self):
+		from jarz_pos.api import sop
 
-        with ExitStack() as stack:
-            mocks = self._stack(stack)
-            mocks["doc"].side_effect = Exception("corrupt doc")
+		with ExitStack() as stack:
+			mocks = self._stack(stack)
+			mocks["doc"].side_effect = Exception("corrupt doc")
 
-            result = sop.get_sop_for_item("PIST-CAKE")
+			result = sop.get_sop_for_item("PIST-CAKE")
 
-        self.assertEqual({"has_sop": False, "item_code": "PIST-CAKE"}, result)
-        mocks["frappe"].log_error.assert_called()
+		self.assertEqual({"has_sop": False, "item_code": "PIST-CAKE"}, result)
+		mocks["frappe"].log_error.assert_called()
 
-    def test_a_broken_bom_still_returns_the_procedure(self):
-        # Instructions without numbers beat no instructions; the unresolved
-        # token is reported so the gap is visible.
-        from jarz_pos.api import sop
+	def test_a_broken_bom_still_returns_the_procedure(self):
+		# Instructions without numbers beat no instructions; the unresolved
+		# token is reported so the gap is visible.
+		from jarz_pos.api import sop
 
-        with ExitStack() as stack:
-            mocks = self._stack(stack)
-            mocks["materials"].return_value.side_effect = Exception("BOM exploded, badly")
+		with ExitStack() as stack:
+			mocks = self._stack(stack)
+			mocks["materials"].return_value.side_effect = Exception("BOM exploded, badly")
 
-            result = sop.get_sop_for_item("PIST-CAKE")
+			result = sop.get_sop_for_item("PIST-CAKE")
 
-        self.assertTrue(result["has_sop"])
-        self.assertEqual(["PIST-SPR"], result["unresolved_tokens"])
-        self.assertIn("{{item:PIST-SPR}}", result["steps"][0]["instruction_html"])
-        mocks["frappe"].log_error.assert_called()
+		self.assertTrue(result["has_sop"])
+		self.assertEqual(["PIST-SPR"], result["unresolved_tokens"])
+		self.assertIn("{{item:PIST-SPR}}", result["steps"][0]["instruction_html"])
+		mocks["frappe"].log_error.assert_called()
 
-    def test_returns_the_documented_shape(self):
-        from jarz_pos.api import sop
+	def test_returns_the_documented_shape(self):
+		from jarz_pos.api import sop
 
-        with ExitStack() as stack:
-            self._stack(stack)
-            result = sop.get_sop_for_item("PIST-CAKE")
+		with ExitStack() as stack:
+			self._stack(stack)
+			result = sop.get_sop_for_item("PIST-CAKE")
 
-        for key in (
-            "has_sop",
-            "sop",
-            "version",
-            "item_code",
-            "item_name",
-            "bom",
-            "yield_percent",
-            "prep_time_mins",
-            "equipment",
-            "batches",
-            "units",
-            "total_duration_mins",
-            "steps",
-            "unresolved_tokens",
-        ):
-            self.assertIn(key, result)
+		for key in (
+			"has_sop",
+			"sop",
+			"version",
+			"item_code",
+			"item_name",
+			"bom",
+			"yield_percent",
+			"prep_time_mins",
+			"equipment",
+			"batches",
+			"units",
+			"total_duration_mins",
+			"steps",
+			"unresolved_tokens",
+		):
+			self.assertIn(key, result)
 
-        step = result["steps"][0]
-        for key in (
-            "step_no",
-            "title",
-            "instruction_text",
-            "instruction_html",
-            "image_url",
-            "duration_mins",
-            "scaling_mode",
-            "requires_confirmation",
-            "capture_type",
-            "capture_label",
-            "capture_min",
-            "capture_max",
-        ):
-            self.assertIn(key, step)
+		step = result["steps"][0]
+		for key in (
+			"step_no",
+			"title",
+			"instruction_text",
+			"instruction_html",
+			"image_url",
+			"duration_mins",
+			"scaling_mode",
+			"requires_confirmation",
+			"capture_type",
+			"capture_label",
+			"capture_min",
+			"capture_max",
+		):
+			self.assertIn(key, step)
 
-    def test_one_batch_renders_the_authored_quantities(self):
-        from jarz_pos.api import sop
+	def test_one_batch_renders_the_authored_quantities(self):
+		from jarz_pos.api import sop
 
-        with ExitStack() as stack:
-            self._stack(stack)
-            result = sop.get_sop_for_item("PIST-CAKE")
+		with ExitStack() as stack:
+			self._stack(stack)
+			result = sop.get_sop_for_item("PIST-CAKE")
 
-        self.assertEqual(1.0, result["batches"])
-        self.assertEqual(10.0, result["units"])  # one batch of a BOM that yields 10
-        self.assertIn("1.830 Kg Pistachio spread", result["steps"][0]["instruction_html"])
+		self.assertEqual(1.0, result["batches"])
+		self.assertEqual(10.0, result["units"])  # one batch of a BOM that yields 10
+		self.assertIn("1.830 Kg Pistachio spread", result["steps"][0]["instruction_html"])
 
-    def test_three_batches_triple_every_quantity(self):
-        from jarz_pos.api import sop
+	def test_three_batches_triple_every_quantity(self):
+		from jarz_pos.api import sop
 
-        with ExitStack() as stack:
-            self._stack(stack)
-            result = sop.get_sop_for_item("PIST-CAKE", batches=3)
+		with ExitStack() as stack:
+			self._stack(stack)
+			result = sop.get_sop_for_item("PIST-CAKE", batches=3)
 
-        self.assertEqual(3.0, result["batches"])
-        self.assertEqual(30.0, result["units"])
-        self.assertIn("5.490 Kg Pistachio spread", result["steps"][0]["instruction_html"])
-        # 4 mins Per Batch x3, plus a 15 min Fixed preheat
-        self.assertEqual(27.0, result["total_duration_mins"])
+		self.assertEqual(3.0, result["batches"])
+		self.assertEqual(30.0, result["units"])
+		self.assertIn("5.490 Kg Pistachio spread", result["steps"][0]["instruction_html"])
+		# 4 mins Per Batch x3, plus a 15 min Fixed preheat
+		self.assertEqual(27.0, result["total_duration_mins"])
 
-    def test_batches_arrives_as_the_string_http_sends(self):
-        from jarz_pos.api import sop
+	def test_batches_arrives_as_the_string_http_sends(self):
+		from jarz_pos.api import sop
 
-        with ExitStack() as stack:
-            self._stack(stack)
-            result = sop.get_sop_for_item("PIST-CAKE", batches="3")
+		with ExitStack() as stack:
+			self._stack(stack)
+			result = sop.get_sop_for_item("PIST-CAKE", batches="3")
 
-        self.assertEqual(3.0, result["batches"])
+		self.assertEqual(3.0, result["batches"])
 
-    def test_instruction_text_is_stripped_server_side(self):
-        # The app renders the plain text; it must never need an HTML package.
-        from jarz_pos.api import sop
+	def test_instruction_text_is_stripped_server_side(self):
+		# The app renders the plain text; it must never need an HTML package.
+		from jarz_pos.api import sop
 
-        with ExitStack() as stack:
-            self._stack(stack)
-            result = sop.get_sop_for_item("PIST-CAKE")
+		with ExitStack() as stack:
+			self._stack(stack)
+			result = sop.get_sop_for_item("PIST-CAKE")
 
-        step = result["steps"][0]
-        self.assertEqual("Weigh 1.830 Kg Pistachio spread into the bowl.", step["instruction_text"])
-        self.assertTrue(step["instruction_html"].startswith("<p>"))
+		step = result["steps"][0]
+		self.assertEqual("Weigh 1.830 Kg Pistachio spread into the bowl.", step["instruction_text"])
+		self.assertTrue(step["instruction_html"].startswith("<p>"))
 
-    def test_an_explicit_bom_overrides_the_sop_default(self):
-        from jarz_pos.api import sop
+	def test_an_explicit_bom_overrides_the_sop_default(self):
+		from jarz_pos.api import sop
 
-        with ExitStack() as stack:
-            mocks = self._stack(stack)
-            result = sop.get_sop_for_item("PIST-CAKE", bom="BOM-OVERRIDE")
+		with ExitStack() as stack:
+			mocks = self._stack(stack)
+			result = sop.get_sop_for_item("PIST-CAKE", bom="BOM-OVERRIDE")
 
-        self.assertEqual("BOM-OVERRIDE", result["bom"])
-        mocks["bom"].assert_called_once_with("BOM-OVERRIDE")
+		self.assertEqual("BOM-OVERRIDE", result["bom"])
+		mocks["bom"].assert_called_once_with("BOM-OVERRIDE")
 
-    def test_requires_production_access(self):
-        from jarz_pos.api import sop
+	def test_requires_production_access(self):
+		from jarz_pos.api import sop
 
-        with patch(
-            "jarz_pos.api.sop._ensure_production_view_access",
-            side_effect=PermissionError("nope"),
-        ), patch("jarz_pos.api.sop._resolve_active_sop") as mock_active, patch(
-            "jarz_pos.api.sop.frappe"
-        ):
-            with self.assertRaises(PermissionError):
-                sop.get_sop_for_item("PIST-CAKE")
+		with (
+			patch(
+				"jarz_pos.api.sop._ensure_production_view_access",
+				side_effect=PermissionError("nope"),
+			),
+			patch("jarz_pos.api.sop._resolve_active_sop") as mock_active,
+			patch("jarz_pos.api.sop.frappe"),
+		):
+			with self.assertRaises(PermissionError):
+				sop.get_sop_for_item("PIST-CAKE")
 
-        mock_active.assert_not_called()
+		mock_active.assert_not_called()
 
 
 class TestGetSopForWorkOrder(SopApiTestCase):
-    WO = {
-        "name": "MFG-WO-0001",
-        "production_item": "PIST-CAKE",
-        "qty": 30,
-        "bom_no": "BOM-PIST-CAKE-001",
-        "company": "Jarz Co",
-        "jarz_sop_version": "SOP-OLD#2",
-    }
+	WO = {
+		"name": "MFG-WO-0001",
+		"production_item": "PIST-CAKE",
+		"qty": 30,
+		"bom_no": "BOM-PIST-CAKE-001",
+		"company": "Jarz Co",
+		"jarz_sop_version": "SOP-OLD#2",
+	}
 
-    def _run(self, stack, wo=None, **kwargs):
-        from jarz_pos.api import sop
+	def _run(self, stack, wo=None, **kwargs):
+		from jarz_pos.api import sop
 
-        mocks = self._stack(stack, **kwargs)
-        mocks["wo"] = stack.enter_context(
-            patch("jarz_pos.api.sop._resolve_work_order_row", return_value=dict(wo or self.WO))
-        )
-        return sop, mocks
+		mocks = self._stack(stack, **kwargs)
+		mocks["wo"] = stack.enter_context(
+			patch("jarz_pos.api.sop._resolve_work_order_row", return_value=dict(wo or self.WO))
+		)
+		return sop, mocks
 
-    def test_prefers_the_stamped_version_over_the_active_one(self):
-        # The acceptance test for the whole versioning story: editing an SOP
-        # must not rewrite the history of batches already run.
-        with ExitStack() as stack:
-            sop, mocks = self._run(
-                stack,
-                active_sop="SOP-NEW",
-                doc=sop_doc(name="SOP-OLD", version=2),
-            )
-            result = sop.get_sop_for_work_order("MFG-WO-0001")
+	def test_prefers_the_stamped_version_over_the_active_one(self):
+		# The acceptance test for the whole versioning story: editing an SOP
+		# must not rewrite the history of batches already run.
+		with ExitStack() as stack:
+			sop, mocks = self._run(
+				stack,
+				active_sop="SOP-NEW",
+				doc=sop_doc(name="SOP-OLD", version=2),
+			)
+			result = sop.get_sop_for_work_order("MFG-WO-0001")
 
-        mocks["doc"].assert_called_once_with("SOP-OLD")
-        mocks["active"].assert_not_called()
-        self.assertEqual("SOP-OLD", result["sop"])
-        self.assertEqual(2, result["version"])
-        self.assertTrue(result["is_stamped"])
-        self.assertEqual("SOP-OLD#2", result["sop_version_stamp"])
+		mocks["doc"].assert_called_once_with("SOP-OLD")
+		mocks["active"].assert_not_called()
+		self.assertEqual("SOP-OLD", result["sop"])
+		self.assertEqual(2, result["version"])
+		self.assertTrue(result["is_stamped"])
+		self.assertEqual("SOP-OLD#2", result["sop_version_stamp"])
 
-    def test_falls_back_to_the_active_sop_when_unstamped(self):
-        with ExitStack() as stack:
-            wo = dict(self.WO, jarz_sop_version=None)
-            sop, mocks = self._run(
-                stack, wo=wo, active_sop="SOP-NEW", doc=sop_doc(name="SOP-NEW", version=5)
-            )
-            result = sop.get_sop_for_work_order("MFG-WO-0001")
+	def test_falls_back_to_the_active_sop_when_unstamped(self):
+		with ExitStack() as stack:
+			wo = dict(self.WO, jarz_sop_version=None)
+			sop, mocks = self._run(stack, wo=wo, active_sop="SOP-NEW", doc=sop_doc(name="SOP-NEW", version=5))
+			result = sop.get_sop_for_work_order("MFG-WO-0001")
 
-        mocks["active"].assert_called_once_with("PIST-CAKE")
-        mocks["doc"].assert_called_once_with("SOP-NEW")
-        self.assertEqual("SOP-NEW", result["sop"])
-        self.assertFalse(result["is_stamped"])
+		mocks["active"].assert_called_once_with("PIST-CAKE")
+		mocks["doc"].assert_called_once_with("SOP-NEW")
+		self.assertEqual("SOP-NEW", result["sop"])
+		self.assertFalse(result["is_stamped"])
 
-    def test_a_dangling_stamp_falls_back_to_the_active_sop_and_logs(self):
-        with ExitStack() as stack:
-            sop, mocks = self._run(stack, active_sop="SOP-NEW")
-            mocks["doc"].side_effect = [Exception("deleted"), sop_doc(name="SOP-NEW", version=5)]
+	def test_a_dangling_stamp_falls_back_to_the_active_sop_and_logs(self):
+		with ExitStack() as stack:
+			sop, mocks = self._run(stack, active_sop="SOP-NEW")
+			mocks["doc"].side_effect = [Exception("deleted"), sop_doc(name="SOP-NEW", version=5)]
 
-            result = sop.get_sop_for_work_order("MFG-WO-0001")
+			result = sop.get_sop_for_work_order("MFG-WO-0001")
 
-        self.assertEqual("SOP-NEW", result["sop"])
-        self.assertFalse(result["is_stamped"])
-        mocks["frappe"].log_error.assert_called()
+		self.assertEqual("SOP-NEW", result["sop"])
+		self.assertFalse(result["is_stamped"])
+		mocks["frappe"].log_error.assert_called()
 
-    def test_batches_come_from_wo_qty_over_bom_qty(self):
-        with ExitStack() as stack:
-            sop, _ = self._run(stack, doc=sop_doc(name="SOP-OLD", version=2))
-            result = sop.get_sop_for_work_order("MFG-WO-0001")
+	def test_batches_come_from_wo_qty_over_bom_qty(self):
+		with ExitStack() as stack:
+			sop, _ = self._run(stack, doc=sop_doc(name="SOP-OLD", version=2))
+			result = sop.get_sop_for_work_order("MFG-WO-0001")
 
-        # 30 units off a BOM that yields 10 = 3 batches
-        self.assertEqual(3.0, result["batches"])
-        self.assertEqual(30.0, result["units"])
-        self.assertIn("5.490 Kg Pistachio spread", result["steps"][0]["instruction_html"])
-        self.assertEqual("MFG-WO-0001", result["work_order"])
+		# 30 units off a BOM that yields 10 = 3 batches
+		self.assertEqual(3.0, result["batches"])
+		self.assertEqual(30.0, result["units"])
+		self.assertIn("5.490 Kg Pistachio spread", result["steps"][0]["instruction_html"])
+		self.assertEqual("MFG-WO-0001", result["work_order"])
 
-    def test_an_item_with_no_sop_reports_has_sop_false(self):
-        with ExitStack() as stack:
-            wo = dict(self.WO, jarz_sop_version=None)
-            sop, _ = self._run(stack, wo=wo, active_sop=None)
-            result = sop.get_sop_for_work_order("MFG-WO-0001")
+	def test_an_item_with_no_sop_reports_has_sop_false(self):
+		with ExitStack() as stack:
+			wo = dict(self.WO, jarz_sop_version=None)
+			sop, _ = self._run(stack, wo=wo, active_sop=None)
+			result = sop.get_sop_for_work_order("MFG-WO-0001")
 
-        self.assertFalse(result["has_sop"])
-        self.assertEqual("MFG-WO-0001", result["work_order"])
+		self.assertFalse(result["has_sop"])
+		self.assertEqual("MFG-WO-0001", result["work_order"])
 
-    def test_unknown_work_order_is_rejected(self):
-        from jarz_pos.api import sop
+	def test_unknown_work_order_is_rejected(self):
+		from jarz_pos.api import sop
 
-        with ExitStack() as stack:
-            mocks = self._stack(stack, translate=True)
-            stack.enter_context(
-                patch("jarz_pos.api.sop._resolve_work_order_row", return_value=None)
-            )
-            mocks["frappe"].throw.side_effect = ValueError("not found")
+		with ExitStack() as stack:
+			mocks = self._stack(stack, translate=True)
+			stack.enter_context(patch("jarz_pos.api.sop._resolve_work_order_row", return_value=None))
+			mocks["frappe"].throw.side_effect = ValueError("not found")
 
-            with self.assertRaises(ValueError):
-                sop.get_sop_for_work_order("NOPE")
+			with self.assertRaises(ValueError):
+				sop.get_sop_for_work_order("NOPE")
 
-    def test_requires_production_access(self):
-        from jarz_pos.api import sop
+	def test_requires_production_access(self):
+		from jarz_pos.api import sop
 
-        with patch(
-            "jarz_pos.api.sop._ensure_production_view_access",
-            side_effect=PermissionError("nope"),
-        ), patch("jarz_pos.api.sop._resolve_work_order_row") as mock_wo, patch(
-            "jarz_pos.api.sop.frappe"
-        ):
-            with self.assertRaises(PermissionError):
-                sop.get_sop_for_work_order("MFG-WO-0001")
+		with (
+			patch(
+				"jarz_pos.api.sop._ensure_production_view_access",
+				side_effect=PermissionError("nope"),
+			),
+			patch("jarz_pos.api.sop._resolve_work_order_row") as mock_wo,
+			patch("jarz_pos.api.sop.frappe"),
+		):
+			with self.assertRaises(PermissionError):
+				sop.get_sop_for_work_order("MFG-WO-0001")
 
-        mock_wo.assert_not_called()
+		mock_wo.assert_not_called()
 
 
 class TestRecordSopStepCapture(unittest.TestCase):
-    WO = {
-        "name": "MFG-WO-0001",
-        "production_item": "PIST-CAKE",
-        "qty": 30,
-        "bom_no": "BOM-PIST-CAKE-001",
-        "jarz_sop_version": "SOP-0001#1",
-    }
+	WO = {
+		"name": "MFG-WO-0001",
+		"production_item": "PIST-CAKE",
+		"qty": 30,
+		"bom_no": "BOM-PIST-CAKE-001",
+		"jarz_sop_version": "SOP-0001#1",
+	}
 
-    def _stack(self, stack, doc=None):
-        stack.enter_context(patch("jarz_pos.api.sop._ensure_production_view_access"))
-        stack.enter_context(
-            patch("jarz_pos.api.sop._resolve_work_order_row", return_value=dict(self.WO))
-        )
-        stack.enter_context(
-            patch(
-                "jarz_pos.api.sop._resolve_sop_for_work_order",
-                return_value=(doc or sop_doc(), "SOP-0001#1", True),
-            )
-        )
-        stack.enter_context(patch("jarz_pos.api.sop._resolve_session_user", return_value="ops@jarz"))
-        stack.enter_context(
-            patch("jarz_pos.api.sop._resolve_now_datetime", return_value="2026-08-01 09:00:00")
-        )
-        stack.enter_context(passthrough_translate())
-        mock_frappe = stack.enter_context(patch("jarz_pos.api.sop.frappe"))
-        mock_frappe.throw.side_effect = ValueError("rejected")
-        return mock_frappe
+	def _stack(self, stack, doc=None):
+		stack.enter_context(patch("jarz_pos.api.sop._ensure_production_view_access"))
+		stack.enter_context(patch("jarz_pos.api.sop._resolve_work_order_row", return_value=dict(self.WO)))
+		stack.enter_context(
+			patch(
+				"jarz_pos.api.sop._resolve_sop_for_work_order",
+				return_value=(doc or sop_doc(), "SOP-0001#1", True),
+			)
+		)
+		stack.enter_context(patch("jarz_pos.api.sop._resolve_session_user", return_value="ops@jarz"))
+		stack.enter_context(
+			patch("jarz_pos.api.sop._resolve_now_datetime", return_value="2026-08-01 09:00:00")
+		)
+		stack.enter_context(passthrough_translate())
+		mock_frappe = stack.enter_context(patch("jarz_pos.api.sop.frappe"))
+		mock_frappe.throw.side_effect = ValueError("rejected")
+		return mock_frappe
 
-    def test_a_reading_inside_the_range_is_logged(self):
-        from jarz_pos.api import sop
+	def test_a_reading_inside_the_range_is_logged(self):
+		from jarz_pos.api import sop
 
-        with ExitStack() as stack:
-            mock_frappe = self._stack(stack)
-            result = sop.record_sop_step_capture("MFG-WO-0001", 1, value="1.9")
+		with ExitStack() as stack:
+			mock_frappe = self._stack(stack)
+			result = sop.record_sop_step_capture("MFG-WO-0001", 1, value="1.9")
 
-        payload = mock_frappe.get_doc.call_args.args[0]
-        self.assertEqual("Jarz SOP Execution Log", payload["doctype"])
-        self.assertEqual("MFG-WO-0001", payload["work_order"])
-        self.assertEqual("SOP-0001#1", payload["sop_version"])
-        self.assertEqual(1, payload["step_no"])
-        self.assertEqual(1.9, payload["value_float"])
-        self.assertEqual("ops@jarz", payload["captured_by"])
-        mock_frappe.get_doc.return_value.insert.assert_called_once()
-        self.assertTrue(result["ok"])
-        self.assertEqual(1.9, result["value_float"])
+		payload = mock_frappe.get_doc.call_args.args[0]
+		self.assertEqual("Jarz SOP Execution Log", payload["doctype"])
+		self.assertEqual("MFG-WO-0001", payload["work_order"])
+		self.assertEqual("SOP-0001#1", payload["sop_version"])
+		self.assertEqual(1, payload["step_no"])
+		self.assertEqual(1.9, payload["value_float"])
+		self.assertEqual("ops@jarz", payload["captured_by"])
+		mock_frappe.get_doc.return_value.insert.assert_called_once()
+		self.assertTrue(result["ok"])
+		self.assertEqual(1.9, result["value_float"])
 
-    def test_a_reading_outside_the_range_is_rejected(self):
-        from jarz_pos.api import sop
+	def test_a_reading_outside_the_range_is_rejected(self):
+		from jarz_pos.api import sop
 
-        with ExitStack() as stack:
-            mock_frappe = self._stack(stack)
-            with self.assertRaises(ValueError):
-                sop.record_sop_step_capture("MFG-WO-0001", 1, value=9.5)
+		with ExitStack() as stack:
+			mock_frappe = self._stack(stack)
+			with self.assertRaises(ValueError):
+				sop.record_sop_step_capture("MFG-WO-0001", 1, value=9.5)
 
-        mock_frappe.get_doc.assert_not_called()
+		mock_frappe.get_doc.assert_not_called()
 
-    def test_a_non_numeric_reading_is_rejected(self):
-        from jarz_pos.api import sop
+	def test_a_non_numeric_reading_is_rejected(self):
+		from jarz_pos.api import sop
 
-        with ExitStack() as stack:
-            mock_frappe = self._stack(stack)
-            with self.assertRaises(ValueError):
-                sop.record_sop_step_capture("MFG-WO-0001", 1, value="about two")
+		with ExitStack() as stack:
+			mock_frappe = self._stack(stack)
+			with self.assertRaises(ValueError):
+				sop.record_sop_step_capture("MFG-WO-0001", 1, value="about two")
 
-        mock_frappe.get_doc.assert_not_called()
+		mock_frappe.get_doc.assert_not_called()
 
-    def test_a_missing_reading_is_rejected(self):
-        from jarz_pos.api import sop
+	def test_a_missing_reading_is_rejected(self):
+		from jarz_pos.api import sop
 
-        with ExitStack() as stack:
-            mock_frappe = self._stack(stack)
-            with self.assertRaises(ValueError):
-                sop.record_sop_step_capture("MFG-WO-0001", 1)
+		with ExitStack() as stack:
+			mock_frappe = self._stack(stack)
+			with self.assertRaises(ValueError):
+				sop.record_sop_step_capture("MFG-WO-0001", 1)
 
-        mock_frappe.get_doc.assert_not_called()
+		mock_frappe.get_doc.assert_not_called()
 
-    def test_no_bounds_configured_means_any_reading_is_accepted(self):
-        from jarz_pos.api import sop
+	def test_no_bounds_configured_means_any_reading_is_accepted(self):
+		from jarz_pos.api import sop
 
-        doc = sop_doc()
-        doc.steps[0]["capture_min"] = 0
-        doc.steps[0]["capture_max"] = 0
+		doc = sop_doc()
+		doc.steps[0]["capture_min"] = 0
+		doc.steps[0]["capture_max"] = 0
 
-        with ExitStack() as stack:
-            mock_frappe = self._stack(stack, doc=doc)
-            sop.record_sop_step_capture("MFG-WO-0001", 1, value=9999)
+		with ExitStack() as stack:
+			mock_frappe = self._stack(stack, doc=doc)
+			sop.record_sop_step_capture("MFG-WO-0001", 1, value=9999)
 
-        self.assertEqual(9999.0, mock_frappe.get_doc.call_args.args[0]["value_float"])
+		self.assertEqual(9999.0, mock_frappe.get_doc.call_args.args[0]["value_float"])
 
-    def test_a_photo_step_requires_a_file(self):
-        from jarz_pos.api import sop
+	def test_a_photo_step_requires_a_file(self):
+		from jarz_pos.api import sop
 
-        doc = sop_doc()
-        doc.steps[0]["capture_type"] = "Photo"
+		doc = sop_doc()
+		doc.steps[0]["capture_type"] = "Photo"
 
-        with ExitStack() as stack:
-            mock_frappe = self._stack(stack, doc=doc)
-            with self.assertRaises(ValueError):
-                sop.record_sop_step_capture("MFG-WO-0001", 1)
+		with ExitStack() as stack:
+			mock_frappe = self._stack(stack, doc=doc)
+			with self.assertRaises(ValueError):
+				sop.record_sop_step_capture("MFG-WO-0001", 1)
 
-        mock_frappe.get_doc.assert_not_called()
+		mock_frappe.get_doc.assert_not_called()
 
-    def test_a_photo_step_stores_the_attachment(self):
-        from jarz_pos.api import sop
+	def test_a_photo_step_stores_the_attachment(self):
+		from jarz_pos.api import sop
 
-        doc = sop_doc()
-        doc.steps[0]["capture_type"] = "Photo"
+		doc = sop_doc()
+		doc.steps[0]["capture_type"] = "Photo"
 
-        with ExitStack() as stack:
-            mock_frappe = self._stack(stack, doc=doc)
-            sop.record_sop_step_capture("MFG-WO-0001", 1, file_url="/files/proof.jpg")
+		with ExitStack() as stack:
+			mock_frappe = self._stack(stack, doc=doc)
+			sop.record_sop_step_capture("MFG-WO-0001", 1, file_url="/files/proof.jpg")
 
-        payload = mock_frappe.get_doc.call_args.args[0]
-        self.assertEqual("/files/proof.jpg", payload["attachment"])
-        self.assertIsNone(payload["value_float"])
+		payload = mock_frappe.get_doc.call_args.args[0]
+		self.assertEqual("/files/proof.jpg", payload["attachment"])
+		self.assertIsNone(payload["value_float"])
 
-    def test_a_plain_confirmation_step_records_free_text(self):
-        from jarz_pos.api import sop
+	def test_a_plain_confirmation_step_records_free_text(self):
+		from jarz_pos.api import sop
 
-        with ExitStack() as stack:
-            mock_frappe = self._stack(stack)
-            sop.record_sop_step_capture("MFG-WO-0001", 2, value="looked fine")
+		with ExitStack() as stack:
+			mock_frappe = self._stack(stack)
+			sop.record_sop_step_capture("MFG-WO-0001", 2, value="looked fine")
 
-        payload = mock_frappe.get_doc.call_args.args[0]
-        self.assertEqual("None", payload["capture_type"])
-        self.assertEqual("looked fine", payload["value_text"])
-        self.assertIsNone(payload["value_float"])
+		payload = mock_frappe.get_doc.call_args.args[0]
+		self.assertEqual("None", payload["capture_type"])
+		self.assertEqual("looked fine", payload["value_text"])
+		self.assertIsNone(payload["value_float"])
 
-    def test_an_unknown_step_is_rejected(self):
-        from jarz_pos.api import sop
+	def test_an_unknown_step_is_rejected(self):
+		from jarz_pos.api import sop
 
-        with ExitStack() as stack:
-            mock_frappe = self._stack(stack)
-            with self.assertRaises(ValueError):
-                sop.record_sop_step_capture("MFG-WO-0001", 99, value=1)
+		with ExitStack() as stack:
+			mock_frappe = self._stack(stack)
+			with self.assertRaises(ValueError):
+				sop.record_sop_step_capture("MFG-WO-0001", 99, value=1)
 
-        mock_frappe.get_doc.assert_not_called()
+		mock_frappe.get_doc.assert_not_called()
 
-    def test_a_work_order_with_no_sop_is_rejected(self):
-        from jarz_pos.api import sop
+	def test_a_work_order_with_no_sop_is_rejected(self):
+		from jarz_pos.api import sop
 
-        with ExitStack() as stack:
-            stack.enter_context(patch("jarz_pos.api.sop._ensure_production_view_access"))
-            stack.enter_context(
-                patch("jarz_pos.api.sop._resolve_work_order_row", return_value=dict(self.WO))
-            )
-            stack.enter_context(
-                patch(
-                    "jarz_pos.api.sop._resolve_sop_for_work_order",
-                    return_value=(None, None, False),
-                )
-            )
-            stack.enter_context(passthrough_translate())
-            mock_frappe = stack.enter_context(patch("jarz_pos.api.sop.frappe"))
-            mock_frappe.throw.side_effect = ValueError("no sop")
+		with ExitStack() as stack:
+			stack.enter_context(patch("jarz_pos.api.sop._ensure_production_view_access"))
+			stack.enter_context(patch("jarz_pos.api.sop._resolve_work_order_row", return_value=dict(self.WO)))
+			stack.enter_context(
+				patch(
+					"jarz_pos.api.sop._resolve_sop_for_work_order",
+					return_value=(None, None, False),
+				)
+			)
+			stack.enter_context(passthrough_translate())
+			mock_frappe = stack.enter_context(patch("jarz_pos.api.sop.frappe"))
+			mock_frappe.throw.side_effect = ValueError("no sop")
 
-            with self.assertRaises(ValueError):
-                sop.record_sop_step_capture("MFG-WO-0001", 1, value=1.9)
+			with self.assertRaises(ValueError):
+				sop.record_sop_step_capture("MFG-WO-0001", 1, value=1.9)
 
-        mock_frappe.get_doc.assert_not_called()
+		mock_frappe.get_doc.assert_not_called()
 
-    def test_requires_production_access(self):
-        from jarz_pos.api import sop
+	def test_requires_production_access(self):
+		from jarz_pos.api import sop
 
-        with patch(
-            "jarz_pos.api.sop._ensure_production_view_access",
-            side_effect=PermissionError("nope"),
-        ), patch("jarz_pos.api.sop._resolve_work_order_row") as mock_wo, patch(
-            "jarz_pos.api.sop.frappe"
-        ) as mock_frappe:
-            with self.assertRaises(PermissionError):
-                sop.record_sop_step_capture("MFG-WO-0001", 1, value=1.9)
+		with (
+			patch(
+				"jarz_pos.api.sop._ensure_production_view_access",
+				side_effect=PermissionError("nope"),
+			),
+			patch("jarz_pos.api.sop._resolve_work_order_row") as mock_wo,
+			patch("jarz_pos.api.sop.frappe") as mock_frappe,
+		):
+			with self.assertRaises(PermissionError):
+				sop.record_sop_step_capture("MFG-WO-0001", 1, value=1.9)
 
-        mock_wo.assert_not_called()
-        mock_frappe.get_doc.assert_not_called()
+		mock_wo.assert_not_called()
+		mock_frappe.get_doc.assert_not_called()
 
 
 class TestListSops(unittest.TestCase):
-    ROWS = [{"name": "SOP-0001", "item_code": "PIST-CAKE", "version": 2, "is_active": 1}]
+	ROWS = [{"name": "SOP-0001", "item_code": "PIST-CAKE", "version": 2, "is_active": 1}]
 
-    def test_active_only_is_the_default(self):
-        from jarz_pos.api import sop
+	def test_active_only_is_the_default(self):
+		from jarz_pos.api import sop
 
-        with patch("jarz_pos.api.sop._ensure_production_view_access"), patch(
-            "jarz_pos.api.sop.frappe"
-        ) as mock_frappe:
-            mock_frappe.get_all.return_value = self.ROWS
-            result = sop.list_sops()
+		with (
+			patch("jarz_pos.api.sop._ensure_production_view_access"),
+			patch("jarz_pos.api.sop.frappe") as mock_frappe,
+		):
+			mock_frappe.get_all.return_value = self.ROWS
+			result = sop.list_sops()
 
-        filters = mock_frappe.get_all.call_args.kwargs["filters"]
-        self.assertEqual({"is_active": 1}, filters)
-        self.assertEqual(1, result["count"])
+		filters = mock_frappe.get_all.call_args.kwargs["filters"]
+		self.assertEqual({"is_active": 1}, filters)
+		self.assertEqual(1, result["count"])
 
-    def test_active_only_zero_returns_every_version(self):
-        from jarz_pos.api import sop
+	def test_active_only_zero_returns_every_version(self):
+		from jarz_pos.api import sop
 
-        with patch("jarz_pos.api.sop._ensure_production_view_access"), patch(
-            "jarz_pos.api.sop.frappe"
-        ) as mock_frappe:
-            mock_frappe.get_all.return_value = self.ROWS
-            sop.list_sops(active_only=0)
+		with (
+			patch("jarz_pos.api.sop._ensure_production_view_access"),
+			patch("jarz_pos.api.sop.frappe") as mock_frappe,
+		):
+			mock_frappe.get_all.return_value = self.ROWS
+			sop.list_sops(active_only=0)
 
-        self.assertEqual({}, mock_frappe.get_all.call_args.kwargs["filters"])
+		self.assertEqual({}, mock_frappe.get_all.call_args.kwargs["filters"])
 
-    def test_item_code_narrows_the_list(self):
-        from jarz_pos.api import sop
+	def test_item_code_narrows_the_list(self):
+		from jarz_pos.api import sop
 
-        with patch("jarz_pos.api.sop._ensure_production_view_access"), patch(
-            "jarz_pos.api.sop.frappe"
-        ) as mock_frappe:
-            mock_frappe.get_all.return_value = self.ROWS
-            sop.list_sops(item_code="PIST-CAKE", active_only="0")
+		with (
+			patch("jarz_pos.api.sop._ensure_production_view_access"),
+			patch("jarz_pos.api.sop.frappe") as mock_frappe,
+		):
+			mock_frappe.get_all.return_value = self.ROWS
+			sop.list_sops(item_code="PIST-CAKE", active_only="0")
 
-        self.assertEqual(
-            {"item_code": "PIST-CAKE"}, mock_frappe.get_all.call_args.kwargs["filters"]
-        )
+		self.assertEqual({"item_code": "PIST-CAKE"}, mock_frappe.get_all.call_args.kwargs["filters"])
 
-    def test_requires_production_access(self):
-        from jarz_pos.api import sop
+	def test_requires_production_access(self):
+		from jarz_pos.api import sop
 
-        with patch(
-            "jarz_pos.api.sop._ensure_production_view_access",
-            side_effect=PermissionError("nope"),
-        ), patch("jarz_pos.api.sop.frappe") as mock_frappe:
-            with self.assertRaises(PermissionError):
-                sop.list_sops()
+		with (
+			patch(
+				"jarz_pos.api.sop._ensure_production_view_access",
+				side_effect=PermissionError("nope"),
+			),
+			patch("jarz_pos.api.sop.frappe") as mock_frappe,
+		):
+			with self.assertRaises(PermissionError):
+				sop.list_sops()
 
-        mock_frappe.get_all.assert_not_called()
+		mock_frappe.get_all.assert_not_called()
 
 
 def _sop_with_instruction(instruction, **overrides):
-    return sop_doc(
-        steps=[
-            StubRow(
-                step_no=1,
-                idx=1,
-                title="Make it",
-                instruction=instruction,
-                image=None,
-                duration_mins=5,
-                scaling_mode="Fixed",
-                requires_confirmation=0,
-                capture_type="None",
-                capture_label=None,
-                capture_min=0,
-                capture_max=0,
-            )
-        ],
-        **overrides,
-    )
+	return sop_doc(
+		steps=[
+			StubRow(
+				step_no=1,
+				idx=1,
+				title="Make it",
+				instruction=instruction,
+				image=None,
+				duration_mins=5,
+				scaling_mode="Fixed",
+				requires_confirmation=0,
+				capture_type="None",
+				capture_label=None,
+				capture_min=0,
+				capture_max=0,
+			)
+		],
+		**overrides,
+	)
 
 
 # A Tiramisu Large jar (BOM quantity 1): the phantom Cheesecake Mix is a direct
 # line, and ERPNext's reader explodes it into its raw ingredients, one of which
 # is the SAME powder sugar the jar carries on its own.
 JAR_DIRECT_LINES = [
-    {"item_code": "Coffee beans", "item_name": "Coffee beans", "stock_qty": 0.008, "stock_uom": "Kg"},
-    {"item_code": "powder sugar", "item_name": "powder sugar", "stock_qty": 0.0072, "stock_uom": "Kg"},
-    {"item_code": "Cheesecake Mix", "item_name": "Cheesecake Mix", "stock_qty": 0.0898, "stock_uom": "Kg"},
+	{"item_code": "Coffee beans", "item_name": "Coffee beans", "stock_qty": 0.008, "stock_uom": "Kg"},
+	{"item_code": "powder sugar", "item_name": "powder sugar", "stock_qty": 0.0072, "stock_uom": "Kg"},
+	{"item_code": "Cheesecake Mix", "item_name": "Cheesecake Mix", "stock_qty": 0.0898, "stock_uom": "Kg"},
 ]
 JAR_EXPLODED_ROWS = [
-    {"item_code": "Coffee beans", "item_name": "Coffee beans", "uom": "Kg", "required_qty": 0.008},
-    {"item_code": "powder sugar", "item_name": "powder sugar", "uom": "Kg", "required_qty": 0.0072 + 0.0141},
-    {"item_code": "Milkana", "item_name": "Milkana", "uom": "Kg", "required_qty": 0.0236},
+	{"item_code": "Coffee beans", "item_name": "Coffee beans", "uom": "Kg", "required_qty": 0.008},
+	{"item_code": "powder sugar", "item_name": "powder sugar", "uom": "Kg", "required_qty": 0.0072 + 0.0141},
+	{"item_code": "Milkana", "item_name": "Milkana", "uom": "Kg", "required_qty": 0.0236},
 ]
 
 
 class TestComponentMaps(SopApiTestCase):
-    """``_build_component_maps``: direct BOM lines first, reader fills the gaps."""
+	"""``_build_component_maps``: direct BOM lines first, reader fills the gaps."""
 
-    def test_a_phantom_sub_assembly_resolves_as_itself(self):
-        from jarz_pos.api import sop
+	def test_a_phantom_sub_assembly_resolves_as_itself(self):
+		from jarz_pos.api import sop
 
-        with ExitStack() as stack:
-            self._stack(stack, direct_rows=JAR_DIRECT_LINES, material_rows=JAR_EXPLODED_ROWS)
-            qty, uom, name = sop._build_component_maps("BOM-JAR", "Jarz Co", 1.0)
+		with ExitStack() as stack:
+			self._stack(stack, direct_rows=JAR_DIRECT_LINES, material_rows=JAR_EXPLODED_ROWS)
+			qty, uom, name = sop._build_component_maps("BOM-JAR", "Jarz Co", 1.0)
 
-        self.assertAlmostEqual(0.0898, qty["Cheesecake Mix"])
-        self.assertEqual("Kg", uom["Cheesecake Mix"])
-        self.assertEqual("Cheesecake Mix", name["Cheesecake Mix"])
+		self.assertAlmostEqual(0.0898, qty["Cheesecake Mix"])
+		self.assertEqual("Kg", uom["Cheesecake Mix"])
+		self.assertEqual("Cheesecake Mix", name["Cheesecake Mix"])
 
-    def test_a_direct_line_is_quoted_from_the_direct_line_only(self):
-        # The reader reports 21.3 g of sugar for this jar (7.2 g + the 14.1 g
-        # inside the phantom mix).  The kitchen must be told 7.2 g.
-        from jarz_pos.api import sop
+	def test_a_direct_line_is_quoted_from_the_direct_line_only(self):
+		# The reader reports 21.3 g of sugar for this jar (7.2 g + the 14.1 g
+		# inside the phantom mix).  The kitchen must be told 7.2 g.
+		from jarz_pos.api import sop
 
-        with ExitStack() as stack:
-            self._stack(stack, direct_rows=JAR_DIRECT_LINES, material_rows=JAR_EXPLODED_ROWS)
-            qty, _, _ = sop._build_component_maps("BOM-JAR", "Jarz Co", 1.0)
+		with ExitStack() as stack:
+			self._stack(stack, direct_rows=JAR_DIRECT_LINES, material_rows=JAR_EXPLODED_ROWS)
+			qty, _, _ = sop._build_component_maps("BOM-JAR", "Jarz Co", 1.0)
 
-        self.assertAlmostEqual(0.0072, qty["powder sugar"])
+		self.assertAlmostEqual(0.0072, qty["powder sugar"])
 
-    def test_raw_ingredients_only_inside_the_phantom_still_resolve(self):
-        from jarz_pos.api import sop
+	def test_raw_ingredients_only_inside_the_phantom_still_resolve(self):
+		from jarz_pos.api import sop
 
-        with ExitStack() as stack:
-            self._stack(stack, direct_rows=JAR_DIRECT_LINES, material_rows=JAR_EXPLODED_ROWS)
-            qty, uom, name = sop._build_component_maps("BOM-JAR", "Jarz Co", 1.0)
+		with ExitStack() as stack:
+			self._stack(stack, direct_rows=JAR_DIRECT_LINES, material_rows=JAR_EXPLODED_ROWS)
+			qty, uom, name = sop._build_component_maps("BOM-JAR", "Jarz Co", 1.0)
 
-        self.assertAlmostEqual(0.0236, qty["Milkana"])
-        self.assertEqual("Kg", uom["Milkana"])
-        self.assertEqual("Milkana", name["Milkana"])
+		self.assertAlmostEqual(0.0236, qty["Milkana"])
+		self.assertEqual("Kg", uom["Milkana"])
+		self.assertEqual("Milkana", name["Milkana"])
 
-    def test_duplicate_direct_lines_are_summed(self):
-        from jarz_pos.api import sop
+	def test_duplicate_direct_lines_are_summed(self):
+		from jarz_pos.api import sop
 
-        rows = [
-            {"item_code": "FLOUR", "item_name": "Cake flour", "stock_qty": 0.3, "stock_uom": "Kg"},
-            {"item_code": "FLOUR", "item_name": "Cake flour", "stock_qty": 0.2, "stock_uom": "Kg"},
-        ]
-        with ExitStack() as stack:
-            self._stack(stack, direct_rows=rows, material_rows=[])
-            qty, _, _ = sop._build_component_maps("BOM-X", "Jarz Co", 1.0)
+		rows = [
+			{"item_code": "FLOUR", "item_name": "Cake flour", "stock_qty": 0.3, "stock_uom": "Kg"},
+			{"item_code": "FLOUR", "item_name": "Cake flour", "stock_qty": 0.2, "stock_uom": "Kg"},
+		]
+		with ExitStack() as stack:
+			self._stack(stack, direct_rows=rows, material_rows=[])
+			qty, _, _ = sop._build_component_maps("BOM-X", "Jarz Co", 1.0)
 
-        self.assertAlmostEqual(0.5, qty["FLOUR"])
+		self.assertAlmostEqual(0.5, qty["FLOUR"])
 
-    def test_the_reader_is_still_asked_for_one_unexploded_batch(self):
-        from jarz_pos.api import sop
+	def test_the_reader_is_still_asked_for_one_unexploded_batch(self):
+		from jarz_pos.api import sop
 
-        with ExitStack() as stack:
-            mocks = self._stack(stack, direct_rows=JAR_DIRECT_LINES, material_rows=JAR_EXPLODED_ROWS)
-            sop._build_component_maps("BOM-JAR", "Jarz Co", 4.0)
+		with ExitStack() as stack:
+			mocks = self._stack(stack, direct_rows=JAR_DIRECT_LINES, material_rows=JAR_EXPLODED_ROWS)
+			sop._build_component_maps("BOM-JAR", "Jarz Co", 4.0)
 
-        mocks["materials"].return_value.assert_called_once_with(
-            "BOM-JAR", "Jarz Co", 4.0, fetch_exploded=0
-        )
-        mocks["direct"].assert_called_once_with("BOM-JAR")
+		mocks["materials"].return_value.assert_called_once_with("BOM-JAR", "Jarz Co", 4.0, fetch_exploded=0)
+		mocks["direct"].assert_called_once_with("BOM-JAR")
 
-    def test_a_failed_direct_read_logs_and_falls_back_to_the_reader(self):
-        from jarz_pos.api import sop
+	def test_a_failed_direct_read_logs_and_falls_back_to_the_reader(self):
+		from jarz_pos.api import sop
 
-        with ExitStack() as stack:
-            mocks = self._stack(stack)
-            mocks["direct"].side_effect = Exception("BOM Item unreadable")
-            qty, _, _ = sop._build_component_maps("BOM-PIST-CAKE-001", "Jarz Co", 10.0)
+		with ExitStack() as stack:
+			mocks = self._stack(stack)
+			mocks["direct"].side_effect = Exception("BOM Item unreadable")
+			qty, _, _ = sop._build_component_maps("BOM-PIST-CAKE-001", "Jarz Co", 10.0)
 
-        self.assertEqual({"PIST-SPR": 1.83, "FLOUR": 0.5}, qty)
-        titles = [c.kwargs.get("title") for c in mocks["frappe"].log_error.call_args_list]
-        self.assertIn("JARZ SOP – BOM direct lines read failed", titles)
+		self.assertEqual({"PIST-SPR": 1.83, "FLOUR": 0.5}, qty)
+		titles = [c.kwargs.get("title") for c in mocks["frappe"].log_error.call_args_list]
+		self.assertIn("JARZ SOP – BOM direct lines read failed", titles)
 
-    def test_a_failed_reader_keeps_the_direct_lines_and_logs(self):
-        from jarz_pos.api import sop
+	def test_a_failed_reader_keeps_the_direct_lines_and_logs(self):
+		from jarz_pos.api import sop
 
-        with ExitStack() as stack:
-            mocks = self._stack(stack, direct_rows=JAR_DIRECT_LINES)
-            mocks["materials"].return_value.side_effect = Exception("explode failed")
-            qty, _, _ = sop._build_component_maps("BOM-JAR", "Jarz Co", 1.0)
+		with ExitStack() as stack:
+			mocks = self._stack(stack, direct_rows=JAR_DIRECT_LINES)
+			mocks["materials"].return_value.side_effect = Exception("explode failed")
+			qty, _, _ = sop._build_component_maps("BOM-JAR", "Jarz Co", 1.0)
 
-        self.assertEqual({"Coffee beans", "powder sugar", "Cheesecake Mix"}, set(qty))
-        titles = [c.kwargs.get("title") for c in mocks["frappe"].log_error.call_args_list]
-        self.assertIn("JARZ SOP – BOM component read failed", titles)
+		self.assertEqual({"Coffee beans", "powder sugar", "Cheesecake Mix"}, set(qty))
+		titles = [c.kwargs.get("title") for c in mocks["frappe"].log_error.call_args_list]
+		self.assertIn("JARZ SOP – BOM component read failed", titles)
 
-    def test_no_bom_means_empty_maps_and_no_reads(self):
-        from jarz_pos.api import sop
+	def test_no_bom_means_empty_maps_and_no_reads(self):
+		from jarz_pos.api import sop
 
-        with ExitStack() as stack:
-            mocks = self._stack(stack)
-            result = sop._build_component_maps(None, None, 1.0)
+		with ExitStack() as stack:
+			mocks = self._stack(stack)
+			result = sop._build_component_maps(None, None, 1.0)
 
-        self.assertEqual(({}, {}, {}), result)
-        mocks["direct"].assert_not_called()
+		self.assertEqual(({}, {}, {}), result)
+		mocks["direct"].assert_not_called()
 
-    def test_the_direct_resolver_reads_one_level_of_bom_item_rows(self):
-        from jarz_pos.api import sop
+	def test_the_direct_resolver_reads_one_level_of_bom_item_rows(self):
+		from jarz_pos.api import sop
 
-        with patch("jarz_pos.api.sop.frappe") as mock_frappe:
-            mock_frappe.get_all.return_value = [{"item_code": "A", "stock_qty": 1}]
-            rows = sop._resolve_direct_bom_lines("BOM-JAR")
+		with patch("jarz_pos.api.sop.frappe") as mock_frappe:
+			mock_frappe.get_all.return_value = [{"item_code": "A", "stock_qty": 1}]
+			rows = sop._resolve_direct_bom_lines("BOM-JAR")
 
-        self.assertEqual([{"item_code": "A", "stock_qty": 1}], rows)
-        args, kwargs = mock_frappe.get_all.call_args
-        self.assertEqual("BOM Item", args[0])
-        self.assertEqual({"parent": "BOM-JAR", "parenttype": "BOM"}, kwargs["filters"])
-        self.assertIn("stock_qty", kwargs["fields"])
-        self.assertIn("stock_uom", kwargs["fields"])
+		self.assertEqual([{"item_code": "A", "stock_qty": 1}], rows)
+		args, kwargs = mock_frappe.get_all.call_args
+		self.assertEqual("BOM Item", args[0])
+		self.assertEqual({"parent": "BOM-JAR", "parenttype": "BOM"}, kwargs["filters"])
+		self.assertIn("stock_qty", kwargs["fields"])
+		self.assertIn("stock_uom", kwargs["fields"])
 
-    def test_a_tiramisu_sop_quotes_the_jar_lines_not_the_exploded_mix(self):
-        # End to end through the payload builder: 10 jars of the Large.
-        from jarz_pos.api import sop
+	def test_a_tiramisu_sop_quotes_the_jar_lines_not_the_exploded_mix(self):
+		# End to end through the payload builder: 10 jars of the Large.
+		from jarz_pos.api import sop
 
-        doc = _sop_with_instruction(
-            "{{item:Coffee beans|grams}} / {{item:Coffee beans|grams|x3}} / "
-            "{{item:powder sugar|grams}} / {{item:Cheesecake Mix|grams}}"
-        )
-        with ExitStack() as stack:
-            self._stack(
-                stack,
-                doc=doc,
-                bom_row={"quantity": 1, "company": "Jarz Co"},
-                direct_rows=JAR_DIRECT_LINES,
-                material_rows=JAR_EXPLODED_ROWS,
-            )
-            result = sop.get_sop_for_item("Tiramisu Large", batches=10)
+		doc = _sop_with_instruction(
+			"{{item:Coffee beans|grams}} / {{item:Coffee beans|grams|x3}} / "
+			"{{item:powder sugar|grams}} / {{item:Cheesecake Mix|grams}}"
+		)
+		with ExitStack() as stack:
+			self._stack(
+				stack,
+				doc=doc,
+				bom_row={"quantity": 1, "company": "Jarz Co"},
+				direct_rows=JAR_DIRECT_LINES,
+				material_rows=JAR_EXPLODED_ROWS,
+			)
+			result = sop.get_sop_for_item("Tiramisu Large", batches=10)
 
-        self.assertEqual([], result["unresolved_tokens"])
-        self.assertEqual(
-            "80 g / 240 g / 72 g / 898 g", result["steps"][0]["instruction_text"]
-        )
+		self.assertEqual([], result["unresolved_tokens"])
+		self.assertEqual("80 g / 240 g / 72 g / 898 g", result["steps"][0]["instruction_text"])
 
 
 class TestBomPrecedence(SopApiTestCase):
-    """explicit ``bom`` -> the item's current default BOM -> the SOP's own link."""
+	"""explicit ``bom`` -> the item's current default BOM -> the SOP's own link."""
 
-    def test_the_current_default_bom_beats_the_sops_linked_bom(self):
-        # BOM-...-003 replaced -002; the SOP still links -002.
-        from jarz_pos.api import sop
+	def test_the_current_default_bom_beats_the_sops_linked_bom(self):
+		# BOM-...-003 replaced -002; the SOP still links -002.
+		from jarz_pos.api import sop
 
-        doc = sop_doc(bom="BOM-Tiramisu Large-002")
-        with ExitStack() as stack:
-            mocks = self._stack(stack, doc=doc, default_bom="BOM-Tiramisu Large-003")
-            result = sop.get_sop_for_item("PIST-CAKE")
+		doc = sop_doc(bom="BOM-Tiramisu Large-002")
+		with ExitStack() as stack:
+			mocks = self._stack(stack, doc=doc, default_bom="BOM-Tiramisu Large-003")
+			result = sop.get_sop_for_item("PIST-CAKE")
 
-        self.assertEqual("BOM-Tiramisu Large-003", result["bom"])
-        mocks["bom"].assert_called_once_with("BOM-Tiramisu Large-003")
-        mocks["direct"].assert_called_once_with("BOM-Tiramisu Large-003")
+		self.assertEqual("BOM-Tiramisu Large-003", result["bom"])
+		mocks["bom"].assert_called_once_with("BOM-Tiramisu Large-003")
+		mocks["direct"].assert_called_once_with("BOM-Tiramisu Large-003")
 
-    def test_an_explicit_bom_beats_the_default_bom(self):
-        from jarz_pos.api import sop
+	def test_an_explicit_bom_beats_the_default_bom(self):
+		from jarz_pos.api import sop
 
-        with ExitStack() as stack:
-            mocks = self._stack(stack, default_bom="BOM-DEFAULT")
-            result = sop.get_sop_for_item("PIST-CAKE", bom="BOM-OVERRIDE")
+		with ExitStack() as stack:
+			mocks = self._stack(stack, default_bom="BOM-DEFAULT")
+			result = sop.get_sop_for_item("PIST-CAKE", bom="BOM-OVERRIDE")
 
-        self.assertEqual("BOM-OVERRIDE", result["bom"])
-        mocks["default_bom"].assert_not_called()
+		self.assertEqual("BOM-OVERRIDE", result["bom"])
+		mocks["default_bom"].assert_not_called()
 
-    def test_the_sops_linked_bom_is_the_last_resort(self):
-        from jarz_pos.api import sop
+	def test_the_sops_linked_bom_is_the_last_resort(self):
+		from jarz_pos.api import sop
 
-        with ExitStack() as stack:
-            self._stack(stack, doc=sop_doc(bom="BOM-LINKED"), default_bom=None)
-            result = sop.get_sop_for_item("PIST-CAKE")
+		with ExitStack() as stack:
+			self._stack(stack, doc=sop_doc(bom="BOM-LINKED"), default_bom=None)
+			result = sop.get_sop_for_item("PIST-CAKE")
 
-        self.assertEqual("BOM-LINKED", result["bom"])
+		self.assertEqual("BOM-LINKED", result["bom"])
 
-    def test_the_work_order_bom_is_not_replaced_by_the_default(self):
-        # A batch is quoted against what it was made from, even once superseded.
-        from jarz_pos.api import sop
+	def test_the_work_order_bom_is_not_replaced_by_the_default(self):
+		# A batch is quoted against what it was made from, even once superseded.
+		from jarz_pos.api import sop
 
-        wo = {
-            "name": "MFG-WO-0002",
-            "production_item": "PIST-CAKE",
-            "qty": 10,
-            "bom_no": "BOM-WO-OLD",
-            "company": "Jarz Co",
-            "jarz_sop_version": None,
-        }
-        with ExitStack() as stack:
-            self._stack(stack, default_bom="BOM-NEWER")
-            stack.enter_context(
-                patch("jarz_pos.api.sop._resolve_work_order_row", return_value=wo)
-            )
-            result = sop.get_sop_for_work_order("MFG-WO-0002")
+		wo = {
+			"name": "MFG-WO-0002",
+			"production_item": "PIST-CAKE",
+			"qty": 10,
+			"bom_no": "BOM-WO-OLD",
+			"company": "Jarz Co",
+			"jarz_sop_version": None,
+		}
+		with ExitStack() as stack:
+			self._stack(stack, default_bom="BOM-NEWER")
+			stack.enter_context(patch("jarz_pos.api.sop._resolve_work_order_row", return_value=wo))
+			result = sop.get_sop_for_work_order("MFG-WO-0002")
 
-        self.assertEqual("BOM-WO-OLD", result["bom"])
+		self.assertEqual("BOM-WO-OLD", result["bom"])
 
 
 class TestListItemsWithSop(unittest.TestCase):
-    def test_returns_sorted_distinct_item_codes_of_active_sops(self):
-        from jarz_pos.api import sop
+	def test_returns_sorted_distinct_item_codes_of_active_sops(self):
+		from jarz_pos.api import sop
 
-        with patch("jarz_pos.api.sop._ensure_production_view_access"), patch(
-            "jarz_pos.api.sop.frappe"
-        ) as mock_frappe:
-            mock_frappe.get_all.return_value = [
-                "Tiramisu Medium",
-                "Savoiardi",
-                "Tiramisu Medium",
-                "Tiramisu Large",
-                "",
-                None,
-            ]
-            result = sop.list_items_with_sop()
+		with (
+			patch("jarz_pos.api.sop._ensure_production_view_access"),
+			patch("jarz_pos.api.sop.frappe") as mock_frappe,
+		):
+			mock_frappe.get_all.return_value = [
+				"Tiramisu Medium",
+				"Savoiardi",
+				"Tiramisu Medium",
+				"Tiramisu Large",
+				"",
+				None,
+			]
+			result = sop.list_items_with_sop()
 
-        self.assertEqual(
-            {"item_codes": ["Savoiardi", "Tiramisu Large", "Tiramisu Medium"]}, result
-        )
-        kwargs = mock_frappe.get_all.call_args.kwargs
-        self.assertEqual({"is_active": 1}, kwargs["filters"])
-        self.assertEqual("item_code", kwargs["pluck"])
+		self.assertEqual({"item_codes": ["Savoiardi", "Tiramisu Large", "Tiramisu Medium"]}, result)
+		kwargs = mock_frappe.get_all.call_args.kwargs
+		self.assertEqual({"is_active": 1}, kwargs["filters"])
+		self.assertEqual("item_code", kwargs["pluck"])
 
-    def test_no_active_sops_is_an_empty_list(self):
-        from jarz_pos.api import sop
+	def test_no_active_sops_is_an_empty_list(self):
+		from jarz_pos.api import sop
 
-        with patch("jarz_pos.api.sop._ensure_production_view_access"), patch(
-            "jarz_pos.api.sop.frappe"
-        ) as mock_frappe:
-            mock_frappe.get_all.return_value = []
-            result = sop.list_items_with_sop()
+		with (
+			patch("jarz_pos.api.sop._ensure_production_view_access"),
+			patch("jarz_pos.api.sop.frappe") as mock_frappe,
+		):
+			mock_frappe.get_all.return_value = []
+			result = sop.list_items_with_sop()
 
-        self.assertEqual({"item_codes": []}, result)
+		self.assertEqual({"item_codes": []}, result)
 
-    def test_requires_production_access(self):
-        from jarz_pos.api import sop
+	def test_requires_production_access(self):
+		from jarz_pos.api import sop
 
-        with patch(
-            "jarz_pos.api.sop._ensure_production_view_access",
-            side_effect=PermissionError("nope"),
-        ), patch("jarz_pos.api.sop.frappe") as mock_frappe:
-            with self.assertRaises(PermissionError):
-                sop.list_items_with_sop()
+		with (
+			patch(
+				"jarz_pos.api.sop._ensure_production_view_access",
+				side_effect=PermissionError("nope"),
+			),
+			patch("jarz_pos.api.sop.frappe") as mock_frappe,
+		):
+			with self.assertRaises(PermissionError):
+				sop.list_items_with_sop()
 
-        mock_frappe.get_all.assert_not_called()
+		mock_frappe.get_all.assert_not_called()
 
 
 class TestAccessGate(unittest.TestCase):
-    def test_jarz_manager_is_admitted(self):
-        from jarz_pos.api import sop
+	def test_jarz_manager_is_admitted(self):
+		from jarz_pos.api import sop
 
-        with patch("jarz_pos.api.sop.frappe") as mock_frappe:
-            mock_frappe.get_roles.return_value = ["JARZ Manager"]
-            sop._ensure_production_view_access()
+		with patch("jarz_pos.api.sop.frappe") as mock_frappe:
+			mock_frappe.get_roles.return_value = ["JARZ Manager"]
+			sop._ensure_production_view_access()
 
-        mock_frappe.throw.assert_not_called()
+		mock_frappe.throw.assert_not_called()
 
-    def test_an_unrelated_role_is_rejected(self):
-        from jarz_pos.api import sop
+	def test_an_unrelated_role_is_rejected(self):
+		from jarz_pos.api import sop
 
-        with passthrough_translate(), patch("jarz_pos.api.sop.frappe") as mock_frappe:
-            mock_frappe.get_roles.return_value = ["Sales User"]
-            mock_frappe.throw.side_effect = PermissionError("denied")
+		with passthrough_translate(), patch("jarz_pos.api.sop.frappe") as mock_frappe:
+			mock_frappe.get_roles.return_value = ["Sales User"]
+			mock_frappe.throw.side_effect = PermissionError("denied")
 
-            with self.assertRaises(PermissionError):
-                sop._ensure_production_view_access()
+			with self.assertRaises(PermissionError):
+				sop._ensure_production_view_access()
 
 
 # ── Recipe sheet ────────────────────────────────────────────────────────
@@ -970,233 +969,249 @@ class TestAccessGate(unittest.TestCase):
 # A two-step "jar" SOP shared by two sizes: one bowl step quoting the whole
 # run, one ``|each`` step quoting one jar.  Per-jar BOM lines in Kg, BOM qty 1.
 JAR_STEPS = [
-    StubRow(
-        step_no=1,
-        title="Make the cream",
-        instruction="<p>Mix {{item:MIX|grams}} with {{item:SUGAR|grams}} = {{item:MIX+SUGAR|grams}}.</p>",
-        scaling_mode="Fixed",
-        capture_label="Cream weighed (g)",
-    ),
-    StubRow(
-        step_no=2,
-        title="Fill each jar",
-        instruction="<p>{{item:MIX+SUGAR|grams|each}} cream, {{item:COCOA|grams|each}} cocoa.</p>",
-        scaling_mode="Per Unit",
-        capture_label=None,
-    ),
+	StubRow(
+		step_no=1,
+		title="Make the cream",
+		instruction="<p>Mix {{item:MIX|grams}} with {{item:SUGAR|grams}} = {{item:MIX+SUGAR|grams}}.</p>",
+		scaling_mode="Fixed",
+		capture_label="Cream weighed (g)",
+	),
+	StubRow(
+		step_no=2,
+		title="Fill each jar",
+		instruction="<p>{{item:MIX+SUGAR|grams|each}} cream, {{item:COCOA|grams|each}} cocoa.</p>",
+		scaling_mode="Per Unit",
+		capture_label=None,
+	),
 ]
 
 JAR_BOM_LINES = {
-    "BOM-L": [
-        {"item_code": "MIX", "item_name": "Cheesecake Mix", "stock_qty": 0.0898, "stock_uom": "Kg"},
-        {"item_code": "SUGAR", "item_name": "Powder sugar", "stock_qty": 0.0072, "stock_uom": "Kg"},
-        {"item_code": "COCOA", "item_name": "Cocoa", "stock_qty": 0.003, "stock_uom": "Kg"},
-    ],
-    "BOM-M": [
-        {"item_code": "MIX", "item_name": "Cheesecake Mix", "stock_qty": 0.0652, "stock_uom": "Kg"},
-        {"item_code": "SUGAR", "item_name": "Powder sugar", "stock_qty": 0.0048, "stock_uom": "Kg"},
-        {"item_code": "COCOA", "item_name": "Cocoa", "stock_qty": 0.002, "stock_uom": "Kg"},
-    ],
-    "BOM-PIST-CAKE-001": [],
+	"BOM-L": [
+		{"item_code": "MIX", "item_name": "Cheesecake Mix", "stock_qty": 0.0898, "stock_uom": "Kg"},
+		{"item_code": "SUGAR", "item_name": "Powder sugar", "stock_qty": 0.0072, "stock_uom": "Kg"},
+		{"item_code": "COCOA", "item_name": "Cocoa", "stock_qty": 0.003, "stock_uom": "Kg"},
+	],
+	"BOM-M": [
+		{"item_code": "MIX", "item_name": "Cheesecake Mix", "stock_qty": 0.0652, "stock_uom": "Kg"},
+		{"item_code": "SUGAR", "item_name": "Powder sugar", "stock_qty": 0.0048, "stock_uom": "Kg"},
+		{"item_code": "COCOA", "item_name": "Cocoa", "stock_qty": 0.002, "stock_uom": "Kg"},
+	],
+	"BOM-PIST-CAKE-001": [],
 }
 
 SHEET_SOPS = {"TIRA-L": "SOP-L", "TIRA-M": "SOP-M", "PIST-CAKE": "SOP-CAKE"}
 
 
 def sheet_doc(name):
-    if name == "SOP-CAKE":
-        return sop_doc(name="SOP-CAKE", steps=[sop_doc().steps[1]])
-    item_code, item_name = {"SOP-L": ("TIRA-L", "Tiramisu Large"), "SOP-M": ("TIRA-M", "Tiramisu Medium")}[name]
-    return StubDoc(
-        name=name,
-        item_code=item_code,
-        item_name=item_name,
-        bom=None,
-        version=2,
-        yield_percent=100,
-        prep_time_mins=30,
-        equipment="",
-        steps=JAR_STEPS,
-    )
+	if name == "SOP-CAKE":
+		return sop_doc(name="SOP-CAKE", steps=[sop_doc().steps[1]])
+	item_code, item_name = {"SOP-L": ("TIRA-L", "Tiramisu Large"), "SOP-M": ("TIRA-M", "Tiramisu Medium")}[
+		name
+	]
+	return StubDoc(
+		name=name,
+		item_code=item_code,
+		item_name=item_name,
+		bom=None,
+		version=2,
+		yield_percent=100,
+		prep_time_mins=30,
+		equipment="",
+		steps=JAR_STEPS,
+	)
 
 
 class TestRecipeSheet(unittest.TestCase):
-    def _call(self, lines, *, active=None, inner_rows=None):
-        from jarz_pos.api import sop
+	def _call(self, lines, *, active=None, inner_rows=None):
+		from jarz_pos.api import sop
 
-        with ExitStack() as stack:
-            stack.enter_context(patch("jarz_pos.api.sop._ensure_production_view_access"))
-            mock_frappe = stack.enter_context(patch("jarz_pos.api.sop.frappe"))
-            mock_frappe.throw.side_effect = ValueError
-            stack.enter_context(passthrough_translate())
-            stack.enter_context(
-                patch(
-                    "jarz_pos.api.sop._resolve_active_sop",
-                    side_effect=active or (lambda code: SHEET_SOPS.get(code)),
-                )
-            )
-            stack.enter_context(patch("jarz_pos.api.sop._resolve_sop_doc", side_effect=sheet_doc))
-            stack.enter_context(
-                patch(
-                    "jarz_pos.api.sop._resolve_default_bom",
-                    side_effect=lambda code: {"TIRA-L": "BOM-L", "TIRA-M": "BOM-M"}.get(code),
-                )
-            )
-            stack.enter_context(
-                patch("jarz_pos.api.sop._resolve_bom_row", return_value={"quantity": 1, "company": "Jarz Co"})
-            )
-            stack.enter_context(
-                patch("jarz_pos.api.sop._resolve_direct_bom_lines", side_effect=lambda bom: JAR_BOM_LINES[bom])
-            )
-            stack.enter_context(
-                patch(
-                    "jarz_pos.api.sop._resolve_required_material_rows",
-                    return_value=MagicMock(return_value=inner_rows or []),
-                )
-            )
-            stack.enter_context(patch("jarz_pos.api.sop._resolve_strip_html", return_value=fake_strip_html))
-            result = sop.get_recipe_sheet(lines)
-        return result, mock_frappe
+		with ExitStack() as stack:
+			stack.enter_context(patch("jarz_pos.api.sop._ensure_production_view_access"))
+			mock_frappe = stack.enter_context(patch("jarz_pos.api.sop.frappe"))
+			mock_frappe.throw.side_effect = ValueError
+			stack.enter_context(passthrough_translate())
+			stack.enter_context(
+				patch(
+					"jarz_pos.api.sop._resolve_active_sop",
+					side_effect=active or (lambda code: SHEET_SOPS.get(code)),
+				)
+			)
+			stack.enter_context(patch("jarz_pos.api.sop._resolve_sop_doc", side_effect=sheet_doc))
+			stack.enter_context(
+				patch(
+					"jarz_pos.api.sop._resolve_default_bom",
+					side_effect=lambda code: {"TIRA-L": "BOM-L", "TIRA-M": "BOM-M"}.get(code),
+				)
+			)
+			stack.enter_context(
+				patch("jarz_pos.api.sop._resolve_bom_row", return_value={"quantity": 1, "company": "Jarz Co"})
+			)
+			stack.enter_context(
+				patch(
+					"jarz_pos.api.sop._resolve_direct_bom_lines", side_effect=lambda bom: JAR_BOM_LINES[bom]
+				)
+			)
+			stack.enter_context(
+				patch(
+					"jarz_pos.api.sop._resolve_required_material_rows",
+					return_value=MagicMock(return_value=inner_rows or []),
+				)
+			)
+			stack.enter_context(patch("jarz_pos.api.sop._resolve_strip_html", return_value=fake_strip_html))
+			result = sop.get_recipe_sheet(lines)
+		return result, mock_frappe
 
-    def tiramisu(self, result):
-        return next(sheet for sheet in result["sheets"] if sheet["title"] == "Tiramisu")
+	def tiramisu(self, result):
+		return next(sheet for sheet in result["sheets"] if sheet["title"] == "Tiramisu")
 
-    def test_sizes_with_the_same_steps_share_one_sheet(self):
-        result, _ = self._call([{"item_code": "TIRA-M", "qty": 5}, {"item_code": "TIRA-L", "qty": 10}])
+	def test_sizes_with_the_same_steps_share_one_sheet(self):
+		result, _ = self._call([{"item_code": "TIRA-M", "qty": 5}, {"item_code": "TIRA-L", "qty": 10}])
 
-        self.assertEqual(1, len(result["sheets"]))
-        sheet = result["sheets"][0]
-        self.assertEqual("Tiramisu", sheet["title"])
-        self.assertEqual(["SOP-L", "SOP-M"], sheet["sops"])
-        self.assertEqual(15, sheet["total_qty"])
-        # Biggest jar first, whatever order the lines came in.
-        self.assertEqual(
-            [
-                {"item_code": "TIRA-L", "item_name": "Tiramisu Large", "qty": 10},
-                {"item_code": "TIRA-M", "item_name": "Tiramisu Medium", "qty": 5},
-            ],
-            sheet["items"],
-        )
-        self.assertEqual([], sheet["unresolved_tokens"])
+		self.assertEqual(1, len(result["sheets"]))
+		sheet = result["sheets"][0]
+		self.assertEqual("Tiramisu", sheet["title"])
+		self.assertEqual(["SOP-L", "SOP-M"], sheet["sops"])
+		self.assertEqual(15, sheet["total_qty"])
+		# Biggest jar first, whatever order the lines came in.
+		self.assertEqual(
+			[
+				{"item_code": "TIRA-L", "item_name": "Tiramisu Large", "qty": 10},
+				{"item_code": "TIRA-M", "item_name": "Tiramisu Medium", "qty": 5},
+			],
+			sheet["items"],
+		)
+		self.assertEqual([], sheet["unresolved_tokens"])
 
-    def test_bowl_steps_quote_the_whole_run(self):
-        result, _ = self._call([{"item_code": "TIRA-M", "qty": 5}, {"item_code": "TIRA-L", "qty": 10}])
-        step = self.tiramisu(result)["steps"][0]
+	def test_bowl_steps_quote_the_whole_run(self):
+		result, _ = self._call([{"item_code": "TIRA-M", "qty": 5}, {"item_code": "TIRA-L", "qty": 10}])
+		step = self.tiramisu(result)["steps"][0]
 
-        # 10 x 89.8 + 5 x 65.2 = 1224 g of mix; 72 + 24 = 96 g of sugar.
-        self.assertEqual("Mix 1224 g with 96 g = 1320 g.", step["text"])
-        self.assertIsNone(step["per_item"])
-        self.assertEqual("Make the cream", step["title"])
-        self.assertEqual("Cream weighed (g)", step["capture_label"])
+		# 10 x 89.8 + 5 x 65.2 = 1224 g of mix; 72 + 24 = 96 g of sugar.
+		self.assertEqual("Mix 1224 g with 96 g = 1320 g.", step["text"])
+		self.assertIsNone(step["per_item"])
+		self.assertEqual("Make the cream", step["title"])
+		self.assertEqual("Cream weighed (g)", step["capture_label"])
 
-    def test_each_steps_split_into_one_line_per_size(self):
-        result, _ = self._call([{"item_code": "TIRA-M", "qty": 5}, {"item_code": "TIRA-L", "qty": 10}])
-        step = self.tiramisu(result)["steps"][1]
+	def test_each_steps_split_into_one_line_per_size(self):
+		result, _ = self._call([{"item_code": "TIRA-M", "qty": 5}, {"item_code": "TIRA-L", "qty": 10}])
+		step = self.tiramisu(result)["steps"][1]
 
-        self.assertIsNone(step["text"])
-        self.assertEqual(
-            [
-                {"item_code": "TIRA-L", "item_name": "Tiramisu Large", "qty": 10, "text": "97 g cream, 3 g cocoa."},
-                {"item_code": "TIRA-M", "item_name": "Tiramisu Medium", "qty": 5, "text": "70 g cream, 2 g cocoa."},
-            ],
-            step["per_item"],
-        )
-        self.assertIsNone(step["capture_label"])
+		self.assertIsNone(step["text"])
+		self.assertEqual(
+			[
+				{
+					"item_code": "TIRA-L",
+					"item_name": "Tiramisu Large",
+					"qty": 10,
+					"text": "97 g cream, 3 g cocoa.",
+				},
+				{
+					"item_code": "TIRA-M",
+					"item_name": "Tiramisu Medium",
+					"qty": 5,
+					"text": "70 g cream, 2 g cocoa.",
+				},
+			],
+			step["per_item"],
+		)
+		self.assertIsNone(step["capture_label"])
 
-    def test_ingredients_are_the_direct_lines_summed(self):
-        # The material reader also returns what is INSIDE the phantom mix; the
-        # bench takes the mix out of the store, not its cream cheese.
-        inner = [{"item_code": "CREAM-CHEESE", "item_name": "Cream cheese", "required_qty": 0.05, "uom": "Kg"}]
-        result, _ = self._call(
-            [{"item_code": "TIRA-L", "qty": 10}, {"item_code": "TIRA-M", "qty": 5}], inner_rows=inner
-        )
-        ingredients = self.tiramisu(result)["ingredients"]
+	def test_ingredients_are_the_direct_lines_summed(self):
+		# The material reader also returns what is INSIDE the phantom mix; the
+		# bench takes the mix out of the store, not its cream cheese.
+		inner = [
+			{"item_code": "CREAM-CHEESE", "item_name": "Cream cheese", "required_qty": 0.05, "uom": "Kg"}
+		]
+		result, _ = self._call(
+			[{"item_code": "TIRA-L", "qty": 10}, {"item_code": "TIRA-M", "qty": 5}], inner_rows=inner
+		)
+		ingredients = self.tiramisu(result)["ingredients"]
 
-        self.assertEqual(["MIX", "SUGAR", "COCOA"], [i["item_code"] for i in ingredients])
-        self.assertEqual(["1224 g", "96 g", "40 g"], [i["display"] for i in ingredients])
-        self.assertAlmostEqual(1.224, ingredients[0]["qty"])
-        self.assertEqual("Kg", ingredients[0]["uom"])
-        self.assertEqual("Cheesecake Mix", ingredients[0]["item_name"])
+		self.assertEqual(["MIX", "SUGAR", "COCOA"], [i["item_code"] for i in ingredients])
+		self.assertEqual(["1224 g", "96 g", "40 g"], [i["display"] for i in ingredients])
+		self.assertAlmostEqual(1.224, ingredients[0]["qty"])
+		self.assertEqual("Kg", ingredients[0]["uom"])
+		self.assertEqual("Cheesecake Mix", ingredients[0]["item_name"])
 
-    def test_one_size_alone_takes_its_full_name(self):
-        result, _ = self._call([{"item_code": "TIRA-M", "qty": 4}])
-        sheet = result["sheets"][0]
+	def test_one_size_alone_takes_its_full_name(self):
+		result, _ = self._call([{"item_code": "TIRA-M", "qty": 4}])
+		sheet = result["sheets"][0]
 
-        self.assertEqual("Tiramisu Medium", sheet["title"])
-        self.assertEqual("Mix 260.8 g with 19.2 g = 280 g.", sheet["steps"][0]["text"])
-        self.assertEqual("70 g cream, 2 g cocoa.", sheet["steps"][1]["per_item"][0]["text"])
+		self.assertEqual("Tiramisu Medium", sheet["title"])
+		self.assertEqual("Mix 260.8 g with 19.2 g = 280 g.", sheet["steps"][0]["text"])
+		self.assertEqual("70 g cream, 2 g cocoa.", sheet["steps"][1]["per_item"][0]["text"])
 
-    def test_different_steps_make_separate_sheets_sorted_by_title(self):
-        result, _ = self._call([{"item_code": "TIRA-L", "qty": 2}, {"item_code": "PIST-CAKE", "qty": 1}])
+	def test_different_steps_make_separate_sheets_sorted_by_title(self):
+		result, _ = self._call([{"item_code": "TIRA-L", "qty": 2}, {"item_code": "PIST-CAKE", "qty": 1}])
 
-        self.assertEqual(["Pistachio cake", "Tiramisu Large"], [s["title"] for s in result["sheets"]])
+		self.assertEqual(["Pistachio cake", "Tiramisu Large"], [s["title"] for s in result["sheets"]])
 
-    def test_items_without_an_sop_are_skipped(self):
-        result, _ = self._call([{"item_code": "PLAIN", "qty": 3}, {"item_code": "TIRA-L", "qty": 1}])
+	def test_items_without_an_sop_are_skipped(self):
+		result, _ = self._call([{"item_code": "PLAIN", "qty": 3}, {"item_code": "TIRA-L", "qty": 1}])
 
-        self.assertEqual(1, len(result["sheets"]))
-        self.assertEqual(["TIRA-L"], [i["item_code"] for i in result["sheets"][0]["items"]])
+		self.assertEqual(1, len(result["sheets"]))
+		self.assertEqual(["TIRA-L"], [i["item_code"] for i in result["sheets"][0]["items"]])
 
-    def test_one_failing_item_is_logged_and_the_rest_still_render(self):
-        def active(code):
-            if code == "TIRA-M":
-                raise RuntimeError("boom")
-            return SHEET_SOPS.get(code)
+	def test_one_failing_item_is_logged_and_the_rest_still_render(self):
+		def active(code):
+			if code == "TIRA-M":
+				raise RuntimeError("boom")
+			return SHEET_SOPS.get(code)
 
-        result, mock_frappe = self._call(
-            [{"item_code": "TIRA-M", "qty": 5}, {"item_code": "TIRA-L", "qty": 10}], active=active
-        )
+		result, mock_frappe = self._call(
+			[{"item_code": "TIRA-M", "qty": 5}, {"item_code": "TIRA-L", "qty": 10}], active=active
+		)
 
-        self.assertEqual(["TIRA-L"], [i["item_code"] for i in result["sheets"][0]["items"]])
-        titles = [c.kwargs.get("title") for c in mock_frappe.log_error.call_args_list]
-        self.assertIn("JARZ SOP – recipe sheet entry failed", titles)
+		self.assertEqual(["TIRA-L"], [i["item_code"] for i in result["sheets"][0]["items"]])
+		titles = [c.kwargs.get("title") for c in mock_frappe.log_error.call_args_list]
+		self.assertIn("JARZ SOP – recipe sheet entry failed", titles)
 
-    def test_nothing_asked_is_an_empty_sheet_list(self):
-        self.assertEqual({"sheets": []}, self._call(None)[0])
-        self.assertEqual({"sheets": []}, self._call("")[0])
-        self.assertEqual({"sheets": []}, self._call([])[0])
+	def test_nothing_asked_is_an_empty_sheet_list(self):
+		self.assertEqual({"sheets": []}, self._call(None)[0])
+		self.assertEqual({"sheets": []}, self._call("")[0])
+		self.assertEqual({"sheets": []}, self._call([])[0])
 
 
 class TestParseSheetLines(unittest.TestCase):
-    def _parse(self, lines):
-        from jarz_pos.api import sop
+	def _parse(self, lines):
+		from jarz_pos.api import sop
 
-        with passthrough_translate(), patch("jarz_pos.api.sop.frappe") as mock_frappe:
-            mock_frappe.throw.side_effect = ValueError
-            return sop._parse_sheet_lines(lines)
+		with passthrough_translate(), patch("jarz_pos.api.sop.frappe") as mock_frappe:
+			mock_frappe.throw.side_effect = ValueError
+			return sop._parse_sheet_lines(lines)
 
-    def test_json_list_dict_and_bytes_are_accepted(self):
-        expected = {"A": 2.0, "B": 1.5}
-        text = '[{"item_code": "A", "qty": 2}, {"item_code": "B", "qty": 1.5}]'
-        self.assertEqual(expected, self._parse(text))
-        self.assertEqual(expected, self._parse(text.encode()))
-        self.assertEqual(expected, self._parse({"A": 2, "B": 1.5}))
+	def test_json_list_dict_and_bytes_are_accepted(self):
+		expected = {"A": 2.0, "B": 1.5}
+		text = '[{"item_code": "A", "qty": 2}, {"item_code": "B", "qty": 1.5}]'
+		self.assertEqual(expected, self._parse(text))
+		self.assertEqual(expected, self._parse(text.encode()))
+		self.assertEqual(expected, self._parse({"A": 2, "B": 1.5}))
 
-    def test_repeats_are_summed_and_empty_or_non_positive_rows_dropped(self):
-        parsed = self._parse(
-            [
-                {"item_code": " A ", "qty": 2},
-                {"item_code": "A", "qty": "3"},
-                {"item_code": "B", "qty": 0},
-                {"item_code": "C", "qty": -1},
-                {"item_code": "", "qty": 4},
-                "junk",
-            ]
-        )
-        self.assertEqual({"A": 5.0}, parsed)
+	def test_repeats_are_summed_and_empty_or_non_positive_rows_dropped(self):
+		parsed = self._parse(
+			[
+				{"item_code": " A ", "qty": 2},
+				{"item_code": "A", "qty": "3"},
+				{"item_code": "B", "qty": 0},
+				{"item_code": "C", "qty": -1},
+				{"item_code": "", "qty": 4},
+				"junk",
+			]
+		)
+		self.assertEqual({"A": 5.0}, parsed)
 
-    def test_bad_json_or_a_non_list_is_refused(self):
-        with self.assertRaises(ValueError):
-            self._parse("[not json")
-        with self.assertRaises(ValueError):
-            self._parse('"just a string"')
+	def test_bad_json_or_a_non_list_is_refused(self):
+		with self.assertRaises(ValueError):
+			self._parse("[not json")
+		with self.assertRaises(ValueError):
+			self._parse('"just a string"')
 
-    def test_too_many_lines_is_refused(self):
-        from jarz_pos.api import sop
+	def test_too_many_lines_is_refused(self):
+		from jarz_pos.api import sop
 
-        with self.assertRaises(ValueError):
-            self._parse([{"item_code": f"I{n}", "qty": 1} for n in range(sop._MAX_SHEET_LINES + 1)])
+		with self.assertRaises(ValueError):
+			self._parse([{"item_code": f"I{n}", "qty": 1} for n in range(sop._MAX_SHEET_LINES + 1)])
 
 
 if __name__ == "__main__":
-    unittest.main()
+	unittest.main()

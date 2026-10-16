@@ -98,9 +98,16 @@ class TestDuePeriods(unittest.TestCase):
 
 class TestLabels(unittest.TestCase):
 	def test_labels(self):
-		self.assertEqual(prf.accrual_label({"frequency": "Daily", "period_start": "2026-09-23", "period_end": "2026-09-23"}), "Daily fee 2026-09-23")
 		self.assertEqual(
-			prf.accrual_label({"frequency": "Weekly", "period_start": "2026-09-23", "period_end": "2026-09-29"}),
+			prf.accrual_label(
+				{"frequency": "Daily", "period_start": "2026-09-23", "period_end": "2026-09-23"}
+			),
+			"Daily fee 2026-09-23",
+		)
+		self.assertEqual(
+			prf.accrual_label(
+				{"frequency": "Weekly", "period_start": "2026-09-23", "period_end": "2026-09-29"}
+			),
 			"Weekly fee 2026-09-23 to 2026-09-29",
 		)
 
@@ -126,7 +133,9 @@ class TestDeliveryPartnerValidation(unittest.TestCase):
 		self._doc().validate()
 
 	def test_no_fee_needs_nothing(self):
-		self._doc(recurring_fee_amount=0, recurring_fee_frequency=None, recurring_fee_start_date=None).validate()
+		self._doc(
+			recurring_fee_amount=0, recurring_fee_frequency=None, recurring_fee_start_date=None
+		).validate()
 
 	def test_fee_requires_frequency_start_and_account(self):
 		for missing in ("recurring_fee_frequency", "recurring_fee_start_date", "settlement_account"):
@@ -213,8 +222,12 @@ class TestSettlementJeRecurringLine(unittest.TestCase):
 		mock_frappe.db.exists.return_value = True
 
 		create_partner_settlement_je(
-			delivery_partner="Deliverk", company="JARZ", bank_account="Bank - J",
-			order_fee_total=0, recurring_fee_total=50, token="t",
+			delivery_partner="Deliverk",
+			company="JARZ",
+			bank_account="Bank - J",
+			order_fee_total=0,
+			recurring_fee_total=50,
+			token="t",
 		)
 		self.assertEqual(len(lines), 2)
 		self.assertEqual(sum(r["debit_in_account_currency"] for r in lines), 50)
@@ -243,7 +256,9 @@ class TestExplicitEmptySelectionPaysNothing(unittest.TestCase):
 		mock_frappe.get_roles.return_value = ["System Manager"]
 
 		settle_delivery_partner(
-			"Partner A", bank_account="Bank - J", courier_transactions="[]",
+			"Partner A",
+			bank_account="Bank - J",
+			courier_transactions="[]",
 			extra_charges='[{"description": "Waiting", "amount": 30}]',
 		)
 		ct_call = mock_frappe.db.get_values.call_args
@@ -272,9 +287,13 @@ class TestOneBadPeriodDoesNotBlockTheRest(unittest.TestCase):
 	def test_failed_day_is_logged_and_later_days_still_post(self, mock_frappe, mock_post):
 		mock_frappe.db.get_value.side_effect = [
 			frappe._dict(
-				name="Deliverk", is_active=1, settlement_account="Deliverk - J",
-				recurring_fee_amount=50, recurring_fee_frequency="Daily",
-				recurring_fee_start_date="2026-09-21", recurring_fee_end_date=None,
+				name="Deliverk",
+				is_active=1,
+				settlement_account="Deliverk - J",
+				recurring_fee_amount=50,
+				recurring_fee_frequency="Daily",
+				recurring_fee_start_date="2026-09-21",
+				recurring_fee_end_date=None,
 			),
 			"JARZ",
 		]

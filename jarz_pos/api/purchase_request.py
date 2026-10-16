@@ -28,23 +28,25 @@ is raised. The buyer's review happens at purchase time, where they are already
 adjusting quantities — an extra approval step only adds a place for requests to
 get stuck.
 """
+
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
+from typing import Any, Optional
 
 import frappe
 from frappe import _
 from frappe.utils import add_days, flt, getdate, now_datetime, nowdate
-from typing import Any, Dict, List, Optional, Sequence
 
 from jarz_pos.constants import ROLES
 from jarz_pos.utils.access_control import (
-    BranchAccessError,
-    get_user_pos_profiles,
-    is_unrestricted_user,
+	BranchAccessError,
+	get_user_pos_profiles,
+	is_unrestricted_user,
 )
-from jarz_pos.utils.warehouse_utils import resolve_request_warehouse
 from jarz_pos.utils.settings_utils import single_int
+from jarz_pos.utils.warehouse_utils import resolve_request_warehouse
 
 #: Request statuses that still want stock. Anything else is done or abandoned.
 OPEN_STATUSES = ("Pending", "Partially Received", "Ordered", "Partially Ordered")
@@ -54,638 +56,659 @@ OPEN_STATUSES = ("Pending", "Partially Received", "Ordered", "Partially Ordered"
 # Access
 # ---------------------------------------------------------------------------
 
+
 def _ensure_request_access() -> None:
-    """Anyone who can notice a shortage may file one."""
-    if not set(frappe.get_roles()).intersection(ROLES.PURCHASE_REQUEST):
-        frappe.throw(_("Not permitted to raise item requests"), frappe.PermissionError)
+	"""Anyone who can notice a shortage may file one."""
+	if not set(frappe.get_roles()).intersection(ROLES.PURCHASE_REQUEST):
+		frappe.throw(_("Not permitted to raise item requests"), frappe.PermissionError)
 
 
 def _ensure_review_access() -> None:
-    if not set(frappe.get_roles()).intersection(ROLES.PURCHASE_REQUEST_REVIEW):
-        frappe.throw(_("Not permitted to review item requests"), frappe.PermissionError)
+	if not set(frappe.get_roles()).intersection(ROLES.PURCHASE_REQUEST_REVIEW):
+		frappe.throw(_("Not permitted to review item requests"), frappe.PermissionError)
 
 
 def _can_review() -> bool:
-    return is_unrestricted_user() or bool(
-        set(frappe.get_roles()).intersection(ROLES.PURCHASE_REQUEST_REVIEW)
-    )
+	return is_unrestricted_user() or bool(set(frappe.get_roles()).intersection(ROLES.PURCHASE_REQUEST_REVIEW))
 
 
-def _visible_profiles() -> Optional[List[str]]:
-    """Branches whose requests the caller may see.
+def _visible_profiles() -> list[str] | None:
+	"""Branches whose requests the caller may see.
 
-    ``None`` means "no branch filter" — reviewers and Administrator see the whole
-    queue, because a buyer purchases for every branch at once.
-    """
-    if _can_review():
-        return None
-    return get_user_pos_profiles()
+	``None`` means "no branch filter" — reviewers and Administrator see the whole
+	queue, because a buyer purchases for every branch at once.
+	"""
+	if _can_review():
+		return None
+	return get_user_pos_profiles()
 
 
-def _coerce_rows(value: Any) -> List[Dict[str, Any]]:
-    if value is None:
-        return []
-    if isinstance(value, str):
-        try:
-            value = json.loads(value)
-        except Exception:
-            frappe.throw(_("Malformed items payload"))
-    if isinstance(value, dict):
-        return [value]
-    if not isinstance(value, list):
-        frappe.throw(_("Malformed items payload"))
-    return [row for row in value if isinstance(row, dict)]
+def _coerce_rows(value: Any) -> list[dict[str, Any]]:
+	if value is None:
+		return []
+	if isinstance(value, str):
+		try:
+			value = json.loads(value)
+		except Exception:
+			frappe.throw(_("Malformed items payload"))
+	if isinstance(value, dict):
+		return [value]
+	if not isinstance(value, list):
+		frappe.throw(_("Malformed items payload"))
+	return [row for row in value if isinstance(row, dict)]
 
 
 def _settings_int(fieldname: str, default: int) -> int:
-    """Int setting, with ``default`` applied only when nobody has ever set it.
+	"""Int setting, with ``default`` applied only when nobody has ever set it.
 
-    Was ``int(frappe.db.get_single_value(...))``. That helper casts an ``Int``
-    through ``cint()``, so an unwritten field arrives as ``0``, ``int(0)``
-    succeeds, and the ``except (TypeError, ValueError)`` branch carrying the
-    default could never be reached. Every team item request raised without an
-    explicit date was therefore dated *today* instead of the declared three days
-    out — the requester got no lead time and the buyer got no warning.
-    """
-    return single_int("Jarz POS Settings", fieldname, default)
-
-
-def _resolve_company(company: Optional[str] = None) -> str:
-    resolved = (
-        company
-        or frappe.defaults.get_user_default("company")
-        or frappe.db.get_single_value("Global Defaults", "default_company")
-    )
-    if not resolved:
-        rows = frappe.get_all("Company", fields=["name"], limit=2)
-        if len(rows) == 1:
-            resolved = rows[0]["name"]
-    if not resolved:
-        frappe.throw(_("Default Company not set. Please configure a default Company."))
-    return resolved
+	Was ``int(frappe.db.get_single_value(...))``. That helper casts an ``Int``
+	through ``cint()``, so an unwritten field arrives as ``0``, ``int(0)``
+	succeeds, and the ``except (TypeError, ValueError)`` branch carrying the
+	default could never be reached. Every team item request raised without an
+	explicit date was therefore dated *today* instead of the declared three days
+	out — the requester got no lead time and the buyer got no warning.
+	"""
+	return single_int("Jarz POS Settings", fieldname, default)
 
 
-def _resolve_requester_profile(pos_profile: Optional[str] = None) -> Optional[str]:
-    """Branch the request is filed against.
+def _resolve_company(company: str | None = None) -> str:
+	resolved = (
+		company
+		or frappe.defaults.get_user_default("company")
+		or frappe.db.get_single_value("Global Defaults", "default_company")
+	)
+	if not resolved:
+		rows = frappe.get_all("Company", fields=["name"], limit=2)
+		if len(rows) == 1:
+			resolved = rows[0]["name"]
+	if not resolved:
+		frappe.throw(_("Default Company not set. Please configure a default Company."))
+	return resolved
 
-    An explicit profile must be one the caller belongs to; otherwise their first
-    assigned branch is used. Reviewers with no branch assignment (e.g. a
-    head-office buyer) may file an unattributed request.
-    """
-    profiles = get_user_pos_profiles()
-    requested = (pos_profile or "").strip()
-    if requested:
-        if profiles and requested not in profiles and not is_unrestricted_user():
-            frappe.throw(
-                _("You do not have access to branch {0}.").format(requested),
-                BranchAccessError,
-            )
-        return requested
-    return profiles[0] if profiles else None
+
+def _resolve_requester_profile(pos_profile: str | None = None) -> str | None:
+	"""Branch the request is filed against.
+
+	An explicit profile must be one the caller belongs to; otherwise their first
+	assigned branch is used. Reviewers with no branch assignment (e.g. a
+	head-office buyer) may file an unattributed request.
+	"""
+	profiles = get_user_pos_profiles()
+	requested = (pos_profile or "").strip()
+	if requested:
+		if profiles and requested not in profiles and not is_unrestricted_user():
+			frappe.throw(
+				_("You do not have access to branch {0}.").format(requested),
+				BranchAccessError,
+			)
+		return requested
+	return profiles[0] if profiles else None
 
 
 # ---------------------------------------------------------------------------
 # Write
 # ---------------------------------------------------------------------------
 
+
 @frappe.whitelist()
 def create_request(
-    items: Optional[List[Dict[str, Any]]] = None,
-    schedule_date: Optional[str] = None,
-    note: Optional[str] = None,
-    pos_profile: Optional[str] = None,
-    company: Optional[str] = None,
-) -> Dict[str, Any]:
-    """Raise an item request.
+	items: list[dict[str, Any]] | None = None,
+	schedule_date: str | None = None,
+	note: str | None = None,
+	pos_profile: str | None = None,
+	company: str | None = None,
+) -> dict[str, Any]:
+	"""Raise an item request.
 
-    ``items``: ``[{item_code, qty, uom?, warehouse?}]``. The request is submitted
-    immediately — see the module docstring on why there is no approval gate.
-    """
-    _ensure_request_access()
+	``items``: ``[{item_code, qty, uom?, warehouse?}]``. The request is submitted
+	immediately — see the module docstring on why there is no approval gate.
+	"""
+	_ensure_request_access()
 
-    rows = _coerce_rows(items)
-    if not rows:
-        frappe.throw(_("At least one item is required"))
+	rows = _coerce_rows(items)
+	if not rows:
+		frappe.throw(_("At least one item is required"))
 
-    resolved_company = _resolve_company(company)
-    profile = _resolve_requester_profile(pos_profile)
+	resolved_company = _resolve_company(company)
+	profile = _resolve_requester_profile(pos_profile)
 
-    if schedule_date:
-        needed_by = getdate(schedule_date)
-        if needed_by < getdate(nowdate()):
-            frappe.throw(_("The 'needed by' date cannot be in the past."))
-    else:
-        needed_by = getdate(add_days(nowdate(), _settings_int("purchase_request_schedule_days", 3)))
+	if schedule_date:
+		needed_by = getdate(schedule_date)
+		if needed_by < getdate(nowdate()):
+			frappe.throw(_("The 'needed by' date cannot be in the past."))
+	else:
+		needed_by = getdate(add_days(nowdate(), _settings_int("purchase_request_schedule_days", 3)))
 
-    doc = frappe.new_doc("Material Request")
-    doc.material_request_type = "Purchase"
-    doc.company = resolved_company
-    doc.transaction_date = nowdate()
-    doc.schedule_date = needed_by
-    doc.custom_jarz_pos_profile = profile
-    doc.custom_jarz_requested_by_label = _user_label(frappe.session.user)
-    if note:
-        doc.custom_jarz_note = note
+	doc = frappe.new_doc("Material Request")
+	doc.material_request_type = "Purchase"
+	doc.company = resolved_company
+	doc.transaction_date = nowdate()
+	doc.schedule_date = needed_by
+	doc.custom_jarz_pos_profile = profile
+	doc.custom_jarz_requested_by_label = _user_label(frappe.session.user)
+	if note:
+		doc.custom_jarz_note = note
 
-    for line in _build_request_lines(rows, resolved_company, needed_by):
-        doc.append("items", line)
+	for line in _build_request_lines(rows, resolved_company, needed_by):
+		doc.append("items", line)
 
-    doc.flags.ignore_permissions = True
-    doc.insert()
-    doc.submit()
-    doc.reload()
+	doc.flags.ignore_permissions = True
+	doc.insert()
+	doc.submit()
+	doc.reload()
 
-    _notify_reviewers(doc)
+	_notify_reviewers(doc)
 
-    return {"success": True, "request": _serialize_request_with_lines(doc)}
+	return {"success": True, "request": _serialize_request_with_lines(doc)}
 
 
 def _build_request_lines(
-    rows: List[Dict[str, Any]],
-    company: str,
-    needed_by: Any,
-    warehouses: Optional[Dict[str, str]] = None,
-) -> List[Dict[str, Any]]:
-    """Validated Material Request Item rows from the app's ``[{item_code, qty, uom?}]``.
+	rows: list[dict[str, Any]],
+	company: str,
+	needed_by: Any,
+	warehouses: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
+	"""Validated Material Request Item rows from the app's ``[{item_code, qty, uom?}]``.
 
-    ``warehouses`` keeps an edited line where it already was, so editing a
-    quantity does not quietly move the request to a different store.
-    """
-    lines: List[Dict[str, Any]] = []
-    for row in rows:
-        item_code = str(row.get("item_code") or "").strip()
-        if not item_code:
-            frappe.throw(_("Item code missing in row"))
-        qty = flt(row.get("qty") or 0)
-        if qty <= 0:
-            frappe.throw(_("Quantity must be greater than zero for {0}").format(item_code))
+	``warehouses`` keeps an edited line where it already was, so editing a
+	quantity does not quietly move the request to a different store.
+	"""
+	lines: list[dict[str, Any]] = []
+	for row in rows:
+		item_code = str(row.get("item_code") or "").strip()
+		if not item_code:
+			frappe.throw(_("Item code missing in row"))
+		qty = flt(row.get("qty") or 0)
+		if qty <= 0:
+			frappe.throw(_("Quantity must be greater than zero for {0}").format(item_code))
 
-        item = frappe.db.get_value(
-            "Item", item_code, ["stock_uom", "item_name", "disabled", "is_purchase_item"], as_dict=True
-        )
-        if not item:
-            frappe.throw(_("Item {0} not found").format(item_code))
-        if int(item.get("disabled") or 0):
-            frappe.throw(_("Item {0} is disabled and cannot be requested.").format(item_code))
-        if not int(item.get("is_purchase_item") or 0):
-            frappe.throw(_("Item {0} is not a purchasable item.").format(item_code))
+		item = frappe.db.get_value(
+			"Item", item_code, ["stock_uom", "item_name", "disabled", "is_purchase_item"], as_dict=True
+		)
+		if not item:
+			frappe.throw(_("Item {0} not found").format(item_code))
+		if int(item.get("disabled") or 0):
+			frappe.throw(_("Item {0} is disabled and cannot be requested.").format(item_code))
+		if not int(item.get("is_purchase_item") or 0):
+			frappe.throw(_("Item {0} is not a purchasable item.").format(item_code))
 
-        uom = str(row.get("uom") or "").strip() or item["stock_uom"]
-        conversion = _conversion_factor(item_code, uom, item["stock_uom"])
+		uom = str(row.get("uom") or "").strip() or item["stock_uom"]
+		conversion = _conversion_factor(item_code, uom, item["stock_uom"])
 
-        lines.append({
-            "item_code": item_code,
-            "item_name": item.get("item_name"),
-            "qty": qty,
-            "uom": uom,
-            "stock_uom": item["stock_uom"],
-            "conversion_factor": conversion,
-            "schedule_date": needed_by,
-            "warehouse": resolve_request_warehouse(
-                item_code,
-                company,
-                row.get("warehouse") or (warehouses or {}).get(item_code),
-            ),
-        })
-    return lines
-
-
-def _edit_block_reason(doc: Any) -> Optional[str]:
-    """Why ``doc`` can no longer be edited, or ``None`` when it still can.
-
-    Editing is cancel-and-amend, so it is only safe before anything downstream
-    hangs off the request: once a buyer accepted it they may already be buying
-    the old quantities, and once anything is ordered or received the lines are
-    linked from a Purchase Order / Invoice and cannot be cancelled.
-    """
-    if doc.get("material_request_type") != "Purchase" or doc.get("docstatus") != 1:
-        return _("Only an open item request can be edited.")
-    # Only requests raised from the app. Desk, auto-reorder and Production Plan
-    # requests carry per-line warehouses, plan links and dates this rebuild
-    # does not reproduce; amending them would quietly drop all of that.
-    if not doc.get("custom_jarz_requested_by_label"):
-        return _("This request was not raised from the app and can only be changed in ERPNext.")
-    if doc.get("status") != "Pending":
-        return _("Only a pending request can be edited.")
-    if doc.get("custom_jarz_acknowledged_at"):
-        return _("A buyer already accepted this request, so it can no longer be edited.")
-    if flt(doc.get("per_ordered") or 0) > 0 or flt(doc.get("per_received") or 0) > 0:
-        return _("Part of this request was already bought, so it can no longer be edited.")
-    seen_items = set()
-    for line in doc.get("items") or []:
-        if flt(line.get("ordered_qty") or 0) > 0 or flt(line.get("received_qty") or 0) > 0:
-            return _("Part of this request was already bought, so it can no longer be edited.")
-        if line.get("production_plan") or line.get("sales_order"):
-            return _("This request was not raised from the app and can only be changed in ERPNext.")
-        # The edit sheet holds one line per item; a request listing an item
-        # twice (e.g. for two warehouses) would be merged on save.
-        if line.get("item_code") in seen_items:
-            return _("This request lists an item more than once and can only be changed in ERPNext.")
-        seen_items.add(line.get("item_code"))
-    return None
+		lines.append(
+			{
+				"item_code": item_code,
+				"item_name": item.get("item_name"),
+				"qty": qty,
+				"uom": uom,
+				"stock_uom": item["stock_uom"],
+				"conversion_factor": conversion,
+				"schedule_date": needed_by,
+				"warehouse": resolve_request_warehouse(
+					item_code,
+					company,
+					row.get("warehouse") or (warehouses or {}).get(item_code),
+				),
+			}
+		)
+	return lines
 
 
-def _may_edit(owner: Optional[str]) -> bool:
-    """The person who raised a request may edit it, and so may any buyer."""
-    return owner == frappe.session.user or _can_review()
+def _edit_block_reason(doc: Any) -> str | None:
+	"""Why ``doc`` can no longer be edited, or ``None`` when it still can.
+
+	Editing is cancel-and-amend, so it is only safe before anything downstream
+	hangs off the request: once a buyer accepted it they may already be buying
+	the old quantities, and once anything is ordered or received the lines are
+	linked from a Purchase Order / Invoice and cannot be cancelled.
+	"""
+	if doc.get("material_request_type") != "Purchase" or doc.get("docstatus") != 1:
+		return _("Only an open item request can be edited.")
+	# Only requests raised from the app. Desk, auto-reorder and Production Plan
+	# requests carry per-line warehouses, plan links and dates this rebuild
+	# does not reproduce; amending them would quietly drop all of that.
+	if not doc.get("custom_jarz_requested_by_label"):
+		return _("This request was not raised from the app and can only be changed in ERPNext.")
+	if doc.get("status") != "Pending":
+		return _("Only a pending request can be edited.")
+	if doc.get("custom_jarz_acknowledged_at"):
+		return _("A buyer already accepted this request, so it can no longer be edited.")
+	if flt(doc.get("per_ordered") or 0) > 0 or flt(doc.get("per_received") or 0) > 0:
+		return _("Part of this request was already bought, so it can no longer be edited.")
+	seen_items = set()
+	for line in doc.get("items") or []:
+		if flt(line.get("ordered_qty") or 0) > 0 or flt(line.get("received_qty") or 0) > 0:
+			return _("Part of this request was already bought, so it can no longer be edited.")
+		if line.get("production_plan") or line.get("sales_order"):
+			return _("This request was not raised from the app and can only be changed in ERPNext.")
+		# The edit sheet holds one line per item; a request listing an item
+		# twice (e.g. for two warehouses) would be merged on save.
+		if line.get("item_code") in seen_items:
+			return _("This request lists an item more than once and can only be changed in ERPNext.")
+		seen_items.add(line.get("item_code"))
+	return None
+
+
+def _may_edit(owner: str | None) -> bool:
+	"""The person who raised a request may edit it, and so may any buyer."""
+	return owner == frappe.session.user or _can_review()
 
 
 @frappe.whitelist()
-def get_request_for_edit(name: str) -> Dict[str, Any]:
-    """A request plus every line's selectable UOMs, for the edit sheet."""
-    _ensure_request_access()
-    if not name:
-        frappe.throw(_("Request name is required"))
+def get_request_for_edit(name: str) -> dict[str, Any]:
+	"""A request plus every line's selectable UOMs, for the edit sheet."""
+	_ensure_request_access()
+	if not name:
+		frappe.throw(_("Request name is required"))
 
-    doc = frappe.get_doc("Material Request", name)
-    if not _may_edit(doc.owner):
-        frappe.throw(_("Only the requester or a buyer can edit this request."), frappe.PermissionError)
-    reason = _edit_block_reason(doc)
-    if reason:
-        frappe.throw(reason)
+	doc = frappe.get_doc("Material Request", name)
+	if not _may_edit(doc.owner):
+		frappe.throw(_("Only the requester or a buyer can edit this request."), frappe.PermissionError)
+	reason = _edit_block_reason(doc)
+	if reason:
+		frappe.throw(reason)
 
-    from jarz_pos.api.purchase import _get_item_uoms_bulk
+	from jarz_pos.api.purchase import _get_item_uoms_bulk
 
-    codes = list(dict.fromkeys(row.item_code for row in doc.get("items") or []))
-    return {
-        "request": _serialize_request_with_lines(doc),
-        "uoms": _get_item_uoms_bulk(codes),
-    }
+	codes = list(dict.fromkeys(row.item_code for row in doc.get("items") or []))
+	return {
+		"request": _serialize_request_with_lines(doc),
+		"uoms": _get_item_uoms_bulk(codes),
+	}
 
 
 @frappe.whitelist()
 def update_request(
-    name: str,
-    items: Optional[List[Dict[str, Any]]] = None,
-    schedule_date: Optional[str] = None,
-    note: Optional[str] = None,
-) -> Dict[str, Any]:
-    """Edit a request that nobody has acted on yet.
+	name: str,
+	items: list[dict[str, Any]] | None = None,
+	schedule_date: str | None = None,
+	note: str | None = None,
+) -> dict[str, Any]:
+	"""Edit a request that nobody has acted on yet.
 
-    A submitted Material Request cannot change its lines in place, and the
-    requested quantity is already posted to each ``Bin.indented_qty``. So the
-    edit is ERPNext's own cancel-and-amend: the old request is cancelled (which
-    reverses its indented qty) and an amended copy ``<name>-1`` is submitted with
-    the new lines. Requester, branch, raise date and owner carry over.
+	A submitted Material Request cannot change its lines in place, and the
+	requested quantity is already posted to each ``Bin.indented_qty``. So the
+	edit is ERPNext's own cancel-and-amend: the old request is cancelled (which
+	reverses its indented qty) and an amended copy ``<name>-1`` is submitted with
+	the new lines. Requester, branch, raise date and owner carry over.
 
-    ``note``: ``None`` keeps the existing note; an empty string clears it.
-    """
-    _ensure_request_access()
-    if not name:
-        frappe.throw(_("Request name is required"))
+	``note``: ``None`` keeps the existing note; an empty string clears it.
+	"""
+	_ensure_request_access()
+	if not name:
+		frappe.throw(_("Request name is required"))
 
-    rows = _coerce_rows(items)
-    if not rows:
-        frappe.throw(_("At least one item is required"))
+	rows = _coerce_rows(items)
+	if not rows:
+		frappe.throw(_("At least one item is required"))
 
-    # Row lock: a buyer accepting the request while it is being edited must
-    # either see the edit or block it, never accept the cancelled original.
-    old = frappe.get_doc("Material Request", name, for_update=True)
-    if not _may_edit(old.owner):
-        frappe.throw(_("Only the requester or a buyer can edit this request."), frappe.PermissionError)
-    reason = _edit_block_reason(old)
-    if reason:
-        frappe.throw(reason)
+	# Row lock: a buyer accepting the request while it is being edited must
+	# either see the edit or block it, never accept the cancelled original.
+	old = frappe.get_doc("Material Request", name, for_update=True)
+	if not _may_edit(old.owner):
+		frappe.throw(_("Only the requester or a buyer can edit this request."), frappe.PermissionError)
+	reason = _edit_block_reason(old)
+	if reason:
+		frappe.throw(reason)
 
-    current_date = getdate(old.schedule_date) if old.schedule_date else None
-    if schedule_date:
-        needed_by = getdate(schedule_date)
-        # An unchanged date may already be in the past (the request is overdue);
-        # only a newly chosen date has to be in the future.
-        if needed_by != current_date and needed_by < getdate(nowdate()):
-            frappe.throw(_("The 'needed by' date cannot be in the past."))
-    else:
-        needed_by = current_date or getdate(add_days(nowdate(), _settings_int("purchase_request_schedule_days", 3)))
+	current_date = getdate(old.schedule_date) if old.schedule_date else None
+	if schedule_date:
+		needed_by = getdate(schedule_date)
+		# An unchanged date may already be in the past (the request is overdue);
+		# only a newly chosen date has to be in the future.
+		if needed_by != current_date and needed_by < getdate(nowdate()):
+			frappe.throw(_("The 'needed by' date cannot be in the past."))
+	else:
+		needed_by = current_date or getdate(
+			add_days(nowdate(), _settings_int("purchase_request_schedule_days", 3))
+		)
 
-    warehouses = {line.item_code: line.warehouse for line in old.get("items") or [] if line.warehouse}
+	warehouses = {line.item_code: line.warehouse for line in old.get("items") or [] if line.warehouse}
 
-    new = frappe.new_doc("Material Request")
-    new.amended_from = old.name
-    new.material_request_type = old.material_request_type
-    new.company = old.company
-    new.transaction_date = old.transaction_date
-    new.schedule_date = needed_by
-    new.custom_jarz_pos_profile = old.get("custom_jarz_pos_profile")
-    new.custom_jarz_requested_by_label = old.get("custom_jarz_requested_by_label")
-    new.custom_jarz_note = old.get("custom_jarz_note") if note is None else (str(note).strip() or None)
-    for line in _build_request_lines(rows, old.company, needed_by, warehouses):
-        new.append("items", line)
+	new = frappe.new_doc("Material Request")
+	new.amended_from = old.name
+	new.material_request_type = old.material_request_type
+	new.company = old.company
+	new.transaction_date = old.transaction_date
+	new.schedule_date = needed_by
+	new.custom_jarz_pos_profile = old.get("custom_jarz_pos_profile")
+	new.custom_jarz_requested_by_label = old.get("custom_jarz_requested_by_label")
+	new.custom_jarz_note = old.get("custom_jarz_note") if note is None else (str(note).strip() or None)
+	for line in _build_request_lines(rows, old.company, needed_by, warehouses):
+		new.append("items", line)
 
-    old.flags.ignore_permissions = True
-    old.cancel()
+	old.flags.ignore_permissions = True
+	old.cancel()
 
-    new.flags.ignore_permissions = True
-    new.insert()
-    new.submit()
-    # Insert stamps the editor as owner; the request still belongs to whoever
-    # raised it, which is what "My requests" and is_mine key off.
-    if old.owner and new.owner != old.owner:
-        new.db_set("owner", old.owner, update_modified=False)
-    new.add_comment("Comment", _("Edited by {0}").format(_user_label(frappe.session.user)))
-    new.reload()
+	new.flags.ignore_permissions = True
+	new.insert()
+	new.submit()
+	# Insert stamps the editor as owner; the request still belongs to whoever
+	# raised it, which is what "My requests" and is_mine key off.
+	if old.owner and new.owner != old.owner:
+		new.db_set("owner", old.owner, update_modified=False)
+	new.add_comment("Comment", _("Edited by {0}").format(_user_label(frappe.session.user)))
+	new.reload()
 
-    return {
-        "success": True,
-        "request": _serialize_request_with_lines(new),
-        "replaces": old.name,
-    }
-
-
-@frappe.whitelist()
-def stop_request(name: str, reason: Optional[str] = None) -> Dict[str, Any]:
-    """Reject / close a request that will not be bought.
-
-    Uses ERPNext's own ``Stopped`` status rather than cancelling, so the request
-    stays on the record with its history intact.
-    """
-    _ensure_review_access()
-    if not name:
-        frappe.throw(_("Request name is required"))
-
-    doc = frappe.get_doc("Material Request", name)
-    if doc.docstatus != 1:
-        frappe.throw(_("Only an open request can be stopped."))
-    if doc.status == "Stopped":
-        return {"success": True, "request": _serialize_request_with_lines(doc)}
-
-    doc.update_status("Stopped")
-    if reason:
-        doc.add_comment("Comment", _("Stopped: {0}").format(reason))
-    doc.reload()
-    return {"success": True, "request": _serialize_request_with_lines(doc)}
+	return {
+		"success": True,
+		"request": _serialize_request_with_lines(new),
+		"replaces": old.name,
+	}
 
 
 @frappe.whitelist()
-def reopen_request(name: str) -> Dict[str, Any]:
-    """Undo a stop — ERPNext calls this transition ``Submitted``."""
-    _ensure_review_access()
-    if not name:
-        frappe.throw(_("Request name is required"))
+def stop_request(name: str, reason: str | None = None) -> dict[str, Any]:
+	"""Reject / close a request that will not be bought.
 
-    doc = frappe.get_doc("Material Request", name)
-    if doc.status != "Stopped":
-        frappe.throw(_("Only a stopped request can be reopened."))
-    doc.update_status("Submitted")
-    doc.reload()
-    return {"success": True, "request": _serialize_request_with_lines(doc)}
+	Uses ERPNext's own ``Stopped`` status rather than cancelling, so the request
+	stays on the record with its history intact.
+	"""
+	_ensure_review_access()
+	if not name:
+		frappe.throw(_("Request name is required"))
+
+	doc = frappe.get_doc("Material Request", name)
+	if doc.docstatus != 1:
+		frappe.throw(_("Only an open request can be stopped."))
+	if doc.status == "Stopped":
+		return {"success": True, "request": _serialize_request_with_lines(doc)}
+
+	doc.update_status("Stopped")
+	if reason:
+		doc.add_comment("Comment", _("Stopped: {0}").format(reason))
+	doc.reload()
+	return {"success": True, "request": _serialize_request_with_lines(doc)}
 
 
 @frappe.whitelist()
-def acknowledge_request(name: str) -> Dict[str, Any]:
-    """Accept a request: tell the requester a buyer has seen it and is on it.
+def reopen_request(name: str) -> dict[str, Any]:
+	"""Undo a stop — ERPNext calls this transition ``Submitted``."""
+	_ensure_review_access()
+	if not name:
+		frappe.throw(_("Request name is required"))
 
-    Without this a request sat at ``Pending`` from the moment it was raised
-    until goods arrived, so the person who filed it could not tell "nobody has
-    looked" from "being bought". Acceptance is a stamp, not a status change —
-    ERPNext's status map stays the single source of fulfilment state, and an
-    unaccepted request can still be bought, which also marks nothing here.
-    Idempotent: accepting twice keeps the first buyer and time.
-    """
-    _ensure_review_access()
-    if not name:
-        frappe.throw(_("Request name is required"))
-    if not _has_ack_fields():
-        frappe.throw(_("Accepting requests is not available until the site is migrated."))
+	doc = frappe.get_doc("Material Request", name)
+	if doc.status != "Stopped":
+		frappe.throw(_("Only a stopped request can be reopened."))
+	doc.update_status("Submitted")
+	doc.reload()
+	return {"success": True, "request": _serialize_request_with_lines(doc)}
 
-    # Row lock: two buyers tapping Accept together must not both pass the
-    # "already accepted?" check and overwrite each other.
-    doc = frappe.get_doc("Material Request", name, for_update=True)
-    if doc.docstatus != 1 or doc.material_request_type != "Purchase":
-        frappe.throw(_("Only an open item request can be accepted."))
-    if doc.get("custom_jarz_acknowledged_at"):
-        return {"success": True, "request": _serialize_request_with_lines(doc)}
-    if doc.status not in OPEN_STATUSES:
-        frappe.throw(_("Only an open item request can be accepted."))
 
-    user = frappe.session.user
-    doc.db_set({
-        "custom_jarz_acknowledged_by": user,
-        "custom_jarz_acknowledged_by_label": _user_label(user),
-        "custom_jarz_acknowledged_at": now_datetime(),
-    })
-    doc.add_comment("Comment", _("Accepted by {0}").format(_user_label(user)))
-    doc.reload()
-    return {"success": True, "request": _serialize_request_with_lines(doc)}
+@frappe.whitelist()
+def acknowledge_request(name: str) -> dict[str, Any]:
+	"""Accept a request: tell the requester a buyer has seen it and is on it.
+
+	Without this a request sat at ``Pending`` from the moment it was raised
+	until goods arrived, so the person who filed it could not tell "nobody has
+	looked" from "being bought". Acceptance is a stamp, not a status change —
+	ERPNext's status map stays the single source of fulfilment state, and an
+	unaccepted request can still be bought, which also marks nothing here.
+	Idempotent: accepting twice keeps the first buyer and time.
+	"""
+	_ensure_review_access()
+	if not name:
+		frappe.throw(_("Request name is required"))
+	if not _has_ack_fields():
+		frappe.throw(_("Accepting requests is not available until the site is migrated."))
+
+	# Row lock: two buyers tapping Accept together must not both pass the
+	# "already accepted?" check and overwrite each other.
+	doc = frappe.get_doc("Material Request", name, for_update=True)
+	if doc.docstatus != 1 or doc.material_request_type != "Purchase":
+		frappe.throw(_("Only an open item request can be accepted."))
+	if doc.get("custom_jarz_acknowledged_at"):
+		return {"success": True, "request": _serialize_request_with_lines(doc)}
+	if doc.status not in OPEN_STATUSES:
+		frappe.throw(_("Only an open item request can be accepted."))
+
+	user = frappe.session.user
+	doc.db_set(
+		{
+			"custom_jarz_acknowledged_by": user,
+			"custom_jarz_acknowledged_by_label": _user_label(user),
+			"custom_jarz_acknowledged_at": now_datetime(),
+		}
+	)
+	doc.add_comment("Comment", _("Accepted by {0}").format(_user_label(user)))
+	doc.reload()
+	return {"success": True, "request": _serialize_request_with_lines(doc)}
 
 
 # ---------------------------------------------------------------------------
 # Read
 # ---------------------------------------------------------------------------
 
+
 @frappe.whitelist()
 def list_requests(
-    status: Optional[str] = None,
-    pos_profile: Optional[str] = None,
-    mine_only: int = 0,
-    limit: int = 50,
-    page: int = 0,
-) -> Dict[str, Any]:
-    """Paginated request list, scoped to the branches the caller may see."""
-    _ensure_request_access()
+	status: str | None = None,
+	pos_profile: str | None = None,
+	mine_only: int = 0,
+	limit: int = 50,
+	page: int = 0,
+) -> dict[str, Any]:
+	"""Paginated request list, scoped to the branches the caller may see."""
+	_ensure_request_access()
 
-    limit = max(1, min(int(limit or 50), 200))
-    start = max(0, int(page or 0)) * limit
+	limit = max(1, min(int(limit or 50), 200))
+	start = max(0, int(page or 0)) * limit
 
-    filters: Dict[str, Any] = {"material_request_type": "Purchase", "docstatus": 1}
-    if status == "open":
-        filters["status"] = ["in", list(OPEN_STATUSES)]
-    elif status:
-        filters["status"] = status
-    if int(mine_only or 0):
-        filters["owner"] = frappe.session.user
+	filters: dict[str, Any] = {"material_request_type": "Purchase", "docstatus": 1}
+	if status == "open":
+		filters["status"] = ["in", list(OPEN_STATUSES)]
+	elif status:
+		filters["status"] = status
+	if int(mine_only or 0):
+		filters["owner"] = frappe.session.user
 
-    visible = _visible_profiles()
-    if pos_profile:
-        if visible is not None and pos_profile not in visible:
-            frappe.throw(
-                _("You do not have access to branch {0}.").format(pos_profile),
-                BranchAccessError,
-            )
-        filters["custom_jarz_pos_profile"] = pos_profile
-    elif visible is not None:
-        if not visible:
-            return {"requests": [], "total": 0, "can_review": _can_review()}
-        filters["custom_jarz_pos_profile"] = ["in", visible]
+	visible = _visible_profiles()
+	if pos_profile:
+		if visible is not None and pos_profile not in visible:
+			frappe.throw(
+				_("You do not have access to branch {0}.").format(pos_profile),
+				BranchAccessError,
+			)
+		filters["custom_jarz_pos_profile"] = pos_profile
+	elif visible is not None:
+		if not visible:
+			return {"requests": [], "total": 0, "can_review": _can_review()}
+		filters["custom_jarz_pos_profile"] = ["in", visible]
 
-    rows = frappe.get_all(
-        "Material Request",
-        filters=filters,
-        fields=_request_fields(),
-        order_by="transaction_date desc, creation desc",
-        limit_page_length=limit,
-        limit_start=start,
-    )
-    total = frappe.db.count("Material Request", filters=filters)
+	rows = frappe.get_all(
+		"Material Request",
+		filters=filters,
+		fields=_request_fields(),
+		order_by="transaction_date desc, creation desc",
+		limit_page_length=limit,
+		limit_start=start,
+	)
+	total = frappe.db.count("Material Request", filters=filters)
 
-    names = [r["name"] for r in rows]
-    lines_by_parent: Dict[str, List[Dict[str, Any]]] = {name: [] for name in names}
-    if names:
-        for line in frappe.get_all(
-            "Material Request Item",
-            filters={"parent": ["in", names]},
-            fields=_REQUEST_ITEM_FIELDS,
-            order_by="parent asc, idx asc",
-            limit_page_length=0,
-        ):
-            lines_by_parent.setdefault(line["parent"], []).append(_serialize_line(line))
+	names = [r["name"] for r in rows]
+	lines_by_parent: dict[str, list[dict[str, Any]]] = {name: [] for name in names}
+	if names:
+		for line in frappe.get_all(
+			"Material Request Item",
+			filters={"parent": ["in", names]},
+			fields=_REQUEST_ITEM_FIELDS,
+			order_by="parent asc, idx asc",
+			limit_page_length=0,
+		):
+			lines_by_parent.setdefault(line["parent"], []).append(_serialize_line(line))
 
-    requests = []
-    for row in rows:
-        payload = _serialize_request(row)
-        payload["items"] = lines_by_parent.get(row["name"], [])
-        requests.append(payload)
+	requests = []
+	for row in rows:
+		payload = _serialize_request(row)
+		payload["items"] = lines_by_parent.get(row["name"], [])
+		requests.append(payload)
 
-    return {"requests": requests, "total": total, "can_review": _can_review()}
-
-
-@frappe.whitelist()
-def get_request_counts() -> Dict[str, Any]:
-    """Open requests the caller can see, for the side-menu indicator.
-
-    Two counts only, no rows: the drawer asks every time it opens, so this must
-    stay as cheap as two ``COUNT(*)``. Scoped exactly like :func:`list_requests`
-    with ``status="open"``, so the badge never promises a request the list will
-    not show.
-    """
-    _ensure_request_access()
-
-    filters: Dict[str, Any] = {
-        "material_request_type": "Purchase",
-        "docstatus": 1,
-        "status": ["in", list(OPEN_STATUSES)],
-    }
-    visible = _visible_profiles()
-    if visible is not None:
-        if not visible:
-            return {"open": 0, "unacknowledged": 0}
-        filters["custom_jarz_pos_profile"] = ["in", visible]
-
-    open_count = frappe.db.count("Material Request", filters=filters)
-    if not _has_ack_fields():
-        # Not migrated yet: nothing can have been accepted.
-        return {"open": int(open_count or 0), "unacknowledged": int(open_count or 0)}
-    unacknowledged = frappe.db.count(
-        "Material Request",
-        filters={**filters, "custom_jarz_acknowledged_at": ["is", "not set"]},
-    )
-    return {"open": int(open_count or 0), "unacknowledged": int(unacknowledged or 0)}
+	return {"requests": requests, "total": total, "can_review": _can_review()}
 
 
 @frappe.whitelist()
-def get_open_request_lines(company: Optional[str] = None) -> Dict[str, Any]:
-    """The buying list: every outstanding request line, rolled up per item.
+def get_request_counts() -> dict[str, Any]:
+	"""Open requests the caller can see, for the side-menu indicator.
 
-    This is the shape real purchasing software buys from — one row per item with
-    total outstanding demand — rather than one order per requester. Without the
-    roll-up a buyer placing three separate orders for the same item is the
-    default behaviour, not the exception.
+	Two counts only, no rows: the drawer asks every time it opens, so this must
+	stay as cheap as two ``COUNT(*)``. Scoped exactly like :func:`list_requests`
+	with ``status="open"``, so the badge never promises a request the list will
+	not show.
+	"""
+	_ensure_request_access()
 
-    Each row also carries what the buyer needs to make a call without leaving
-    the screen: what is already on hand, and what the item last cost.
-    """
-    _ensure_request_access()
-    resolved_company = _resolve_company(company)
+	filters: dict[str, Any] = {
+		"material_request_type": "Purchase",
+		"docstatus": 1,
+		"status": ["in", list(OPEN_STATUSES)],
+	}
+	visible = _visible_profiles()
+	if visible is not None:
+		if not visible:
+			return {"open": 0, "unacknowledged": 0}
+		filters["custom_jarz_pos_profile"] = ["in", visible]
 
-    filters: Dict[str, Any] = {
-        "material_request_type": "Purchase",
-        "docstatus": 1,
-        "status": ["in", list(OPEN_STATUSES)],
-        "company": resolved_company,
-    }
-    visible = _visible_profiles()
-    if visible is not None:
-        if not visible:
-            return {"lines": [], "company": resolved_company}
-        filters["custom_jarz_pos_profile"] = ["in", visible]
+	open_count = frappe.db.count("Material Request", filters=filters)
+	if not _has_ack_fields():
+		# Not migrated yet: nothing can have been accepted.
+		return {"open": int(open_count or 0), "unacknowledged": int(open_count or 0)}
+	unacknowledged = frappe.db.count(
+		"Material Request",
+		filters={**filters, "custom_jarz_acknowledged_at": ["is", "not set"]},
+	)
+	return {"open": int(open_count or 0), "unacknowledged": int(unacknowledged or 0)}
 
-    parents = frappe.get_all(
-        "Material Request",
-        filters=filters,
-        fields=["name", "custom_jarz_pos_profile", "custom_jarz_requested_by_label",
-                "custom_jarz_note", "schedule_date", "transaction_date", "owner"],
-        limit_page_length=0,
-    )
-    if not parents:
-        return {"lines": [], "company": resolved_company}
 
-    parent_map = {p["name"]: p for p in parents}
-    rows = frappe.get_all(
-        "Material Request Item",
-        filters={"parent": ["in", list(parent_map)]},
-        fields=_REQUEST_ITEM_FIELDS,
-        order_by="parent asc, idx asc",
-        limit_page_length=0,
-    )
+@frappe.whitelist()
+def get_open_request_lines(company: str | None = None) -> dict[str, Any]:
+	"""The buying list: every outstanding request line, rolled up per item.
 
-    grouped: Dict[str, Dict[str, Any]] = {}
-    for row in rows:
-        outstanding = flt(row.get("stock_qty") or 0) - flt(row.get("received_qty") or 0)
-        if outstanding <= 0:
-            continue
+	This is the shape real purchasing software buys from — one row per item with
+	total outstanding demand — rather than one order per requester. Without the
+	roll-up a buyer placing three separate orders for the same item is the
+	default behaviour, not the exception.
 
-        parent = parent_map.get(row["parent"], {})
-        item_code = row["item_code"]
-        bucket = grouped.setdefault(item_code, {
-            "item_code": item_code,
-            "item_name": row.get("item_name") or item_code,
-            "stock_uom": row.get("stock_uom"),
-            "outstanding_qty": 0.0,
-            "requested_qty": 0.0,
-            "received_qty": 0.0,
-            "earliest_needed_by": None,
-            "sources": [],
-        })
-        bucket["outstanding_qty"] += outstanding
-        bucket["requested_qty"] += flt(row.get("stock_qty") or 0)
-        bucket["received_qty"] += flt(row.get("received_qty") or 0)
+	Each row also carries what the buyer needs to make a call without leaving
+	the screen: what is already on hand, and what the item last cost.
+	"""
+	_ensure_request_access()
+	resolved_company = _resolve_company(company)
 
-        needed_by = row.get("schedule_date") or parent.get("schedule_date")
-        current = bucket["earliest_needed_by"]
-        if needed_by and (current is None or getdate(needed_by) < getdate(current)):
-            bucket["earliest_needed_by"] = needed_by
+	filters: dict[str, Any] = {
+		"material_request_type": "Purchase",
+		"docstatus": 1,
+		"status": ["in", list(OPEN_STATUSES)],
+		"company": resolved_company,
+	}
+	visible = _visible_profiles()
+	if visible is not None:
+		if not visible:
+			return {"lines": [], "company": resolved_company}
+		filters["custom_jarz_pos_profile"] = ["in", visible]
 
-        bucket["sources"].append({
-            "material_request": row["parent"],
-            "material_request_item": row["name"],
-            "pos_profile": parent.get("custom_jarz_pos_profile"),
-            "requested_by": parent.get("custom_jarz_requested_by_label") or parent.get("owner"),
-            "note": parent.get("custom_jarz_note"),
-            "qty": flt(row.get("qty") or 0),
-            "stock_qty": flt(row.get("stock_qty") or 0),
-            "received_qty": flt(row.get("received_qty") or 0),
-            "outstanding_qty": outstanding,
-            "uom": row.get("uom"),
-            "conversion_factor": flt(row.get("conversion_factor") or 1),
-            "warehouse": row.get("warehouse"),
-            "needed_by": needed_by,
-        })
+	parents = frappe.get_all(
+		"Material Request",
+		filters=filters,
+		fields=[
+			"name",
+			"custom_jarz_pos_profile",
+			"custom_jarz_requested_by_label",
+			"custom_jarz_note",
+			"schedule_date",
+			"transaction_date",
+			"owner",
+		],
+		limit_page_length=0,
+	)
+	if not parents:
+		return {"lines": [], "company": resolved_company}
 
-    if not grouped:
-        return {"lines": [], "company": resolved_company}
+	parent_map = {p["name"]: p for p in parents}
+	rows = frappe.get_all(
+		"Material Request Item",
+		filters={"parent": ["in", list(parent_map)]},
+		fields=_REQUEST_ITEM_FIELDS,
+		order_by="parent asc, idx asc",
+		limit_page_length=0,
+	)
 
-    item_codes = list(grouped)
-    on_hand = _on_hand_by_item(item_codes)
-    last_rates = _last_purchase_rate_by_item(item_codes)
-    # So a line bought straight off the requests list carries the same VAT it
-    # would have carried had the buyer searched for the item by hand: the Item
-    # master's own template, else the site default from Jarz POS Settings.
-    # Company-scoped, so a default belonging to another company is not offered.
-    from jarz_pos.api.purchase import _item_tax_templates_bulk
+	grouped: dict[str, dict[str, Any]] = {}
+	for row in rows:
+		outstanding = flt(row.get("stock_qty") or 0) - flt(row.get("received_qty") or 0)
+		if outstanding <= 0:
+			continue
 
-    tax_templates = _item_tax_templates_bulk(item_codes, company=resolved_company)
+		parent = parent_map.get(row["parent"], {})
+		item_code = row["item_code"]
+		bucket = grouped.setdefault(
+			item_code,
+			{
+				"item_code": item_code,
+				"item_name": row.get("item_name") or item_code,
+				"stock_uom": row.get("stock_uom"),
+				"outstanding_qty": 0.0,
+				"requested_qty": 0.0,
+				"received_qty": 0.0,
+				"earliest_needed_by": None,
+				"sources": [],
+			},
+		)
+		bucket["outstanding_qty"] += outstanding
+		bucket["requested_qty"] += flt(row.get("stock_qty") or 0)
+		bucket["received_qty"] += flt(row.get("received_qty") or 0)
 
-    lines = []
-    for item_code, bucket in grouped.items():
-        bucket["on_hand_qty"] = on_hand.get(item_code, 0.0)
-        bucket["last_purchase_rate"] = last_rates.get(item_code, 0.0)
-        bucket["item_tax_template"] = tax_templates.get(item_code)
-        # Sort the per-branch breakdown by urgency so the tap-to-expand view
-        # leads with whoever needs it soonest.
-        bucket["sources"].sort(key=lambda s: (str(s.get("needed_by") or "9999-12-31"), s.get("pos_profile") or ""))
-        lines.append(bucket)
+		needed_by = row.get("schedule_date") or parent.get("schedule_date")
+		current = bucket["earliest_needed_by"]
+		if needed_by and (current is None or getdate(needed_by) < getdate(current)):
+			bucket["earliest_needed_by"] = needed_by
 
-    lines.sort(key=lambda b: (str(b.get("earliest_needed_by") or "9999-12-31"), b["item_name"]))
-    return {"lines": lines, "company": resolved_company}
+		bucket["sources"].append(
+			{
+				"material_request": row["parent"],
+				"material_request_item": row["name"],
+				"pos_profile": parent.get("custom_jarz_pos_profile"),
+				"requested_by": parent.get("custom_jarz_requested_by_label") or parent.get("owner"),
+				"note": parent.get("custom_jarz_note"),
+				"qty": flt(row.get("qty") or 0),
+				"stock_qty": flt(row.get("stock_qty") or 0),
+				"received_qty": flt(row.get("received_qty") or 0),
+				"outstanding_qty": outstanding,
+				"uom": row.get("uom"),
+				"conversion_factor": flt(row.get("conversion_factor") or 1),
+				"warehouse": row.get("warehouse"),
+				"needed_by": needed_by,
+			}
+		)
+
+	if not grouped:
+		return {"lines": [], "company": resolved_company}
+
+	item_codes = list(grouped)
+	on_hand = _on_hand_by_item(item_codes)
+	last_rates = _last_purchase_rate_by_item(item_codes)
+	# So a line bought straight off the requests list carries the same VAT it
+	# would have carried had the buyer searched for the item by hand: the Item
+	# master's own template, else the site default from Jarz POS Settings.
+	# Company-scoped, so a default belonging to another company is not offered.
+	from jarz_pos.api.purchase import _item_tax_templates_bulk
+
+	tax_templates = _item_tax_templates_bulk(item_codes, company=resolved_company)
+
+	lines = []
+	for item_code, bucket in grouped.items():
+		bucket["on_hand_qty"] = on_hand.get(item_code, 0.0)
+		bucket["last_purchase_rate"] = last_rates.get(item_code, 0.0)
+		bucket["item_tax_template"] = tax_templates.get(item_code)
+		# Sort the per-branch breakdown by urgency so the tap-to-expand view
+		# leads with whoever needs it soonest.
+		bucket["sources"].sort(
+			key=lambda s: (str(s.get("needed_by") or "9999-12-31"), s.get("pos_profile") or "")
+		)
+		lines.append(bucket)
+
+	lines.sort(key=lambda b: (str(b.get("earliest_needed_by") or "9999-12-31"), b["item_name"]))
+	return {"lines": lines, "company": resolved_company}
 
 
 # ---------------------------------------------------------------------------
@@ -693,252 +716,271 @@ def get_open_request_lines(company: Optional[str] = None) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 _REQUEST_FIELDS = [
-    "name", "material_request_type", "transaction_date", "schedule_date", "status", "docstatus",
-    "per_ordered", "per_received", "company", "owner", "creation", "modified",
-    "custom_jarz_pos_profile", "custom_jarz_requested_by_label", "custom_jarz_note",
+	"name",
+	"material_request_type",
+	"transaction_date",
+	"schedule_date",
+	"status",
+	"docstatus",
+	"per_ordered",
+	"per_received",
+	"company",
+	"owner",
+	"creation",
+	"modified",
+	"custom_jarz_pos_profile",
+	"custom_jarz_requested_by_label",
+	"custom_jarz_note",
 ]
 
 _ACK_FIELDS = [
-    "custom_jarz_acknowledged_by", "custom_jarz_acknowledged_by_label",
-    "custom_jarz_acknowledged_at",
+	"custom_jarz_acknowledged_by",
+	"custom_jarz_acknowledged_by_label",
+	"custom_jarz_acknowledged_at",
 ]
 
 
 def _has_ack_fields() -> bool:
-    """Whether the acceptance Custom Fields exist on this site yet.
+	"""Whether the acceptance Custom Fields exist on this site yet.
 
-    Fixtures sync at the very end of ``bench migrate``, and the CI logic gate
-    runs without migrating. Selecting an absent column is a hard SQL error, so
-    without this check the whole request list — not just acceptance — died in
-    that window.
-    """
-    try:
-        return bool(frappe.db.has_column("Material Request", "custom_jarz_acknowledged_at"))
-    except Exception:
-        return False
+	Fixtures sync at the very end of ``bench migrate``, and the CI logic gate
+	runs without migrating. Selecting an absent column is a hard SQL error, so
+	without this check the whole request list — not just acceptance — died in
+	that window.
+	"""
+	try:
+		return bool(frappe.db.has_column("Material Request", "custom_jarz_acknowledged_at"))
+	except Exception:
+		return False
 
 
-def _request_fields() -> List[str]:
-    return _REQUEST_FIELDS + _ACK_FIELDS if _has_ack_fields() else list(_REQUEST_FIELDS)
+def _request_fields() -> list[str]:
+	return _REQUEST_FIELDS + _ACK_FIELDS if _has_ack_fields() else list(_REQUEST_FIELDS)
+
 
 _REQUEST_ITEM_FIELDS = [
-    "name", "parent", "item_code", "item_name", "qty", "uom", "stock_uom",
-    "conversion_factor", "stock_qty", "ordered_qty", "received_qty",
-    "warehouse", "schedule_date", "idx",
+	"name",
+	"parent",
+	"item_code",
+	"item_name",
+	"qty",
+	"uom",
+	"stock_uom",
+	"conversion_factor",
+	"stock_qty",
+	"ordered_qty",
+	"received_qty",
+	"warehouse",
+	"schedule_date",
+	"idx",
 ]
 
 
-def _serialize_request(doc: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        "name": doc.get("name"),
-        "transaction_date": doc.get("transaction_date"),
-        "schedule_date": doc.get("schedule_date"),
-        "status": doc.get("status"),
-        "docstatus": doc.get("docstatus"),
-        "per_ordered": flt(doc.get("per_ordered") or 0),
-        "per_received": flt(doc.get("per_received") or 0),
-        "company": doc.get("company"),
-        "pos_profile": doc.get("custom_jarz_pos_profile"),
-        "requested_by": doc.get("custom_jarz_requested_by_label") or doc.get("owner"),
-        "requested_by_user": doc.get("owner"),
-        "note": doc.get("custom_jarz_note"),
-        "creation": doc.get("creation"),
-        "modified": doc.get("modified"),
-        "is_mine": doc.get("owner") == frappe.session.user,
-        "acknowledged_by": doc.get("custom_jarz_acknowledged_by_label")
-        or doc.get("custom_jarz_acknowledged_by"),
-        "acknowledged_by_user": doc.get("custom_jarz_acknowledged_by"),
-        "acknowledged_at": doc.get("custom_jarz_acknowledged_at"),
-        # Header-level only for list rows; update_request re-checks every line.
-        "can_edit": _may_edit(doc.get("owner")) and _edit_block_reason(doc) is None,
-    }
+def _serialize_request(doc: dict[str, Any]) -> dict[str, Any]:
+	return {
+		"name": doc.get("name"),
+		"transaction_date": doc.get("transaction_date"),
+		"schedule_date": doc.get("schedule_date"),
+		"status": doc.get("status"),
+		"docstatus": doc.get("docstatus"),
+		"per_ordered": flt(doc.get("per_ordered") or 0),
+		"per_received": flt(doc.get("per_received") or 0),
+		"company": doc.get("company"),
+		"pos_profile": doc.get("custom_jarz_pos_profile"),
+		"requested_by": doc.get("custom_jarz_requested_by_label") or doc.get("owner"),
+		"requested_by_user": doc.get("owner"),
+		"note": doc.get("custom_jarz_note"),
+		"creation": doc.get("creation"),
+		"modified": doc.get("modified"),
+		"is_mine": doc.get("owner") == frappe.session.user,
+		"acknowledged_by": doc.get("custom_jarz_acknowledged_by_label")
+		or doc.get("custom_jarz_acknowledged_by"),
+		"acknowledged_by_user": doc.get("custom_jarz_acknowledged_by"),
+		"acknowledged_at": doc.get("custom_jarz_acknowledged_at"),
+		# Header-level only for list rows; update_request re-checks every line.
+		"can_edit": _may_edit(doc.get("owner")) and _edit_block_reason(doc) is None,
+	}
 
 
-def _serialize_request_with_lines(doc: Any) -> Dict[str, Any]:
-    """A single request as the list returns it, lines included.
+def _serialize_request_with_lines(doc: Any) -> dict[str, Any]:
+	"""A single request as the list returns it, lines included.
 
-    The write endpoints used to return the header alone. The app swaps the
-    returned request into its list in place, so a card that had just been
-    stopped or reopened lost every line and fell back to showing its name.
-    """
-    payload = _serialize_request(doc.as_dict())
-    payload["items"] = [_serialize_line(row.as_dict()) for row in doc.get("items") or []]
-    return payload
+	The write endpoints used to return the header alone. The app swaps the
+	returned request into its list in place, so a card that had just been
+	stopped or reopened lost every line and fell back to showing its name.
+	"""
+	payload = _serialize_request(doc.as_dict())
+	payload["items"] = [_serialize_line(row.as_dict()) for row in doc.get("items") or []]
+	return payload
 
 
-def _serialize_line(row: Dict[str, Any]) -> Dict[str, Any]:
-    stock_qty = flt(row.get("stock_qty") or 0)
-    received = flt(row.get("received_qty") or 0)
-    return {
-        "name": row.get("name"),
-        "item_code": row.get("item_code"),
-        "item_name": row.get("item_name") or row.get("item_code"),
-        "qty": flt(row.get("qty") or 0),
-        "uom": row.get("uom"),
-        "stock_uom": row.get("stock_uom"),
-        "conversion_factor": flt(row.get("conversion_factor") or 1),
-        "stock_qty": stock_qty,
-        "ordered_qty": flt(row.get("ordered_qty") or 0),
-        "received_qty": received,
-        "outstanding_qty": max(stock_qty - received, 0.0),
-        "warehouse": row.get("warehouse"),
-        "schedule_date": row.get("schedule_date"),
-    }
+def _serialize_line(row: dict[str, Any]) -> dict[str, Any]:
+	stock_qty = flt(row.get("stock_qty") or 0)
+	received = flt(row.get("received_qty") or 0)
+	return {
+		"name": row.get("name"),
+		"item_code": row.get("item_code"),
+		"item_name": row.get("item_name") or row.get("item_code"),
+		"qty": flt(row.get("qty") or 0),
+		"uom": row.get("uom"),
+		"stock_uom": row.get("stock_uom"),
+		"conversion_factor": flt(row.get("conversion_factor") or 1),
+		"stock_qty": stock_qty,
+		"ordered_qty": flt(row.get("ordered_qty") or 0),
+		"received_qty": received,
+		"outstanding_qty": max(stock_qty - received, 0.0),
+		"warehouse": row.get("warehouse"),
+		"schedule_date": row.get("schedule_date"),
+	}
 
 
 def _conversion_factor(item_code: str, uom: str, stock_uom: str) -> float:
-    if not uom or uom == stock_uom:
-        return 1.0
-    factor = frappe.db.get_value(
-        "UOM Conversion Detail", {"parent": item_code, "uom": uom}, "conversion_factor"
-    )
-    if not factor:
-        frappe.throw(
-            _("{0} has no conversion from {1} to {2}. Add it on the Item.").format(
-                item_code, uom, stock_uom
-            )
-        )
-    return flt(factor)
+	if not uom or uom == stock_uom:
+		return 1.0
+	factor = frappe.db.get_value(
+		"UOM Conversion Detail", {"parent": item_code, "uom": uom}, "conversion_factor"
+	)
+	if not factor:
+		frappe.throw(
+			_("{0} has no conversion from {1} to {2}. Add it on the Item.").format(item_code, uom, stock_uom)
+		)
+	return flt(factor)
 
 
-def _on_hand_by_item(item_codes: Sequence[str]) -> Dict[str, float]:
-    if not item_codes:
-        return {}
-    totals: Dict[str, float] = {}
-    for row in frappe.get_all(
-        "Bin",
-        filters={"item_code": ["in", list(item_codes)]},
-        fields=["item_code", "actual_qty"],
-        limit_page_length=0,
-    ):
-        totals[row["item_code"]] = totals.get(row["item_code"], 0.0) + flt(row.get("actual_qty") or 0)
-    return totals
+def _on_hand_by_item(item_codes: Sequence[str]) -> dict[str, float]:
+	if not item_codes:
+		return {}
+	totals: dict[str, float] = {}
+	for row in frappe.get_all(
+		"Bin",
+		filters={"item_code": ["in", list(item_codes)]},
+		fields=["item_code", "actual_qty"],
+		limit_page_length=0,
+	):
+		totals[row["item_code"]] = totals.get(row["item_code"], 0.0) + flt(row.get("actual_qty") or 0)
+	return totals
 
 
-def _last_purchase_rate_by_item(item_codes: Sequence[str]) -> Dict[str, float]:
-    """Most recent rate actually paid, per item.
+def _last_purchase_rate_by_item(item_codes: Sequence[str]) -> dict[str, float]:
+	"""Most recent rate actually paid, per item.
 
-    Read from submitted Purchase Invoice lines rather than
-    ``Item.last_purchase_rate``, which is also written by Purchase Orders and so
-    can reflect a price that was quoted but never paid.
-    """
-    if not item_codes:
-        return {}
-    rows = frappe.get_all(
-        "Purchase Invoice Item",
-        filters={"item_code": ["in", list(item_codes)], "docstatus": 1},
-        fields=["item_code", "rate", "creation"],
-        order_by="creation desc",
-        limit_page_length=0,
-    )
-    latest: Dict[str, float] = {}
-    for row in rows:
-        latest.setdefault(row["item_code"], flt(row.get("rate") or 0))
-    return latest
+	Read from submitted Purchase Invoice lines rather than
+	``Item.last_purchase_rate``, which is also written by Purchase Orders and so
+	can reflect a price that was quoted but never paid.
+	"""
+	if not item_codes:
+		return {}
+	rows = frappe.get_all(
+		"Purchase Invoice Item",
+		filters={"item_code": ["in", list(item_codes)], "docstatus": 1},
+		fields=["item_code", "rate", "creation"],
+		order_by="creation desc",
+		limit_page_length=0,
+	)
+	latest: dict[str, float] = {}
+	for row in rows:
+		latest.setdefault(row["item_code"], flt(row.get("rate") or 0))
+	return latest
 
 
 def _user_label(user: str) -> str:
-    label = frappe.db.get_value("User", user, "full_name")
-    return str(label or user)
+	label = frappe.db.get_value("User", user, "full_name")
+	return str(label or user)
 
 
 def notify_fulfilment(purchase_invoice: str, request_item_names: Sequence[str]) -> None:
-    """Tell requesters what was actually bought against their request.
+	"""Tell requesters what was actually bought against their request.
 
-    Called after the Purchase Invoice submits, so ``received_qty`` on the
-    request lines already reflects the purchase. Closing this loop is what keeps
-    staff filing requests — a request that disappears into silence stops being
-    used within a week.
+	Called after the Purchase Invoice submits, so ``received_qty`` on the
+	request lines already reflects the purchase. Closing this loop is what keeps
+	staff filing requests — a request that disappears into silence stops being
+	used within a week.
 
-    Best-effort by design: the goods are already received and the accounting is
-    already posted by the time this runs, so a notification failure must not
-    undo any of it. It is logged, never silently swallowed.
-    """
-    if not request_item_names:
-        return
-    try:
-        rows = frappe.get_all(
-            "Material Request Item",
-            filters={"name": ["in", list(request_item_names)]},
-            fields=["parent", "item_code", "item_name", "stock_qty", "received_qty", "stock_uom"],
-            limit_page_length=0,
-        )
-        if not rows:
-            return
+	Best-effort by design: the goods are already received and the accounting is
+	already posted by the time this runs, so a notification failure must not
+	undo any of it. It is logged, never silently swallowed.
+	"""
+	if not request_item_names:
+		return
+	try:
+		rows = frappe.get_all(
+			"Material Request Item",
+			filters={"name": ["in", list(request_item_names)]},
+			fields=["parent", "item_code", "item_name", "stock_qty", "received_qty", "stock_uom"],
+			limit_page_length=0,
+		)
+		if not rows:
+			return
 
-        parents = {r["parent"] for r in rows}
-        parent_rows = frappe.get_all(
-            "Material Request",
-            filters={"name": ["in", list(parents)]},
-            fields=["name", "owner", "status", "per_received", "custom_jarz_pos_profile"],
-            limit_page_length=0,
-        )
-        parent_map = {p["name"]: p for p in parent_rows}
+		parents = {r["parent"] for r in rows}
+		parent_rows = frappe.get_all(
+			"Material Request",
+			filters={"name": ["in", list(parents)]},
+			fields=["name", "owner", "status", "per_received", "custom_jarz_pos_profile"],
+			limit_page_length=0,
+		)
+		parent_map = {p["name"]: p for p in parent_rows}
 
-        by_parent: Dict[str, List[Dict[str, Any]]] = {}
-        for row in rows:
-            by_parent.setdefault(row["parent"], []).append(row)
+		by_parent: dict[str, list[dict[str, Any]]] = {}
+		for row in rows:
+			by_parent.setdefault(row["parent"], []).append(row)
 
-        from jarz_pos.utils.realtime import publish_to_branches
+		from jarz_pos.utils.realtime import publish_to_branches
 
-        for parent_name, lines in by_parent.items():
-            parent = parent_map.get(parent_name) or {}
-            profile = parent.get("custom_jarz_pos_profile")
-            payload = {
-                "name": parent_name,
-                "purchase_invoice": purchase_invoice,
-                "status": parent.get("status"),
-                "per_received": flt(parent.get("per_received") or 0),
-                "lines": [
-                    {
-                        "item_code": line["item_code"],
-                        "item_name": line.get("item_name") or line["item_code"],
-                        "requested_qty": flt(line.get("stock_qty") or 0),
-                        "received_qty": flt(line.get("received_qty") or 0),
-                        "uom": line.get("stock_uom"),
-                    }
-                    for line in lines
-                ],
-            }
-            owner = parent.get("owner")
-            publish_to_branches(
-                "jarz_pos_item_request_fulfilled",
-                payload,
-                [profile] if profile else [],
-                extra_users=[owner] if owner else None,
-                after_commit=True,
-            )
-    except Exception:
-        frappe.log_error(
-            frappe.get_traceback(), "purchase_request: fulfilment notification failed"
-        )
+		for parent_name, lines in by_parent.items():
+			parent = parent_map.get(parent_name) or {}
+			profile = parent.get("custom_jarz_pos_profile")
+			payload = {
+				"name": parent_name,
+				"purchase_invoice": purchase_invoice,
+				"status": parent.get("status"),
+				"per_received": flt(parent.get("per_received") or 0),
+				"lines": [
+					{
+						"item_code": line["item_code"],
+						"item_name": line.get("item_name") or line["item_code"],
+						"requested_qty": flt(line.get("stock_qty") or 0),
+						"received_qty": flt(line.get("received_qty") or 0),
+						"uom": line.get("stock_uom"),
+					}
+					for line in lines
+				],
+			}
+			owner = parent.get("owner")
+			publish_to_branches(
+				"jarz_pos_item_request_fulfilled",
+				payload,
+				[profile] if profile else [],
+				extra_users=[owner] if owner else None,
+				after_commit=True,
+			)
+	except Exception:
+		frappe.log_error(frappe.get_traceback(), "purchase_request: fulfilment notification failed")
 
 
 def _notify_reviewers(doc: Any) -> None:
-    """Tell the buyers a new request landed.
+	"""Tell the buyers a new request landed.
 
-    Best-effort: a notification failure must not roll back a request that is
-    otherwise valid. Logged rather than swallowed silently so a broken
-    notification path is visible instead of merely absent.
-    """
-    try:
-        from jarz_pos.utils.realtime import publish_to_branches
+	Best-effort: a notification failure must not roll back a request that is
+	otherwise valid. Logged rather than swallowed silently so a broken
+	notification path is visible instead of merely absent.
+	"""
+	try:
+		from jarz_pos.utils.realtime import publish_to_branches
 
-        profile = doc.get("custom_jarz_pos_profile")
-        if not profile:
-            return
-        publish_to_branches(
-            "jarz_pos_item_request_created",
-            {
-                "name": doc.name,
-                "pos_profile": profile,
-                "requested_by": doc.get("custom_jarz_requested_by_label"),
-                "item_count": len(doc.get("items") or []),
-            },
-            [profile],
-            after_commit=True,
-        )
-    except Exception:
-        frappe.log_error(
-            frappe.get_traceback(), "purchase_request: reviewer notification failed"
-        )
+		profile = doc.get("custom_jarz_pos_profile")
+		if not profile:
+			return
+		publish_to_branches(
+			"jarz_pos_item_request_created",
+			{
+				"name": doc.name,
+				"pos_profile": profile,
+				"requested_by": doc.get("custom_jarz_requested_by_label"),
+				"item_count": len(doc.get("items") or []),
+			},
+			[profile],
+			after_commit=True,
+		)
+	except Exception:
+		frappe.log_error(frappe.get_traceback(), "purchase_request: reviewer notification failed")

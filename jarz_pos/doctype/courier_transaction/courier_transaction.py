@@ -26,8 +26,10 @@ class CourierTransaction(Document):
 			current = float(frappe.db.get_value("Sales Invoice", inv_name, "custom_shipping_expense") or 0)
 			if current <= 0:
 				frappe.db.set_value(
-					"Sales Invoice", inv_name,
-					"custom_shipping_expense", shipping,
+					"Sales Invoice",
+					inv_name,
+					"custom_shipping_expense",
+					shipping,
 					update_modified=False,
 				)
 		except Exception:

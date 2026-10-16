@@ -14,4 +14,4 @@ from frappe.model.document import Document
 
 
 class InvoiceStateLog(Document):
-    pass
+	pass

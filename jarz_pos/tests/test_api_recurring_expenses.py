@@ -4,9 +4,9 @@ These cover the pure decision functions — month resolution, cadence matching
 and GL reconciliation classification — so they run without a site or database.
 """
 
-from datetime import date
 import io
 import unittest
+from datetime import date
 from unittest.mock import MagicMock, patch
 
 
@@ -205,15 +205,11 @@ class TestNamingSeriesFallback(unittest.TestCase):
 
 		from jarz_pos.doctype.jarz_recurring_expense import jarz_recurring_expense as mod
 
-		path = os.path.join(
-			os.path.dirname(mod.__file__), "jarz_recurring_expense.json"
-		)
-		with io.open(path, encoding="utf-8") as handle:
+		path = os.path.join(os.path.dirname(mod.__file__), "jarz_recurring_expense.json")
+		with open(path, encoding="utf-8") as handle:
 			schema = json.load(handle)
 
-		field = next(
-			f for f in schema["fields"] if f["fieldname"] == "naming_series"
-		)
+		field = next(f for f in schema["fields"] if f["fieldname"] == "naming_series")
 		# A read-only Data field silently drops its default on non-form inserts.
 		self.assertEqual(field["fieldtype"], "Select")
 		self.assertFalse(field.get("read_only"))
@@ -278,8 +274,16 @@ class TestLeaverIsPaidForDaysWorked(unittest.TestCase):
 			if doctype == "Employee":
 				return [{"name": "E1", "employee_name": "Left Mid", "relieving_date": date(2026, 8, 10)}]
 			if doctype == "Salary Structure Assignment":
-				return [{"employee": "E1", "employee_name": "Left Mid", "base": 4500, "variable": 0,
-						 "from_date": date(2026, 1, 1), "salary_structure": "S"}]
+				return [
+					{
+						"employee": "E1",
+						"employee_name": "Left Mid",
+						"base": 4500,
+						"variable": 0,
+						"from_date": date(2026, 1, 1),
+						"salary_structure": "S",
+					}
+				]
 			return []
 
 		with patch.object(recurring_expenses.frappe, "get_all", side_effect=get_all):

@@ -79,10 +79,9 @@ class TestCustomerAPI(unittest.TestCase):
 			}
 		]
 
-		with patch(
-			"jarz_pos.utils.invoice_utils._territory_has_column", return_value=True
-		), patch(
-			"jarz_pos.api.customer.frappe.get_all", return_value=rows
+		with (
+			patch("jarz_pos.utils.invoice_utils._territory_has_column", return_value=True),
+			patch("jarz_pos.api.customer.frappe.get_all", return_value=rows),
 		):
 			result = get_territories()
 
@@ -107,10 +106,9 @@ class TestCustomerAPI(unittest.TestCase):
 			{"name": "EGZAYED", "territory_name": "EGZAYED", "custom_woo_code": "EGZAYED"},
 		]
 
-		with patch(
-			"jarz_pos.utils.invoice_utils._territory_has_column", return_value=True
-		), patch(
-			"jarz_pos.api.customer.frappe.get_all", return_value=rows
+		with (
+			patch("jarz_pos.utils.invoice_utils._territory_has_column", return_value=True),
+			patch("jarz_pos.api.customer.frappe.get_all", return_value=rows),
 		):
 			result = get_territories()
 
@@ -126,10 +124,9 @@ class TestCustomerAPI(unittest.TestCase):
 
 		rows = [{"name": "Egypt", "territory_name": "Egypt"}]
 
-		with patch(
-			"jarz_pos.utils.invoice_utils._territory_has_column", return_value=False
-		), patch(
-			"jarz_pos.api.customer.frappe.get_all", return_value=rows
+		with (
+			patch("jarz_pos.utils.invoice_utils._territory_has_column", return_value=False),
+			patch("jarz_pos.api.customer.frappe.get_all", return_value=rows),
 		):
 			result = get_territories()
 
@@ -155,10 +152,9 @@ class TestCustomerAPI(unittest.TestCase):
 			},
 		]
 
-		with patch(
-			"jarz_pos.utils.invoice_utils._territory_has_column", return_value=True
-		), patch(
-			"jarz_pos.api.customer.frappe.get_all", return_value=rows
+		with (
+			patch("jarz_pos.utils.invoice_utils._territory_has_column", return_value=True),
+			patch("jarz_pos.api.customer.frappe.get_all", return_value=rows),
 		):
 			result = get_territories(search="نصر")
 

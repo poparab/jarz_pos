@@ -15,192 +15,217 @@ app_home = "/desk/jarz-pos"
 
 # Fixtures
 fixtures = [
-    {"dt": "Custom Field", "filters": [["dt", "in", [
-        "Print Settings", "Sales Invoice", "Sales Invoice Item", "Address", "Supplier", "Quotation", "Sales Order", "Customer", "Sales Partner", "User", "Employee", "Account", "Item", "Lead", "Opportunity", "Work Order",
-        # Purchasing: idempotency key on the invoice, requester/branch/note on
-        # the item request. Omitting a dt here means its fields silently never
-        # migrate, so this list must track the fixture file.
-        "Purchase Invoice", "Material Request",
-        # POS Profile carries custom_allow_delivery_partner, which api/pos.py and
-        # api/couriers.py both read behind a get_meta() existence check. It was
-        # in the fixture FILE but not in this filter, so it was exported from the
-        # site it was created on and never imported onto any other — the guarded
-        # reads then degraded silently and the flag simply did not exist on a
-        # fresh site. Found by scripts/verify_schema_landed, which is exactly the
-        # class of drift that check exists for.
-        #
-        # Territory is deliberately NOT added: jarz_woocommerce_integration owns
-        # it in its own fixture filter and already imports the Territory fields
-        # this app reads. Listing it here too would make two apps import the same
-        # fields on every migrate, with last-writer-wins deciding the definition.
-        "POS Profile"
-    ]]]},
-    # "Jarz POS Settings" is deliberately NOT a fixture. Frappe imports a Single
-    # fixture with force=True + delete_old_doc, i.e. it REBUILDS the document from
-    # the JSON — so every field absent from that file reverted to its doctype
-    # default on every `bench migrate`. The file listed no feature flags, so every
-    # flag on this Single was silently switched off by every backend deploy,
-    # including enable_invoice_returns, whose own description calls it "the instant
-    # rollback lever — it needs no deploy and no restart".
-    #
-    # Seeding now happens in setup.settings_defaults.ensure_settings_defaults
-    # (after_migrate), which fills only fields that are EMPTY and never overwrites
-    # an operator's choice.
+	{
+		"dt": "Custom Field",
+		"filters": [
+			[
+				"dt",
+				"in",
+				[
+					"Print Settings",
+					"Sales Invoice",
+					"Sales Invoice Item",
+					"Address",
+					"Supplier",
+					"Quotation",
+					"Sales Order",
+					"Customer",
+					"Sales Partner",
+					"User",
+					"Employee",
+					"Account",
+					"Item",
+					"Lead",
+					"Opportunity",
+					"Work Order",
+					# Purchasing: idempotency key on the invoice, requester/branch/note on
+					# the item request. Omitting a dt here means its fields silently never
+					# migrate, so this list must track the fixture file.
+					"Purchase Invoice",
+					"Material Request",
+					# POS Profile carries custom_allow_delivery_partner, which api/pos.py and
+					# api/couriers.py both read behind a get_meta() existence check. It was
+					# in the fixture FILE but not in this filter, so it was exported from the
+					# site it was created on and never imported onto any other — the guarded
+					# reads then degraded silently and the flag simply did not exist on a
+					# fresh site. Found by scripts/verify_schema_landed, which is exactly the
+					# class of drift that check exists for.
+					#
+					# Territory is deliberately NOT added: jarz_woocommerce_integration owns
+					# it in its own fixture filter and already imports the Territory fields
+					# this app reads. Listing it here too would make two apps import the same
+					# fields on every migrate, with last-writer-wins deciding the definition.
+					"POS Profile",
+				],
+			]
+		],
+	},
+	# "Jarz POS Settings" is deliberately NOT a fixture. Frappe imports a Single
+	# fixture with force=True + delete_old_doc, i.e. it REBUILDS the document from
+	# the JSON — so every field absent from that file reverted to its doctype
+	# default on every `bench migrate`. The file listed no feature flags, so every
+	# flag on this Single was silently switched off by every backend deploy,
+	# including enable_invoice_returns, whose own description calls it "the instant
+	# rollback lever — it needs no deploy and no restart".
+	#
+	# Seeding now happens in setup.settings_defaults.ensure_settings_defaults
+	# (after_migrate), which fills only fields that are EMPTY and never overwrites
+	# an operator's choice.
 ]
 
 # Ensure conflicting Custom Fields are removed before fixtures import
 before_migrate = [
-    "jarz_pos.utils.cleanup.remove_conflicting_territory_delivery_fields",
-    # Remove any existing Custom Fields that collide with our fixtures by dt+fieldname
-    "jarz_pos.utils.cleanup.remove_colliding_custom_fields_for_fixtures",
-    # Courier app schema (COURIER_CONTRACTS §2 and §3). Deliberately AFTER the
-    # collision sweep: that sweep deletes any Custom Field whose name differs
-    # from the fixture's, so seeding first would only hand it something to
-    # delete. Both seeders are create-only and swallow their own exceptions.
-    "jarz_pos.utils.cleanup.ensure_courier_delivery_fields",
-    "jarz_pos.utils.cleanup.ensure_address_geo_fields",
-    # Customer tracking token. Kept out of ensure_courier_delivery_fields because
-    # COURIER_CONTRACTS §2 freezes that block at eight fields and a guard test
-    # asserts the set.
-    "jarz_pos.utils.cleanup.ensure_tracking_fields",
-    # Per-order customer pin snapshot on Sales Invoice (written by the Woo
-    # inbound sync). Before fixtures so the column exists while new code serves.
-    "jarz_pos.utils.cleanup.ensure_invoice_delivery_pin_fields",
-    # Journal Entry provenance tag. MUST be before_migrate: the backfill patch
-    # (post_model_sync) writes to this column, and post_model_sync runs long
-    # before sync_fixtures(). A fixture here would create the field after the
-    # patch needed it, so the patch would throw and every pre-existing tagged
-    # entry would stay invisible to its own idempotency guard.
-    "jarz_pos.utils.cleanup.ensure_journal_entry_tag_field",
-    # Journal Entry / Payment Entry posting TIME. Also before_migrate, and for
-    # the same reason as the tag above: fixtures sync at the very end of a
-    # migrate, while the freshly deployed code that writes this field is already
-    # serving. Neither doctype (nor GL Entry) has a core posting_time, so
-    # without this the time the POS user picked has nowhere to land and the
-    # write is dropped in silence.
-    #
-    # Like every seeder in this block, it must stay AFTER
-    # remove_colliding_custom_fields_for_fixtures: that sweep deletes any Custom
-    # Field whose name differs from the fixture's, so seeding first would only
-    # hand it something to delete.
-    "jarz_pos.utils.cleanup.ensure_posting_time_fields",
-    # Account flag that makes the Expenses screen ask which period a bill
-    # covers (paid ads). Before fixtures for the same reason as the line above.
-    "jarz_pos.utils.cleanup.ensure_account_requires_period_field",
-    # Ensure Territory has delivery_income and delivery_expense fields
-    "jarz_pos.utils.cleanup.ensure_territory_delivery_fields",
-    # Ensure new delivery slot fields exist before fixtures import / migrations
-    "jarz_pos.utils.cleanup.ensure_delivery_slot_fields",
-    # Remove legacy single datetime field
-    "jarz_pos.utils.cleanup.remove_required_delivery_datetime_field",
-    # POS Payment Receipt grants "Jarz POS Staff" create+write, and a DocPerm row
-    # is a Link to Role — so the record has to exist before the DocType syncs,
-    # which happens in the schema updates and therefore before after_migrate.
-    "jarz_pos.setup.pos_staff_role.ensure_pos_staff_role",
-    # Meta CAPI Settings / Event grant "Meta CAPI Manager"; same reason as above.
-    "jarz_pos.setup.meta_capi_role.ensure_meta_capi_role",
+	"jarz_pos.utils.cleanup.remove_conflicting_territory_delivery_fields",
+	# Remove any existing Custom Fields that collide with our fixtures by dt+fieldname
+	"jarz_pos.utils.cleanup.remove_colliding_custom_fields_for_fixtures",
+	# Courier app schema (COURIER_CONTRACTS §2 and §3). Deliberately AFTER the
+	# collision sweep: that sweep deletes any Custom Field whose name differs
+	# from the fixture's, so seeding first would only hand it something to
+	# delete. Both seeders are create-only and swallow their own exceptions.
+	"jarz_pos.utils.cleanup.ensure_courier_delivery_fields",
+	"jarz_pos.utils.cleanup.ensure_address_geo_fields",
+	# Customer tracking token. Kept out of ensure_courier_delivery_fields because
+	# COURIER_CONTRACTS §2 freezes that block at eight fields and a guard test
+	# asserts the set.
+	"jarz_pos.utils.cleanup.ensure_tracking_fields",
+	# Per-order customer pin snapshot on Sales Invoice (written by the Woo
+	# inbound sync). Before fixtures so the column exists while new code serves.
+	"jarz_pos.utils.cleanup.ensure_invoice_delivery_pin_fields",
+	# Journal Entry provenance tag. MUST be before_migrate: the backfill patch
+	# (post_model_sync) writes to this column, and post_model_sync runs long
+	# before sync_fixtures(). A fixture here would create the field after the
+	# patch needed it, so the patch would throw and every pre-existing tagged
+	# entry would stay invisible to its own idempotency guard.
+	"jarz_pos.utils.cleanup.ensure_journal_entry_tag_field",
+	# Journal Entry / Payment Entry posting TIME. Also before_migrate, and for
+	# the same reason as the tag above: fixtures sync at the very end of a
+	# migrate, while the freshly deployed code that writes this field is already
+	# serving. Neither doctype (nor GL Entry) has a core posting_time, so
+	# without this the time the POS user picked has nowhere to land and the
+	# write is dropped in silence.
+	#
+	# Like every seeder in this block, it must stay AFTER
+	# remove_colliding_custom_fields_for_fixtures: that sweep deletes any Custom
+	# Field whose name differs from the fixture's, so seeding first would only
+	# hand it something to delete.
+	"jarz_pos.utils.cleanup.ensure_posting_time_fields",
+	# Account flag that makes the Expenses screen ask which period a bill
+	# covers (paid ads). Before fixtures for the same reason as the line above.
+	"jarz_pos.utils.cleanup.ensure_account_requires_period_field",
+	# Ensure Territory has delivery_income and delivery_expense fields
+	"jarz_pos.utils.cleanup.ensure_territory_delivery_fields",
+	# Ensure new delivery slot fields exist before fixtures import / migrations
+	"jarz_pos.utils.cleanup.ensure_delivery_slot_fields",
+	# Remove legacy single datetime field
+	"jarz_pos.utils.cleanup.remove_required_delivery_datetime_field",
+	# POS Payment Receipt grants "Jarz POS Staff" create+write, and a DocPerm row
+	# is a Link to Role — so the record has to exist before the DocType syncs,
+	# which happens in the schema updates and therefore before after_migrate.
+	"jarz_pos.setup.pos_staff_role.ensure_pos_staff_role",
+	# Meta CAPI Settings / Event grant "Meta CAPI Manager"; same reason as above.
+	"jarz_pos.setup.meta_capi_role.ensure_meta_capi_role",
 ]
 
 after_migrate = [
-    # Create the POS ledger accounts Jarz POS Settings names (idempotent,
-    # create-only). Runs FIRST: a settings field pointing at a non-existent
-    # account fails link validation for every later full save of that Single,
-    # which is how the purchasing seeder below silently did nothing on
-    # production while succeeding on staging.
-    "jarz_pos.setup.accounts_setup.ensure_pos_accounts",
-    # Create the default 14% purchase VAT Item Tax Template (create-only, uses
-    # an EXISTING tax account, no-ops if the company has none). Must run BEFORE
-    # settings_defaults: that seeder points the Jarz POS Settings link at this
-    # template, and it will only do so once the template actually exists — a
-    # Link naming a missing record poisons every later full save of the Single.
-    "jarz_pos.setup.purchase_setup.ensure_purchase_vat_template",
-    # Create the label-COGS masters (Labels Inventory / Label Cost accounts and
-    # the Customer Label Printing item). Deliberately NOT gated on settings the
-    # way ensure_pos_accounts is: account-if-configured plus seed-if-exists
-    # deadlocks for a brand-new account, so this creates first and
-    # settings_defaults links after.
-    "jarz_pos.setup.label_setup.ensure_label_accounting",
-    # Fill ONLY the empty fields on Jarz POS Settings. Replaces the Single
-    # fixture, which rebuilt the doc every migrate and reverted every feature
-    # flag. Must run after ensure_pos_accounts so the account names it seeds
-    # already exist — a Link to a missing record fails validation on every later
-    # full save of this Single.
-    "jarz_pos.setup.settings_defaults.ensure_settings_defaults",
-    # Rebuild every Jarz Desk surface from jarz_pos.utils.setup_workspace (idempotent):
-    # the JARZ POS workspace, the Jarz POS sidebar, and the additive Home entry.
-    "jarz_pos.utils.setup_workspace.ensure_jarz_desk",
-    # Seed B2B master data (idempotent, create-only)
-    "jarz_pos.setup.b2b_master_data.ensure_b2b_master_data",
-    # Enforce the staff rates on the "Employee" price list (Large 92 / Medium 77)
-    # in BOTH pricing layers — the Jarz Price List Category Rate rows and the
-    # per-item Item Price rows — so precedence between them cannot matter. Must
-    # run AFTER b2b_master_data, which creates that price list. Unlike every
-    # other seeder here this one deliberately CORRECTS drift rather than being
-    # create-only, and reports each correction; see the module docstring.
-    "jarz_pos.setup.employee_pricing.ensure_employee_price_list_rates",
-    # The Small (147 ml) jar: item group, glass/lid/carton, one Small item, 147
-    # label and 2/3-of-Medium BOM per flavour. Create-only. Must run BEFORE
-    # b2b_pricing, which prices the Small items it creates on the same migrate.
-    "jarz_pos.setup.small_jar_setup.ensure_small_jar_setup",
-    # Seed the B2B base rates (Large 92 / Medium 77 / Small 30) on the "B2B Selling" list, in
-    # the same two layers. Also after b2b_master_data, which creates that list.
-    # CREATE-ONLY on purpose — the exact opposite of employee_pricing above: a B2B
-    # price is negotiated and the Pricing page exists to change it, so this fills
-    # what is missing and never overwrites a rate somebody set. The one-time
-    # corrective pass is opt-in (ensure_b2b_base_prices(realign=True), by hand).
-    "jarz_pos.setup.b2b_pricing.ensure_b2b_base_prices",
-    # Employee-advance schema: Customer.custom_employee plus the custom_jarz_*
-    # columns on Employee Advance — the payout ones, and the two settlement ones
-    # the Monthly Expenses board writes when a salary payment recovers an
-    # advance. Guarded on HRMS being installed, never raises.
-    # After b2b_master_data because the name-matching fallback in
-    # utils/employee_link.py is scoped to the "Employee" Customer Group it seeds.
-    "jarz_pos.setup.employee_link_setup.ensure_employee_link_fields",
-    # One staff Customer per Active employee (Employee group, custom_employee set,
-    # never pushed to WooCommerce) for the POS staff-order picker. Must run right
-    # AFTER ensure_employee_link_fields, which creates and indexes the column it
-    # writes. Idempotent, reports stale links as conflicts, never raises.
-    "jarz_pos.setup.employee_link_setup.ensure_employee_customers",
-    # Customer credit schema: custom_credit_allowed / custom_credit_days /
-    # custom_credit_limit_amount. An after_migrate seeder rather than a fixture
-    # because fixtures sync at the very end of a migrate while the deployed code
-    # is already serving, and the invoice-creation gate reads these columns on
-    # the first credit order placed after a deploy. Never raises.
-    "jarz_pos.setup.credit_terms.ensure_credit_terms_fields",
-    # Lead.custom_settlement_terms (JSON): payment terms a rep agrees with a
-    # Lead before the first order; copied to Jarz Settlement Terms when the
-    # Lead becomes a Customer (services/settlement_lead_terms). Seeder rather
-    # than fixture for the same reason as the line above. Never raises.
-    "jarz_pos.setup.settlement_terms_leads.ensure_lead_settlement_terms_field",
-    # Seed CRM config: Assignment Rule + Opportunity Workflow (idempotent, guarded)
-    "jarz_pos.setup.crm_setup.ensure_crm_setup",
-    # Create the Production Operator role + role profile + doc perms (idempotent)
-    "jarz_pos.setup.production_setup.ensure_production_setup",
-    # Seed the courier app's Delivery Failure Reason master data (idempotent,
-    # create-only, swallows every exception so it can never abort the shared
-    # bench migrate).
-    "jarz_pos.setup.courier_setup.ensure_courier_setup",
-    # Seed purchasing warehouse routing (idempotent, create-only). Keeps the
-    # "where does purchased stock land" table identical on staging and prod
-    # instead of being set by hand on each.
-    "jarz_pos.setup.purchase_setup.ensure_purchase_setup",
-    # Park fully-returned orders in the "Returned" column (idempotent). Must run
-    # here rather than as a patch: post_model_sync patches execute BEFORE
-    # sync_fixtures(), so the "Returned" Select option would not exist yet.
-    # Re-running every migrate is deliberate — it also reconciles returns whose
-    # best-effort board move failed.
-    "jarz_pos.setup.return_board_state.ensure_returned_board_state",
-    # Shift distribution: Employee roster fields, POS Profile -> Shift Location
-    # mapping, and the name-based auto-map that makes branch scoping work out of
-    # the box. Guarded on HRMS being installed, never raises. Deliberately last:
-    # it reads POS Profiles, which earlier seeders may create.
-    "jarz_pos.setup.roster_setup.ensure_roster_setup",
-    # Employee Checkin device-flag columns + Employee.custom_checkin_device. After
-    # ensure_roster_setup: it anchors on custom_roster_checkin_exempt.
-    "jarz_pos.setup.checkin_device_setup.ensure_checkin_device_fields",
-    # Task Board: seed the full-access list with the owner account, only while
-    # the list is empty and only if that User exists. Create-only, never raises.
-    "jarz_pos.setup.task_board_setup.ensure_task_board_settings",
+	# Create the POS ledger accounts Jarz POS Settings names (idempotent,
+	# create-only). Runs FIRST: a settings field pointing at a non-existent
+	# account fails link validation for every later full save of that Single,
+	# which is how the purchasing seeder below silently did nothing on
+	# production while succeeding on staging.
+	"jarz_pos.setup.accounts_setup.ensure_pos_accounts",
+	# Create the default 14% purchase VAT Item Tax Template (create-only, uses
+	# an EXISTING tax account, no-ops if the company has none). Must run BEFORE
+	# settings_defaults: that seeder points the Jarz POS Settings link at this
+	# template, and it will only do so once the template actually exists — a
+	# Link naming a missing record poisons every later full save of the Single.
+	"jarz_pos.setup.purchase_setup.ensure_purchase_vat_template",
+	# Create the label-COGS masters (Labels Inventory / Label Cost accounts and
+	# the Customer Label Printing item). Deliberately NOT gated on settings the
+	# way ensure_pos_accounts is: account-if-configured plus seed-if-exists
+	# deadlocks for a brand-new account, so this creates first and
+	# settings_defaults links after.
+	"jarz_pos.setup.label_setup.ensure_label_accounting",
+	# Fill ONLY the empty fields on Jarz POS Settings. Replaces the Single
+	# fixture, which rebuilt the doc every migrate and reverted every feature
+	# flag. Must run after ensure_pos_accounts so the account names it seeds
+	# already exist — a Link to a missing record fails validation on every later
+	# full save of this Single.
+	"jarz_pos.setup.settings_defaults.ensure_settings_defaults",
+	# Rebuild every Jarz Desk surface from jarz_pos.utils.setup_workspace (idempotent):
+	# the JARZ POS workspace, the Jarz POS sidebar, and the additive Home entry.
+	"jarz_pos.utils.setup_workspace.ensure_jarz_desk",
+	# Seed B2B master data (idempotent, create-only)
+	"jarz_pos.setup.b2b_master_data.ensure_b2b_master_data",
+	# Enforce the staff rates on the "Employee" price list (Large 92 / Medium 77)
+	# in BOTH pricing layers — the Jarz Price List Category Rate rows and the
+	# per-item Item Price rows — so precedence between them cannot matter. Must
+	# run AFTER b2b_master_data, which creates that price list. Unlike every
+	# other seeder here this one deliberately CORRECTS drift rather than being
+	# create-only, and reports each correction; see the module docstring.
+	"jarz_pos.setup.employee_pricing.ensure_employee_price_list_rates",
+	# The Small (147 ml) jar: item group, glass/lid/carton, one Small item, 147
+	# label and 2/3-of-Medium BOM per flavour. Create-only. Must run BEFORE
+	# b2b_pricing, which prices the Small items it creates on the same migrate.
+	"jarz_pos.setup.small_jar_setup.ensure_small_jar_setup",
+	# Seed the B2B base rates (Large 92 / Medium 77 / Small 30) on the "B2B Selling" list, in
+	# the same two layers. Also after b2b_master_data, which creates that list.
+	# CREATE-ONLY on purpose — the exact opposite of employee_pricing above: a B2B
+	# price is negotiated and the Pricing page exists to change it, so this fills
+	# what is missing and never overwrites a rate somebody set. The one-time
+	# corrective pass is opt-in (ensure_b2b_base_prices(realign=True), by hand).
+	"jarz_pos.setup.b2b_pricing.ensure_b2b_base_prices",
+	# Employee-advance schema: Customer.custom_employee plus the custom_jarz_*
+	# columns on Employee Advance — the payout ones, and the two settlement ones
+	# the Monthly Expenses board writes when a salary payment recovers an
+	# advance. Guarded on HRMS being installed, never raises.
+	# After b2b_master_data because the name-matching fallback in
+	# utils/employee_link.py is scoped to the "Employee" Customer Group it seeds.
+	"jarz_pos.setup.employee_link_setup.ensure_employee_link_fields",
+	# One staff Customer per Active employee (Employee group, custom_employee set,
+	# never pushed to WooCommerce) for the POS staff-order picker. Must run right
+	# AFTER ensure_employee_link_fields, which creates and indexes the column it
+	# writes. Idempotent, reports stale links as conflicts, never raises.
+	"jarz_pos.setup.employee_link_setup.ensure_employee_customers",
+	# Customer credit schema: custom_credit_allowed / custom_credit_days /
+	# custom_credit_limit_amount. An after_migrate seeder rather than a fixture
+	# because fixtures sync at the very end of a migrate while the deployed code
+	# is already serving, and the invoice-creation gate reads these columns on
+	# the first credit order placed after a deploy. Never raises.
+	"jarz_pos.setup.credit_terms.ensure_credit_terms_fields",
+	# Lead.custom_settlement_terms (JSON): payment terms a rep agrees with a
+	# Lead before the first order; copied to Jarz Settlement Terms when the
+	# Lead becomes a Customer (services/settlement_lead_terms). Seeder rather
+	# than fixture for the same reason as the line above. Never raises.
+	"jarz_pos.setup.settlement_terms_leads.ensure_lead_settlement_terms_field",
+	# Seed CRM config: Assignment Rule + Opportunity Workflow (idempotent, guarded)
+	"jarz_pos.setup.crm_setup.ensure_crm_setup",
+	# Create the Production Operator role + role profile + doc perms (idempotent)
+	"jarz_pos.setup.production_setup.ensure_production_setup",
+	# Seed the courier app's Delivery Failure Reason master data (idempotent,
+	# create-only, swallows every exception so it can never abort the shared
+	# bench migrate).
+	"jarz_pos.setup.courier_setup.ensure_courier_setup",
+	# Seed purchasing warehouse routing (idempotent, create-only). Keeps the
+	# "where does purchased stock land" table identical on staging and prod
+	# instead of being set by hand on each.
+	"jarz_pos.setup.purchase_setup.ensure_purchase_setup",
+	# Park fully-returned orders in the "Returned" column (idempotent). Must run
+	# here rather than as a patch: post_model_sync patches execute BEFORE
+	# sync_fixtures(), so the "Returned" Select option would not exist yet.
+	# Re-running every migrate is deliberate — it also reconciles returns whose
+	# best-effort board move failed.
+	"jarz_pos.setup.return_board_state.ensure_returned_board_state",
+	# Shift distribution: Employee roster fields, POS Profile -> Shift Location
+	# mapping, and the name-based auto-map that makes branch scoping work out of
+	# the box. Guarded on HRMS being installed, never raises. Deliberately last:
+	# it reads POS Profiles, which earlier seeders may create.
+	"jarz_pos.setup.roster_setup.ensure_roster_setup",
+	# Employee Checkin device-flag columns + Employee.custom_checkin_device. After
+	# ensure_roster_setup: it anchors on custom_roster_checkin_exempt.
+	"jarz_pos.setup.checkin_device_setup.ensure_checkin_device_fields",
+	# Task Board: seed the full-access list with the owner account, only while
+	# the list is empty and only if that User exists. Create-only, never raises.
+	"jarz_pos.setup.task_board_setup.ensure_task_board_settings",
 ]
 
 # Apps
@@ -213,12 +238,12 @@ after_migrate = [
 # workspace name — Workspace autonames on its label, so "JARZ POS" slugs to
 # /desk/jarz-pos.
 add_to_apps_screen = [
-    {
-        "name": "jarz_pos",
-        "logo": "/assets/jarz_pos/images/jarz-pos-logo.svg",
-        "title": "Jarz POS",
-        "route": "/desk/jarz-pos",
-    }
+	{
+		"name": "jarz_pos",
+		"logo": "/assets/jarz_pos/images/jarz-pos-logo.svg",
+		"title": "Jarz POS",
+		"route": "/desk/jarz-pos",
+	}
 ]
 
 # Includes in <head>
@@ -252,8 +277,8 @@ page_js = {"point-of-sale": "public/js/point_of_sale_close_fix.js"}
 
 # include js in doctype views
 doctype_js = {
-    "POS Closing Entry": "public/js/pos_closing_entry_fix.js",
-    "Sales Invoice": "public/js/sales_invoice_cancelled_fields.js",
+	"POS Closing Entry": "public/js/pos_closing_entry_fix.js",
+	"Sales Invoice": "public/js/sales_invoice_cancelled_fields.js",
 }
 # doctype_list_js = {"doctype" : "public/js/doctype_list.js"}
 # doctype_tree_js = {"doctype" : "public/js/doctype_tree.js"}
@@ -289,11 +314,11 @@ doctype_js = {
 # Keep the prefix in step with `jarz_pos.services.tracking.TRACKING_ROUTE_PREFIX`,
 # which is what builds the absolute URL the Woo app and the POS both hand out.
 website_route_rules = [
-    {"from_route": "/track/<token>", "to_route": "track"},
-    # B2B sales material, sent to a prospect on WhatsApp. Same shape as
-    # /track: the token segment is mapped away before TemplatePage sees it,
-    # which is exactly why www/m.py renders nothing per-token.
-    {"from_route": "/m/<token>", "to_route": "m"},
+	{"from_route": "/track/<token>", "to_route": "track"},
+	# B2B sales material, sent to a prospect on WhatsApp. Same shape as
+	# /track: the token segment is mapped away before TemplatePage sees it,
+	# which is exactly why www/m.py renders nothing per-token.
+	{"from_route": "/m/<token>", "to_route": "m"},
 ]
 
 # Generators
@@ -351,17 +376,17 @@ after_uninstall = "jarz_pos.utils.cleanup.remove_required_delivery_datetime_fiel
 # Permissions evaluated in scripted ways
 
 permission_query_conditions = {
-    "Address": "jarz_pos.permissions.address.get_permission_query_conditions",
-    # Task Board: the only DocPerm is System Manager; these narrow it to the
-    # board's own visibility rule (services.task_board.is_visible).
-    "Jarz Task": "jarz_pos.permissions.tasks.get_permission_query_conditions",
-    "Jarz Task Entry": "jarz_pos.permissions.tasks.get_entry_permission_query_conditions",
+	"Address": "jarz_pos.permissions.address.get_permission_query_conditions",
+	# Task Board: the only DocPerm is System Manager; these narrow it to the
+	# board's own visibility rule (services.task_board.is_visible).
+	"Jarz Task": "jarz_pos.permissions.tasks.get_permission_query_conditions",
+	"Jarz Task Entry": "jarz_pos.permissions.tasks.get_entry_permission_query_conditions",
 }
 
 has_permission = {
-    "Address": "jarz_pos.permissions.address.has_permission",
-    "Jarz Task": "jarz_pos.permissions.tasks.has_permission",
-    "Jarz Task Entry": "jarz_pos.permissions.tasks.has_permission",
+	"Address": "jarz_pos.permissions.address.has_permission",
+	"Jarz Task": "jarz_pos.permissions.tasks.has_permission",
+	"Jarz Task Entry": "jarz_pos.permissions.tasks.has_permission",
 }
 
 # DocType Class
@@ -369,7 +394,7 @@ has_permission = {
 # Override standard doctype classes
 
 override_doctype_class = {
-    "POS Closing Entry": "jarz_pos.overrides.pos_closing_entry.POSClosingEntry",
+	"POS Closing Entry": "jarz_pos.overrides.pos_closing_entry.POSClosingEntry",
 }
 
 # Document Events
@@ -377,269 +402,269 @@ override_doctype_class = {
 # Hook on document methods and events
 
 doc_events = {
-    # Shift distribution gate. HRMS skips the geofence entirely when a check-in
-    # matches no shift, so an employee the roster leaves empty is the ONE person
-    # who can clock in from anywhere. This handler turns that inversion round:
-    # no shift on the roster, no check-in. Runs after HRMS's own validate (Frappe
-    # composes app hooks to run after the controller method), so doc.shift is
-    # already resolved and can be trusted.
-    "Employee Checkin": {
-        "validate": "jarz_pos.events.employee_checkin.enforce_roster_on_checkin",
-        # Buddy-punch flagging: stamps the phone cookie token and flags a new or
-        # shared device. FLAG ONLY -- never raises, never refuses.
-        "before_insert": "jarz_pos.services.checkin_device.stamp_device",
-    },
-    # Staff-order picker: keep one staff Customer per Active employee as people
-    # are hired or reactivated, so the POS never has to create one mid-order.
-    # The handler NEVER raises and is fenced by a savepoint — saving an Employee
-    # must not fail over a customer side effect. Guarded on HRMS + the
-    # Customer.custom_employee column, so it is a no-op before the first migrate.
-    "Employee": {
-        "after_insert": "jarz_pos.services.employee_customers.ensure_customer_on_employee_save",
-        "on_update": "jarz_pos.services.employee_customers.ensure_customer_on_employee_save",
-    },
-    # B2B settlement terms agreed on a Lead follow it onto the Customer created
-    # from it (Customer.lead_name). Zero queries for a Customer without
-    # lead_name (POS walk-ins, the WooCommerce bulk sync); savepoint-fenced,
-    # NEVER raises, never blocks the Customer insert.
-    "Customer": {
-        "after_insert": "jarz_pos.services.settlement_lead_terms.on_customer_after_insert",
-    },
-    # Keep Address.custom_geo_confidence in step with custom_geo_source. This
-    # fires on EVERY Address save site-wide, including the WooCommerce bulk
-    # customer sync — so the handler makes zero DB queries, zero network calls,
-    # never raises, and never touches a field in Woo's outbound trigger set.
-    "Address": {
-        "before_save": "jarz_pos.events.address.clamp_geo_confidence",
-    },
-    # Task Board attachments are private Files whose core DocPerm lets their
-    # uploader delete or re-point them via /api/resource/File. These guards
-    # refuse that for EXISTING files attached to Jarz Task / Jarz Task Entry
-    # (inserts and every other File are untouched; never raise otherwise).
-    # The board's own remove path sets frappe.flags.jarz_task_file_ok.
-    "File": {
-        "validate": "jarz_pos.permissions.tasks.guard_task_file_update",
-        "on_trash": "jarz_pos.permissions.tasks.guard_task_file_trash",
-    },
-    # B2B printed labels: the printer's bill is the GL side of a label batch.
-    # Submitting it (from the app OR a bill re-issued in Desk) links the batch
-    # and books its value; cancelling it takes the value back out. Both look up
-    # the batch by link or by the label-po-<name> idempotency key, so any other
-    # Purchase Invoice costs one indexed read and nothing else.
-    #
-    # Cash custody (عهدة) — before_submit / before_cancel below: a custody
-    # account can never go negative. Enforced at the ledger boundary rather
-    # than in the custody endpoints, so an expense approved days later, a
-    # purchase paid from custody and a Journal Entry typed in Desk all reach
-    # the same check. Returns before any query when the voucher credits no
-    # custody account; otherwise locks the holder row, reads the balance with
-    # a locking read, and FAILS CLOSED. before_cancel covers the mirror case:
-    # cancelling the entry that put money into custody after some was spent.
-    "Purchase Invoice": {
-        "before_submit": "jarz_pos.services.cash_custody.guard_custody_balance",
-        "before_cancel": "jarz_pos.services.cash_custody.guard_custody_balance_on_cancel",
-        "on_submit": [
-            "jarz_pos.services.label_stock.link_bill_on_purchase_invoice_submit",
-            "jarz_pos.services.cash_custody.verify_custody_after_posting",
-        ],
-        "on_cancel": [
-            "jarz_pos.services.label_stock.unlink_bill_on_purchase_invoice_cancel",
-            "jarz_pos.services.cash_custody.verify_custody_after_posting",
-        ],
-    },
-    "Journal Entry": {
-        "before_submit": "jarz_pos.services.cash_custody.guard_custody_balance",
-        "before_cancel": "jarz_pos.services.cash_custody.guard_custody_balance_on_cancel",
-        "on_submit": "jarz_pos.services.cash_custody.verify_custody_after_posting",
-        "on_cancel": "jarz_pos.services.cash_custody.verify_custody_after_posting",
-    },
-    "Payment Entry": {
-        "before_submit": "jarz_pos.services.cash_custody.guard_custody_balance",
-        "before_cancel": "jarz_pos.services.cash_custody.guard_custody_balance_on_cancel",
-        "on_submit": "jarz_pos.services.cash_custody.verify_custody_after_posting",
-        "on_cancel": "jarz_pos.services.cash_custody.verify_custody_after_posting",
-    },
-    "Sales Invoice": {
-        # Promo-code engine: single apply path for Woo / Desk invoices. Runs
-        # before validate so calculate_taxes_and_totals picks up discount_amount.
-        "before_validate": "jarz_pos.services.promo_codes.apply_promo_codes_before_validate",
-        # Seed custom_kanban_profile from pos_profile on drafts; preserve submitted reassignments
-        "validate": [
-            "jarz_pos.events.sales_invoice.sync_kanban_profile",
-            # ERPNext's set_pos_fields() re-applies the POS Profile's own
-            # update_stock during validate, and every profile here has it on —
-            # so stock must be re-suppressed on EVERY save, not just at creation.
-            "jarz_pos.events.sales_invoice.suppress_pos_invoice_stock_update",
-            # Native Sales Invoice validation resolves Item Price again. Restore
-            # the scoped Jarz pricing snapshot after the controller has run.
-            "jarz_pos.services.invoice_creation.restore_resolved_item_pricing_on_validate",
-        ],
-    # Emit WebSocket event when POS invoice is submitted (ensures final totals/state)
-    "on_submit": [
-        # State history (Invoice State Log): first entry of the invoice. First in
-        # the list so a later hook that raises can not skip it; never raises.
-        "jarz_pos.services.state_log.log_state_on_submit",
-        "jarz_pos.events.sales_invoice.publish_new_invoice",
-        # CRM bridge: link B2B sale to Opportunity (never raises, fast-exits Standard)
-        "jarz_pos.crm.pos_bridge.link_b2b_sale_to_opportunity",
-        # Promo-code engine: record redemptions (concurrency-safe, may abort submit)
-        "jarz_pos.services.promo_codes.record_redemptions_on_submit",
-        # B2B printed labels: draw down the customer's label stock. Deliberately
-        # on submit rather than on the OFD transition where consumable_deduction
-        # sits — a B2B supply order does not have to travel the dispatch kanban,
-        # and one that never reached OFD would silently never consume a label.
-        "jarz_pos.services.label_stock.consume_labels_on_invoice_submit",
-        # Branch/territory parity catch. Files a "Jarz Territory Exception" when
-        # the branch that shipped is not the branch the delivery territory points
-        # at, or when the order has no territory at all. Deliberately a doc event
-        # rather than a call inside services/invoice_creation: this way it covers
-        # the WooCommerce inbound lane too, which never goes through that module.
-        # Never raises, never touches the invoice, idempotent per (invoice, type).
-        "jarz_pos.services.territory_exceptions.record_territory_exception_on_submit",
-        # B2B settlement terms: a credit order for an "Invoice after Invoice"
-        # shop with older open credit invoices pushes "collect the previous
-        # invoice(s) with this delivery". Credit-only fast exit, queued after
-        # commit, never raises, suppressed in test runs.
-        "jarz_pos.services.settlement_reminders.on_sales_invoice_submit",
-    ],
-    # Emit state-change events for already-submitted invoices edited elsewhere
-    "on_update_after_submit": [
-        # State history (Invoice State Log): covers every writer that SAVES the
-        # invoice (kanban, delivery handling, ...). set_value / raw-SQL writers
-        # log explicitly instead. First so a later raise can not skip it.
-        "jarz_pos.services.state_log.log_state_on_update_after_submit",
-        "jarz_pos.events.sales_invoice.publish_state_change_if_needed",
-        "jarz_pos.services.consumable_deduction.deduct_consumables_on_ofd",
-        "jarz_pos.events.sales_invoice.stamp_out_for_delivery_flag",
-        # Customer delivery tracking: mint the opaque /track token on the first
-        # Out for Delivery move. Here rather than in api/kanban + api/trips
-        # because every dispatch path saves the submitted invoice, so one hook
-        # covers all of them (never raises).
-        "jarz_pos.events.sales_invoice.mint_tracking_token_on_ofd",
-        # CRM: Sample/Trial delivery -> feedback / check-up follow-up (never raises)
-        "jarz_pos.crm.pos_bridge.create_delivery_followup_on_state",
-    ],
-        # FIX 5 (2026-07-20): document-level guard — refuse to cancel a dispatched
-        # invoice from ANY path (Desk / script / API), not just kanban.cancel_invoice.
-        "before_cancel": "jarz_pos.events.sales_invoice.block_cancel_if_dispatched",
-        # Keep operational workflow fields aligned across all cancellation paths.
-        "on_cancel": [
-            "jarz_pos.events.sales_invoice.mark_cancelled_invoice_workflow_fields",
-            # A pending (unsettled) sales-partner fee row has nothing to charge once
-            # the order is cancelled; drop it so the partner settlement never posts it.
-            "jarz_pos.events.sales_invoice.release_unsettled_partner_transactions",
-            "jarz_pos.services.consumable_deduction.reverse_consumable_deduction_on_cancel",
-            # Promo-code engine: reverse redemptions, recompute times_used
-            "jarz_pos.services.promo_codes.reverse_redemptions_on_cancel",
-            # B2B printed labels: hand back whatever this invoice consumed.
-            "jarz_pos.services.label_stock.reverse_labels_on_invoice_cancel",
-        ],
-        # Validate bundle items before submission
-        "before_submit": "jarz_pos.events.sales_invoice.validate_invoice_before_submit"
-    }
+	# Shift distribution gate. HRMS skips the geofence entirely when a check-in
+	# matches no shift, so an employee the roster leaves empty is the ONE person
+	# who can clock in from anywhere. This handler turns that inversion round:
+	# no shift on the roster, no check-in. Runs after HRMS's own validate (Frappe
+	# composes app hooks to run after the controller method), so doc.shift is
+	# already resolved and can be trusted.
+	"Employee Checkin": {
+		"validate": "jarz_pos.events.employee_checkin.enforce_roster_on_checkin",
+		# Buddy-punch flagging: stamps the phone cookie token and flags a new or
+		# shared device. FLAG ONLY -- never raises, never refuses.
+		"before_insert": "jarz_pos.services.checkin_device.stamp_device",
+	},
+	# Staff-order picker: keep one staff Customer per Active employee as people
+	# are hired or reactivated, so the POS never has to create one mid-order.
+	# The handler NEVER raises and is fenced by a savepoint — saving an Employee
+	# must not fail over a customer side effect. Guarded on HRMS + the
+	# Customer.custom_employee column, so it is a no-op before the first migrate.
+	"Employee": {
+		"after_insert": "jarz_pos.services.employee_customers.ensure_customer_on_employee_save",
+		"on_update": "jarz_pos.services.employee_customers.ensure_customer_on_employee_save",
+	},
+	# B2B settlement terms agreed on a Lead follow it onto the Customer created
+	# from it (Customer.lead_name). Zero queries for a Customer without
+	# lead_name (POS walk-ins, the WooCommerce bulk sync); savepoint-fenced,
+	# NEVER raises, never blocks the Customer insert.
+	"Customer": {
+		"after_insert": "jarz_pos.services.settlement_lead_terms.on_customer_after_insert",
+	},
+	# Keep Address.custom_geo_confidence in step with custom_geo_source. This
+	# fires on EVERY Address save site-wide, including the WooCommerce bulk
+	# customer sync — so the handler makes zero DB queries, zero network calls,
+	# never raises, and never touches a field in Woo's outbound trigger set.
+	"Address": {
+		"before_save": "jarz_pos.events.address.clamp_geo_confidence",
+	},
+	# Task Board attachments are private Files whose core DocPerm lets their
+	# uploader delete or re-point them via /api/resource/File. These guards
+	# refuse that for EXISTING files attached to Jarz Task / Jarz Task Entry
+	# (inserts and every other File are untouched; never raise otherwise).
+	# The board's own remove path sets frappe.flags.jarz_task_file_ok.
+	"File": {
+		"validate": "jarz_pos.permissions.tasks.guard_task_file_update",
+		"on_trash": "jarz_pos.permissions.tasks.guard_task_file_trash",
+	},
+	# B2B printed labels: the printer's bill is the GL side of a label batch.
+	# Submitting it (from the app OR a bill re-issued in Desk) links the batch
+	# and books its value; cancelling it takes the value back out. Both look up
+	# the batch by link or by the label-po-<name> idempotency key, so any other
+	# Purchase Invoice costs one indexed read and nothing else.
+	#
+	# Cash custody (عهدة) — before_submit / before_cancel below: a custody
+	# account can never go negative. Enforced at the ledger boundary rather
+	# than in the custody endpoints, so an expense approved days later, a
+	# purchase paid from custody and a Journal Entry typed in Desk all reach
+	# the same check. Returns before any query when the voucher credits no
+	# custody account; otherwise locks the holder row, reads the balance with
+	# a locking read, and FAILS CLOSED. before_cancel covers the mirror case:
+	# cancelling the entry that put money into custody after some was spent.
+	"Purchase Invoice": {
+		"before_submit": "jarz_pos.services.cash_custody.guard_custody_balance",
+		"before_cancel": "jarz_pos.services.cash_custody.guard_custody_balance_on_cancel",
+		"on_submit": [
+			"jarz_pos.services.label_stock.link_bill_on_purchase_invoice_submit",
+			"jarz_pos.services.cash_custody.verify_custody_after_posting",
+		],
+		"on_cancel": [
+			"jarz_pos.services.label_stock.unlink_bill_on_purchase_invoice_cancel",
+			"jarz_pos.services.cash_custody.verify_custody_after_posting",
+		],
+	},
+	"Journal Entry": {
+		"before_submit": "jarz_pos.services.cash_custody.guard_custody_balance",
+		"before_cancel": "jarz_pos.services.cash_custody.guard_custody_balance_on_cancel",
+		"on_submit": "jarz_pos.services.cash_custody.verify_custody_after_posting",
+		"on_cancel": "jarz_pos.services.cash_custody.verify_custody_after_posting",
+	},
+	"Payment Entry": {
+		"before_submit": "jarz_pos.services.cash_custody.guard_custody_balance",
+		"before_cancel": "jarz_pos.services.cash_custody.guard_custody_balance_on_cancel",
+		"on_submit": "jarz_pos.services.cash_custody.verify_custody_after_posting",
+		"on_cancel": "jarz_pos.services.cash_custody.verify_custody_after_posting",
+	},
+	"Sales Invoice": {
+		# Promo-code engine: single apply path for Woo / Desk invoices. Runs
+		# before validate so calculate_taxes_and_totals picks up discount_amount.
+		"before_validate": "jarz_pos.services.promo_codes.apply_promo_codes_before_validate",
+		# Seed custom_kanban_profile from pos_profile on drafts; preserve submitted reassignments
+		"validate": [
+			"jarz_pos.events.sales_invoice.sync_kanban_profile",
+			# ERPNext's set_pos_fields() re-applies the POS Profile's own
+			# update_stock during validate, and every profile here has it on —
+			# so stock must be re-suppressed on EVERY save, not just at creation.
+			"jarz_pos.events.sales_invoice.suppress_pos_invoice_stock_update",
+			# Native Sales Invoice validation resolves Item Price again. Restore
+			# the scoped Jarz pricing snapshot after the controller has run.
+			"jarz_pos.services.invoice_creation.restore_resolved_item_pricing_on_validate",
+		],
+		# Emit WebSocket event when POS invoice is submitted (ensures final totals/state)
+		"on_submit": [
+			# State history (Invoice State Log): first entry of the invoice. First in
+			# the list so a later hook that raises can not skip it; never raises.
+			"jarz_pos.services.state_log.log_state_on_submit",
+			"jarz_pos.events.sales_invoice.publish_new_invoice",
+			# CRM bridge: link B2B sale to Opportunity (never raises, fast-exits Standard)
+			"jarz_pos.crm.pos_bridge.link_b2b_sale_to_opportunity",
+			# Promo-code engine: record redemptions (concurrency-safe, may abort submit)
+			"jarz_pos.services.promo_codes.record_redemptions_on_submit",
+			# B2B printed labels: draw down the customer's label stock. Deliberately
+			# on submit rather than on the OFD transition where consumable_deduction
+			# sits — a B2B supply order does not have to travel the dispatch kanban,
+			# and one that never reached OFD would silently never consume a label.
+			"jarz_pos.services.label_stock.consume_labels_on_invoice_submit",
+			# Branch/territory parity catch. Files a "Jarz Territory Exception" when
+			# the branch that shipped is not the branch the delivery territory points
+			# at, or when the order has no territory at all. Deliberately a doc event
+			# rather than a call inside services/invoice_creation: this way it covers
+			# the WooCommerce inbound lane too, which never goes through that module.
+			# Never raises, never touches the invoice, idempotent per (invoice, type).
+			"jarz_pos.services.territory_exceptions.record_territory_exception_on_submit",
+			# B2B settlement terms: a credit order for an "Invoice after Invoice"
+			# shop with older open credit invoices pushes "collect the previous
+			# invoice(s) with this delivery". Credit-only fast exit, queued after
+			# commit, never raises, suppressed in test runs.
+			"jarz_pos.services.settlement_reminders.on_sales_invoice_submit",
+		],
+		# Emit state-change events for already-submitted invoices edited elsewhere
+		"on_update_after_submit": [
+			# State history (Invoice State Log): covers every writer that SAVES the
+			# invoice (kanban, delivery handling, ...). set_value / raw-SQL writers
+			# log explicitly instead. First so a later raise can not skip it.
+			"jarz_pos.services.state_log.log_state_on_update_after_submit",
+			"jarz_pos.events.sales_invoice.publish_state_change_if_needed",
+			"jarz_pos.services.consumable_deduction.deduct_consumables_on_ofd",
+			"jarz_pos.events.sales_invoice.stamp_out_for_delivery_flag",
+			# Customer delivery tracking: mint the opaque /track token on the first
+			# Out for Delivery move. Here rather than in api/kanban + api/trips
+			# because every dispatch path saves the submitted invoice, so one hook
+			# covers all of them (never raises).
+			"jarz_pos.events.sales_invoice.mint_tracking_token_on_ofd",
+			# CRM: Sample/Trial delivery -> feedback / check-up follow-up (never raises)
+			"jarz_pos.crm.pos_bridge.create_delivery_followup_on_state",
+		],
+		# FIX 5 (2026-07-20): document-level guard — refuse to cancel a dispatched
+		# invoice from ANY path (Desk / script / API), not just kanban.cancel_invoice.
+		"before_cancel": "jarz_pos.events.sales_invoice.block_cancel_if_dispatched",
+		# Keep operational workflow fields aligned across all cancellation paths.
+		"on_cancel": [
+			"jarz_pos.events.sales_invoice.mark_cancelled_invoice_workflow_fields",
+			# A pending (unsettled) sales-partner fee row has nothing to charge once
+			# the order is cancelled; drop it so the partner settlement never posts it.
+			"jarz_pos.events.sales_invoice.release_unsettled_partner_transactions",
+			"jarz_pos.services.consumable_deduction.reverse_consumable_deduction_on_cancel",
+			# Promo-code engine: reverse redemptions, recompute times_used
+			"jarz_pos.services.promo_codes.reverse_redemptions_on_cancel",
+			# B2B printed labels: hand back whatever this invoice consumed.
+			"jarz_pos.services.label_stock.reverse_labels_on_invoice_cancel",
+		],
+		# Validate bundle items before submission
+		"before_submit": "jarz_pos.events.sales_invoice.validate_invoice_before_submit",
+	},
 }
 
 # Scheduled Tasks
 # ---------------
 
 scheduler_events = {
-    "daily": [
-        # Automated site backup. Frappe ships NO backup-creating job — upstream
-        # relies on a host crontab that a Docker deployment never gets — so
-        # until this landed the only backups this deployment had ever taken
-        # were a side effect of deploying, and passing -SkipBackup silently
-        # reduced backup coverage to zero. See setup/backup_schedule.py.
-        "jarz_pos.setup.backup_schedule.daily_backup",
-        "jarz_pos.tasks.run_nightly_rfm_segmentation",
-        "jarz_pos.tasks.run_daily_inventory_digest",
-        # CRM automation (guarded, never raise)
-        # Lead-score auto-recompute DISABLED by product decision: the catalog
-        # fit score (custom_fit_score) is manually/Excel owned and must NEVER
-        # change automatically. Re-enable only if the CRM-computed
-        # custom_lead_score is wanted again.
-        # "jarz_pos.crm.lead_scoring.compute_lead_scores",
-        "jarz_pos.crm.follow_ups.run_followup_reminders",
-        "jarz_pos.crm.reorder_forecast.compute_reorder_forecast",
-        # B2B printed labels: refresh every label's cover and alert on the ones
-        # that must go to the print house now to land before they run out.
-        "jarz_pos.services.label_stock.run_label_stock_alerts",
-        # Branch/territory parity: pick up anything the on_submit hook missed in
-        # the last few days, then auto-close the exceptions whose territory has
-        # since been corrected. Bounded window and a hard row cap, so this can
-        # never run long enough to crowd the rest of the daily slot. The
-        # HISTORICAL backfill is deliberately NOT here — it is a one-off run by
-        # hand via territory_exceptions.backfill_territory_exceptions.
-        "jarz_pos.services.territory_exceptions.run_territory_exception_sweep",
-        # WooCommerce backlog watch: detection-only. Flags Woo-linked Sales
-        # Invoices sitting in a non-terminal ops state well past when they
-        # should have finished, and auto-closes rows whose order has since
-        # moved on. Never writes to a Sales Invoice or any WooCommerce record
-        # -- see jarz_pos.services.woo_backlog_watch for why (the migration
-        # that actually fixes these stays a supervised manual operation).
-        "jarz_pos.services.woo_backlog_watch.run_woo_backlog_sweep",
-    ],
-    "weekly": [
-        "jarz_pos.tasks.run_weekly_velocity_update",
-    ],
-    "hourly": [
-        # Re-align every Awaiting Payment order with its ledger BEFORE escalating,
-        # so an order that has already been paid through another route is neither
-        # chased nor left sitting in the reconciliation queue. Must stay ahead of
-        # the escalation job below or paid orders keep generating alerts.
-        "jarz_pos.tasks.reconcile_awaiting_online_payments",
-        # Escalate unpaid InstaPay/Mobile Wallet orders that have sat Out for
-        # Delivery awaiting payment confirmation past the configured threshold.
-        "jarz_pos.tasks.escalate_unconfirmed_online_payments",
-        # Branch day access (Jarz POS Day Access): start grants whose day has
-        # come, remove the POS Profile User row of grants past 03:00 the next
-        # morning, cancel grants that never got to start. Every step waits
-        # while the branch has an open shift, so this is also the retry loop
-        # for a branch left open overnight. Never raises. See
-        # jarz_pos.services.branch_access.
-        "jarz_pos.services.branch_access.run_day_access_cycle",
-        # Delivery-partner recurring fees (Deliverk: 50 EGP every day, worked or
-        # not): accrue each period on its first day. Hourly rather than daily so a
-        # failed or skipped run costs an hour, not a day; idempotent and catches
-        # up, so it posts nothing until a new period starts. Never raises. See
-        # jarz_pos.services.partner_recurring_fees.
-        "jarz_pos.services.partner_recurring_fees.run_partner_recurring_fees",
-        # Customer follow-up cycle: open the 3h/day2/day7/... touches for every
-        # newly delivered retail order. Off until Jarz Follow-up Settings is
-        # enabled; idempotent per invoice; never raises. See
-        # jarz_pos.services.customer_followups.
-        "jarz_pos.services.customer_followups.generate_touches",
-        # Meta Conversions API: log every newly delivered chat (flutter) order as
-        # Pending Approval / Held / Approved / Skipped, then send the approved
-        # ones as Purchase. Website orders are left to the Woo pixel plugin.
-        # Off until Meta CAPI Settings is enabled; idempotent per invoice;
-        # never raise. See jarz_pos.services.meta_capi.
-        "jarz_pos.services.meta_capi.queue_delivered_orders",
-        "jarz_pos.services.meta_capi.send_approved_events",
-    ],
-    "cron": {
-        # Task Board reminders at 09:00 site time (Africa/Cairo): due tomorrow,
-        # overdue (assignee daily, creator once), open subtasks. Capped, never
-        # raises; bookkeeping on the rows makes a same-day re-run a no-op.
-        "0 9 * * *": [
-            "jarz_pos.services.task_reminders.run_task_reminders",
-            # B2B settlement reminders (due soon / due today / overdue) and the
-            # tagged [jarz:settlement] ToDo per customer. Bookkeeping on the
-            # terms record makes a same-day re-run a no-op. Never raises.
-            "jarz_pos.services.settlement_reminders.run_settlement_reminders",
-        ],
-        # Tell each configured sender how many follow-ups wait today (12:00 site
-        # time, the start of the call window). Never raises.
-        "0 12 * * *": [
-            "jarz_pos.services.customer_followups.send_daily_sender_push",
-        ],
-        # Chat inbox: push moderators when a customer has waited past
-        # alert_after_minutes (repeat every alert_repeat_minutes, capped).
-        # Off until Jarz Chat Settings is enabled; never raises. See
-        # jarz_pos.services.chat_alerts.
-        "* * * * *": [
-            "jarz_pos.services.chat_alerts.check_waiting",
-        ],
-    },
+	"daily": [
+		# Automated site backup. Frappe ships NO backup-creating job — upstream
+		# relies on a host crontab that a Docker deployment never gets — so
+		# until this landed the only backups this deployment had ever taken
+		# were a side effect of deploying, and passing -SkipBackup silently
+		# reduced backup coverage to zero. See setup/backup_schedule.py.
+		"jarz_pos.setup.backup_schedule.daily_backup",
+		"jarz_pos.tasks.run_nightly_rfm_segmentation",
+		"jarz_pos.tasks.run_daily_inventory_digest",
+		# CRM automation (guarded, never raise)
+		# Lead-score auto-recompute DISABLED by product decision: the catalog
+		# fit score (custom_fit_score) is manually/Excel owned and must NEVER
+		# change automatically. Re-enable only if the CRM-computed
+		# custom_lead_score is wanted again.
+		# "jarz_pos.crm.lead_scoring.compute_lead_scores",
+		"jarz_pos.crm.follow_ups.run_followup_reminders",
+		"jarz_pos.crm.reorder_forecast.compute_reorder_forecast",
+		# B2B printed labels: refresh every label's cover and alert on the ones
+		# that must go to the print house now to land before they run out.
+		"jarz_pos.services.label_stock.run_label_stock_alerts",
+		# Branch/territory parity: pick up anything the on_submit hook missed in
+		# the last few days, then auto-close the exceptions whose territory has
+		# since been corrected. Bounded window and a hard row cap, so this can
+		# never run long enough to crowd the rest of the daily slot. The
+		# HISTORICAL backfill is deliberately NOT here — it is a one-off run by
+		# hand via territory_exceptions.backfill_territory_exceptions.
+		"jarz_pos.services.territory_exceptions.run_territory_exception_sweep",
+		# WooCommerce backlog watch: detection-only. Flags Woo-linked Sales
+		# Invoices sitting in a non-terminal ops state well past when they
+		# should have finished, and auto-closes rows whose order has since
+		# moved on. Never writes to a Sales Invoice or any WooCommerce record
+		# -- see jarz_pos.services.woo_backlog_watch for why (the migration
+		# that actually fixes these stays a supervised manual operation).
+		"jarz_pos.services.woo_backlog_watch.run_woo_backlog_sweep",
+	],
+	"weekly": [
+		"jarz_pos.tasks.run_weekly_velocity_update",
+	],
+	"hourly": [
+		# Re-align every Awaiting Payment order with its ledger BEFORE escalating,
+		# so an order that has already been paid through another route is neither
+		# chased nor left sitting in the reconciliation queue. Must stay ahead of
+		# the escalation job below or paid orders keep generating alerts.
+		"jarz_pos.tasks.reconcile_awaiting_online_payments",
+		# Escalate unpaid InstaPay/Mobile Wallet orders that have sat Out for
+		# Delivery awaiting payment confirmation past the configured threshold.
+		"jarz_pos.tasks.escalate_unconfirmed_online_payments",
+		# Branch day access (Jarz POS Day Access): start grants whose day has
+		# come, remove the POS Profile User row of grants past 03:00 the next
+		# morning, cancel grants that never got to start. Every step waits
+		# while the branch has an open shift, so this is also the retry loop
+		# for a branch left open overnight. Never raises. See
+		# jarz_pos.services.branch_access.
+		"jarz_pos.services.branch_access.run_day_access_cycle",
+		# Delivery-partner recurring fees (Deliverk: 50 EGP every day, worked or
+		# not): accrue each period on its first day. Hourly rather than daily so a
+		# failed or skipped run costs an hour, not a day; idempotent and catches
+		# up, so it posts nothing until a new period starts. Never raises. See
+		# jarz_pos.services.partner_recurring_fees.
+		"jarz_pos.services.partner_recurring_fees.run_partner_recurring_fees",
+		# Customer follow-up cycle: open the 3h/day2/day7/... touches for every
+		# newly delivered retail order. Off until Jarz Follow-up Settings is
+		# enabled; idempotent per invoice; never raises. See
+		# jarz_pos.services.customer_followups.
+		"jarz_pos.services.customer_followups.generate_touches",
+		# Meta Conversions API: log every newly delivered chat (flutter) order as
+		# Pending Approval / Held / Approved / Skipped, then send the approved
+		# ones as Purchase. Website orders are left to the Woo pixel plugin.
+		# Off until Meta CAPI Settings is enabled; idempotent per invoice;
+		# never raise. See jarz_pos.services.meta_capi.
+		"jarz_pos.services.meta_capi.queue_delivered_orders",
+		"jarz_pos.services.meta_capi.send_approved_events",
+	],
+	"cron": {
+		# Task Board reminders at 09:00 site time (Africa/Cairo): due tomorrow,
+		# overdue (assignee daily, creator once), open subtasks. Capped, never
+		# raises; bookkeeping on the rows makes a same-day re-run a no-op.
+		"0 9 * * *": [
+			"jarz_pos.services.task_reminders.run_task_reminders",
+			# B2B settlement reminders (due soon / due today / overdue) and the
+			# tagged [jarz:settlement] ToDo per customer. Bookkeeping on the
+			# terms record makes a same-day re-run a no-op. Never raises.
+			"jarz_pos.services.settlement_reminders.run_settlement_reminders",
+		],
+		# Tell each configured sender how many follow-ups wait today (12:00 site
+		# time, the start of the call window). Never raises.
+		"0 12 * * *": [
+			"jarz_pos.services.customer_followups.send_daily_sender_push",
+		],
+		# Chat inbox: push moderators when a customer has waited past
+		# alert_after_minutes (repeat every alert_repeat_minutes, capped).
+		# Off until Jarz Chat Settings is enabled; never raises. See
+		# jarz_pos.services.chat_alerts.
+		"* * * * *": [
+			"jarz_pos.services.chat_alerts.check_waiting",
+		],
+	},
 }
 
 # Testing
@@ -655,186 +680,196 @@ scheduler_events = {
 # }
 
 override_whitelisted_methods = {
-    # POS API Methods
-    "get_pos_profiles": "jarz_pos.api.pos.get_pos_profiles",
-    "get_pos_profile_data": "jarz_pos.api.pos.get_pos_profile_data",
-    "get_products": "jarz_pos.api.pos.get_products",
-    "get_bundles": "jarz_pos.api.pos.get_bundles",
-    "create_pos_invoice": "jarz_pos.api.invoices.create_pos_invoice",
-    "simple_invoice": "jarz_pos.api.invoices.simple_invoice",
-    "get_pos_profiles_with_items": "jarz_pos.api.pos.get_pos_profiles_with_items",
-    "get_active_pos_profiles": "jarz_pos.api.pos.get_active_pos_profiles",
-    "update_profile_status": "jarz_pos.api.pos.update_profile_status",
-    "process_bundle": "jarz_pos.api.pos.process_bundle",
-    "get_item_details": "jarz_pos.api.pos.get_item_details",
-    "get_profile_bundles": "jarz_pos.api.pos.get_profile_bundles",
-    "test_bundle_debug": "jarz_pos.api.pos.test_bundle_debug",
-    "get_territory_pos_profile": "jarz_pos.api.pos.get_territory_pos_profile",
-    # User API Methods
-    "jarz_pos.api.user.get_current_user_roles": "jarz_pos.api.user.get_current_user_roles",
-    # Shift API Methods
-    "jarz_pos.api.shift.get_active_shift": "jarz_pos.api.shift.get_active_shift",
-    "jarz_pos.api.shift.get_shift_payment_methods": "jarz_pos.api.shift.get_shift_payment_methods",
-    "jarz_pos.api.shift.start_shift": "jarz_pos.api.shift.start_shift",
-    "jarz_pos.api.shift.get_shift_summary": "jarz_pos.api.shift.get_shift_summary",
-    "jarz_pos.api.shift.end_shift": "jarz_pos.api.shift.end_shift",
-    # Notification API Methods
-    "jarz_pos.api.notifications.get_pending_alerts": "jarz_pos.api.notifications.get_pending_alerts",
-    "jarz_pos.api.notifications.register_device_token": "jarz_pos.api.notifications.register_device_token",
-    "jarz_pos.api.notifications.accept_invoice": "jarz_pos.api.notifications.accept_invoice",
+	# POS API Methods
+	"get_pos_profiles": "jarz_pos.api.pos.get_pos_profiles",
+	"get_pos_profile_data": "jarz_pos.api.pos.get_pos_profile_data",
+	"get_products": "jarz_pos.api.pos.get_products",
+	"get_bundles": "jarz_pos.api.pos.get_bundles",
+	"create_pos_invoice": "jarz_pos.api.invoices.create_pos_invoice",
+	"simple_invoice": "jarz_pos.api.invoices.simple_invoice",
+	"get_pos_profiles_with_items": "jarz_pos.api.pos.get_pos_profiles_with_items",
+	"get_active_pos_profiles": "jarz_pos.api.pos.get_active_pos_profiles",
+	"update_profile_status": "jarz_pos.api.pos.update_profile_status",
+	"process_bundle": "jarz_pos.api.pos.process_bundle",
+	"get_item_details": "jarz_pos.api.pos.get_item_details",
+	"get_profile_bundles": "jarz_pos.api.pos.get_profile_bundles",
+	"test_bundle_debug": "jarz_pos.api.pos.test_bundle_debug",
+	"get_territory_pos_profile": "jarz_pos.api.pos.get_territory_pos_profile",
+	# User API Methods
+	"jarz_pos.api.user.get_current_user_roles": "jarz_pos.api.user.get_current_user_roles",
+	# Shift API Methods
+	"jarz_pos.api.shift.get_active_shift": "jarz_pos.api.shift.get_active_shift",
+	"jarz_pos.api.shift.get_shift_payment_methods": "jarz_pos.api.shift.get_shift_payment_methods",
+	"jarz_pos.api.shift.start_shift": "jarz_pos.api.shift.start_shift",
+	"jarz_pos.api.shift.get_shift_summary": "jarz_pos.api.shift.get_shift_summary",
+	"jarz_pos.api.shift.end_shift": "jarz_pos.api.shift.end_shift",
+	# Notification API Methods
+	"jarz_pos.api.notifications.get_pending_alerts": "jarz_pos.api.notifications.get_pending_alerts",
+	"jarz_pos.api.notifications.register_device_token": "jarz_pos.api.notifications.register_device_token",
+	"jarz_pos.api.notifications.accept_invoice": "jarz_pos.api.notifications.accept_invoice",
 }
 
 # Ensure API modules are imported at startup so @frappe.whitelist() decorators register
 try:
-    from jarz_pos.api import manager as _mgr
-    _mgr.get_manager_dashboard_summary
-    _mgr.get_manager_orders
+	from jarz_pos.api import manager as _mgr
+
+	_mgr.get_manager_dashboard_summary
+	_mgr.get_manager_orders
 except Exception:
-    pass
+	pass
 
 try:
-    # Ensure B2B CRM endpoints register their @frappe.whitelist() decorators.
-    from jarz_pos.api import crm as _crm
-    _crm.get_b2b_pipeline
-    _crm.get_account
-    _crm.advance_stage
-    _crm.create_lead
-    _crm.log_activity
-    _crm.get_my_followups
-    _crm.get_reorder_due
-    _crm.request_sample
-    _crm.place_b2b_order
+	# Ensure B2B CRM endpoints register their @frappe.whitelist() decorators.
+	from jarz_pos.api import crm as _crm
+
+	_crm.get_b2b_pipeline
+	_crm.get_account
+	_crm.advance_stage
+	_crm.create_lead
+	_crm.log_activity
+	_crm.get_my_followups
+	_crm.get_reorder_due
+	_crm.request_sample
+	_crm.place_b2b_order
 except Exception:
-    pass
+	pass
 
 try:
-    # Ensure Leads catalog endpoints register their @frappe.whitelist() decorators.
-    from jarz_pos.api import leads as _leads
-    _leads.get_leads
-    _leads.get_lead
-    _leads.preview_maps_link
-    _leads.save_lead
-    _leads.set_lead_address
-    _leads.get_lead_categories
-    _leads.save_lead_category
-    _leads.get_not_suitable_reasons
-    _leads.set_lead_suitability
-    _leads.get_merge_candidates
-    _leads.merge_leads
+	# Ensure Leads catalog endpoints register their @frappe.whitelist() decorators.
+	from jarz_pos.api import leads as _leads
+
+	_leads.get_leads
+	_leads.get_lead
+	_leads.preview_maps_link
+	_leads.save_lead
+	_leads.set_lead_address
+	_leads.get_lead_categories
+	_leads.save_lead_category
+	_leads.get_not_suitable_reasons
+	_leads.set_lead_suitability
+	_leads.get_merge_candidates
+	_leads.merge_leads
 except Exception:
-    pass
+	pass
 
 try:
-    # Courier app (COURIER_CONTRACTS): door-pin geo endpoints and the per-invoice
-    # delivery transitions. Touched here so their @frappe.whitelist() decorators
-    # register at startup like every other API module in this file.
-    from jarz_pos.api import geo as _geo_api
-    from jarz_pos.api import courier_delivery as _courier_api
-    _geo_api.preview_maps_link
-    _geo_api.get_address_pin
-    _geo_api.set_address_pin
-    _geo_api.dry_run_address_pin
-    _courier_api.get_delivery_failure_reasons
-    _courier_api.get_stop_outcome
-    _courier_api.get_my_courier_identity
-    _courier_api.mark_arrived
-    _courier_api.mark_delivered
-    _courier_api.mark_failed
+	# Courier app (COURIER_CONTRACTS): door-pin geo endpoints and the per-invoice
+	# delivery transitions. Touched here so their @frappe.whitelist() decorators
+	# register at startup like every other API module in this file.
+	from jarz_pos.api import courier_delivery as _courier_api
+	from jarz_pos.api import geo as _geo_api
+
+	_geo_api.preview_maps_link
+	_geo_api.get_address_pin
+	_geo_api.set_address_pin
+	_geo_api.dry_run_address_pin
+	_courier_api.get_delivery_failure_reasons
+	_courier_api.get_stop_outcome
+	_courier_api.get_my_courier_identity
+	_courier_api.mark_arrived
+	_courier_api.mark_delivered
+	_courier_api.mark_failed
 except Exception:
-    pass
+	pass
 
 try:
-    # Customer delivery tracking. get_public_status is the ONLY allow_guest
-    # endpoint in this app; touching it here registers its whitelist entry at
-    # startup like every other API module, so the public page never 404s because
-    # of lazy import order.
-    from jarz_pos.api import tracking as _tracking_api
-    _tracking_api.get_public_status
-    _tracking_api.get_tracking_link
+	# Customer delivery tracking. get_public_status is the ONLY allow_guest
+	# endpoint in this app; touching it here registers its whitelist entry at
+	# startup like every other API module, so the public page never 404s because
+	# of lazy import order.
+	from jarz_pos.api import tracking as _tracking_api
+
+	_tracking_api.get_public_status
+	_tracking_api.get_tracking_link
 except Exception:
-    pass
+	pass
 
 try:
-    # Cash custody (عهدة) endpoints.
-    from jarz_pos.api import cash_custody as _cash_custody_api
-    _cash_custody_api.get_custody_overview
-    _cash_custody_api.list_custody_candidates
-    _cash_custody_api.add_custody_holder
-    _cash_custody_api.set_custody_holder_enabled
-    _cash_custody_api.issue_custody
-    _cash_custody_api.return_custody
-    _cash_custody_api.get_custody_statement
+	# Cash custody (عهدة) endpoints.
+	from jarz_pos.api import cash_custody as _cash_custody_api
+
+	_cash_custody_api.get_custody_overview
+	_cash_custody_api.list_custody_candidates
+	_cash_custody_api.add_custody_holder
+	_cash_custody_api.set_custody_holder_enabled
+	_cash_custody_api.issue_custody
+	_cash_custody_api.return_custody
+	_cash_custody_api.get_custody_statement
 except Exception:
-    pass
+	pass
 
 try:
-    # Task Board endpoints (feature task-board).
-    from jarz_pos.api import tasks as _tasks_api
-    _tasks_api.get_board_context
-    _tasks_api.get_board
-    _tasks_api.get_task
-    _tasks_api.create_task
-    _tasks_api.set_status
-    _tasks_api.download_attachment
+	# Task Board endpoints (feature task-board).
+	from jarz_pos.api import tasks as _tasks_api
+
+	_tasks_api.get_board_context
+	_tasks_api.get_board
+	_tasks_api.get_task
+	_tasks_api.create_task
+	_tasks_api.set_status
+	_tasks_api.download_attachment
 except Exception:
-    pass
+	pass
 
 try:
-    # Chat inbox (feature chat-inbox). meta_webhook is allow_guest and
-    # authorised only by Meta's HMAC signature; touching it here registers its
-    # whitelist entry at startup so Meta's deliveries never 404 on import order.
-    from jarz_pos.api import chat as _chat_api
-    from jarz_pos.api import chat_webhook as _chat_webhook_api
-    _chat_webhook_api.meta_webhook
-    _chat_api.get_conversations
-    _chat_api.get_conversation
-    _chat_api.send_message
-    _chat_api.send_draft
-    _chat_api.reject_draft
-    _chat_api.regenerate_draft
-    _chat_api.assign_conversation
-    _chat_api.set_conversation_status
-    _chat_api.link_customer
-    _chat_api.get_order_prefill
-    _chat_api.get_chat_metrics
-    _chat_api.get_unread_total
+	# Chat inbox (feature chat-inbox). meta_webhook is allow_guest and
+	# authorised only by Meta's HMAC signature; touching it here registers its
+	# whitelist entry at startup so Meta's deliveries never 404 on import order.
+	from jarz_pos.api import chat as _chat_api
+	from jarz_pos.api import chat_webhook as _chat_webhook_api
+
+	_chat_webhook_api.meta_webhook
+	_chat_api.get_conversations
+	_chat_api.get_conversation
+	_chat_api.send_message
+	_chat_api.send_draft
+	_chat_api.reject_draft
+	_chat_api.regenerate_draft
+	_chat_api.assign_conversation
+	_chat_api.set_conversation_status
+	_chat_api.link_customer
+	_chat_api.get_order_prefill
+	_chat_api.get_chat_metrics
+	_chat_api.get_unread_total
 except Exception:
-    pass
+	pass
 
 try:
-    # WooCommerce backlog review queue (read-only manager dashboard feed).
-    from jarz_pos.api import woo_backlog as _woo_backlog_api
-    _woo_backlog_api.get_woo_backlog_queue
+	# WooCommerce backlog review queue (read-only manager dashboard feed).
+	from jarz_pos.api import woo_backlog as _woo_backlog_api
+
+	_woo_backlog_api.get_woo_backlog_queue
 except Exception:
-    pass
+	pass
 
 try:
-    from jarz_pos.api import user as _user
-    from jarz_pos.api import notifications as _notif
-    from jarz_pos.api import shift as _shift
-    # Touch the functions to ensure they're loaded
-    _user.get_current_user_roles
-    _notif.get_pending_alerts
-    _notif.register_device_token
-    _notif.accept_invoice
-    _shift.get_active_shift
-    _shift.get_shift_payment_methods
-    _shift.start_shift
-    _shift.get_shift_summary
-    _shift.end_shift
-    # Defensive registration: ensure methods are marked as whitelisted
-    _shift.get_active_shift.whitelisted = True
-    _shift.get_shift_payment_methods.whitelisted = True
-    _shift.start_shift.whitelisted = True
-    _shift.get_shift_summary.whitelisted = True
-    _shift.end_shift.whitelisted = True
-    _shift.get_active_shift.allow_guest = False
-    _shift.get_shift_payment_methods.allow_guest = False
-    _shift.start_shift.allow_guest = False
-    _shift.get_shift_summary.allow_guest = False
-    _shift.end_shift.allow_guest = False
+	from jarz_pos.api import notifications as _notif
+	from jarz_pos.api import shift as _shift
+	from jarz_pos.api import user as _user
+
+	# Touch the functions to ensure they're loaded
+	_user.get_current_user_roles
+	_notif.get_pending_alerts
+	_notif.register_device_token
+	_notif.accept_invoice
+	_shift.get_active_shift
+	_shift.get_shift_payment_methods
+	_shift.start_shift
+	_shift.get_shift_summary
+	_shift.end_shift
+	# Defensive registration: ensure methods are marked as whitelisted
+	_shift.get_active_shift.whitelisted = True
+	_shift.get_shift_payment_methods.whitelisted = True
+	_shift.start_shift.whitelisted = True
+	_shift.get_shift_summary.whitelisted = True
+	_shift.end_shift.whitelisted = True
+	_shift.get_active_shift.allow_guest = False
+	_shift.get_shift_payment_methods.allow_guest = False
+	_shift.start_shift.allow_guest = False
+	_shift.get_shift_summary.allow_guest = False
+	_shift.end_shift.allow_guest = False
 except Exception:
-    pass
+	pass
 
 # each overriding function accepts a `data` argument;
 # generated from the base implementation of the doctype dashboard,
@@ -904,4 +939,3 @@ after_job = ["jarz_pos.observability.sentry_bootstrap.after_job"]
 # default_log_clearing_doctypes = {
 # 	"Logging DocType Name": 30  # days to retain logs
 # }
-

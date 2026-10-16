@@ -454,12 +454,14 @@ def moderator_users(alerts_only: bool = False) -> list[str]:
 
 
 def chat_recipients() -> list[str]:
-	"""Realtime audience: Settings moderators plus every Moderator / JARZ Manager."""
+	"""Realtime audience: Settings moderators plus every Moderator / JARZ Manager / line manager."""
 	users = set(moderator_users())
 	try:
 		from jarz_pos.api import notifications as n
 
-		users.update(n._get_users_with_roles([ROLES.MODERATOR, ROLES.JARZ_MANAGER]))
+		users.update(
+			n._get_users_with_roles([ROLES.MODERATOR, ROLES.JARZ_MANAGER, *sorted(ROLES.LINE_MANAGER_TIER)])
+		)
 	except Exception:
 		pass
 	users.discard("Guest")

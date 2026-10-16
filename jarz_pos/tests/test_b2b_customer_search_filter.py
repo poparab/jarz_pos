@@ -35,123 +35,122 @@ from jarz_pos.api import customer as cust_api
 
 @contextmanager
 def _patched_db(captured, *, has_columns=("phone", "customer_type")):
-    """Patch the frappe surface search_customers touches, capturing sql() args."""
+	"""Patch the frappe surface search_customers touches, capturing sql() args."""
 
-    def _fake_sql(query, params=None, as_dict=1):
-        captured["query"] = query
-        captured["params"] = dict(params or {})
-        return []  # no rows -> augmentation loop is a no-op
+	def _fake_sql(query, params=None, as_dict=1):
+		captured["query"] = query
+		captured["params"] = dict(params or {})
+		return []  # no rows -> augmentation loop is a no-op
 
-    has_set = set(has_columns)
-    with patch.object(cust_api.frappe.db, "sql", side_effect=_fake_sql), patch.object(
-        cust_api.frappe.db, "has_column", side_effect=lambda dt, col: col in has_set
-    ), patch.object(cust_api.frappe, "logger"), patch.object(
-        cust_api, "_augment_customer_with_territory"
-    ):
-        yield
+	has_set = set(has_columns)
+	with (
+		patch.object(cust_api.frappe.db, "sql", side_effect=_fake_sql),
+		patch.object(cust_api.frappe.db, "has_column", side_effect=lambda dt, col: col in has_set),
+		patch.object(cust_api.frappe, "logger"),
+		patch.object(cust_api, "_augment_customer_with_territory"),
+	):
+		yield
 
 
 class TestCustomerTypeFilterAbsent(unittest.TestCase):
-    """When customer_type is omitted, the query carries NO customer_type clause."""
+	"""When customer_type is omitted, the query carries NO customer_type clause."""
 
-    def test_name_search_no_type_clause(self):
-        cap = {}
-        with _patched_db(cap):
-            cust_api.search_customers(name="acme")
-        self.assertNotIn("customer_type", cap["query"])
-        self.assertNotIn("customer_type", cap["params"])
-        self.assertEqual(cap["params"].get("search_term"), "%acme%")
+	def test_name_search_no_type_clause(self):
+		cap = {}
+		with _patched_db(cap):
+			cust_api.search_customers(name="acme")
+		self.assertNotIn("customer_type", cap["query"])
+		self.assertNotIn("customer_type", cap["params"])
+		self.assertEqual(cap["params"].get("search_term"), "%acme%")
 
-    def test_phone_search_no_type_clause(self):
-        cap = {}
-        with _patched_db(cap):
-            cust_api.search_customers(phone="0100")
-        self.assertNotIn("customer_type", cap["query"])
-        self.assertNotIn("customer_type", cap["params"])
+	def test_phone_search_no_type_clause(self):
+		cap = {}
+		with _patched_db(cap):
+			cust_api.search_customers(phone="0100")
+		self.assertNotIn("customer_type", cap["query"])
+		self.assertNotIn("customer_type", cap["params"])
 
 
 class TestCustomerTypeFilterPresent(unittest.TestCase):
-    """When a valid customer_type is passed, an ANDed parameterized clause is added."""
+	"""When a valid customer_type is passed, an ANDed parameterized clause is added."""
 
-    def test_company_filter_added_and_anded(self):
-        cap = {}
-        with _patched_db(cap):
-            cust_api.search_customers(name="acme", customer_type="Company")
-        self.assertEqual(cap["params"].get("customer_type"), "Company")
-        # Parameterized (no inlined value) and ANDed onto the OR group.
-        self.assertIn("%(customer_type)s", cap["query"])
-        self.assertIn("AND", cap["query"].upper())
-        # The name OR-group is still present.
-        self.assertIn("search_term", cap["params"])
+	def test_company_filter_added_and_anded(self):
+		cap = {}
+		with _patched_db(cap):
+			cust_api.search_customers(name="acme", customer_type="Company")
+		self.assertEqual(cap["params"].get("customer_type"), "Company")
+		# Parameterized (no inlined value) and ANDed onto the OR group.
+		self.assertIn("%(customer_type)s", cap["query"])
+		self.assertIn("AND", cap["query"].upper())
+		# The name OR-group is still present.
+		self.assertIn("search_term", cap["params"])
 
-    def test_phone_search_ignores_type_filter(self):
-        # Was test_individual_filter_added, which asserted the opposite. A phone
-        # search must return the holder of that number whatever its customer_type,
-        # because that is precisely what create_customer blocks on. See the module
-        # docstring for the incident this encodes.
-        cap = {}
-        with _patched_db(cap):
-            cust_api.search_customers(phone="0100", customer_type="Individual")
-        self.assertNotIn("%(customer_type)s", cap["query"])
-        self.assertNotIn("customer_type", cap["params"])
-        # The phone match itself is still there and still parameterized.
-        self.assertIn("phone_term_0", cap["params"])
+	def test_phone_search_ignores_type_filter(self):
+		# Was test_individual_filter_added, which asserted the opposite. A phone
+		# search must return the holder of that number whatever its customer_type,
+		# because that is precisely what create_customer blocks on. See the module
+		# docstring for the incident this encodes.
+		cap = {}
+		with _patched_db(cap):
+			cust_api.search_customers(phone="0100", customer_type="Individual")
+		self.assertNotIn("%(customer_type)s", cap["query"])
+		self.assertNotIn("customer_type", cap["params"])
+		# The phone match itself is still there and still parameterized.
+		self.assertIn("phone_term_0", cap["params"])
 
-    def test_name_and_phone_are_ored_with_type_on_the_name_only(self):
-        # Previously `if name: ... elif phone:` silently dropped the phone whenever
-        # a name was also supplied. Both criteria now widen the search.
-        cap = {}
-        with _patched_db(cap):
-            cust_api.search_customers(
-                name="acme", phone="0100", customer_type="Company"
-            )
-        self.assertEqual(cap["params"].get("customer_type"), "Company")
-        self.assertIn("search_term", cap["params"])
-        self.assertIn("phone_term_0", cap["params"])
-        # Shape: ((name AND type) OR phone) — the type never constrains the phone leg.
-        self.assertIn(" OR ", cap["query"])
-        self.assertIn("AND", cap["query"].upper())
+	def test_name_and_phone_are_ored_with_type_on_the_name_only(self):
+		# Previously `if name: ... elif phone:` silently dropped the phone whenever
+		# a name was also supplied. Both criteria now widen the search.
+		cap = {}
+		with _patched_db(cap):
+			cust_api.search_customers(name="acme", phone="0100", customer_type="Company")
+		self.assertEqual(cap["params"].get("customer_type"), "Company")
+		self.assertIn("search_term", cap["params"])
+		self.assertIn("phone_term_0", cap["params"])
+		# Shape: ((name AND type) OR phone) — the type never constrains the phone leg.
+		self.assertIn(" OR ", cap["query"])
+		self.assertIn("AND", cap["query"].upper())
 
-    def test_type_clause_skipped_when_column_missing(self):
-        # If the Customer doctype lacks the customer_type column, the filter is
-        # silently skipped (no clause, no param) rather than producing bad SQL.
-        cap = {}
-        with _patched_db(cap, has_columns=("phone",)):
-            cust_api.search_customers(name="acme", customer_type="Company")
-        self.assertNotIn("%(customer_type)s", cap["query"])
-        self.assertNotIn("customer_type", cap["params"])
+	def test_type_clause_skipped_when_column_missing(self):
+		# If the Customer doctype lacks the customer_type column, the filter is
+		# silently skipped (no clause, no param) rather than producing bad SQL.
+		cap = {}
+		with _patched_db(cap, has_columns=("phone",)):
+			cust_api.search_customers(name="acme", customer_type="Company")
+		self.assertNotIn("%(customer_type)s", cap["query"])
+		self.assertNotIn("customer_type", cap["params"])
 
 
 class TestCustomerTypeValidation(unittest.TestCase):
-    """An invalid customer_type is rejected before any query runs."""
+	"""An invalid customer_type is rejected before any query runs."""
 
-    def test_invalid_type_throws(self):
-        cap = {}
-        with _patched_db(cap):
-            with self.assertRaises(Exception):
-                cust_api.search_customers(name="acme", customer_type="Wholesale")
-        # db.sql must not have been reached.
-        self.assertNotIn("query", cap)
+	def test_invalid_type_throws(self):
+		cap = {}
+		with _patched_db(cap):
+			with self.assertRaises(Exception):
+				cust_api.search_customers(name="acme", customer_type="Wholesale")
+		# db.sql must not have been reached.
+		self.assertNotIn("query", cap)
 
-    def test_invalid_type_throws_on_phone_search_too(self):
-        # The phone path no longer *applies* the filter, but it must still reject a
-        # bad value — otherwise a client typo would silently widen the search.
-        cap = {}
-        with _patched_db(cap):
-            with self.assertRaises(Exception):
-                cust_api.search_customers(phone="0100", customer_type="Wholesale")
-        self.assertNotIn("query", cap)
+	def test_invalid_type_throws_on_phone_search_too(self):
+		# The phone path no longer *applies* the filter, but it must still reject a
+		# bad value — otherwise a client typo would silently widen the search.
+		cap = {}
+		with _patched_db(cap):
+			with self.assertRaises(Exception):
+				cust_api.search_customers(phone="0100", customer_type="Wholesale")
+		self.assertNotIn("query", cap)
 
 
 class TestSearchNoCriteria(unittest.TestCase):
-    """No name and no phone -> empty list, no query (unchanged contract)."""
+	"""No name and no phone -> empty list, no query (unchanged contract)."""
 
-    def test_empty_returns_list_without_query(self):
-        cap = {}
-        with _patched_db(cap):
-            self.assertEqual(cust_api.search_customers(), [])
-        self.assertNotIn("query", cap)
+	def test_empty_returns_list_without_query(self):
+		cap = {}
+		with _patched_db(cap):
+			self.assertEqual(cust_api.search_customers(), [])
+		self.assertNotIn("query", cap)
 
 
 if __name__ == "__main__":
-    unittest.main()
+	unittest.main()

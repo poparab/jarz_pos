@@ -30,27 +30,27 @@ top-level frappe calls.
 """
 
 import frappe
-from frappe.utils import add_days, nowdate, getdate
+from frappe.utils import add_days, getdate, nowdate
 
 from jarz_pos.setup.b2b_master_data import ensure_b2b_master_data
 
 LOGGER_NAME = "seed_b2b_demo_data"
 
 # ── Tunables ──────────────────────────────────────────────────────────────
-WINDOW_DAYS = 120                 # lookback for "active" customers / invoices
-MIN_INVOICES = 2                  # min submitted non-return invoices to qualify
-TARGET_B2B_CUSTOMERS = 15         # customers promoted into a B2B group
-TARGET_DISTRIBUTORS = 3           # of those, promoted to Distributor instead of B2B
-TARGET_OPPORTUNITIES = 9          # demo pipeline opportunities to maintain
-TARGET_CONVERSIONS = 3            # customers linked back to a demo opportunity
+WINDOW_DAYS = 120  # lookback for "active" customers / invoices
+MIN_INVOICES = 2  # min submitted non-return invoices to qualify
+TARGET_B2B_CUSTOMERS = 15  # customers promoted into a B2B group
+TARGET_DISTRIBUTORS = 3  # of those, promoted to Distributor instead of B2B
+TARGET_OPPORTUNITIES = 9  # demo pipeline opportunities to maintain
+TARGET_CONVERSIONS = 3  # customers linked back to a demo opportunity
 
 # ── Verified master-data names (see custom_field.json / b2b_master_data.py) ─
 B2B_GROUP = "B2B"
 DISTRIBUTOR_GROUP = "Distributor"
 B2B_GROUPS = (B2B_GROUP, DISTRIBUTOR_GROUP)
-B2B_PURPOSE = "B2B Supply"                 # Sales Invoice.custom_order_purpose (Select)
-STANDARD_PURPOSE = "Standard"              # default custom_order_purpose (revert target)
-B2B_POLICY = "B2B Supply"                  # Jarz Commercial Policy name (Link target)
+B2B_PURPOSE = "B2B Supply"  # Sales Invoice.custom_order_purpose (Select)
+STANDARD_PURPOSE = "Standard"  # default custom_order_purpose (revert target)
+B2B_POLICY = "B2B Supply"  # Jarz Commercial Policy name (Link target)
 
 # Non-terminal Opportunity.custom_b2b_stage options to cycle through.
 PIPELINE_STAGES = ["Qualify", "Sample", "Approved", "Trial", "Check-up", "Active"]
@@ -148,8 +148,8 @@ def _b2b_group_customers():
 # ---------------------------------------------------------------------------
 def _promote_customers(summary, cutoff):
 	log = _logger()
-	promoted = []          # customers we actually changed this run
-	b2b_customers = []      # all customers now in a B2B group (changed + pre-existing)
+	promoted = []  # customers we actually changed this run
+	b2b_customers = []  # all customers now in a B2B group (changed + pre-existing)
 
 	try:
 		candidates = _active_customers(cutoff)
@@ -178,9 +178,7 @@ def _promote_customers(summary, cutoff):
 			log.error(f"Failed to promote customer '{cust}'", exc_info=True)
 
 	summary["customers_promoted"] = len(promoted)
-	summary["customers_promoted_detail"] = [
-		f"{c} -> {g}" for c, g in promoted
-	]
+	summary["customers_promoted_detail"] = [f"{c} -> {g}" for c, g in promoted]
 	return b2b_customers
 
 
@@ -206,8 +204,7 @@ def _tag_invoices(summary, cutoff):
 	policy = B2B_POLICY if frappe.db.exists("Jarz Commercial Policy", B2B_POLICY) else None
 	if not policy:
 		log.warning(
-			f"Commercial policy '{B2B_POLICY}' missing; invoices will be tagged "
-			f"with purpose only"
+			f"Commercial policy '{B2B_POLICY}' missing; invoices will be tagged " f"with purpose only"
 		)
 
 	try:
@@ -239,12 +236,18 @@ def _tag_invoices(summary, cutoff):
 		try:
 			# set_value bypasses submit locks — acceptable for a seeder.
 			frappe.db.set_value(
-				"Sales Invoice", name, "custom_order_purpose", B2B_PURPOSE,
+				"Sales Invoice",
+				name,
+				"custom_order_purpose",
+				B2B_PURPOSE,
 				update_modified=False,
 			)
 			if policy:
 				frappe.db.set_value(
-					"Sales Invoice", name, "custom_commercial_policy", policy,
+					"Sales Invoice",
+					name,
+					"custom_commercial_policy",
+					policy,
 					update_modified=False,
 				)
 			tagged += 1
@@ -282,16 +285,20 @@ def _revert_stray_b2b_tags(summary):
 	for name in stray:
 		try:
 			frappe.db.set_value(
-				"Sales Invoice", name, "custom_order_purpose", STANDARD_PURPOSE,
+				"Sales Invoice",
+				name,
+				"custom_order_purpose",
+				STANDARD_PURPOSE,
 				update_modified=False,
 			)
 			# Only clear the policy if it was pointed at the B2B policy by the seeder.
-			current_policy = frappe.db.get_value(
-				"Sales Invoice", name, "custom_commercial_policy"
-			)
+			current_policy = frappe.db.get_value("Sales Invoice", name, "custom_commercial_policy")
 			if current_policy == B2B_POLICY:
 				frappe.db.set_value(
-					"Sales Invoice", name, "custom_commercial_policy", None,
+					"Sales Invoice",
+					name,
+					"custom_commercial_policy",
+					None,
 					update_modified=False,
 				)
 			reverted += 1
@@ -299,9 +306,7 @@ def _revert_stray_b2b_tags(summary):
 			log.error(f"Failed to revert stray B2B tag on '{name}'", exc_info=True)
 
 	summary["invoices_reverted"] = reverted
-	log.info(
-		f"Reverted {reverted} stray B2B-Supply invoice tag(s) to {STANDARD_PURPOSE}"
-	)
+	log.info(f"Reverted {reverted} stray B2B-Supply invoice tag(s) to {STANDARD_PURPOSE}")
 
 
 # ---------------------------------------------------------------------------
@@ -365,8 +370,7 @@ def _create_opportunities(summary, b2b_customers, company):
 			doc.insert(ignore_permissions=True)
 			created.append(doc.name)
 			log.info(
-				f"Created demo Opportunity {doc.name} "
-				f"(party={party}, stage={stage}, amount={amount})"
+				f"Created demo Opportunity {doc.name} " f"(party={party}, stage={stage}, amount={amount})"
 			)
 		except Exception:
 			log.error(
@@ -511,8 +515,10 @@ def run(force=0):
 		print(f"      - {detail}")
 	print(f"  invoices tagged    : {summary.get('invoices_tagged')}")
 	print(f"  invoices reverted  : {summary.get('invoices_reverted')}")
-	print(f"  opportunities new  : {summary.get('opportunities_created')} "
-		  f"(total demo: {summary.get('opportunities_total')})")
+	print(
+		f"  opportunities new  : {summary.get('opportunities_created')} "
+		f"(total demo: {summary.get('opportunities_total')})"
+	)
 	print(f"  conversions linked : {summary.get('conversions_linked')}")
 
 	# Convenience: show the live analytics result for the last 90 days.

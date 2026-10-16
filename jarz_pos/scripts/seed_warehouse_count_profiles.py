@@ -38,107 +38,106 @@ ABBR = "J"
 
 #: warehouse -> the single root group whose subtree belongs in it.
 PROFILES = (
-    (f"Raw Material - {ABBR}", "Materials"),
-    (f"Consumables - {ABBR}", "Consumable"),
-    (f"Work In Progress - {ABBR}", "Sub Assemblies"),
-    (f"Finished Goods - {ABBR}", "Finished Goods"),
+	(f"Raw Material - {ABBR}", "Materials"),
+	(f"Consumables - {ABBR}", "Consumable"),
+	(f"Work In Progress - {ABBR}", "Sub Assemblies"),
+	(f"Finished Goods - {ABBR}", "Finished Goods"),
 )
 
 
 def mark(k, v):
-    print(f"MARKe {k} | {v}")
+	print(f"MARKe {k} | {v}")
 
 
 def _descendants(group):
-    b = frappe.db.get_value("Item Group", group, ["lft", "rgt"], as_dict=True)
-    if not b:
-        return []
-    return frappe.get_all(
-        "Item Group",
-        filters={"lft": [">=", b["lft"]], "rgt": ["<=", b["rgt"]], "is_group": 0},
-        pluck="name",
-    )
+	b = frappe.db.get_value("Item Group", group, ["lft", "rgt"], as_dict=True)
+	if not b:
+		return []
+	return frappe.get_all(
+		"Item Group",
+		filters={"lft": [">=", b["lft"]], "rgt": ["<=", b["rgt"]], "is_group": 0},
+		pluck="name",
+	)
 
 
 def _stock_here_outside(warehouse, groups):
-    """Items holding stock in this warehouse that the groups would not show."""
-    rows = frappe.db.sql(
-        """SELECT b.item_code, i.item_group, b.actual_qty
+	"""Items holding stock in this warehouse that the groups would not show."""
+	rows = frappe.db.sql(
+		"""SELECT b.item_code, i.item_group, b.actual_qty
            FROM `tabBin` b JOIN `tabItem` i ON i.name = b.item_code
            WHERE b.warehouse = %s AND b.actual_qty != 0 AND i.disabled = 0""",
-        warehouse,
-        as_dict=True,
-    )
-    return [r for r in rows if r["item_group"] not in groups]
+		warehouse,
+		as_dict=True,
+	)
+	return [r for r in rows if r["item_group"] not in groups]
 
 
 def build(apply=False):
-    mark("MODE", "APPLY - writing" if apply else "DRY RUN - no writes")
-    changes = 0
+	mark("MODE", "APPLY - writing" if apply else "DRY RUN - no writes")
+	changes = 0
 
-    for warehouse, root in PROFILES:
-        if not frappe.db.exists("Warehouse", warehouse):
-            mark("WARN", f"no such warehouse: {warehouse}")
-            continue
-        if not frappe.db.exists("Item Group", root):
-            mark("WARN", f"no such item group: {root}")
-            continue
+	for warehouse, root in PROFILES:
+		if not frappe.db.exists("Warehouse", warehouse):
+			mark("WARN", f"no such warehouse: {warehouse}")
+			continue
+		if not frappe.db.exists("Item Group", root):
+			mark("WARN", f"no such item group: {root}")
+			continue
 
-        leaves = _descendants(root)
-        covered = set(leaves)
-        strays = _stock_here_outside(warehouse, covered)
-        shown = frappe.db.count(
-            "Item", {"item_group": ["in", leaves], "disabled": 0, "has_variants": 0}
-        ) + len(strays)
+		leaves = _descendants(root)
+		covered = set(leaves)
+		strays = _stock_here_outside(warehouse, covered)
+		shown = frappe.db.count(
+			"Item", {"item_group": ["in", leaves], "disabled": 0, "has_variants": 0}
+		) + len(strays)
 
-        if frappe.db.exists("Warehouse Count Profile", {"warehouse": warehouse}):
-            mark("ALREADY", f"{warehouse} already has a count profile")
-            continue
+		if frappe.db.exists("Warehouse Count Profile", {"warehouse": warehouse}):
+			mark("ALREADY", f"{warehouse} already has a count profile")
+			continue
 
-        mark(
-            "WOULD" if not apply else "APPLY",
-            f"{warehouse}: profile on {root} -> {sorted(leaves)}"
-            f" | {shown} rows (was 190)",
-        )
-        for s in strays:
-            mark(
-                "PIN",
-                f"{warehouse}: pinning {s['item_code']} ({s['item_group']}, qty {s['actual_qty']})"
-                f" as an Include -- holds stock here but sits outside {root}",
-            )
-        changes += 1
+		mark(
+			"WOULD" if not apply else "APPLY",
+			f"{warehouse}: profile on {root} -> {sorted(leaves)}" f" | {shown} rows (was 190)",
+		)
+		for s in strays:
+			mark(
+				"PIN",
+				f"{warehouse}: pinning {s['item_code']} ({s['item_group']}, qty {s['actual_qty']})"
+				f" as an Include -- holds stock here but sits outside {root}",
+			)
+		changes += 1
 
-        if not apply:
-            continue
+		if not apply:
+			continue
 
-        doc = frappe.get_doc(
-            {
-                "doctype": "Warehouse Count Profile",
-                "warehouse": warehouse,
-                "company": frappe.db.get_value("Warehouse", warehouse, "company"),
-                "enabled": 1,
-                "include_child_groups": 1,
-                "item_groups": [{"item_group": root, "enabled": 1}],
-                "item_exceptions": [
-                    {
-                        "item_code": s["item_code"],
-                        "action": "Include",
-                        "enabled": 1,
-                        "reason": f"Holds stock in {warehouse} but sits outside {root}",
-                    }
-                    for s in strays
-                ],
-            }
-        )
-        doc.flags.ignore_permissions = True
-        doc.insert()
-        mark("DOC", f"Warehouse Count Profile {doc.name} created")
+		doc = frappe.get_doc(
+			{
+				"doctype": "Warehouse Count Profile",
+				"warehouse": warehouse,
+				"company": frappe.db.get_value("Warehouse", warehouse, "company"),
+				"enabled": 1,
+				"include_child_groups": 1,
+				"item_groups": [{"item_group": root, "enabled": 1}],
+				"item_exceptions": [
+					{
+						"item_code": s["item_code"],
+						"action": "Include",
+						"enabled": 1,
+						"reason": f"Holds stock in {warehouse} but sits outside {root}",
+					}
+					for s in strays
+				],
+			}
+		)
+		doc.flags.ignore_permissions = True
+		doc.insert()
+		mark("DOC", f"Warehouse Count Profile {doc.name} created")
 
-    if apply:
-        frappe.db.commit()
-        frappe.clear_cache()
-    mark("DONE", f"changes={changes}")
+	if apply:
+		frappe.db.commit()
+		frappe.clear_cache()
+	mark("DONE", f"changes={changes}")
 
 
 if __name__ == "__main__":
-    build(apply="--apply" in sys.argv)
+	build(apply="--apply" in sys.argv)

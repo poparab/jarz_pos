@@ -1,18 +1,17 @@
 /* jshint esversion: 9 */
-/* globals frappe */
 
-frappe.pages['shipping-analytics'].on_page_load = function (wrapper) {
+frappe.pages["shipping-analytics"].on_page_load = function (wrapper) {
 	let page = frappe.ui.make_app_page({
 		parent: wrapper,
-		title: __('Shipping Analytics'),
+		title: __("Shipping Analytics"),
 		single_column: true,
 	});
 	let dash = new ShippingAnalyticsDashboard(page);
-	$(wrapper).data('sa_dash', dash);
+	$(wrapper).data("sa_dash", dash);
 };
 
-frappe.pages['shipping-analytics'].on_page_show = function (wrapper) {
-	let dash = $(wrapper).data('sa_dash');
+frappe.pages["shipping-analytics"].on_page_show = function (wrapper) {
+	let dash = $(wrapper).data("sa_dash");
 	if (dash) dash.refresh();
 };
 
@@ -34,9 +33,9 @@ class ShippingAnalyticsDashboard {
 		let me = this;
 
 		this.page.add_field({
-			fieldtype: 'Date',
-			fieldname: 'from_date',
-			label: __('From'),
+			fieldtype: "Date",
+			fieldname: "from_date",
+			label: __("From"),
 			change() {
 				me.from_date = me.page.fields_dict.from_date.get_value() || me.from_date;
 				me.refresh();
@@ -45,9 +44,9 @@ class ShippingAnalyticsDashboard {
 		this.page.fields_dict.from_date.set_value(this.from_date);
 
 		this.page.add_field({
-			fieldtype: 'Date',
-			fieldname: 'to_date',
-			label: __('To'),
+			fieldtype: "Date",
+			fieldname: "to_date",
+			label: __("To"),
 			change() {
 				me.to_date = me.page.fields_dict.to_date.get_value() || me.to_date;
 				me.refresh();
@@ -55,7 +54,7 @@ class ShippingAnalyticsDashboard {
 		});
 		this.page.fields_dict.to_date.set_value(this.to_date);
 
-		this.page.add_inner_button(__('This Month'), () => {
+		this.page.add_inner_button(__("This Month"), () => {
 			this.from_date = frappe.datetime.month_start();
 			this.to_date = frappe.datetime.month_end();
 			this.page.fields_dict.from_date.set_value(this.from_date);
@@ -63,7 +62,7 @@ class ShippingAnalyticsDashboard {
 			this.refresh();
 		});
 
-		this.page.add_inner_button(__('Last 30 Days'), () => {
+		this.page.add_inner_button(__("Last 30 Days"), () => {
 			this.to_date = frappe.datetime.nowdate();
 			this.from_date = frappe.datetime.add_days(this.to_date, -30);
 			this.page.fields_dict.from_date.set_value(this.from_date);
@@ -71,7 +70,7 @@ class ShippingAnalyticsDashboard {
 			this.refresh();
 		});
 
-		this.page.add_inner_button(__('Last 90 Days'), () => {
+		this.page.add_inner_button(__("Last 90 Days"), () => {
 			this.to_date = frappe.datetime.nowdate();
 			this.from_date = frappe.datetime.add_days(this.to_date, -90);
 			this.page.fields_dict.from_date.set_value(this.from_date);
@@ -280,120 +279,140 @@ class ShippingAnalyticsDashboard {
 	refresh() {
 		let args = { from_date: this.from_date, to_date: this.to_date };
 
-		frappe.call('jarz_pos.api.shipping_analytics.get_summary_kpis', args)
-			.then(r => r.message && this._render_kpis(r.message));
+		frappe
+			.call("jarz_pos.api.shipping_analytics.get_summary_kpis", args)
+			.then((r) => r.message && this._render_kpis(r.message));
 
-		frappe.call({
-			method: 'jarz_pos.api.shipping_analytics.get_alerts_data',
-			args: args,
-			error: () => {
-				$('#sa-alerts').html(
-					'<div class="sa-alert warning"><span class="ico">⚠</span>' +
-					'<span>Could not load alerts — check the error log for details.</span></div>'
-				);
-			},
-		}).then(r => r.message !== undefined && this._render_alerts(r.message));
+		frappe
+			.call({
+				method: "jarz_pos.api.shipping_analytics.get_alerts_data",
+				args: args,
+				error: () => {
+					$("#sa-alerts").html(
+						'<div class="sa-alert warning"><span class="ico">⚠</span>' +
+							"<span>Could not load alerts — check the error log for details.</span></div>"
+					);
+				},
+			})
+			.then((r) => r.message !== undefined && this._render_alerts(r.message));
 
-		frappe.call('jarz_pos.api.shipping_analytics.get_cost_by_territory', args)
-			.then(r => r.message && this._render_territory(r.message));
+		frappe
+			.call("jarz_pos.api.shipping_analytics.get_cost_by_territory", args)
+			.then((r) => r.message && this._render_territory(r.message));
 
-		frappe.call('jarz_pos.api.shipping_analytics.get_cost_by_pos_profile', args)
-			.then(r => r.message && this._render_branch(r.message));
+		frappe
+			.call("jarz_pos.api.shipping_analytics.get_cost_by_pos_profile", args)
+			.then((r) => r.message && this._render_branch(r.message));
 
-		frappe.call('jarz_pos.api.shipping_analytics.get_cost_by_courier', args)
-			.then(r => r.message && this._render_courier(r.message));
+		frappe
+			.call("jarz_pos.api.shipping_analytics.get_cost_by_courier", args)
+			.then((r) => r.message && this._render_courier(r.message));
 
-		frappe.call('jarz_pos.api.shipping_analytics.get_custom_shipping_breakdown', args)
-			.then(r => r.message && this._render_csr(r.message));
+		frappe
+			.call("jarz_pos.api.shipping_analytics.get_custom_shipping_breakdown", args)
+			.then((r) => r.message && this._render_csr(r.message));
 
-		frappe.call('jarz_pos.api.shipping_analytics.get_daily_trend', args)
-			.then(r => r.message && this._render_trend(r.message));
+		frappe
+			.call("jarz_pos.api.shipping_analytics.get_daily_trend", args)
+			.then((r) => r.message && this._render_trend(r.message));
 
-		frappe.call('jarz_pos.api.shipping_analytics.get_pickup_vs_delivery_split', args)
-			.then(r => r.message && this._render_pickup(r.message));
+		frappe
+			.call("jarz_pos.api.shipping_analytics.get_pickup_vs_delivery_split", args)
+			.then((r) => r.message && this._render_pickup(r.message));
 
-		frappe.call('jarz_pos.api.shipping_analytics.get_cost_by_sub_territory', args)
-			.then(r => r.message && this._render_sub_territory(r.message));
+		frappe
+			.call("jarz_pos.api.shipping_analytics.get_cost_by_sub_territory", args)
+			.then((r) => r.message && this._render_sub_territory(r.message));
 
-		frappe.call('jarz_pos.api.shipping_analytics.get_unsettled_courier_balances')
-			.then(r => r.message && this._render_unsettled(r.message));
+		frappe
+			.call("jarz_pos.api.shipping_analytics.get_unsettled_courier_balances")
+			.then((r) => r.message && this._render_unsettled(r.message));
 
-		frappe.call('jarz_pos.api.shipping_analytics.get_double_shipping_impact', args)
-			.then(r => r.message && this._render_double(r.message));
+		frappe
+			.call("jarz_pos.api.shipping_analytics.get_double_shipping_impact", args)
+			.then((r) => r.message && this._render_double(r.message));
 
-		frappe.call('jarz_pos.api.shipping_analytics.get_pickup_delivery_trend', args)
-			.then(r => r.message && this._render_pd_trend(r.message));
+		frappe
+			.call("jarz_pos.api.shipping_analytics.get_pickup_delivery_trend", args)
+			.then((r) => r.message && this._render_pd_trend(r.message));
 	}
 
 	// ── Renderers ────────────────────────────────────────────────────────────
 
 	_render_kpis(d) {
-		let pl_cls = d.net_pl >= 0 ? 'pos' : 'neg';
-		let csr_cls = d.pending_csr_count > 0 ? 'warn' : 'pos';
-		let uns_cls = d.unsettled_courier_total > 0 ? 'warn' : 'pos';
+		let pl_cls = d.net_pl >= 0 ? "pos" : "neg";
+		let csr_cls = d.pending_csr_count > 0 ? "warn" : "pos";
+		let uns_cls = d.unsettled_courier_total > 0 ? "warn" : "pos";
 
-		$('#sa-kpis').html(`
-			${_kpi('Total Orders', d.total_orders, '')}
-			${_kpi('Delivery Orders', d.delivery_orders, '')}
-			${_kpi('Pickup Orders', d.pickup_orders, '')}
-			${_kpi('Shipping Expense', _egp(d.total_expense), 'neg')}
-			${_kpi('Delivery Income', _egp(d.total_income), 'pos')}
-			${_kpi('Net P&L', _egp(d.net_pl), pl_cls)}
-			${_kpi('Avg Cost / Delivery', _egp(d.avg_cost_per_order), '')}
-			${_kpi('Pending Overrides', d.pending_csr_count, csr_cls)}
-			${_kpi('Unsettled (All-Time)', _egp(d.unsettled_courier_total), uns_cls)}
+		$("#sa-kpis").html(`
+			${_kpi("Total Orders", d.total_orders, "")}
+			${_kpi("Delivery Orders", d.delivery_orders, "")}
+			${_kpi("Pickup Orders", d.pickup_orders, "")}
+			${_kpi("Shipping Expense", _egp(d.total_expense), "neg")}
+			${_kpi("Delivery Income", _egp(d.total_income), "pos")}
+			${_kpi("Net P&L", _egp(d.net_pl), pl_cls)}
+			${_kpi("Avg Cost / Delivery", _egp(d.avg_cost_per_order), "")}
+			${_kpi("Pending Overrides", d.pending_csr_count, csr_cls)}
+			${_kpi("Unsettled (All-Time)", _egp(d.unsettled_courier_total), uns_cls)}
 		`);
 	}
 
 	_render_alerts(alerts) {
-		let icons = { danger: '🔴', warning: '🟡', info: '🔵' };
+		let icons = { danger: "🔴", warning: "🟡", info: "🔵" };
 		if (!alerts.length) {
-			$('#sa-alerts').html('<div class="sa-no-alerts">✅ No active discrepancies detected for the selected period.</div>');
+			$("#sa-alerts").html(
+				'<div class="sa-no-alerts">✅ No active discrepancies detected for the selected period.</div>'
+			);
 			return;
 		}
-		$('#sa-alerts').html(alerts.map(a =>
-			`<div class="sa-alert ${a.type}">
-				<span class="ico">${icons[a.type] || 'ℹ'}</span>
+		$("#sa-alerts").html(
+			alerts
+				.map(
+					(a) =>
+						`<div class="sa-alert ${a.type}">
+				<span class="ico">${icons[a.type] || "ℹ"}</span>
 				<span>${a.message}</span>
 			</div>`
-		).join(''));
+				)
+				.join("")
+		);
 	}
 
 	_render_territory(rows) {
 		if (!rows.length) return;
 
 		// Stacked bar: expense + income
-		_chart('sa-chart-terr-bar', {
-			type: 'bar',
+		_chart("sa-chart-terr-bar", {
+			type: "bar",
 			height: 280,
 			data: {
-				labels: rows.map(r => _short(r.territory)),
+				labels: rows.map((r) => _short(r.territory)),
 				datasets: [
-					{ name: 'Expense', values: rows.map(r => r.total_expense) },
-					{ name: 'Income',  values: rows.map(r => r.total_income) },
+					{ name: "Expense", values: rows.map((r) => r.total_expense) },
+					{ name: "Income", values: rows.map((r) => r.total_income) },
 				],
 			},
-			colors: ['#e74c3c', '#27ae60'],
+			colors: ["#e74c3c", "#27ae60"],
 			barOptions: { stacked: false },
-			tooltipOptions: { formatTooltipY: v => _egp(v) },
+			tooltipOptions: { formatTooltipY: (v) => _egp(v) },
 		});
 
 		// Avg cost bar — sorted high to low so the most expensive territories appear first
 		let by_avg = [...rows].sort((a, b) => b.avg_cost - a.avg_cost);
-		_chart('sa-chart-terr-avg', {
-			type: 'bar',
+		_chart("sa-chart-terr-avg", {
+			type: "bar",
 			height: 280,
 			data: {
-				labels: by_avg.map(r => _short(r.territory)),
-				datasets: [{ name: 'Avg Cost/Order', values: by_avg.map(r => r.avg_cost) }],
+				labels: by_avg.map((r) => _short(r.territory)),
+				datasets: [{ name: "Avg Cost/Order", values: by_avg.map((r) => r.avg_cost) }],
 			},
-			colors: ['#FF6B35'],
-			tooltipOptions: { formatTooltipY: v => _egp(v) },
+			colors: ["#FF6B35"],
+			tooltipOptions: { formatTooltipY: (v) => _egp(v) },
 		});
 
 		// P&L table
-		let pos_neg = v => `<span class="${v >= 0 ? 'green' : 'red'}">${_egp(v)}</span>`;
-		$('#sa-table-terr').html(`
+		let pos_neg = (v) => `<span class="${v >= 0 ? "green" : "red"}">${_egp(v)}</span>`;
+		$("#sa-table-terr").html(`
 			<table class="sa-table">
 				<thead><tr>
 					<th>Territory</th><th>Orders</th>
@@ -401,14 +420,18 @@ class ShippingAnalyticsDashboard {
 					<th>Net P&L</th><th>Avg Cost</th>
 				</tr></thead>
 				<tbody>
-					${rows.map(r => `<tr>
+					${rows
+						.map(
+							(r) => `<tr>
 						<td>${r.territory}</td>
 						<td>${r.order_count}</td>
 						<td class="red">${_egp(r.total_expense)}</td>
 						<td class="green">${_egp(r.total_income)}</td>
 						<td>${pos_neg(r.net_pl)}</td>
 						<td>${_egp(r.avg_cost)}</td>
-					</tr>`).join('')}
+					</tr>`
+						)
+						.join("")}
 				</tbody>
 			</table>`);
 	}
@@ -416,92 +439,96 @@ class ShippingAnalyticsDashboard {
 	_render_branch(rows) {
 		if (!rows.length) return;
 
-		_chart('sa-chart-branch-cost', {
-			type: 'bar',
+		_chart("sa-chart-branch-cost", {
+			type: "bar",
 			height: 260,
 			data: {
-				labels: rows.map(r => _short(r.branch)),
+				labels: rows.map((r) => _short(r.branch)),
 				datasets: [
-					{ name: 'Expense', values: rows.map(r => r.total_expense) },
-					{ name: 'Income',  values: rows.map(r => r.total_income) },
+					{ name: "Expense", values: rows.map((r) => r.total_expense) },
+					{ name: "Income", values: rows.map((r) => r.total_income) },
 				],
 			},
-			colors: ['#e74c3c', '#27ae60'],
-			tooltipOptions: { formatTooltipY: v => _egp(v) },
+			colors: ["#e74c3c", "#27ae60"],
+			tooltipOptions: { formatTooltipY: (v) => _egp(v) },
 		});
 
-		_chart('sa-chart-branch-avg', {
-			type: 'bar',
+		_chart("sa-chart-branch-avg", {
+			type: "bar",
 			height: 260,
 			data: {
-				labels: rows.map(r => _short(r.branch)),
-				datasets: [{ name: 'Avg Cost/Order', values: rows.map(r => r.avg_cost) }],
+				labels: rows.map((r) => _short(r.branch)),
+				datasets: [{ name: "Avg Cost/Order", values: rows.map((r) => r.avg_cost) }],
 			},
-			colors: ['#FF6B35'],
-			tooltipOptions: { formatTooltipY: v => _egp(v) },
+			colors: ["#FF6B35"],
+			tooltipOptions: { formatTooltipY: (v) => _egp(v) },
 		});
 	}
 
 	_render_courier(rows) {
 		if (!rows.length) {
-			$('#sa-chart-courier').html('<div class="sa-loading">No courier transactions in range.</div>');
+			$("#sa-chart-courier").html(
+				'<div class="sa-loading">No courier transactions in range.</div>'
+			);
 			return;
 		}
 
-		_chart('sa-chart-courier', {
-			type: 'bar',
+		_chart("sa-chart-courier", {
+			type: "bar",
 			height: 280,
 			data: {
-				labels: rows.map(r => _short(r.party)),
+				labels: rows.map((r) => _short(r.party)),
 				datasets: [
-					{ name: 'Settled',   values: rows.map(r => r.settled) },
-					{ name: 'Unsettled', values: rows.map(r => r.unsettled) },
+					{ name: "Settled", values: rows.map((r) => r.settled) },
+					{ name: "Unsettled", values: rows.map((r) => r.unsettled) },
 				],
 			},
-			colors: ['#27ae60', '#e74c3c'],
+			colors: ["#27ae60", "#e74c3c"],
 			barOptions: { stacked: true },
-			tooltipOptions: { formatTooltipY: v => _egp(v) },
+			tooltipOptions: { formatTooltipY: (v) => _egp(v) },
 		});
 	}
 
 	_render_unsettled(rows) {
 		if (!rows.length) {
-			$('#sa-table-unsettled').html('<div class="sa-loading">No unsettled balances.</div>');
-			$('#sa-chart-aging').html('<div class="sa-loading">No unsettled balances.</div>');
+			$("#sa-table-unsettled").html('<div class="sa-loading">No unsettled balances.</div>');
+			$("#sa-chart-aging").html('<div class="sa-loading">No unsettled balances.</div>');
 			return;
 		}
 
 		// Aging chart — top unsettled balances by amount (read-only view of the same data).
 		let top = rows.slice(0, 10);
-		_chart('sa-chart-aging', {
-			type: 'bar',
+		_chart("sa-chart-aging", {
+			type: "bar",
 			height: 260,
 			data: {
-				labels: top.map(r => _short(r.party)),
-				datasets: [{ name: 'Unsettled (EGP)', values: top.map(r => r.total_owed) }],
+				labels: top.map((r) => _short(r.party)),
+				datasets: [{ name: "Unsettled (EGP)", values: top.map((r) => r.total_owed) }],
 			},
-			colors: ['#e67e22'],
-			tooltipOptions: { formatTooltipY: v => _egp(v) },
+			colors: ["#e67e22"],
+			tooltipOptions: { formatTooltipY: (v) => _egp(v) },
 		});
 
-		$('#sa-table-unsettled').html(`
+		$("#sa-table-unsettled").html(`
 			<table class="sa-table">
 				<thead><tr>
 					<th>Courier</th><th>Type</th><th>Orders</th>
 					<th>Amount</th><th>Oldest</th><th>Age</th>
 				</tr></thead>
 				<tbody>
-					${rows.map(r => {
-						let age_cls = r.days_aged > 7 ? 'red' : '';
-						return `<tr>
+					${rows
+						.map((r) => {
+							let age_cls = r.days_aged > 7 ? "red" : "";
+							return `<tr>
 							<td>${r.party}</td>
 							<td>${r.party_type}</td>
 							<td>${r.order_count}</td>
 							<td class="red">${_egp(r.total_owed)}</td>
-							<td>${r.oldest_date || '—'}</td>
+							<td>${r.oldest_date || "—"}</td>
 							<td class="${age_cls}">${r.days_aged}d</td>
 						</tr>`;
-					}).join('')}
+						})
+						.join("")}
 				</tbody>
 			</table>`);
 	}
@@ -511,32 +538,34 @@ class ShippingAnalyticsDashboard {
 
 		// Donut
 		if (s.total > 0) {
-			_chart('sa-chart-csr-donut', {
-				type: 'donut',
+			_chart("sa-chart-csr-donut", {
+				type: "donut",
 				height: 240,
 				data: {
-					labels: ['Approved', 'Rejected', 'Pending'],
+					labels: ["Approved", "Rejected", "Pending"],
 					datasets: [{ values: [s.approved, s.rejected, s.pending] }],
 				},
-				colors: ['#27ae60', '#e74c3c', '#f39c12'],
+				colors: ["#27ae60", "#e74c3c", "#f39c12"],
 			});
 		} else {
-			$('#sa-chart-csr-donut').html('<div class="sa-loading">No override requests in range.</div>');
+			$("#sa-chart-csr-donut").html(
+				'<div class="sa-loading">No override requests in range.</div>'
+			);
 		}
 
 		// Table
 		if (!data.rows.length) {
-			$('#sa-table-csr').html('<div class="sa-loading">No requests found.</div>');
+			$("#sa-table-csr").html('<div class="sa-loading">No requests found.</div>');
 			return;
 		}
 
-		let status_badge = s => {
-			if (s === 'Approved') return '<span class="badge-ok">Approved</span>';
-			if (s === 'Rejected') return '<span class="badge-warn">Rejected</span>';
+		let status_badge = (s) => {
+			if (s === "Approved") return '<span class="badge-ok">Approved</span>';
+			if (s === "Rejected") return '<span class="badge-warn">Rejected</span>';
 			return '<span class="badge-pend">Pending</span>';
 		};
 
-		$('#sa-table-csr').html(`
+		$("#sa-table-csr").html(`
 			<div style="font-size:12px;color:var(--text-muted);margin-bottom:10px;">
 				${s.total} requests — approval rate: <b>${s.approval_rate}%</b>
 			</div>
@@ -546,84 +575,98 @@ class ShippingAnalyticsDashboard {
 					<th>Requested</th><th>Delta</th><th>Status</th>
 				</tr></thead>
 				<tbody>
-					${data.rows.map(r => {
-						let delta_cls = r.is_large_override ? 'red' : '';
-						return `<tr>
+					${data.rows
+						.map((r) => {
+							let delta_cls = r.is_large_override ? "red" : "";
+							return `<tr>
 							<td><a href="/app/sales-invoice/${r.invoice}" target="_blank">${r.invoice}</a></td>
-							<td>${r.territory || '—'}</td>
+							<td>${r.territory || "—"}</td>
 							<td>${_egp(r.original_amount)}</td>
 							<td>${_egp(r.requested_amount)}</td>
-							<td class="${delta_cls}">${r.delta >= 0 ? '+' : ''}${_egp(r.delta)}</td>
+							<td class="${delta_cls}">${r.delta >= 0 ? "+" : ""}${_egp(r.delta)}</td>
 							<td>${status_badge(r.status)}</td>
 						</tr>`;
-					}).join('')}
+						})
+						.join("")}
 				</tbody>
 			</table>`);
 	}
 
 	_render_trend(rows) {
 		if (!rows.length) {
-			$('#sa-chart-trend').html('<div class="sa-loading">No data in range.</div>');
+			$("#sa-chart-trend").html('<div class="sa-loading">No data in range.</div>');
 			return;
 		}
 
-		_chart('sa-chart-trend', {
-			type: 'axis-mixed',
+		_chart("sa-chart-trend", {
+			type: "axis-mixed",
 			height: 300,
 			data: {
-				labels: rows.map(r => r.posting_date),
+				labels: rows.map((r) => r.posting_date),
 				datasets: [
-					{ name: 'Orders', type: 'bar', values: rows.map(r => r.order_count) },
-					{ name: 'Expense (EGP)', type: 'line', values: rows.map(r => r.total_expense) },
-					{ name: 'Income (EGP)',  type: 'line', values: rows.map(r => r.total_income) },
+					{ name: "Orders", type: "bar", values: rows.map((r) => r.order_count) },
+					{
+						name: "Expense (EGP)",
+						type: "line",
+						values: rows.map((r) => r.total_expense),
+					},
+					{
+						name: "Income (EGP)",
+						type: "line",
+						values: rows.map((r) => r.total_income),
+					},
 				],
 			},
-			colors: ['#95a5a6', '#e74c3c', '#27ae60'],
+			colors: ["#95a5a6", "#e74c3c", "#27ae60"],
 		});
 	}
 
 	_render_pickup(data) {
 		let total = data.pickup + data.delivery;
 		if (!total) {
-			$('#sa-chart-pickup').html('<div class="sa-loading">No data.</div>');
+			$("#sa-chart-pickup").html('<div class="sa-loading">No data.</div>');
 			return;
 		}
-		_chart('sa-chart-pickup', {
-			type: 'donut',
+		_chart("sa-chart-pickup", {
+			type: "donut",
 			height: 240,
 			data: {
-				labels: ['Delivery', 'Pickup'],
+				labels: ["Delivery", "Pickup"],
 				datasets: [{ values: [data.delivery, data.pickup] }],
 			},
-			colors: ['#3498db', '#FF6B35'],
+			colors: ["#3498db", "#FF6B35"],
 		});
 	}
 
 	_render_sub_territory(rows) {
-		let non_empty = rows.filter(r => r.sub_territory !== '(None)');
+		let non_empty = rows.filter((r) => r.sub_territory !== "(None)");
 		if (!non_empty.length) {
-			$('#sa-chart-sub-terr').html('<div class="sa-loading">No sub-territories assigned in range.</div>');
+			$("#sa-chart-sub-terr").html(
+				'<div class="sa-loading">No sub-territories assigned in range.</div>'
+			);
 			return;
 		}
-		_chart('sa-chart-sub-terr', {
-			type: 'bar',
+		_chart("sa-chart-sub-terr", {
+			type: "bar",
 			height: 260,
 			data: {
-				labels: non_empty.map(r => _short(r.sub_territory)),
-				datasets: [{ name: 'Expense', values: non_empty.map(r => r.total_expense) }],
+				labels: non_empty.map((r) => _short(r.sub_territory)),
+				datasets: [{ name: "Expense", values: non_empty.map((r) => r.total_expense) }],
 			},
-			colors: ['#9b59b6'],
-			tooltipOptions: { formatTooltipY: v => _egp(v) },
+			colors: ["#9b59b6"],
+			tooltipOptions: { formatTooltipY: (v) => _egp(v) },
 		});
 	}
 
 	_render_double(data) {
 		if (!data.trips.length) {
-			$('#sa-table-double').html('<div class="sa-loading">No double-shipping trips in range.</div>');
+			$("#sa-table-double").html(
+				'<div class="sa-loading">No double-shipping trips in range.</div>'
+			);
 			return;
 		}
 
-		$('#sa-table-double').html(`
+		$("#sa-table-double").html(`
 			<div style="font-size:12px;color:var(--text-muted);margin-bottom:10px;">
 				<b>${data.total_double_trips}</b> trips — total extra cost:
 				<span class="red"><b>${_egp(data.total_extra_cost)}</b></span>
@@ -635,35 +678,39 @@ class ShippingAnalyticsDashboard {
 					<th>Total Paid</th><th>Extra Cost (2×)</th>
 				</tr></thead>
 				<tbody>
-					${data.trips.map(r => `<tr>
+					${data.trips
+						.map(
+							(r) => `<tr>
 						<td><a href="/app/delivery-trip/${r.name}" target="_blank">${r.name}</a></td>
 						<td>${r.trip_date}</td>
-						<td>${r.courier_party || '—'}</td>
-						<td>${r.double_shipping_territory || '—'}</td>
+						<td>${r.courier_party || "—"}</td>
+						<td>${r.double_shipping_territory || "—"}</td>
 						<td>${r.total_orders}</td>
 						<td>${_egp(r.total_shipping_expense)}</td>
 						<td class="red">${_egp(r.extra_cost)}</td>
-					</tr>`).join('')}
+					</tr>`
+						)
+						.join("")}
 				</tbody>
 			</table>`);
 	}
 
 	_render_pd_trend(rows) {
 		if (!rows.length) {
-			$('#sa-chart-pd-trend').html('<div class="sa-loading">No data in range.</div>');
+			$("#sa-chart-pd-trend").html('<div class="sa-loading">No data in range.</div>');
 			return;
 		}
-		_chart('sa-chart-pd-trend', {
-			type: 'bar',
+		_chart("sa-chart-pd-trend", {
+			type: "bar",
 			height: 280,
 			data: {
-				labels: rows.map(r => r.posting_date),
+				labels: rows.map((r) => r.posting_date),
 				datasets: [
-					{ name: 'Delivery', values: rows.map(r => r.delivery) },
-					{ name: 'Pickup', values: rows.map(r => r.pickup) },
+					{ name: "Delivery", values: rows.map((r) => r.delivery) },
+					{ name: "Pickup", values: rows.map((r) => r.pickup) },
 				],
 			},
-			colors: ['#3498db', '#FF6B35'],
+			colors: ["#3498db", "#FF6B35"],
 			barOptions: { stacked: true },
 		});
 	}
@@ -673,15 +720,18 @@ class ShippingAnalyticsDashboard {
 
 function _egp(v) {
 	let n = parseFloat(v || 0);
-	return 'EGP ' + n.toLocaleString('en', {
-		minimumFractionDigits: 0,
-		maximumFractionDigits: 0,
-	});
+	return (
+		"EGP " +
+		n.toLocaleString("en", {
+			minimumFractionDigits: 0,
+			maximumFractionDigits: 0,
+		})
+	);
 }
 
 function _short(label, max = 18) {
-	if (!label) return '—';
-	return label.length > max ? label.slice(0, max - 1) + '…' : label;
+	if (!label) return "—";
+	return label.length > max ? label.slice(0, max - 1) + "…" : label;
 }
 
 function _kpi(label, value, cls) {
@@ -694,7 +744,7 @@ function _kpi(label, value, cls) {
 function _chart(id, opts) {
 	let el = document.getElementById(id);
 	if (!el) return;
-	el.innerHTML = '';
+	el.innerHTML = "";
 	try {
 		new frappe.Chart(el, opts);
 	} catch (e) {

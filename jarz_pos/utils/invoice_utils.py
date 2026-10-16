@@ -1,52 +1,54 @@
 """Jarz POS - Utility functions for API endpoints.
 This module provides common helper functions that are used across different API endpoints.
 """
+
 from __future__ import annotations
-import frappe
+
 import re
 import unicodedata
-from typing import Dict, List, Any, Optional, Union
+from typing import Any, Optional, Union
+
+import frappe
 
 from jarz_pos.utils.address_pins import (
-    get_address_pin_map,
-    invoice_pin_override,
-    pin_fields_for,
+	get_address_pin_map,
+	invoice_pin_override,
+	pin_fields_for,
 )
-
 
 _PRINT_CONTROL_PATTERN = re.compile(r"[\x00-\x08\x0B-\x1F\x7F-\x9F]")
 _HTML_TAG_PATTERN = re.compile(r"<[^>]+>")
 
 
 def sanitize_printable_text(value: Any) -> str:
-    """Normalize printable payload text for thermal-receipt consumers.
+	"""Normalize printable payload text for thermal-receipt consumers.
 
-    This strips control characters and HTML while preserving ordinary spaces,
-    punctuation, URLs, and Arabic text.
-    """
-    if value is None:
-        return ""
+	This strips control characters and HTML while preserving ordinary spaces,
+	punctuation, URLs, and Arabic text.
+	"""
+	if value is None:
+		return ""
 
-    text = value
-    as_unicode = getattr(frappe, "as_unicode", None)
-    if callable(as_unicode):
-        try:
-            candidate = as_unicode(value)
-            if isinstance(candidate, bytes):
-                text = candidate.decode(errors="ignore")
-            elif isinstance(candidate, str):
-                text = candidate
-            else:
-                text = value
-        except Exception:
-            text = value
+	text = value
+	as_unicode = getattr(frappe, "as_unicode", None)
+	if callable(as_unicode):
+		try:
+			candidate = as_unicode(value)
+			if isinstance(candidate, bytes):
+				text = candidate.decode(errors="ignore")
+			elif isinstance(candidate, str):
+				text = candidate
+			else:
+				text = value
+		except Exception:
+			text = value
 
-    if not isinstance(text, str):
-        text = str(text)
+	if not isinstance(text, str):
+		text = str(text)
 
-    text = _HTML_TAG_PATTERN.sub(" ", text)
-    text = _PRINT_CONTROL_PATTERN.sub(" ", text)
-    return re.sub(r"\s+", " ", text).strip()
+	text = _HTML_TAG_PATTERN.sub(" ", text)
+	text = _PRINT_CONTROL_PATTERN.sub(" ", text)
+	return re.sub(r"\s+", " ", text).strip()
 
 
 # ---------------------------------------------------------------------------
@@ -66,87 +68,87 @@ ORDER_CHANNEL_FIELD = "custom_order_channel"
 POS_SOURCE_TYPE = "pos"
 
 
-def _append_unique_line(existing: Any, marker: str) -> Optional[str]:
-    """Return ``existing`` with ``marker`` appended on its own line.
+def _append_unique_line(existing: Any, marker: str) -> str | None:
+	"""Return ``existing`` with ``marker`` appended on its own line.
 
-    Returns ``None`` when there is nothing to do (blank marker, or the marker is
-    already present), so callers can skip the write entirely.  Pure string work —
-    deliberately no ``frappe`` calls, so this stays testable and cannot fail.
-    """
-    marker = str(marker or "").strip()
-    if not marker:
-        return None
+	Returns ``None`` when there is nothing to do (blank marker, or the marker is
+	already present), so callers can skip the write entirely.  Pure string work —
+	deliberately no ``frappe`` calls, so this stays testable and cannot fail.
+	"""
+	marker = str(marker or "").strip()
+	if not marker:
+		return None
 
-    current = str(existing or "").strip()
-    if marker in current:
-        return None
+	current = str(existing or "").strip()
+	if marker in current:
+		return None
 
-    return (current + "\n" if current else "") + marker
+	return (current + "\n" if current else "") + marker
 
 
 def append_pos_audit_marker(invoice_doc, marker: str, *, mirror_to_remarks: bool = False) -> None:
-    """Record an internal POS audit marker on the invoice (F-13).
+	"""Record an internal POS audit marker on the invoice (F-13).
 
-    Markers such as ``[PICKUP]`` or ``[LINE DISCOUNTS]`` used to be stacked into
-    ``remarks``, which on the WooCommerce lane carries the *customer's note*.  One
-    field therefore meant two different things depending on which lane wrote the
-    order.  Markers now live in :data:`POS_AUDIT_MARKERS_FIELD` so ``remarks``
-    means "the customer's note" on both lanes.
+	Markers such as ``[PICKUP]`` or ``[LINE DISCOUNTS]`` used to be stacked into
+	``remarks``, which on the WooCommerce lane carries the *customer's note*.  One
+	field therefore meant two different things depending on which lane wrote the
+	order.  Markers now live in :data:`POS_AUDIT_MARKERS_FIELD` so ``remarks``
+	means "the customer's note" on both lanes.
 
-    ``mirror_to_remarks`` keeps the legacy copy in ``remarks`` for the markers a
-    consumer outside this package still reads there (see
-    ``invoice_creation._REMARKS_MIRRORED_TAGS``); it exists to be switched off per
-    marker as those readers migrate, not as a permanent second home.
+	``mirror_to_remarks`` keeps the legacy copy in ``remarks`` for the markers a
+	consumer outside this package still reads there (see
+	``invoice_creation._REMARKS_MIRRORED_TAGS``); it exists to be switched off per
+	marker as those readers migrate, not as a permanent second home.
 
-    Never raises: an audit marker must not be able to fail invoice creation.
-    """
-    try:
-        updated = _append_unique_line(getattr(invoice_doc, POS_AUDIT_MARKERS_FIELD, None), marker)
-        if updated is not None:
-            setattr(invoice_doc, POS_AUDIT_MARKERS_FIELD, updated)
-    except Exception:
-        pass
+	Never raises: an audit marker must not be able to fail invoice creation.
+	"""
+	try:
+		updated = _append_unique_line(getattr(invoice_doc, POS_AUDIT_MARKERS_FIELD, None), marker)
+		if updated is not None:
+			setattr(invoice_doc, POS_AUDIT_MARKERS_FIELD, updated)
+	except Exception:
+		pass
 
-    if not mirror_to_remarks:
-        return
+	if not mirror_to_remarks:
+		return
 
-    try:
-        mirrored = _append_unique_line(getattr(invoice_doc, "remarks", None), marker)
-        if mirrored is not None:
-            invoice_doc.remarks = mirrored
-    except Exception:
-        pass
+	try:
+		mirrored = _append_unique_line(getattr(invoice_doc, "remarks", None), marker)
+		if mirrored is not None:
+			invoice_doc.remarks = mirrored
+	except Exception:
+		pass
 
 
 def stamp_order_channel(invoice_doc, channel: Any, *, source_type: str = POS_SOURCE_TYPE) -> str:
-    """Persist the ordering channel on the invoice and return what was stamped (F-14).
+	"""Persist the ordering channel on the invoice and return what was stamped (F-14).
 
-    ``create_pos_invoice`` has always accepted a ``channel`` argument and thrown
-    it away after promo evaluation, so a POS order reached channel analytics with
-    every ``woo_*`` attribution column NULL — indistinguishable from an order of
-    unknown provenance.
+	``create_pos_invoice`` has always accepted a ``channel`` argument and thrown
+	it away after promo evaluation, so a POS order reached channel analytics with
+	every ``woo_*`` attribution column NULL — indistinguishable from an order of
+	unknown provenance.
 
-    ``woo_source_type`` is filled ONLY when it is otherwise empty: an order pushed
-    POS → Woo and pulled back may legitimately carry real Woo attribution, and
-    that must win over this default.  Never raises.
-    """
-    normalized = str(channel or "").strip()
-    if not normalized:
-        return ""
+	``woo_source_type`` is filled ONLY when it is otherwise empty: an order pushed
+	POS → Woo and pulled back may legitimately carry real Woo attribution, and
+	that must win over this default.  Never raises.
+	"""
+	normalized = str(channel or "").strip()
+	if not normalized:
+		return ""
 
-    try:
-        setattr(invoice_doc, ORDER_CHANNEL_FIELD, normalized)
-    except Exception:
-        return ""
+	try:
+		setattr(invoice_doc, ORDER_CHANNEL_FIELD, normalized)
+	except Exception:
+		return ""
 
-    try:
-        existing_source = str(getattr(invoice_doc, "woo_source_type", "") or "").strip()
-        if not existing_source and source_type:
-            invoice_doc.woo_source_type = source_type
-    except Exception:
-        pass
+	try:
+		existing_source = str(getattr(invoice_doc, "woo_source_type", "") or "").strip()
+		if not existing_source and source_type:
+			invoice_doc.woo_source_type = source_type
+	except Exception:
+		pass
 
-    return normalized
+	return normalized
 
 
 #: Territory values that carry no delivery information and therefore mean
@@ -163,763 +165,772 @@ UNRESOLVED_TERRITORY_VALUES = frozenset({"", "all territories"})
 
 
 def is_unresolved_territory(territory_value: Any) -> bool:
-    """Whether a territory value tells us nothing about where the order goes.
+	"""Whether a territory value tells us nothing about where the order goes.
 
-    True for ``None``, blank, and ``All Territories`` (case/whitespace
-    insensitive).  Used to decide whether to shout and file a review-queue
-    exception — never to rewrite the value, which stays exactly as resolved.
-    """
-    return str(territory_value or "").strip().lower() in UNRESOLVED_TERRITORY_VALUES
+	True for ``None``, blank, and ``All Territories`` (case/whitespace
+	insensitive).  Used to decide whether to shout and file a review-queue
+	exception — never to rewrite the value, which stays exactly as resolved.
+	"""
+	return str(territory_value or "").strip().lower() in UNRESOLVED_TERRITORY_VALUES
 
 
 def _log_loud(logger, message: str, title: str) -> None:
-    """Emit a diagnostic that is actually visible on staging and production.
+	"""Emit a diagnostic that is actually visible on staging and production.
 
-    ``frappe.logger()`` runs at level ERROR off a dev server, so ``.info()`` and
-    ``.warning()`` vanish there — anything that must be seen also goes to the
-    Error Log.  Tries ``logger.warning`` then ``logger.error`` because the loggers
-    passed around this module are sometimes minimal stubs.  Never raises.
-    """
-    try:
-        print(f"   ⚠️ {message}")
-    except Exception:
-        pass
+	``frappe.logger()`` runs at level ERROR off a dev server, so ``.info()`` and
+	``.warning()`` vanish there — anything that must be seen also goes to the
+	Error Log.  Tries ``logger.warning`` then ``logger.error`` because the loggers
+	passed around this module are sometimes minimal stubs.  Never raises.
+	"""
+	try:
+		print(f"   ⚠️ {message}")
+	except Exception:
+		pass
 
-    for level in ("warning", "error", "info"):
-        candidate = getattr(logger, level, None)
-        if callable(candidate):
-            try:
-                candidate(message)
-                break
-            except Exception:
-                continue
+	for level in ("warning", "error", "info"):
+		candidate = getattr(logger, level, None)
+		if callable(candidate):
+			try:
+				candidate(message)
+				break
+			except Exception:
+				continue
 
-    try:
-        frappe.log_error(message, title)
-    except Exception:
-        pass
+	try:
+		frappe.log_error(message, title)
+	except Exception:
+		pass
 
 
 def set_invoice_fields(invoice_doc, customer_doc, pos_profile, delivery_datetime, logger):
-    """Set basic fields on the Sales Invoice document."""
-    logger.debug("Setting invoice fields...")
-    print(f"   Setting basic invoice fields...")
-    
-    # Set basic invoice fields
-    invoice_doc.customer = customer_doc.name
-    invoice_doc.customer_name = customer_doc.customer_name
-    invoice_doc.company = pos_profile.company
-    invoice_doc.pos_profile = pos_profile.name
-    # Every POS invoice is a POS invoice (F-17). `pos_profile` is set on the line
-    # above, so ERPNext's stricter POS validation always has what it needs.
-    invoice_doc.is_pos = 1
-    invoice_doc.selling_price_list = pos_profile.selling_price_list
-    invoice_doc.currency = pos_profile.currency
+	"""Set basic fields on the Sales Invoice document."""
+	logger.debug("Setting invoice fields...")
+	print("   Setting basic invoice fields...")
 
-    # F-09: seed the customer's own territory, and do NOT invent "All Territories"
-    # when there isn't one.  That value is the root of the tree: delivery_income 0
-    # and no pos_profile, so it bills no shipping and names no branch — the same
-    # outcome as NULL, but disguised as a real answer.  Production carries 262
-    # NULL-territory invoices and zero "All Territories" ones, so leaving it blank
-    # is also what the data already does.
-    #
-    # A blank territory is safe here:
-    #   * Sales Invoice.territory is not mandatory in ERPNext;
-    #   * create_pos_invoice STEP 6.A overwrites it with the address-resolved
-    #     territory, and `update_if_missing` inside set_missing_values() only fills
-    #     a territory that is still blank, so a resolved value always survives;
-    #   * the shipping-income block already treats "no territory" as "add no row" —
-    #     it now says so out loud and files a review-queue exception as well.
-    #
-    # Deliberately quiet: STEP 6.A re-checks the SAME condition with the shipping
-    # address in hand and owns the Error Log entry. Shouting twice per order would
-    # just make the review queue's signal harder to find.
-    customer_territory = str(getattr(customer_doc, "territory", "") or "").strip()
-    invoice_doc.territory = customer_territory or None
-    if is_unresolved_territory(customer_territory):
-        message = (
-            f"Customer {getattr(customer_doc, 'name', '?')} seeds an unresolved "
-            f"territory ({customer_territory or '<blank>'}); not substituting "
-            "'All Territories'. Caller must re-check after address resolution."
-        )
-        print(f"   ⚠️ {message}")
-        try:
-            logger.debug(message)
-        except Exception:
-            pass
+	# Set basic invoice fields
+	invoice_doc.customer = customer_doc.name
+	invoice_doc.customer_name = customer_doc.customer_name
+	invoice_doc.company = pos_profile.company
+	invoice_doc.pos_profile = pos_profile.name
+	# Every POS invoice is a POS invoice (F-17). `pos_profile` is set on the line
+	# above, so ERPNext's stricter POS validation always has what it needs.
+	invoice_doc.is_pos = 1
+	invoice_doc.selling_price_list = pos_profile.selling_price_list
+	invoice_doc.currency = pos_profile.currency
 
-    # Set delivery slot fields when delivery_datetime provided (new model)
-    # Note: duration is calculated properly in _apply_delivery_slot_fields from
-    # end_datetime or timetable slot_hours; do NOT set a default here.
-    if delivery_datetime:
-        try:
-            dt = frappe.utils.get_datetime(delivery_datetime)
-            invoice_doc.custom_delivery_date = dt.date()
-            invoice_doc.custom_delivery_time_from = dt.time().strftime("%H:%M:%S")
-        except Exception:
-            # Non-fatal: let hooks enforce completeness if partially provided later
-            pass
-    
-    # Set posting date and time
-    invoice_doc.posting_date = frappe.utils.today()
-    invoice_doc.posting_time = frappe.utils.nowtime()
-    
-    logger.debug(f"Invoice fields set: customer={invoice_doc.customer}, company={invoice_doc.company}")
-    print(f"   ✅ Basic fields set for customer: {invoice_doc.customer_name}")
+	# F-09: seed the customer's own territory, and do NOT invent "All Territories"
+	# when there isn't one.  That value is the root of the tree: delivery_income 0
+	# and no pos_profile, so it bills no shipping and names no branch — the same
+	# outcome as NULL, but disguised as a real answer.  Production carries 262
+	# NULL-territory invoices and zero "All Territories" ones, so leaving it blank
+	# is also what the data already does.
+	#
+	# A blank territory is safe here:
+	#   * Sales Invoice.territory is not mandatory in ERPNext;
+	#   * create_pos_invoice STEP 6.A overwrites it with the address-resolved
+	#     territory, and `update_if_missing` inside set_missing_values() only fills
+	#     a territory that is still blank, so a resolved value always survives;
+	#   * the shipping-income block already treats "no territory" as "add no row" —
+	#     it now says so out loud and files a review-queue exception as well.
+	#
+	# Deliberately quiet: STEP 6.A re-checks the SAME condition with the shipping
+	# address in hand and owns the Error Log entry. Shouting twice per order would
+	# just make the review queue's signal harder to find.
+	customer_territory = str(getattr(customer_doc, "territory", "") or "").strip()
+	invoice_doc.territory = customer_territory or None
+	if is_unresolved_territory(customer_territory):
+		message = (
+			f"Customer {getattr(customer_doc, 'name', '?')} seeds an unresolved "
+			f"territory ({customer_territory or '<blank>'}); not substituting "
+			"'All Territories'. Caller must re-check after address resolution."
+		)
+		print(f"   ⚠️ {message}")
+		try:
+			logger.debug(message)
+		except Exception:
+			pass
+
+	# Set delivery slot fields when delivery_datetime provided (new model)
+	# Note: duration is calculated properly in _apply_delivery_slot_fields from
+	# end_datetime or timetable slot_hours; do NOT set a default here.
+	if delivery_datetime:
+		try:
+			dt = frappe.utils.get_datetime(delivery_datetime)
+			invoice_doc.custom_delivery_date = dt.date()
+			invoice_doc.custom_delivery_time_from = dt.time().strftime("%H:%M:%S")
+		except Exception:
+			# Non-fatal: let hooks enforce completeness if partially provided later
+			pass
+
+	# Set posting date and time
+	invoice_doc.posting_date = frappe.utils.today()
+	invoice_doc.posting_time = frappe.utils.nowtime()
+
+	logger.debug(f"Invoice fields set: customer={invoice_doc.customer}, company={invoice_doc.company}")
+	print(f"   ✅ Basic fields set for customer: {invoice_doc.customer_name}")
 
 
 def add_items_to_invoice(invoice_doc, processed_items, logger):
-    """Add items to the Sales Invoice document following ERPNext discount logic.
-    Key insight: Set price_list_rate and discount_percentage, let ERPNext compute rate and discount_amount.
-    For 100% discount: ERPNext will set rate = 0.0 automatically.
-    For partial discount: ERPNext will compute rate = price_list_rate * (1 - discount_percentage/100).
-    """
-    logger.debug(f"Adding {len(processed_items)} items to invoice (ERPNext native discount logic)...")
-    print(f"   Adding {len(processed_items)} items to invoice...")
+	"""Add items to the Sales Invoice document following ERPNext discount logic.
+	Key insight: Set price_list_rate and discount_percentage, let ERPNext compute rate and discount_amount.
+	For 100% discount: ERPNext will set rate = 0.0 automatically.
+	For partial discount: ERPNext will compute rate = price_list_rate * (1 - discount_percentage/100).
+	"""
+	logger.debug(f"Adding {len(processed_items)} items to invoice (ERPNext native discount logic)...")
+	print(f"   Adding {len(processed_items)} items to invoice...")
 
-    discount_items = 0
-    total_planned_discount = 0.0
+	discount_items = 0
+	total_planned_discount = 0.0
 
-    for i, item_data in enumerate(processed_items, 1):
-        try:
-            invoice_item = invoice_doc.append("items", {})
-            invoice_item.item_code = item_data["item_code"]
-            invoice_item.item_name = item_data.get("item_name", item_data["item_code"])
-            invoice_item.qty = float(item_data.get("qty", 1))
+	for i, item_data in enumerate(processed_items, 1):
+		try:
+			invoice_item = invoice_doc.append("items", {})
+			invoice_item.item_code = item_data["item_code"]
+			invoice_item.item_name = item_data.get("item_name", item_data["item_code"])
+			invoice_item.qty = float(item_data.get("qty", 1))
 
-            # CRITICAL: Set price_list_rate first (ERPNext needs this for discount calculations)
-            if "price_list_rate" in item_data:
-                invoice_item.price_list_rate = float(item_data["price_list_rate"])
-                # Don't set rate - let ERPNext compute it from price_list_rate and discount_percentage
-            elif "rate" in item_data:
-                # Fallback: if no price_list_rate, use rate as both
-                invoice_item.price_list_rate = float(item_data["rate"])
-                # Still don't set rate - let ERPNext compute
+			# CRITICAL: Set price_list_rate first (ERPNext needs this for discount calculations)
+			if "price_list_rate" in item_data:
+				invoice_item.price_list_rate = float(item_data["price_list_rate"])
+				# Don't set rate - let ERPNext compute it from price_list_rate and discount_percentage
+			elif "rate" in item_data:
+				# Fallback: if no price_list_rate, use rate as both
+				invoice_item.price_list_rate = float(item_data["rate"])
+				# Still don't set rate - let ERPNext compute
 
-            # CRITICAL: Set discount_percentage (ERPNext will compute rate and discount_amount)
-            discount_pct = float(item_data.get("discount_percentage", 0) or 0)
-            if discount_pct > 0:
-                discount_items += 1
-                invoice_item.discount_percentage = discount_pct
-                # Estimate discount for logging
-                price_list_rate = getattr(invoice_item, 'price_list_rate', 0) or 0
-                estimated_discount = price_list_rate * invoice_item.qty * (discount_pct / 100.0)
-                total_planned_discount += estimated_discount
+			# CRITICAL: Set discount_percentage (ERPNext will compute rate and discount_amount)
+			discount_pct = float(item_data.get("discount_percentage", 0) or 0)
+			if discount_pct > 0:
+				discount_items += 1
+				invoice_item.discount_percentage = discount_pct
+				# Estimate discount for logging
+				price_list_rate = getattr(invoice_item, "price_list_rate", 0) or 0
+				estimated_discount = price_list_rate * invoice_item.qty * (discount_pct / 100.0)
+				total_planned_discount += estimated_discount
 
-            # Handle legacy discount_amount (convert to percentage if no percentage set)
-            if discount_pct == 0 and "discount_amount" in item_data:
-                discount_amt_per_unit = float(item_data["discount_amount"] or 0)
-                if discount_amt_per_unit > 0:
-                    price_list_rate = getattr(invoice_item, 'price_list_rate', 0) or 0
-                    if price_list_rate > 0:
-                        # Convert discount_amount to discount_percentage
-                        computed_pct = (discount_amt_per_unit / price_list_rate) * 100.0
-                        computed_pct = min(max(0.0, computed_pct), 100.0)
-                        invoice_item.discount_percentage = computed_pct
-                        discount_items += 1
-                        total_planned_discount += discount_amt_per_unit * invoice_item.qty
+			# Handle legacy discount_amount (convert to percentage if no percentage set)
+			if discount_pct == 0 and "discount_amount" in item_data:
+				discount_amt_per_unit = float(item_data["discount_amount"] or 0)
+				if discount_amt_per_unit > 0:
+					price_list_rate = getattr(invoice_item, "price_list_rate", 0) or 0
+					if price_list_rate > 0:
+						# Convert discount_amount to discount_percentage
+						computed_pct = (discount_amt_per_unit / price_list_rate) * 100.0
+						computed_pct = min(max(0.0, computed_pct), 100.0)
+						invoice_item.discount_percentage = computed_pct
+						discount_items += 1
+						total_planned_discount += discount_amt_per_unit * invoice_item.qty
 
-            # Custom bundle flags (only set if fields exist)
-            for flag_field in [
-                "is_bundle_parent", "is_bundle_child", "bundle_code", "parent_bundle",
-                "bundle_group_key", "bundle_group_name",
-            ]:
-                if flag_field in item_data:
-                    try:
-                        setattr(invoice_item, flag_field, item_data[flag_field])
-                    except Exception:
-                        pass
+			# Custom bundle flags (only set if fields exist)
+			for flag_field in [
+				"is_bundle_parent",
+				"is_bundle_child",
+				"bundle_code",
+				"parent_bundle",
+				"bundle_group_key",
+				"bundle_group_name",
+			]:
+				if flag_field in item_data:
+					try:
+						setattr(invoice_item, flag_field, item_data[flag_field])
+					except Exception:
+						pass
 
-            # UOM resolution
-            if item_data.get("uom"):
-                invoice_item.uom = item_data["uom"]
-            else:
-                try:
-                    item_doc = frappe.get_doc("Item", item_data["item_code"])
-                    invoice_item.uom = item_doc.stock_uom
-                except Exception:
-                    pass
+			# UOM resolution
+			if item_data.get("uom"):
+				invoice_item.uom = item_data["uom"]
+			else:
+				try:
+					item_doc = frappe.get_doc("Item", item_data["item_code"])
+					invoice_item.uom = item_doc.stock_uom
+				except Exception:
+					pass
 
-            # Log what we set (rate will be computed by ERPNext)
-            price_list_rate = getattr(invoice_item, 'price_list_rate', 0) or 0
-            discount_pct = getattr(invoice_item, 'discount_percentage', 0) or 0
-            print(f"      {i}. {invoice_item.item_name} x {invoice_item.qty} | price_list_rate={price_list_rate} | discount_pct={discount_pct}% (rate will be computed by ERPNext)")
-            
-        except Exception as e:
-            error_msg = f"Error adding item {item_data.get('item_code','Unknown')}: {str(e)}"
-            logger.error(error_msg)
-            print(f"   ❌ {error_msg}")
-            raise
+			# Log what we set (rate will be computed by ERPNext)
+			price_list_rate = getattr(invoice_item, "price_list_rate", 0) or 0
+			discount_pct = getattr(invoice_item, "discount_percentage", 0) or 0
+			print(
+				f"      {i}. {invoice_item.item_name} x {invoice_item.qty} | price_list_rate={price_list_rate} | discount_pct={discount_pct}% (rate will be computed by ERPNext)"
+			)
 
-    print(f"   ✅ All {len(processed_items)} items added successfully")
-    if discount_items:
-        print(f"   💸 Discount bearing lines: {discount_items}; Estimated total discount: {total_planned_discount}")
-    else:
-        print(f"   ℹ️ No discount lines detected in added items")
+		except Exception as e:
+			error_msg = f"Error adding item {item_data.get('item_code','Unknown')}: {e!s}"
+			logger.error(error_msg)
+			print(f"   ❌ {error_msg}")
+			raise
+
+	print(f"   ✅ All {len(processed_items)} items added successfully")
+	if discount_items:
+		print(
+			f"   💸 Discount bearing lines: {discount_items}; Estimated total discount: {total_planned_discount}"
+		)
+	else:
+		print("   ℹ️ No discount lines detected in added items")
 
 
 def add_delivery_charges_to_invoice(invoice_doc, delivery_charges, pos_profile, logger):
-    """Add delivery charges to the Sales Invoice document.
-    
-    Note: Delivery charges are handled in the taxes section, not as items.
-    This function is kept for compatibility but doesn't add delivery as items.
-    """
-    logger.debug(f"Processing {len(delivery_charges)} delivery charges...")
-    print(f"   Processing {len(delivery_charges)} delivery charges...")
-    
-    if delivery_charges:
-        # Just log the delivery charges - they're handled elsewhere in taxes
-        total_delivery = sum(float(charge["amount"]) for charge in delivery_charges)
-        
-        logger.info(f"Delivery charges total: ${total_delivery:.2f} (handled in taxes section)")
-        print(f"   📦 Delivery charges total: ${total_delivery:.2f}")
-        print(f"   💡 Delivery charges are handled in taxes section, not as items")
-        
-        # Optionally add a note to the invoice remarks
-        for i, charge in enumerate(delivery_charges, 1):
-            charge_desc = charge.get("description", f"Delivery Charge - {charge.get('charge_type', 'Standard')}")
-            charge_amount = float(charge["amount"])
-            print(f"      {i}. {charge_desc}: ${charge_amount:.2f}")
-            
-    else:
-        print(f"   📦 No delivery charges to process")
-    
-    print(f"   ✅ Delivery charges processing completed (handled in taxes)")
+	"""Add delivery charges to the Sales Invoice document.
+
+	Note: Delivery charges are handled in the taxes section, not as items.
+	This function is kept for compatibility but doesn't add delivery as items.
+	"""
+	logger.debug(f"Processing {len(delivery_charges)} delivery charges...")
+	print(f"   Processing {len(delivery_charges)} delivery charges...")
+
+	if delivery_charges:
+		# Just log the delivery charges - they're handled elsewhere in taxes
+		total_delivery = sum(float(charge["amount"]) for charge in delivery_charges)
+
+		logger.info(f"Delivery charges total: ${total_delivery:.2f} (handled in taxes section)")
+		print(f"   📦 Delivery charges total: ${total_delivery:.2f}")
+		print("   💡 Delivery charges are handled in taxes section, not as items")
+
+		# Optionally add a note to the invoice remarks
+		for i, charge in enumerate(delivery_charges, 1):
+			charge_desc = charge.get(
+				"description", f"Delivery Charge - {charge.get('charge_type', 'Standard')}"
+			)
+			charge_amount = float(charge["amount"])
+			print(f"      {i}. {charge_desc}: ${charge_amount:.2f}")
+
+	else:
+		print("   📦 No delivery charges to process")
+
+	print("   ✅ Delivery charges processing completed (handled in taxes)")
 
 
 def verify_invoice_totals(invoice_doc, logger):
-    """Verify that invoice totals are calculated correctly."""
-    logger.debug("Verifying invoice totals...")
-    print(f"   Verifying invoice totals...")
-    
-    try:
-        # Calculate expected totals
-        expected_net_total = sum(item.amount for item in invoice_doc.items)
+	"""Verify that invoice totals are calculated correctly."""
+	logger.debug("Verifying invoice totals...")
+	print("   Verifying invoice totals...")
 
-        # An additional header discount (e.g. a promo code) reduces net_total
-        # (ERPNext sets net_total = total - discount_amount regardless of
-        # apply_discount_on) but NOT the line amounts, so add it back before
-        # reconciling against the sum of line amounts.
-        actual_net_total = float(invoice_doc.net_total) + float(
-            invoice_doc.get("discount_amount") or 0
-        )
+	try:
+		# Calculate expected totals
+		expected_net_total = sum(item.amount for item in invoice_doc.items)
 
-        # Basic validation
-        if abs(actual_net_total - expected_net_total) > 0.01:
-            error_msg = f"Net total mismatch: Expected {expected_net_total}, Got {actual_net_total}"
-            logger.error(error_msg)
-            print(f"   ❌ {error_msg}")
-            frappe.throw(error_msg)
-        
-        logger.debug(f"Invoice totals verified: net_total={invoice_doc.net_total}, grand_total={invoice_doc.grand_total}")
-        print(f"   ✅ Totals verified: Net=${invoice_doc.net_total}, Grand=${invoice_doc.grand_total}")
-        
-    except Exception as e:
-        error_msg = f"Error verifying invoice totals: {str(e)}"
-        logger.error(error_msg)
-        print(f"   ❌ {error_msg}")
-        raise
+		# An additional header discount (e.g. a promo code) reduces net_total
+		# (ERPNext sets net_total = total - discount_amount regardless of
+		# apply_discount_on) but NOT the line amounts, so add it back before
+		# reconciling against the sum of line amounts.
+		actual_net_total = float(invoice_doc.net_total) + float(invoice_doc.get("discount_amount") or 0)
+
+		# Basic validation
+		if abs(actual_net_total - expected_net_total) > 0.01:
+			error_msg = f"Net total mismatch: Expected {expected_net_total}, Got {actual_net_total}"
+			logger.error(error_msg)
+			print(f"   ❌ {error_msg}")
+			frappe.throw(error_msg)
+
+		logger.debug(
+			f"Invoice totals verified: net_total={invoice_doc.net_total}, grand_total={invoice_doc.grand_total}"
+		)
+		print(f"   ✅ Totals verified: Net=${invoice_doc.net_total}, Grand=${invoice_doc.grand_total}")
+
+	except Exception as e:
+		error_msg = f"Error verifying invoice totals: {e!s}"
+		logger.error(error_msg)
+		print(f"   ❌ {error_msg}")
+		raise
 
 
-def get_territory_labels(territory: str | None) -> Dict[str, str]:
-    """Human names for a Territory whose record name is a WooCommerce area code.
+def get_territory_labels(territory: str | None) -> dict[str, str]:
+	"""Human names for a Territory whose record name is a WooCommerce area code.
 
-    Territories synced from WooCommerce are *named* by their Woo state code
-    ("EGNASRCITY", "EGHADAYEQAH"), so any surface that prints the raw Link value
-    prints a code at an operator. ``territory_name`` carries the title and
-    ``custom_territory_name_ar`` the Arabic name the WooCommerce checkout shows —
-    the kanban board already prefers the Arabic one, and the invoice details
-    payload has to agree with it or the same order reads differently on the card
-    and in the sheet it opens.
+	Territories synced from WooCommerce are *named* by their Woo state code
+	("EGNASRCITY", "EGHADAYEQAH"), so any surface that prints the raw Link value
+	prints a code at an operator. ``territory_name`` carries the title and
+	``custom_territory_name_ar`` the Arabic name the WooCommerce checkout shows —
+	the kanban board already prefers the Arabic one, and the invoice details
+	payload has to agree with it or the same order reads differently on the card
+	and in the sheet it opens.
 
-    Returns ``{"territory": <raw>, "territory_display": <title>,
-    "territory_name_ar": <arabic>}``; the display always falls back to the raw
-    value, never to an empty string.
-    """
-    raw = str(territory or "").strip()
-    if not raw:
-        return {"territory": "", "territory_display": "", "territory_name_ar": ""}
+	Returns ``{"territory": <raw>, "territory_display": <title>,
+	"territory_name_ar": <arabic>}``; the display always falls back to the raw
+	value, never to an empty string.
+	"""
+	raw = str(territory or "").strip()
+	if not raw:
+		return {"territory": "", "territory_display": "", "territory_name_ar": ""}
 
-    values = None
-    try:
-        values = frappe.db.get_value(
-            "Territory",
-            raw,
-            ["territory_name", "custom_territory_name_ar"],
-            as_dict=True,
-        )
-    except Exception:
-        values = None
+	values = None
+	try:
+		values = frappe.db.get_value(
+			"Territory",
+			raw,
+			["territory_name", "custom_territory_name_ar"],
+			as_dict=True,
+		)
+	except Exception:
+		values = None
 
-    title = str((values or {}).get("territory_name") or raw).strip() or raw
-    try:
-        title = frappe._(title)
-    except Exception:
-        pass
-    arabic = str((values or {}).get("custom_territory_name_ar") or "").strip()
-    return {
-        "territory": raw,
-        "territory_display": sanitize_printable_text(title),
-        "territory_name_ar": sanitize_printable_text(arabic),
-    }
+	title = str((values or {}).get("territory_name") or raw).strip() or raw
+	try:
+		title = frappe._(title)
+	except Exception:
+		pass
+	arabic = str((values or {}).get("custom_territory_name_ar") or "").strip()
+	return {
+		"territory": raw,
+		"territory_display": sanitize_printable_text(title),
+		"territory_name_ar": sanitize_printable_text(arabic),
+	}
 
 
 def get_area_label(territory: str | None) -> str:
-    """The single best human name for an area: Arabic, then title, then the code."""
-    labels = get_territory_labels(territory)
-    return (
-        labels["territory_name_ar"]
-        or labels["territory_display"]
-        or labels["territory"]
-    )
+	"""The single best human name for an area: Arabic, then title, then the code."""
+	labels = get_territory_labels(territory)
+	return labels["territory_name_ar"] or labels["territory_display"] or labels["territory"]
 
 
 def get_address_details(address_name: str) -> str:
-    """Get formatted address string from an Address document.
-    
-    Args:
-        address_name: The name of the Address document
-        
-    Returns:
-        A formatted address string with comma-separated components
-    """
-    full_address = ""
-    if not address_name:
-        return full_address
-        
-    try:
-        address_doc = frappe.get_doc("Address", address_name)
-        full_address = sanitize_printable_text(address_doc.address_line1 or "")
-        if address_doc.address_line2:
-            full_address += f", {sanitize_printable_text(address_doc.address_line2)}"
-        if address_doc.city:
-            # ``city`` holds the WooCommerce area code on every Woo-sourced
-            # address ("EGHADAYEQAH"), so print the area's own name instead of
-            # tacking a code onto an otherwise Arabic address.
-            full_address += f", {get_area_label(address_doc.city) or sanitize_printable_text(address_doc.city)}"
-        return full_address.strip(", ")
-    except Exception as e:
-        frappe.log_error(f"Error fetching address details: {str(e)}", "Address Utils")
-        return ""
+	"""Get formatted address string from an Address document.
+
+	Args:
+	    address_name: The name of the Address document
+
+	Returns:
+	    A formatted address string with comma-separated components
+	"""
+	full_address = ""
+	if not address_name:
+		return full_address
+
+	try:
+		address_doc = frappe.get_doc("Address", address_name)
+		full_address = sanitize_printable_text(address_doc.address_line1 or "")
+		if address_doc.address_line2:
+			full_address += f", {sanitize_printable_text(address_doc.address_line2)}"
+		if address_doc.city:
+			# ``city`` holds the WooCommerce area code on every Woo-sourced
+			# address ("EGHADAYEQAH"), so print the area's own name instead of
+			# tacking a code onto an otherwise Arabic address.
+			full_address += (
+				f", {get_area_label(address_doc.city) or sanitize_printable_text(address_doc.city)}"
+			)
+		return full_address.strip(", ")
+	except Exception as e:
+		frappe.log_error(f"Error fetching address details: {e!s}", "Address Utils")
+		return ""
 
 
 def _safe_float(value, fallback: float = 0.0) -> float:
-    """Convert value to float; return fallback on None / empty / unparseable."""
-    try:
-        if value is None or value == "":
-            return fallback
-        return float(value)
-    except (TypeError, ValueError):
-        return fallback
+	"""Convert value to float; return fallback on None / empty / unparseable."""
+	try:
+		if value is None or value == "":
+			return fallback
+		return float(value)
+	except (TypeError, ValueError):
+		return fallback
 
 
 def read_invoice_shipping_income(invoice: Any) -> float:
-    """Return the shipping income a Sales Invoice actually carried.
+	"""Return the shipping income a Sales Invoice actually carried.
 
-    The ``Shipping Income (<territory>)`` tax row is the whole story: a zero
-    delivery income injects no row at all (free-delivery bundle, a 0 override,
-    pickup, a no-courier policy), so no row means the customer was charged
-    nothing.  There is no territory fallback — the territory rate is what an
-    order *would* cost today, not what this one billed, and on staging 2,337 of
-    the 2,338 row-less POS invoices charged nothing whatsoever.
+	The ``Shipping Income (<territory>)`` tax row is the whole story: a zero
+	delivery income injects no row at all (free-delivery bundle, a 0 override,
+	pickup, a no-courier policy), so no row means the customer was charged
+	nothing.  There is no territory fallback — the territory rate is what an
+	order *would* cost today, not what this one billed, and on staging 2,337 of
+	the 2,338 row-less POS invoices charged nothing whatsoever.
 
-    ``custom_delivery_income`` is deliberately not consulted: it is a NOT NULL
-    Currency column defaulting to 0, so a stored 0 cannot be told apart from
-    "never set".
-    """
-    try:
-        for row in invoice.get("taxes") or []:
-            description = str(row.get("description") or "").strip().lower()
-            if description.startswith("shipping income"):
-                return float(row.get("tax_amount") or 0)
-    except Exception:
-        pass
-    return 0.0
-
-
-def normalize_woo_order_id(value: Any) -> Optional[int]:
-    """Return the WooCommerce order id, or ``None`` when the order isn't a Woo order.
-
-    ``woo_order_id`` is an ``Int`` custom field on Sales Invoice, so an order that
-    never came from WooCommerce reads back as ``0``, not ``NULL``.  Every consumer
-    wants "no Woo id" to be absent rather than a zero that renders as ``#0``, so
-    the zero is collapsed here instead of at each call site.
-    """
-    try:
-        woo_id = int(value or 0)
-    except (TypeError, ValueError):
-        return None
-    return woo_id or None
+	``custom_delivery_income`` is deliberately not consulted: it is a NOT NULL
+	Currency column defaulting to 0, so a stored 0 cannot be told apart from
+	"never set".
+	"""
+	try:
+		for row in invoice.get("taxes") or []:
+			description = str(row.get("description") or "").strip().lower()
+			if description.startswith("shipping income"):
+				return float(row.get("tax_amount") or 0)
+	except Exception:
+		pass
+	return 0.0
 
 
-def get_woo_order_ids(invoice_names) -> Dict[str, int]:
-    """Batch-map Sales Invoice name -> WooCommerce order id.
+def normalize_woo_order_id(value: Any) -> int | None:
+	"""Return the WooCommerce order id, or ``None`` when the order isn't a Woo order.
 
-    Only invoices that actually carry a Woo id appear in the result, so a plain
-    ``.get(name)`` yields ``None`` for POS-native orders.  Batched because the
-    callers are list endpoints (courier balances, trips, master orders) that
-    would otherwise issue one query per row.
-    """
-    names = [str(n).strip() for n in (invoice_names or []) if str(n or "").strip()]
-    if not names:
-        return {}
+	``woo_order_id`` is an ``Int`` custom field on Sales Invoice, so an order that
+	never came from WooCommerce reads back as ``0``, not ``NULL``.  Every consumer
+	wants "no Woo id" to be absent rather than a zero that renders as ``#0``, so
+	the zero is collapsed here instead of at each call site.
+	"""
+	try:
+		woo_id = int(value or 0)
+	except (TypeError, ValueError):
+		return None
+	return woo_id or None
 
-    try:
-        rows = frappe.get_all(
-            "Sales Invoice",
-            filters={"name": ["in", list(set(names))]},
-            fields=["name", "woo_order_id"],
-        )
-    except Exception:
-        frappe.log_error(frappe.get_traceback(), "Jarz POS get_woo_order_ids failed")
-        return {}
 
-    out: Dict[str, int] = {}
-    for row in rows:
-        woo_id = normalize_woo_order_id(row.get("woo_order_id"))
-        if woo_id is not None:
-            out[row.get("name")] = woo_id
-    return out
+def get_woo_order_ids(invoice_names) -> dict[str, int]:
+	"""Batch-map Sales Invoice name -> WooCommerce order id.
+
+	Only invoices that actually carry a Woo id appear in the result, so a plain
+	``.get(name)`` yields ``None`` for POS-native orders.  Batched because the
+	callers are list endpoints (courier balances, trips, master orders) that
+	would otherwise issue one query per row.
+	"""
+	names = [str(n).strip() for n in (invoice_names or []) if str(n or "").strip()]
+	if not names:
+		return {}
+
+	try:
+		rows = frappe.get_all(
+			"Sales Invoice",
+			filters={"name": ["in", list(set(names))]},
+			fields=["name", "woo_order_id"],
+		)
+	except Exception:
+		frappe.log_error(frappe.get_traceback(), "Jarz POS get_woo_order_ids failed")
+		return {}
+
+	out: dict[str, int] = {}
+	for row in rows:
+		woo_id = normalize_woo_order_id(row.get("woo_order_id"))
+		if woo_id is not None:
+			out[row.get("name")] = woo_id
+	return out
 
 
 def _derive_bundle_group_metadata(
-    bundle_code: str,
-    item_code: str,
-    cache: Dict[str, Dict[str, Dict[str, str]]],
+	bundle_code: str,
+	item_code: str,
+	cache: dict[str, dict[str, dict[str, str]]],
 ) -> tuple:
-    """Return (group_key, group_name) for a bundle child item.
+	"""Return (group_key, group_name) for a bundle child item.
 
-    Looks up the Jarz Bundle document by bundle_code, walks its Jarz Bundle
-    Item Group rows, and finds which group contains item_code.  Results are
-    cached per bundle_code within a single request so repeated child rows for
-    the same bundle do not re-query.  Returns ('', '') when the bundle or item
-    cannot be resolved.
-    """
-    if bundle_code not in cache:
-        bundle_map: Dict[str, Dict[str, str]] = {}
-        try:
-            bundle_doc = frappe.get_doc("Jarz Bundle", bundle_code)
-            for group_row in bundle_doc.items:
-                group_key = str(getattr(group_row, "name", "") or "")
-                group_name = str(group_row.item_group or "")
-                items_in_group = frappe.get_all(
-                    "Item",
-                    filters={"item_group": group_name, "disabled": 0, "has_variants": 0},
-                    fields=["name"],
-                    limit=0,
-                )
-                for item_row in items_in_group:
-                    bundle_map[item_row["name"]] = {
-                        "key": group_key,
-                        "name": group_name,
-                    }
-        except Exception:
-            pass  # Bundle not found or DB error — leave entry empty so caller gets ""
-        cache[bundle_code] = bundle_map
+	Looks up the Jarz Bundle document by bundle_code, walks its Jarz Bundle
+	Item Group rows, and finds which group contains item_code.  Results are
+	cached per bundle_code within a single request so repeated child rows for
+	the same bundle do not re-query.  Returns ('', '') when the bundle or item
+	cannot be resolved.
+	"""
+	if bundle_code not in cache:
+		bundle_map: dict[str, dict[str, str]] = {}
+		try:
+			bundle_doc = frappe.get_doc("Jarz Bundle", bundle_code)
+			for group_row in bundle_doc.items:
+				group_key = str(getattr(group_row, "name", "") or "")
+				group_name = str(group_row.item_group or "")
+				items_in_group = frappe.get_all(
+					"Item",
+					filters={"item_group": group_name, "disabled": 0, "has_variants": 0},
+					fields=["name"],
+					limit=0,
+				)
+				for item_row in items_in_group:
+					bundle_map[item_row["name"]] = {
+						"key": group_key,
+						"name": group_name,
+					}
+		except Exception:
+			pass  # Bundle not found or DB error — leave entry empty so caller gets ""
+		cache[bundle_code] = bundle_map
 
-    entry = cache.get(bundle_code, {}).get(item_code)
-    if entry:
-        return entry["key"], entry["name"]
-    return "", ""
+	entry = cache.get(bundle_code, {}).get(item_code)
+	if entry:
+		return entry["key"], entry["name"]
+	return "", ""
 
 
 def _derive_bundle_code_from_parent_item(
-    item_code: str,
-    cache: Dict[str, str],
+	item_code: str,
+	cache: dict[str, str],
 ) -> str:
-    """Return Jarz Bundle name linked to a bundle parent ERPNext item."""
-    item_code = str(item_code or "").strip()
-    if not item_code:
-        return ""
-    if item_code not in cache:
-        bundle_code = ""
-        try:
-            rows = frappe.get_all(
-                "Jarz Bundle",
-                filters={"erpnext_item": item_code},
-                fields=["name"],
-                limit=1,
-            )
-            if isinstance(rows, (list, tuple)) and rows:
-                first = rows[0]
-                if isinstance(first, dict):
-                    bundle_code = str(first.get("name") or "").strip()
-                else:
-                    bundle_code = str(getattr(first, "name", "") or "").strip()
-        except Exception:
-            bundle_code = ""
-        cache[item_code] = bundle_code
-    return cache[item_code]
+	"""Return Jarz Bundle name linked to a bundle parent ERPNext item."""
+	item_code = str(item_code or "").strip()
+	if not item_code:
+		return ""
+	if item_code not in cache:
+		bundle_code = ""
+		try:
+			rows = frappe.get_all(
+				"Jarz Bundle",
+				filters={"erpnext_item": item_code},
+				fields=["name"],
+				limit=1,
+			)
+			if isinstance(rows, (list, tuple)) and rows:
+				first = rows[0]
+				if isinstance(first, dict):
+					bundle_code = str(first.get("name") or "").strip()
+				else:
+					bundle_code = str(getattr(first, "name", "") or "").strip()
+		except Exception:
+			bundle_code = ""
+		cache[item_code] = bundle_code
+	return cache[item_code]
 
 
-def format_invoice_data(invoice: frappe.Document) -> Dict[str, Any]:
-    """Format a Sales Invoice document into a standardized dictionary format.
-    
-    Args:
-        invoice: The Sales Invoice document
-        
-    Returns:
-        Dictionary with standardized invoice data
-    """
-    # Get address information
-    address_name = invoice.get("shipping_address_name") or invoice.get("customer_address")
-    full_address = get_address_details(address_name)
-    
-    # Get items
-    items = []
-    _has_bundle_parent_missing_code = False
-    _bundle_group_derivation_cache: Dict[str, Dict[str, Dict[str, str]]] = {}
-    _bundle_parent_derivation_cache: Dict[str, str] = {}
-    for item in invoice.items:
-        bundle_code_val = getattr(item, "bundle_code", None)
-        if bundle_code_val is None:
-            bundle_code_val = ""
-        else:
-            bundle_code_val = str(bundle_code_val).strip()
-        is_bundle_parent_val = getattr(item, "is_bundle_parent", None)
-        is_bundle_parent_flag = bool(is_bundle_parent_val) if is_bundle_parent_val not in (None, "") else False
-        if is_bundle_parent_flag and not bundle_code_val:
-            bundle_code_val = _derive_bundle_code_from_parent_item(
-                item.item_code, _bundle_parent_derivation_cache
-            )
-            if not bundle_code_val:
-                _has_bundle_parent_missing_code = True
+def format_invoice_data(invoice: frappe.Document) -> dict[str, Any]:
+	"""Format a Sales Invoice document into a standardized dictionary format.
 
-        # Read persisted group metadata; derive on-the-fly for legacy / unfilled rows
-        is_bundle_child_flag = bool(getattr(item, "is_bundle_child", None))
-        bundle_group_key = str(getattr(item, "bundle_group_key", None) or "").strip()
-        bundle_group_name = str(getattr(item, "bundle_group_name", None) or "").strip()
-        if is_bundle_child_flag and (not bundle_group_key or not bundle_group_name):
-            parent_bundle_code = str(getattr(item, "parent_bundle", None) or "").strip()
-            if parent_bundle_code:
-                derived_key, derived_name = _derive_bundle_group_metadata(
-                    parent_bundle_code, item.item_code, _bundle_group_derivation_cache
-                )
-                if derived_key and not bundle_group_key:
-                    bundle_group_key = derived_key
-                if derived_name and not bundle_group_name:
-                    bundle_group_name = derived_name
+	Args:
+	    invoice: The Sales Invoice document
 
-        item_payload = {
-            "item_code": item.item_code,
-            "item_name": sanitize_printable_text(item.item_name),
-            "qty": _safe_float(item.qty),
-            "rate": _safe_float(item.rate),
-            "amount": _safe_float(item.amount),
-            # Always emit bundle_code + is_bundle_parent/child so amendment client
-            # can reconstruct bundles even when value is falsy.
-            "bundle_code": bundle_code_val,
-            "is_bundle_parent": is_bundle_parent_flag,
-            "is_bundle_child": is_bundle_child_flag,
-            "parent_bundle": str(getattr(item, "parent_bundle", None) or "").strip(),
-            "bundle_group_key": bundle_group_key,
-            "bundle_group_name": bundle_group_name,
-        }
-        for fieldname in [
-            "price_list_rate",
-            "discount_percentage",
-            "discount_amount",
-        ]:
-            value = getattr(item, fieldname, None)
-            if value not in (None, ""):
-                item_payload[fieldname] = value
-        items.append(item_payload)
-    if _has_bundle_parent_missing_code:
-        frappe.log_error(
-            f"Invoice {invoice.name} has bundle-parent rows with empty bundle_code — "
-            "amendment reconstruction may fail (catalog miss). "
-            "Check item rows for missing bundle_code field.",
-            "Amendment Payload Drift",
-        )
-    
-    # Validate customer field — should never be empty on a submitted POS invoice.
-    _customer_val = str(invoice.customer or "").strip()
-    if not _customer_val:
-        frappe.log_error(
-            f"Invoice {invoice.name} has empty customer field — "
-            "amendment load will fail (customer will be missing). "
-            "Raw invoice.customer: {!r}".format(invoice.customer),
-            "Amendment Payload Missing Customer",
-        )
+	Returns:
+	    Dictionary with standardized invoice data
+	"""
+	# Get address information
+	address_name = invoice.get("shipping_address_name") or invoice.get("customer_address")
+	full_address = get_address_details(address_name)
 
-    # Create formatted invoice data
-    data = {
-        "name": invoice.name,
-        "invoice_id_short": invoice.name.split('-')[-1] if '-' in invoice.name else invoice.name,
-        "customer_name": sanitize_printable_text(invoice.customer_name or invoice.customer),
-        "customer": sanitize_printable_text(invoice.customer),
-        "territory": sanitize_printable_text(invoice.territory or ""),
-        # Same Arabic-first area naming the kanban card uses. Without these the
-        # details sheet falls back to the raw Link value and shows the Woo code.
-        **get_territory_labels(invoice.territory),
-        "sub_territory": sanitize_printable_text(invoice.get("custom_sub_territory") or ""),
-        "sub_territory_display": get_area_label(invoice.get("custom_sub_territory")),
-        "sales_partner": invoice.get("sales_partner"),
-    # New delivery slot fields
-        "delivery_date": invoice.get("custom_delivery_date"),
-        "delivery_time_from": invoice.get("custom_delivery_time_from"),
-        "delivery_duration": invoice.get("custom_delivery_duration"),
-    "delivery_slot_label": sanitize_printable_text(invoice.get("custom_delivery_slot_label")),
-        "status": sanitize_printable_text(invoice.get("custom_sales_invoice_state") or invoice.get("sales_invoice_state") or "Received"),
-        "posting_date": str(invoice.posting_date),
-        "grand_total": float(invoice.grand_total or 0),
-        "net_total": float(invoice.net_total or 0),
-        "total_taxes_and_charges": float(invoice.total_taxes_and_charges or 0),
-        "full_address": full_address,
-        "shipping_address_name": invoice.get("shipping_address_name") or invoice.get("customer_address"),
-        "customer_address": invoice.get("customer_address"),
-        "items": items,
-        "payment_method": invoice.get("custom_payment_method"),
-        "pos_profile": invoice.get("custom_kanban_profile") or invoice.get("pos_profile"),
-        # The order's pricing basis. The amendment draft reads this to load the catalog
-        # from the SAME list the order was booked on; without it the client falls back
-        # to the POS Profile default and posts that fallback as an explicit choice,
-        # which is how a B2B order at 92/unit came back from amendment at the retail
-        # 160 (Woo 17328, 2026-09-11). Paired with the narrowed rule 1 in
-        # jarz_pos.api.manager._resolve_amendment_price_list.
-        "selling_price_list": invoice.get("selling_price_list"),
-        "outstanding_amount": float(invoice.get("outstanding_amount") or 0),
-        "docstatus_value": int(invoice.get("docstatus") or 0),
-        "doc_status": invoice.get("status"),
-        "is_return": int(invoice.get("is_return") or 0),
-        "delivery_trip": invoice.get("custom_delivery_trip"),
-        "custom_delivery_income": invoice.get("custom_delivery_income"),
-        "woo_order_id": invoice.get("woo_order_id"),
-    }
-    # Map pin + tappable Maps link, the same keys the kanban card carries, so a
-    # card refreshed through get_invoice_details keeps its "Pinned" badge.
-    # get_address_pin_map never raises and skips the query for a blank name.
-    # This invoice's own pin snapshot (custom_delivery_pin_*) beats the shared
-    # Address pin, which a later order of the same customer may have re-pinned.
-    # A Document's .get() returns None for a column the site has not migrated.
-    data.update(
-        invoice_pin_override(
-            invoice, pin_fields_for(address_name, get_address_pin_map([address_name]))
-        )
-    )
-    return data
+	# Get items
+	items = []
+	_has_bundle_parent_missing_code = False
+	_bundle_group_derivation_cache: dict[str, dict[str, dict[str, str]]] = {}
+	_bundle_parent_derivation_cache: dict[str, str] = {}
+	for item in invoice.items:
+		bundle_code_val = getattr(item, "bundle_code", None)
+		if bundle_code_val is None:
+			bundle_code_val = ""
+		else:
+			bundle_code_val = str(bundle_code_val).strip()
+		is_bundle_parent_val = getattr(item, "is_bundle_parent", None)
+		is_bundle_parent_flag = (
+			bool(is_bundle_parent_val) if is_bundle_parent_val not in (None, "") else False
+		)
+		if is_bundle_parent_flag and not bundle_code_val:
+			bundle_code_val = _derive_bundle_code_from_parent_item(
+				item.item_code, _bundle_parent_derivation_cache
+			)
+			if not bundle_code_val:
+				_has_bundle_parent_missing_code = True
 
+		# Read persisted group metadata; derive on-the-fly for legacy / unfilled rows
+		is_bundle_child_flag = bool(getattr(item, "is_bundle_child", None))
+		bundle_group_key = str(getattr(item, "bundle_group_key", None) or "").strip()
+		bundle_group_name = str(getattr(item, "bundle_group_name", None) or "").strip()
+		if is_bundle_child_flag and (not bundle_group_key or not bundle_group_name):
+			parent_bundle_code = str(getattr(item, "parent_bundle", None) or "").strip()
+			if parent_bundle_code:
+				derived_key, derived_name = _derive_bundle_group_metadata(
+					parent_bundle_code, item.item_code, _bundle_group_derivation_cache
+				)
+				if derived_key and not bundle_group_key:
+					bundle_group_key = derived_key
+				if derived_name and not bundle_group_name:
+					bundle_group_name = derived_name
 
-def apply_invoice_filters(filters: Optional[Union[str, Dict]] = None) -> Dict[str, Any]:
-    """Process and apply filters for Sales Invoice queries.
-    
-    Args:
-        filters: Filter conditions as string (JSON) or dict
-        
-    Returns:
-        Dictionary of filter conditions for frappe.get_all
-    """
-    # Base filters for POS invoices
-    filter_conditions = {
-        "docstatus": 1,  # Only submitted invoices
-        "is_pos": 1,     # Only POS invoices
-        # Credit notes are accounting corrections, not board work. They inherit
-        # is_pos from the invoice they reverse, so without this a return would
-        # render as a negative-total card in whatever column it inherited.
-        "is_return": 0,
-    }
-    
-    if not filters:
-        return filter_conditions
-        
-    # Convert JSON string to dict if needed
-    if isinstance(filters, str):
-        try:
-            import json
-            filters = json.loads(filters)
-        except json.JSONDecodeError:
-            frappe.log_error(f"Invalid JSON in filters: {filters}", "Filter Processing")
-            return filter_conditions
+		item_payload = {
+			"item_code": item.item_code,
+			"item_name": sanitize_printable_text(item.item_name),
+			"qty": _safe_float(item.qty),
+			"rate": _safe_float(item.rate),
+			"amount": _safe_float(item.amount),
+			# Always emit bundle_code + is_bundle_parent/child so amendment client
+			# can reconstruct bundles even when value is falsy.
+			"bundle_code": bundle_code_val,
+			"is_bundle_parent": is_bundle_parent_flag,
+			"is_bundle_child": is_bundle_child_flag,
+			"parent_bundle": str(getattr(item, "parent_bundle", None) or "").strip(),
+			"bundle_group_key": bundle_group_key,
+			"bundle_group_name": bundle_group_name,
+		}
+		for fieldname in [
+			"price_list_rate",
+			"discount_percentage",
+			"discount_amount",
+		]:
+			value = getattr(item, fieldname, None)
+			if value not in (None, ""):
+				item_payload[fieldname] = value
+		items.append(item_payload)
+	if _has_bundle_parent_missing_code:
+		frappe.log_error(
+			f"Invoice {invoice.name} has bundle-parent rows with empty bundle_code — "
+			"amendment reconstruction may fail (catalog miss). "
+			"Check item rows for missing bundle_code field.",
+			"Amendment Payload Drift",
+		)
 
-    def _normalise_date(value: Any) -> Optional[str]:
-        if value in (None, ""):
-            return None
-        text = str(value).strip()
-        if not text:
-            return None
-        return text.split("T", 1)[0]
+	# Validate customer field — should never be empty on a submitted POS invoice.
+	_customer_val = str(invoice.customer or "").strip()
+	if not _customer_val:
+		frappe.log_error(
+			f"Invoice {invoice.name} has empty customer field — "
+			"amendment load will fail (customer will be missing). "
+			"Raw invoice.customer: {!r}".format(invoice.customer),
+			"Amendment Payload Missing Customer",
+		)
 
-    date_from = _normalise_date(filters.get('dateFrom'))
-    date_to = _normalise_date(filters.get('dateTo'))
-    customer = str(filters.get('customer') or '').strip()
-    status = str(filters.get('status') or '').strip().lower()
-    
-    # Apply date filters
-    if date_from:
-        filter_conditions["posting_date"] = [">=", date_from]
-        
-    if date_to:
-        if "posting_date" in filter_conditions:
-            filter_conditions["posting_date"] = ["between", [date_from, date_to]]
-        else:
-            filter_conditions["posting_date"] = ["<=", date_to]
-            
-    # Apply customer filter
-    if customer:
-        filter_conditions["customer"] = customer
-
-    if status:
-        if status == 'paid':
-            filter_conditions["status"] = "Paid"
-            filter_conditions["docstatus"] = 1
-        elif status in {'unpaid', 'overdue'}:
-            filter_conditions["status"] = ["in", ["Unpaid", "Overdue"]]
-            filter_conditions["docstatus"] = 1
-        elif status in {'cancelled', 'canceled'}:
-            filter_conditions["docstatus"] = 2
-            filter_conditions.pop("status", None)
-        elif status == 'return':
-            # "Returned" on the board means an order that came back, and that is
-            # recorded on the order itself. Selecting is_return=1 here would list
-            # the credit notes instead — documents that carry no kanban state, so
-            # the board rendered them as phantom "Received" cards or, once branch
-            # scoping arrived, as nothing at all.
-            if _has_si_field("custom_return_status"):
-                filter_conditions["custom_return_status"] = [
-                    "in", ["Partially Returned", "Fully Returned"]
-                ]
-            else:
-                filter_conditions["is_return"] = 1
-            filter_conditions["docstatus"] = 1
-        elif status == 'draft':
-            filter_conditions["docstatus"] = 0
-            filter_conditions.pop("status", None)
-
-    # Apply amount filters. `is not None` rather than truthiness: 0 is a
-    # legitimate lower bound (free / fully-discounted orders).
-    amount_from = _coerce_amount(filters.get('amountFrom'))
-    amount_to = _coerce_amount(filters.get('amountTo'))
-
-    if amount_from is not None and amount_to is not None:
-        filter_conditions["grand_total"] = ["between", [amount_from, amount_to]]
-    elif amount_from is not None:
-        filter_conditions["grand_total"] = [">=", amount_from]
-    elif amount_to is not None:
-        filter_conditions["grand_total"] = ["<=", amount_to]
-
-    return filter_conditions
+	# Create formatted invoice data
+	data = {
+		"name": invoice.name,
+		"invoice_id_short": invoice.name.split("-")[-1] if "-" in invoice.name else invoice.name,
+		"customer_name": sanitize_printable_text(invoice.customer_name or invoice.customer),
+		"customer": sanitize_printable_text(invoice.customer),
+		"territory": sanitize_printable_text(invoice.territory or ""),
+		# Same Arabic-first area naming the kanban card uses. Without these the
+		# details sheet falls back to the raw Link value and shows the Woo code.
+		**get_territory_labels(invoice.territory),
+		"sub_territory": sanitize_printable_text(invoice.get("custom_sub_territory") or ""),
+		"sub_territory_display": get_area_label(invoice.get("custom_sub_territory")),
+		"sales_partner": invoice.get("sales_partner"),
+		# New delivery slot fields
+		"delivery_date": invoice.get("custom_delivery_date"),
+		"delivery_time_from": invoice.get("custom_delivery_time_from"),
+		"delivery_duration": invoice.get("custom_delivery_duration"),
+		"delivery_slot_label": sanitize_printable_text(invoice.get("custom_delivery_slot_label")),
+		"status": sanitize_printable_text(
+			invoice.get("custom_sales_invoice_state") or invoice.get("sales_invoice_state") or "Received"
+		),
+		"posting_date": str(invoice.posting_date),
+		"grand_total": float(invoice.grand_total or 0),
+		"net_total": float(invoice.net_total or 0),
+		"total_taxes_and_charges": float(invoice.total_taxes_and_charges or 0),
+		"full_address": full_address,
+		"shipping_address_name": invoice.get("shipping_address_name") or invoice.get("customer_address"),
+		"customer_address": invoice.get("customer_address"),
+		"items": items,
+		"payment_method": invoice.get("custom_payment_method"),
+		"pos_profile": invoice.get("custom_kanban_profile") or invoice.get("pos_profile"),
+		# The order's pricing basis. The amendment draft reads this to load the catalog
+		# from the SAME list the order was booked on; without it the client falls back
+		# to the POS Profile default and posts that fallback as an explicit choice,
+		# which is how a B2B order at 92/unit came back from amendment at the retail
+		# 160 (Woo 17328, 2026-09-11). Paired with the narrowed rule 1 in
+		# jarz_pos.api.manager._resolve_amendment_price_list.
+		"selling_price_list": invoice.get("selling_price_list"),
+		"outstanding_amount": float(invoice.get("outstanding_amount") or 0),
+		"docstatus_value": int(invoice.get("docstatus") or 0),
+		"doc_status": invoice.get("status"),
+		"is_return": int(invoice.get("is_return") or 0),
+		"delivery_trip": invoice.get("custom_delivery_trip"),
+		"custom_delivery_income": invoice.get("custom_delivery_income"),
+		"woo_order_id": invoice.get("woo_order_id"),
+	}
+	# Map pin + tappable Maps link, the same keys the kanban card carries, so a
+	# card refreshed through get_invoice_details keeps its "Pinned" badge.
+	# get_address_pin_map never raises and skips the query for a blank name.
+	# This invoice's own pin snapshot (custom_delivery_pin_*) beats the shared
+	# Address pin, which a later order of the same customer may have re-pinned.
+	# A Document's .get() returns None for a column the site has not migrated.
+	data.update(
+		invoice_pin_override(invoice, pin_fields_for(address_name, get_address_pin_map([address_name])))
+	)
+	return data
 
 
-def _coerce_amount(value: Any) -> Optional[float]:
-    """Parse a client-supplied amount bound, treating blanks as "no bound"."""
-    if value in (None, ""):
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
+def apply_invoice_filters(filters: str | dict | None = None) -> dict[str, Any]:
+	"""Process and apply filters for Sales Invoice queries.
+
+	Args:
+	    filters: Filter conditions as string (JSON) or dict
+
+	Returns:
+	    Dictionary of filter conditions for frappe.get_all
+	"""
+	# Base filters for POS invoices
+	filter_conditions = {
+		"docstatus": 1,  # Only submitted invoices
+		"is_pos": 1,  # Only POS invoices
+		# Credit notes are accounting corrections, not board work. They inherit
+		# is_pos from the invoice they reverse, so without this a return would
+		# render as a negative-total card in whatever column it inherited.
+		"is_return": 0,
+	}
+
+	if not filters:
+		return filter_conditions
+
+	# Convert JSON string to dict if needed
+	if isinstance(filters, str):
+		try:
+			import json
+
+			filters = json.loads(filters)
+		except json.JSONDecodeError:
+			frappe.log_error(f"Invalid JSON in filters: {filters}", "Filter Processing")
+			return filter_conditions
+
+	def _normalise_date(value: Any) -> str | None:
+		if value in (None, ""):
+			return None
+		text = str(value).strip()
+		if not text:
+			return None
+		return text.split("T", 1)[0]
+
+	date_from = _normalise_date(filters.get("dateFrom"))
+	date_to = _normalise_date(filters.get("dateTo"))
+	customer = str(filters.get("customer") or "").strip()
+	status = str(filters.get("status") or "").strip().lower()
+
+	# Apply date filters
+	if date_from:
+		filter_conditions["posting_date"] = [">=", date_from]
+
+	if date_to:
+		if "posting_date" in filter_conditions:
+			filter_conditions["posting_date"] = ["between", [date_from, date_to]]
+		else:
+			filter_conditions["posting_date"] = ["<=", date_to]
+
+	# Apply customer filter
+	if customer:
+		filter_conditions["customer"] = customer
+
+	if status:
+		if status == "paid":
+			filter_conditions["status"] = "Paid"
+			filter_conditions["docstatus"] = 1
+		elif status in {"unpaid", "overdue"}:
+			filter_conditions["status"] = ["in", ["Unpaid", "Overdue"]]
+			filter_conditions["docstatus"] = 1
+		elif status in {"cancelled", "canceled"}:
+			filter_conditions["docstatus"] = 2
+			filter_conditions.pop("status", None)
+		elif status == "return":
+			# "Returned" on the board means an order that came back, and that is
+			# recorded on the order itself. Selecting is_return=1 here would list
+			# the credit notes instead — documents that carry no kanban state, so
+			# the board rendered them as phantom "Received" cards or, once branch
+			# scoping arrived, as nothing at all.
+			if _has_si_field("custom_return_status"):
+				filter_conditions["custom_return_status"] = ["in", ["Partially Returned", "Fully Returned"]]
+			else:
+				filter_conditions["is_return"] = 1
+			filter_conditions["docstatus"] = 1
+		elif status == "draft":
+			filter_conditions["docstatus"] = 0
+			filter_conditions.pop("status", None)
+
+	# Apply amount filters. `is not None` rather than truthiness: 0 is a
+	# legitimate lower bound (free / fully-discounted orders).
+	amount_from = _coerce_amount(filters.get("amountFrom"))
+	amount_to = _coerce_amount(filters.get("amountTo"))
+
+	if amount_from is not None and amount_to is not None:
+		filter_conditions["grand_total"] = ["between", [amount_from, amount_to]]
+	elif amount_from is not None:
+		filter_conditions["grand_total"] = [">=", amount_from]
+	elif amount_to is not None:
+		filter_conditions["grand_total"] = ["<=", amount_to]
+
+	return filter_conditions
+
+
+def _coerce_amount(value: Any) -> float | None:
+	"""Parse a client-supplied amount bound, treating blanks as "no bound"."""
+	if value in (None, ""):
+		return None
+	try:
+		return float(value)
+	except (TypeError, ValueError):
+		return None
 
 
 def _has_si_field(fieldname: str) -> bool:
-    """Whether Sales Invoice actually carries `fieldname` on this site.
+	"""Whether Sales Invoice actually carries `fieldname` on this site.
 
-    Guards the optional jarz fixtures: a site that has not migrated them yet
-    would otherwise take an "unknown column" SQL error and lose the whole board.
-    """
-    try:
-        return bool(frappe.get_meta("Sales Invoice").get_field(fieldname))
-    except Exception:
-        return False
+	Guards the optional jarz fixtures: a site that has not migrated them yet
+	would otherwise take an "unknown column" SQL error and lose the whole board.
+	"""
+	try:
+		return bool(frappe.get_meta("Sales Invoice").get_field(fieldname))
+	except Exception:
+		return False
 
 
 # ---------------------------------------------------------------------------
@@ -928,27 +939,27 @@ def _has_si_field(fieldname: str) -> bool:
 
 _TERRITORY_LABEL_SEPARATOR_RE = re.compile(r"\s+-\s+")
 _TERRITORY_LOOKUP_FIELDS = (
-    "territory_name",
-    "custom_woo_code",
-    "woo_code",
-    "custom_territory_name_ar",
+	"territory_name",
+	"custom_woo_code",
+	"woo_code",
+	"custom_territory_name_ar",
 )
 
 
 def _normalize_territory_lookup_text(value: Any) -> str:
-    text = unicodedata.normalize("NFC", str(value or "")).strip()
-    text = re.sub(r"\s+", " ", text)
-    return re.sub(r"\s*-\s*", " - ", text)
+	text = unicodedata.normalize("NFC", str(value or "")).strip()
+	text = re.sub(r"\s+", " ", text)
+	return re.sub(r"\s*-\s*", " - ", text)
 
 
 def _territory_lookup_candidates(value: Any) -> list[str]:
-    normalized = _normalize_territory_lookup_text(value)
-    candidates: list[str] = []
-    for candidate in [normalized, *_TERRITORY_LABEL_SEPARATOR_RE.split(normalized, maxsplit=1)]:
-        candidate = _normalize_territory_lookup_text(candidate)
-        if candidate and candidate not in candidates:
-            candidates.append(candidate)
-    return candidates
+	normalized = _normalize_territory_lookup_text(value)
+	candidates: list[str] = []
+	for candidate in [normalized, *_TERRITORY_LABEL_SEPARATOR_RE.split(normalized, maxsplit=1)]:
+		candidate = _normalize_territory_lookup_text(candidate)
+		if candidate and candidate not in candidates:
+			candidates.append(candidate)
+	return candidates
 
 
 # Arabic orthography varies between the Territory master and the free-text city
@@ -958,109 +969,116 @@ def _territory_lookup_candidates(value: Any) -> list[str]:
 # form maps to exactly one Territory, so it can turn "no match" into a match but
 # can never change an existing one.
 _ARABIC_DIACRITICS_RE = re.compile(r"[ً-ْٰـ]")
-_ARABIC_FOLD_MAP = str.maketrans({
-    "أ": "ا", "إ": "ا", "آ": "ا", "ٱ": "ا",
-    "ة": "ه", "ى": "ي", "ؤ": "و", "ئ": "ي",
-})
+_ARABIC_FOLD_MAP = str.maketrans(
+	{
+		"أ": "ا",
+		"إ": "ا",
+		"آ": "ا",
+		"ٱ": "ا",
+		"ة": "ه",
+		"ى": "ي",
+		"ؤ": "و",
+		"ئ": "ي",
+	}
+)
 
 
 def _fold_territory_lookup_text(value: Any) -> str:
-    """Return a spelling-insensitive key for matching territory labels."""
-    text = unicodedata.normalize("NFKC", str(value or "")).strip().lower()
-    text = _ARABIC_DIACRITICS_RE.sub("", text)
-    text = text.translate(_ARABIC_FOLD_MAP)
-    return re.sub(r"\s+", " ", text).strip()
+	"""Return a spelling-insensitive key for matching territory labels."""
+	text = unicodedata.normalize("NFKC", str(value or "")).strip().lower()
+	text = _ARABIC_DIACRITICS_RE.sub("", text)
+	text = text.translate(_ARABIC_FOLD_MAP)
+	return re.sub(r"\s+", " ", text).strip()
 
 
-def _folded_territory_index() -> Dict[str, Optional[str]]:
-    """Map folded label → Territory name, or → None where the label is ambiguous.
+def _folded_territory_index() -> dict[str, str | None]:
+	"""Map folded label → Territory name, or → None where the label is ambiguous.
 
-    Cached per request: it is only built when exact matching has already failed.
-    """
-    cached = getattr(frappe.local, "_jarz_folded_territory_index", None)
-    if cached is not None:
-        return cached
+	Cached per request: it is only built when exact matching has already failed.
+	"""
+	cached = getattr(frappe.local, "_jarz_folded_territory_index", None)
+	if cached is not None:
+		return cached
 
-    index: Dict[str, Optional[str]] = {}
-    try:
-        fields = ["name"] + [f for f in _TERRITORY_LOOKUP_FIELDS if _territory_has_column(f)]
-        for row in frappe.get_all("Territory", fields=fields, limit=0):
-            for fieldname in fields:
-                raw = _normalize_territory_lookup_text(row.get(fieldname))
-                if not raw:
-                    continue
-                for part in [raw, *_TERRITORY_LABEL_SEPARATOR_RE.split(raw, maxsplit=1)]:
-                    key = _fold_territory_lookup_text(part)
-                    if not key:
-                        continue
-                    if key in index and index[key] != row["name"]:
-                        index[key] = None  # ambiguous → refuse to guess
-                    elif key not in index:
-                        index[key] = row["name"]
-    except Exception:
-        frappe.log_error(frappe.get_traceback(), "Folded territory index build failed")
-        index = {}
+	index: dict[str, str | None] = {}
+	try:
+		fields = ["name"] + [f for f in _TERRITORY_LOOKUP_FIELDS if _territory_has_column(f)]
+		for row in frappe.get_all("Territory", fields=fields, limit=0):
+			for fieldname in fields:
+				raw = _normalize_territory_lookup_text(row.get(fieldname))
+				if not raw:
+					continue
+				for part in [raw, *_TERRITORY_LABEL_SEPARATOR_RE.split(raw, maxsplit=1)]:
+					key = _fold_territory_lookup_text(part)
+					if not key:
+						continue
+					if key in index and index[key] != row["name"]:
+						index[key] = None  # ambiguous → refuse to guess
+					elif key not in index:
+						index[key] = row["name"]
+	except Exception:
+		frappe.log_error(frappe.get_traceback(), "Folded territory index build failed")
+		index = {}
 
-    frappe.local._jarz_folded_territory_index = index
-    return index
+	frappe.local._jarz_folded_territory_index = index
+	return index
 
 
 def _territory_has_column(fieldname: str) -> bool:
-    try:
-        return bool(frappe.db.has_column("Territory", fieldname))
-    except Exception:
-        try:
-            meta = frappe.get_meta("Territory")
-            return bool(meta and meta.get_field(fieldname))
-        except Exception:
-            return False
+	try:
+		return bool(frappe.db.has_column("Territory", fieldname))
+	except Exception:
+		try:
+			meta = frappe.get_meta("Territory")
+			return bool(meta and meta.get_field(fieldname))
+		except Exception:
+			return False
 
 
-def _lookup_territory_by_field(fieldname: str, value: str) -> Optional[str]:
-    if not value:
-        return None
-    try:
-        if fieldname == "name":
-            if frappe.db.exists("Territory", value):
-                return value
-            return None
+def _lookup_territory_by_field(fieldname: str, value: str) -> str | None:
+	if not value:
+		return None
+	try:
+		if fieldname == "name":
+			if frappe.db.exists("Territory", value):
+				return value
+			return None
 
-        if not _territory_has_column(fieldname):
-            return None
+		if not _territory_has_column(fieldname):
+			return None
 
-        return (
-            frappe.db.get_value("Territory", {fieldname: value, "is_group": 0}, "name")
-            or frappe.db.get_value("Territory", {fieldname: value}, "name")
-        )
-    except Exception:
-        return None
+		return frappe.db.get_value(
+			"Territory", {fieldname: value, "is_group": 0}, "name"
+		) or frappe.db.get_value("Territory", {fieldname: value}, "name")
+	except Exception:
+		return None
 
 
-def resolve_territory_name(territory_value: Any) -> Optional[str]:
-    """Return the canonical Territory name for a code/display value, if known."""
-    candidates = _territory_lookup_candidates(territory_value)
-    if not candidates:
-        return None
+def resolve_territory_name(territory_value: Any) -> str | None:
+	"""Return the canonical Territory name for a code/display value, if known."""
+	candidates = _territory_lookup_candidates(territory_value)
+	if not candidates:
+		return None
 
-    for candidate in candidates:
-        territory_name = _lookup_territory_by_field("name", candidate)
-        if territory_name:
-            return territory_name
+	for candidate in candidates:
+		territory_name = _lookup_territory_by_field("name", candidate)
+		if territory_name:
+			return territory_name
 
-    for candidate in candidates:
-        for fieldname in _TERRITORY_LOOKUP_FIELDS:
-            territory_name = _lookup_territory_by_field(fieldname, candidate)
-            if territory_name:
-                return territory_name
+	for candidate in candidates:
+		for fieldname in _TERRITORY_LOOKUP_FIELDS:
+			territory_name = _lookup_territory_by_field(fieldname, candidate)
+			if territory_name:
+				return territory_name
 
-    # Last resort: spelling-insensitive match (see _folded_territory_index).
-    index = _folded_territory_index()
-    for candidate in candidates:
-        territory_name = index.get(_fold_territory_lookup_text(candidate))
-        if territory_name:
-            return territory_name
+	# Last resort: spelling-insensitive match (see _folded_territory_index).
+	index = _folded_territory_index()
+	for candidate in candidates:
+		territory_name = index.get(_fold_territory_lookup_text(candidate))
+		if territory_name:
+			return territory_name
 
-    return None
+	return None
 
 
 #: Address fields consulted, in order, when resolving an Address to a Territory.
@@ -1090,187 +1108,186 @@ def resolve_territory_name(territory_value: Any) -> Optional[str]:
 ADDRESS_TERRITORY_FIELD_PRECEDENCE = ("city", "state")
 
 
-def _territory_from_address_row(address_row: Optional[Dict[str, Any]]) -> Optional[str]:
-    """First field in :data:`ADDRESS_TERRITORY_FIELD_PRECEDENCE` that resolves."""
-    if not address_row:
-        return None
+def _territory_from_address_row(address_row: dict[str, Any] | None) -> str | None:
+	"""First field in :data:`ADDRESS_TERRITORY_FIELD_PRECEDENCE` that resolves."""
+	if not address_row:
+		return None
 
-    for fieldname in ADDRESS_TERRITORY_FIELD_PRECEDENCE:
-        territory_name = resolve_territory_name(address_row.get(fieldname))
-        if territory_name:
-            return territory_name
-    return None
+	for fieldname in ADDRESS_TERRITORY_FIELD_PRECEDENCE:
+		territory_name = resolve_territory_name(address_row.get(fieldname))
+		if territory_name:
+			return territory_name
+	return None
 
 
 def describe_address_territory_resolution(
-    address_row: Optional[Dict[str, Any]],
-) -> Dict[str, Any]:
-    """Explain how an Address row resolves to a Territory, field by field.
+	address_row: dict[str, Any] | None,
+) -> dict[str, Any]:
+	"""Explain how an Address row resolves to a Territory, field by field.
 
-    Diagnostic only — it changes nothing.  It exists so the city-vs-state question
-    can be *measured* rather than argued: ``fields_disagree`` is True only when
-    both fields resolve and resolve to DIFFERENT Territories, which is the single
-    population where the precedence in
-    :data:`ADDRESS_TERRITORY_FIELD_PRECEDENCE` can change an outcome.
+	Diagnostic only — it changes nothing.  It exists so the city-vs-state question
+	can be *measured* rather than argued: ``fields_disagree`` is True only when
+	both fields resolve and resolve to DIFFERENT Territories, which is the single
+	population where the precedence in
+	:data:`ADDRESS_TERRITORY_FIELD_PRECEDENCE` can change an outcome.
 
-    Returns a dict with the raw values, the per-field resolutions, the winner and
-    which field won.  Never raises.
-    """
-    result: Dict[str, Any] = {
-        "resolved_territory": None,
-        "resolved_from": None,
-        "fields_disagree": False,
-    }
+	Returns a dict with the raw values, the per-field resolutions, the winner and
+	which field won.  Never raises.
+	"""
+	result: dict[str, Any] = {
+		"resolved_territory": None,
+		"resolved_from": None,
+		"fields_disagree": False,
+	}
 
-    row = address_row if isinstance(address_row, dict) else {}
-    for fieldname in ADDRESS_TERRITORY_FIELD_PRECEDENCE:
-        raw = str(row.get(fieldname) or "").strip()
-        result[fieldname] = raw
-        try:
-            resolved = resolve_territory_name(raw) if raw else None
-        except Exception:
-            resolved = None
-        result[f"{fieldname}_territory"] = resolved
-        if resolved and result["resolved_territory"] is None:
-            result["resolved_territory"] = resolved
-            result["resolved_from"] = fieldname
+	row = address_row if isinstance(address_row, dict) else {}
+	for fieldname in ADDRESS_TERRITORY_FIELD_PRECEDENCE:
+		raw = str(row.get(fieldname) or "").strip()
+		result[fieldname] = raw
+		try:
+			resolved = resolve_territory_name(raw) if raw else None
+		except Exception:
+			resolved = None
+		result[f"{fieldname}_territory"] = resolved
+		if resolved and result["resolved_territory"] is None:
+			result["resolved_territory"] = resolved
+			result["resolved_from"] = fieldname
 
-    resolutions = [
-        result.get(f"{fieldname}_territory")
-        for fieldname in ADDRESS_TERRITORY_FIELD_PRECEDENCE
-    ]
-    non_null = [value for value in resolutions if value]
-    result["fields_disagree"] = len(non_null) > 1 and len(set(non_null)) > 1
-    return result
+	resolutions = [result.get(f"{fieldname}_territory") for fieldname in ADDRESS_TERRITORY_FIELD_PRECEDENCE]
+	non_null = [value for value in resolutions if value]
+	result["fields_disagree"] = len(non_null) > 1 and len(set(non_null)) > 1
+	return result
 
 
-def resolve_address_territory(address_name: str | None) -> Optional[str]:
-    """Resolve a selected Address to a Territory using Jarz's Address.city convention."""
-    address_name = str(address_name or "").strip()
-    if not address_name:
-        return None
+def resolve_address_territory(address_name: str | None) -> str | None:
+	"""Resolve a selected Address to a Territory using Jarz's Address.city convention."""
+	address_name = str(address_name or "").strip()
+	if not address_name:
+		return None
 
-    try:
-        address_row = frappe.db.get_value(
-            "Address",
-            address_name,
-            list(ADDRESS_TERRITORY_FIELD_PRECEDENCE),
-            as_dict=True,
-        )
-    except Exception:
-        address_row = None
-    return _territory_from_address_row(address_row)
+	try:
+		address_row = frappe.db.get_value(
+			"Address",
+			address_name,
+			list(ADDRESS_TERRITORY_FIELD_PRECEDENCE),
+			as_dict=True,
+		)
+	except Exception:
+		address_row = None
+	return _territory_from_address_row(address_row)
 
 
 def resolve_order_territory(
-    customer_name: str | None,
-    *,
-    shipping_address_name: str | None = None,
-    resolved_shipping_address: Optional[Dict[str, Any]] = None,
-) -> Optional[str]:
-    """Resolve the territory that should control a POS order.
+	customer_name: str | None,
+	*,
+	shipping_address_name: str | None = None,
+	resolved_shipping_address: dict[str, Any] | None = None,
+) -> str | None:
+	"""Resolve the territory that should control a POS order.
 
-    Precedence, highest first (F-07 — explicit on purpose, do not reorder without
-    reading the note on :data:`ADDRESS_TERRITORY_FIELD_PRECEDENCE`):
+	Precedence, highest first (F-07 — explicit on purpose, do not reorder without
+	reading the note on :data:`ADDRESS_TERRITORY_FIELD_PRECEDENCE`):
 
-      1. the shipping address row already resolved by the caller — ``city``, then
-         ``state``;
-      2. the same lookup against ``shipping_address_name``;
-      3. ``Customer.territory``.
+	  1. the shipping address row already resolved by the caller — ``city``, then
+	     ``state``;
+	  2. the same lookup against ``shipping_address_name``;
+	  3. ``Customer.territory``.
 
-    The selected shipping address wins over the customer's stored territory
-    because the POS operator picks that address for THIS order, so older/default
-    customer state cannot contaminate invoice totals.  ``Customer.territory`` is a
-    Link, so step 3 resolves whenever it is set at all — which means a ``None``
-    return here proves the customer carries no territory either, and the caller
-    must treat that as an exception rather than as free shipping.
-    """
-    territory_name = _territory_from_address_row(resolved_shipping_address)
-    if territory_name:
-        return territory_name
+	The selected shipping address wins over the customer's stored territory
+	because the POS operator picks that address for THIS order, so older/default
+	customer state cannot contaminate invoice totals.  ``Customer.territory`` is a
+	Link, so step 3 resolves whenever it is set at all — which means a ``None``
+	return here proves the customer carries no territory either, and the caller
+	must treat that as an exception rather than as free shipping.
+	"""
+	territory_name = _territory_from_address_row(resolved_shipping_address)
+	if territory_name:
+		return territory_name
 
-    territory_name = resolve_address_territory(shipping_address_name)
-    if territory_name:
-        return territory_name
+	territory_name = resolve_address_territory(shipping_address_name)
+	if territory_name:
+		return territory_name
 
-    customer_name = str(customer_name or "").strip()
-    if not customer_name:
-        return None
+	customer_name = str(customer_name or "").strip()
+	if not customer_name:
+		return None
 
-    try:
-        customer_territory = frappe.db.get_value("Customer", customer_name, "territory")
-    except Exception:
-        customer_territory = None
-    return resolve_territory_name(customer_territory)
-
-
-def resolve_pos_profile_for_territory(territory_name: str | None) -> Optional[str]:
-    territory_name = resolve_territory_name(territory_name)
-    if not territory_name:
-        return None
-
-    try:
-        if not frappe.get_meta("Territory").get_field("pos_profile"):
-            return None
-    except Exception:
-        return None
-
-    return frappe.db.get_value("Territory", territory_name, "pos_profile") or None
+	try:
+		customer_territory = frappe.db.get_value("Customer", customer_name, "territory")
+	except Exception:
+		customer_territory = None
+	return resolve_territory_name(customer_territory)
 
 
-def resolve_territory_pos_profile(customer_name: str, territory_name: str | None = None) -> Optional[str]:
-    """Return the POS Profile configured on the customer's territory, or None if not set.
+def resolve_pos_profile_for_territory(territory_name: str | None) -> str | None:
+	territory_name = resolve_territory_name(territory_name)
+	if not territory_name:
+		return None
 
-    Returns None when:
-    - customer_name is blank
-    - customer has no territory
-    - the Territory doctype has no pos_profile field (app not installed)
-    - the territory has no POS profile assigned
-    """
-    if territory_name:
-        return resolve_pos_profile_for_territory(territory_name)
+	try:
+		if not frappe.get_meta("Territory").get_field("pos_profile"):
+			return None
+	except Exception:
+		return None
 
-    if not customer_name:
-        return None
-    territory = frappe.db.get_value("Customer", customer_name, "territory")
-    return resolve_pos_profile_for_territory(territory)
+	return frappe.db.get_value("Territory", territory_name, "pos_profile") or None
+
+
+def resolve_territory_pos_profile(customer_name: str, territory_name: str | None = None) -> str | None:
+	"""Return the POS Profile configured on the customer's territory, or None if not set.
+
+	Returns None when:
+	- customer_name is blank
+	- customer has no territory
+	- the Territory doctype has no pos_profile field (app not installed)
+	- the territory has no POS profile assigned
+	"""
+	if territory_name:
+		return resolve_pos_profile_for_territory(territory_name)
+
+	if not customer_name:
+		return None
+	territory = frappe.db.get_value("Customer", customer_name, "territory")
+	return resolve_pos_profile_for_territory(territory)
 
 
 def assert_pos_profile_matches_territory(
-    customer_name: str,
-    pos_profile_name: str,
-    override: bool = False,
-    territory_name: str | None = None,
+	customer_name: str,
+	pos_profile_name: str,
+	override: bool = False,
+	territory_name: str | None = None,
 ) -> None:
-    """Raise a ValidationError with code POS_PROFILE_TERRITORY_MISMATCH when the
-    selected POS profile does not match the customer's territory profile and the
-    caller has not supplied an explicit override.
+	"""Raise a ValidationError with code POS_PROFILE_TERRITORY_MISMATCH when the
+	selected POS profile does not match the customer's territory profile and the
+	caller has not supplied an explicit override.
 
-    Both "no territory" and "territory has no pos_profile" are treated as a
-    mismatch and require confirmation (override=True) to proceed.
-    """
-    import json as _json
+	Both "no territory" and "territory has no pos_profile" are treated as a
+	mismatch and require confirmation (override=True) to proceed.
+	"""
+	import json as _json
 
-    if override:
-        return
+	if override:
+		return
 
-    effective_territory = resolve_territory_name(territory_name) if territory_name else None
-    territory_profile = resolve_territory_pos_profile(customer_name, territory_name=effective_territory)
-    selected = (pos_profile_name or "").strip()
-    territory = (territory_profile or "").strip()
+	effective_territory = resolve_territory_name(territory_name) if territory_name else None
+	territory_profile = resolve_territory_pos_profile(customer_name, territory_name=effective_territory)
+	selected = (pos_profile_name or "").strip()
+	territory = (territory_profile or "").strip()
 
-    if selected and territory and selected == territory:
-        return
+	if selected and territory and selected == territory:
+		return
 
-    customer_territory = frappe.db.get_value("Customer", customer_name, "territory") or ""
-    frappe.throw(
-        _json.dumps({
-            "code": "POS_PROFILE_TERRITORY_MISMATCH",
-            "selected_profile": selected,
-            "territory_profile": territory,
-            "customer_territory": customer_territory,
-            "effective_territory": effective_territory or customer_territory,
-        }),
-        frappe.ValidationError,
-        title="POS_PROFILE_TERRITORY_MISMATCH",
-    )
+	customer_territory = frappe.db.get_value("Customer", customer_name, "territory") or ""
+	frappe.throw(
+		_json.dumps(
+			{
+				"code": "POS_PROFILE_TERRITORY_MISMATCH",
+				"selected_profile": selected,
+				"territory_profile": territory,
+				"customer_territory": customer_territory,
+				"effective_territory": effective_territory or customer_territory,
+			}
+		),
+		frappe.ValidationError,
+		title="POS_PROFILE_TERRITORY_MISMATCH",
+	)

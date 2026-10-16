@@ -19,10 +19,11 @@ __version__ = "0.0.1"
 __all__ = ["__version__"]
 
 # Lightweight aliasing of legacy nested package to the canonical one
-import sys as _sys
 import importlib as _importlib
+import sys as _sys
 
 _LEGACY_ROOT = __name__ + ".jarz_pos"
+
 
 class _LegacyAliasModule:
 	"""Module proxy that forwards attribute access to subpackages.
