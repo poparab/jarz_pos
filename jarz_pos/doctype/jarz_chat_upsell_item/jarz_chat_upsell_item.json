@@ -1,0 +1,49 @@
+{
+ "actions": [],
+ "creation": "2026-10-16 12:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "item_code",
+  "pitch",
+  "active"
+ ],
+ "fields": [
+  {
+   "fieldname": "item_code",
+   "fieldtype": "Link",
+   "label": "Item",
+   "options": "Item",
+   "in_list_view": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "pitch",
+   "fieldtype": "Small Text",
+   "label": "Pitch",
+   "in_list_view": 1,
+   "description": "Arabic hint for the AI on how to suggest this item."
+  },
+  {
+   "fieldname": "active",
+   "fieldtype": "Check",
+   "label": "Active",
+   "default": "1",
+   "in_list_view": 1
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-10-16 12:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "jarz pos",
+ "name": "Jarz Chat Upsell Item",
+ "owner": "Administrator",
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "istable": 1,
+ "editable_grid": 1,
+ "track_changes": 0,
+ "permissions": []
+}

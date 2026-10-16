@@ -10,3 +10,6 @@ sentry-sdk>=2.0.0
 # with pyproject.toml: the deploy script only reinstalls when one of these two
 # files changes.
 pypdfium2>=4.30.0
+# Claude SDK for the chat inbox AI drafts (jarz_pos.services.chat_drafts).
+# Keep in lockstep with pyproject.toml.
+anthropic>=0.40.0

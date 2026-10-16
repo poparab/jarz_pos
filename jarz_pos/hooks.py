@@ -632,6 +632,13 @@ scheduler_events = {
         "0 12 * * *": [
             "jarz_pos.services.customer_followups.send_daily_sender_push",
         ],
+        # Chat inbox: push moderators when a customer has waited past
+        # alert_after_minutes (repeat every alert_repeat_minutes, capped).
+        # Off until Jarz Chat Settings is enabled; never raises. See
+        # jarz_pos.services.chat_alerts.
+        "* * * * *": [
+            "jarz_pos.services.chat_alerts.check_waiting",
+        ],
     },
 }
 
@@ -769,6 +776,28 @@ try:
     _tasks_api.create_task
     _tasks_api.set_status
     _tasks_api.download_attachment
+except Exception:
+    pass
+
+try:
+    # Chat inbox (feature chat-inbox). meta_webhook is allow_guest and
+    # authorised only by Meta's HMAC signature; touching it here registers its
+    # whitelist entry at startup so Meta's deliveries never 404 on import order.
+    from jarz_pos.api import chat as _chat_api
+    from jarz_pos.api import chat_webhook as _chat_webhook_api
+    _chat_webhook_api.meta_webhook
+    _chat_api.get_conversations
+    _chat_api.get_conversation
+    _chat_api.send_message
+    _chat_api.send_draft
+    _chat_api.reject_draft
+    _chat_api.regenerate_draft
+    _chat_api.assign_conversation
+    _chat_api.set_conversation_status
+    _chat_api.link_customer
+    _chat_api.get_order_prefill
+    _chat_api.get_chat_metrics
+    _chat_api.get_unread_total
 except Exception:
     pass
 

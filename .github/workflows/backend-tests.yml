@@ -735,6 +735,18 @@ jobs:
             # name normalisation, hashing, the amendment-free event id, the
             # hold / approve / skip decision, the 7-day expiry and the payload.
             test_meta_capi
+            # Chat inbox (feature chat-inbox). Pure, no chat table
+            # needed, so they pass before migrate. Pins Meta's HMAC check and
+            # handshake and the WhatsApp/Messenger/Instagram/comment parsing
+            # (statuses, echoes, attachments, comment threads); the AI draft
+            # guarantees (personal data masked, prices only from server-filled
+            # placeholders, typed numbers flagged, upsell only from the list and
+            # never on a complaint, planted wrong price caught only when gone,
+            # complaint cannot go out unedited, As-Is vs Edited, cost); and the
+            # per-channel reply window and text limits.
+            test_chat_webhook
+            test_chat_drafts
+            test_chat_send
           )
           rc=0
           for m in "${MODULES[@]}"; do
