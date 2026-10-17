@@ -120,6 +120,46 @@ class TestCoordinateForms(unittest.TestCase):
 			31.0,
 			geo.PRECISION_VIEWPORT,
 		),
+		# Shapes the 2026-10-17 staging test found the POS refusing.
+		("q=loc: prefix", "https://maps.google.com/maps?q=loc:30.0444,31.2357", 30.0444, 31.2357, geo.PRECISION_QUERY),
+		("place path pair", "https://www.google.com/maps/place/30.0444,31.2357", 30.0444, 31.2357, geo.PRECISION_QUERY),
+		(
+			"search path pair with plus",
+			"https://www.google.com/maps/search/30.0444,+31.2357",
+			30.0444,
+			31.2357,
+			geo.PRECISION_QUERY,
+		),
+		(
+			"place path pair beats the viewport after it",
+			"https://www.google.com/maps/place/30.0444,31.2357/@30.1000,31.3000,15z",
+			30.0444,
+			31.2357,
+			geo.PRECISION_QUERY,
+		),
+		("apple coordinate=", "https://maps.apple.com/?coordinate=30.0444,31.2357", 30.0444, 31.2357, geo.PRECISION_QUERY),
+		(
+			"osm marker",
+			"https://www.openstreetmap.org/?mlat=30.0444&mlon=31.2357#map=17/30.0444/31.2357",
+			30.0444,
+			31.2357,
+			geo.PRECISION_VIEWPORT,
+		),
+		("osm hash only", "https://www.openstreetmap.org/#map=17/30.0444/31.2357", 30.0444, 31.2357, geo.PRECISION_VIEWPORT),
+		("bing cp=", "https://www.bing.com/maps?cp=30.0444~31.2357&lvl=16", 30.0444, 31.2357, geo.PRECISION_QUERY),
+		("arabic-indic digits", "https://www.google.com/maps/@٣٠.٠٤٤,٣١.٢٣٥,17z", 30.044, 31.235, geo.PRECISION_VIEWPORT),
+		# Bare pairs, as typed or copied from the Maps "what's here?" card.
+		("bare comma space", "30.0444, 31.2357", 30.0444, 31.2357, geo.PRECISION_QUERY),
+		("bare comma", "30.0444,31.2357", 30.0444, 31.2357, geo.PRECISION_QUERY),
+		("bare space", "30.0444 31.2357", 30.0444, 31.2357, geo.PRECISION_QUERY),
+		("bare semicolon", "30.0444;31.2357", 30.0444, 31.2357, geo.PRECISION_QUERY),
+		("bare in parentheses", "(30.0444, 31.2357)", 30.0444, 31.2357, geo.PRECISION_QUERY),
+		("bare with letters", "30.0444° N, 31.2357° E", 30.0444, 31.2357, geo.PRECISION_QUERY),
+		("bare lng first by letters", "31.2357 E 30.0444 N", 30.0444, 31.2357, geo.PRECISION_QUERY),
+		("bare southern letters", "33.8688 S, 151.2093 E", -33.8688, 151.2093, geo.PRECISION_QUERY),
+		("bare arabic digits and comma", "٣٠٫٠٤٤٤، ٣١٫٢٣٥٧", 30.0444, 31.2357, geo.PRECISION_QUERY),
+		("bare persian digits", "۳۰.۰۴۴۴, ۳۱.۲۳۵۷", 30.0444, 31.2357, geo.PRECISION_QUERY),
+		("dms pair", "30°02'39.8\"N 31°14'08.5\"E", 30.044389, 31.235694, geo.PRECISION_QUERY),
 	]
 
 	def test_table(self):
@@ -191,9 +231,16 @@ class TestRejections(unittest.TestCase):
 		("javascript scheme, no coords", "javascript:alert(document.cookie)"),
 		("sql-ish", "'; DROP TABLE tabAddress; --"),
 		("arabic place name", "https://maps.google.com/?q=القاهرة"),
-		("arabic-indic digits", "https://www.google.com/maps/@٣٠.٠٤٤,٣١.٢٣٥,17z"),
 		("emoji", "📍 https://example.com"),
 		("short link (needs expansion)", "https://maps.app.goo.gl/aBcDeF123"),
+		("pair inside prose", "Villa 12, 3rd floor"),
+		("decimal pair inside prose", "near 30.0444, 31.2357 by the mosque"),
+		("house numbers", "12 5"),
+		("integer bare pair", "30, 31"),
+		("one decimal number", "Villa 12.500"),
+		("contradictory letters", "30.0444 N, 31.2357 N"),
+		("dms minutes out of range", "30°75'39.8\"N 31°14'08.5\"E"),
+		("dms seconds out of range", "30°02'61\"N 31°14'08.5\"E"),
 	]
 
 	def test_table(self):
@@ -252,6 +299,26 @@ class TestCoordinateValidation(unittest.TestCase):
 		):
 			with self.subTest(lat=lat, lng=lng):
 				self.assertFalse(geo.is_valid_coordinate(lat, lng))
+
+
+class TestServiceArea(unittest.TestCase):
+	"""Egypt's box: a parsed point outside it is read but never delivered to."""
+
+	def test_egyptian_cities_are_inside(self):
+		for lat, lng in ((30.0444, 31.2357), (31.2001, 29.9187), (24.0889, 32.8998), (27.2579, 33.8116)):
+			with self.subTest(lat=lat, lng=lng):
+				self.assertTrue(geo.in_service_area(lat, lng))
+
+	def test_elsewhere_is_outside(self):
+		# Paris, Riyadh, Sydney, Dubai.
+		for lat, lng in ((48.8566, 2.3522), (24.7136, 46.6753), (-33.8688, 151.2093), (25.2048, 55.2708)):
+			with self.subTest(lat=lat, lng=lng):
+				self.assertFalse(geo.in_service_area(lat, lng))
+
+	def test_invalid_input_is_outside(self):
+		for lat, lng in ((None, None), ("x", 1), (0, 0), (float("nan"), 31)):
+			with self.subTest(lat=lat, lng=lng):
+				self.assertFalse(geo.in_service_area(lat, lng))
 
 
 class TestLocationLinkExtraction(unittest.TestCase):

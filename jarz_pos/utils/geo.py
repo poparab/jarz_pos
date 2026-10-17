@@ -181,11 +181,23 @@ MAPS_LINK_HOSTS = frozenset(
 # ─────────────────────────────────────────────────────────────────────────────
 
 #: ASCII digits ONLY, deliberately. ``\d`` in Python matches every Unicode
-#: decimal digit, and ``float()`` happily parses them — so ``@٣٠.٠,٣١.٢`` would
-#: silently become a coordinate. Real Maps URLs are always ASCII here, so an
-#: Arabic-Indic numeral in this position is a mangled or hostile input, not a
-#: location.
+#: decimal digit, and ``float()`` happily parses them — so fullwidth or other
+#: exotic numerals would silently become a coordinate. Arabic-Indic numerals are
+#: the one exception staff genuinely type (an Arabic keyboard produces
+#: ``٣٠٫٠٤٤٤، ٣١٫٢٣٥٧``), and :data:`_ARABIC_NUMERALS` translates exactly those
+#: to ASCII *before* matching, so the pattern itself never widens.
 _COORD = r"[-+]?[0-9]{1,3}(?:\.[0-9]+)?"
+
+#: Arabic-Indic (U+0660–0669) and Extended/Persian (U+06F0–06F9) digits, the
+#: Arabic decimal separator ``٫`` and the Arabic comma ``،``, mapped to ASCII.
+_ARABIC_NUMERALS = str.maketrans(
+	{
+		**{chr(0x0660 + i): str(i) for i in range(10)},
+		**{chr(0x06F0 + i): str(i) for i in range(10)},
+		"٫": ".",
+		"،": ",",
+	}
+)
 
 
 def is_valid_coordinate(lat: object, lng: object) -> bool:
@@ -210,6 +222,27 @@ def is_valid_coordinate(lat: object, lng: object) -> bool:
 	if abs(lat_f) < 1e-9 and abs(lng_f) < 1e-9:
 		return False
 	return True
+
+
+#: Egypt's bounding box (lat_min, lat_max, lng_min, lng_max), with a little
+#: margin. Every Jarz branch delivers inside it, so a link that resolves
+#: elsewhere (Paris, a swapped lat/lng, a coordinate pasted from another app)
+#: is a mistake, never a delivery. The same box guards the Woo inbound parser.
+SERVICE_AREA = (22.0, 32.0, 24.5, 37.0)
+
+
+def in_service_area(lat: object, lng: object) -> bool:
+	"""True when *lat*/*lng* is a valid coordinate inside :data:`SERVICE_AREA`.
+
+	Kept out of :func:`parse_maps_link` on purpose: the parser answers "what
+	point does this link name", and this answers "can we deliver there". Callers
+	that take a pin from a pasted link apply it; trusted sources (courier GPS,
+	manual override) are not gated by it.
+	"""
+	if not is_valid_coordinate(lat, lng):
+		return False
+	lat_min, lat_max, lng_min, lng_max = SERVICE_AREA
+	return lat_min <= float(lat) <= lat_max and lng_min <= float(lng) <= lng_max
 
 
 #: Google Maps "search" URL. The documented, stable form for "drop a pin here":
@@ -349,10 +382,39 @@ _PIN_RE = re.compile(rf"!3d({_COORD})!4d({_COORD})")
 _AT_RE = re.compile(rf"@({_COORD}),({_COORD})")
 
 #: A bare ``<lat>,<lng>`` value used by ``q=``/``ll=``/``query=``/``center=``.
-_PAIR_RE = re.compile(rf"^\s*({_COORD})\s*,\s*({_COORD})\s*$")
+#: ``loc:`` is the legacy "drop a pin" prefix (``?q=loc:30.04,31.23``); ``~`` is
+#: Bing's separator (``cp=30.04~31.23``). A ``+`` before the longitude is what a
+#: share sheet leaves when it encodes the space after the comma.
+_PAIR_RE = re.compile(rf"^\s*(?:loc:)?\s*({_COORD})\s*[,~]\s*\+?({_COORD})\s*$", re.IGNORECASE)
 
-#: Query parameters that may hold an explicit coordinate pair.
-_COORD_PARAMS = ("q", "ll", "query", "center", "daddr", "destination", "sll", "mlat")
+#: Query parameters that may hold an explicit coordinate pair. ``coordinate``
+#: is Apple Maps; ``cp`` is Bing.
+_COORD_PARAMS = ("q", "ll", "query", "center", "daddr", "destination", "sll", "coordinate", "cp")
+
+#: ``/maps/place/<lat>,<lng>`` and ``/maps/search/<lat>,+<lng>`` — the pair sits
+#: in the path, not a parameter. This is the point Maps was asked to show, so it
+#: outranks the ``@`` viewport that usually follows it.
+_PATH_PAIR_RE = re.compile(rf"/maps/(?:place|search)/({_COORD})\s*,\s*\+?\s*({_COORD})(?![0-9.])")
+
+#: OpenStreetMap: ``#map=<zoom>/<lat>/<lng>`` — a viewport, like Google's ``@``.
+_OSM_HASH_RE = re.compile(rf"#map=[0-9]{{1,2}}/({_COORD})/({_COORD})")
+
+#: A whole input that is nothing but a coordinate pair, as typed or copied from
+#: the Maps "what's here?" card: ``30.0444, 31.2357`` / ``30.0444 31.2357`` /
+#: ``30.0444;31.2357`` / ``30.0444° N, 31.2357° E`` / ``(30.0444, 31.2357)``.
+#: Anchored at both ends on purpose: a pair embedded in prose ("Villa 12, 3rd
+#: floor") must never become a pin, and both halves need a decimal point, so a
+#: pair of house or block numbers ("12 5", "30, 31") never reads as one either.
+_HEMI = r"\s*°?\s*([NSEW])?"
+_DECIMAL = r"[-+]?[0-9]{1,3}\.[0-9]+"
+_BARE_PAIR_RE = re.compile(
+	rf"^\s*\(?\s*({_DECIMAL}){_HEMI}\s*(?:[,;]\s*|\s+)({_DECIMAL}){_HEMI}\s*\)?\s*$",
+	re.IGNORECASE,
+)
+
+#: Degrees/minutes/seconds as Google copies it: ``30°02'39.8"N 31°14'08.6"E``.
+_DMS = r"([0-9]{1,3})\s*°\s*([0-9]{1,2})\s*['′]\s*([0-9]{1,2}(?:\.[0-9]+)?)\s*(?:\"|″|'')?\s*([NSEW])"
+_DMS_PAIR_RE = re.compile(rf"^\s*{_DMS}\s*,?\s*{_DMS}\s*$", re.IGNORECASE)
 
 
 def is_short_maps_link(url: object) -> bool:
@@ -381,13 +443,19 @@ def parse_maps_link(url: object) -> tuple[float, float, str] | None:
 	1. ``!3d``/``!4d`` — the pin the user actually chose;
 	2. ``@lat,lng`` — the viewport centre, which can be far from the pin;
 	3. ``q=``/``ll=`` and friends — an explicit coordinate query;
-	4. a full Plus Code anywhere in the URL.
+	4. a full Plus Code anywhere in the URL;
+	5. an input that is *only* a coordinate pair (typed, or copied from the
+	   Maps card), in decimal or degrees/minutes/seconds.
+
+	A ``/maps/place/<lat>,<lng>`` path pair is checked between 1 and 2: it is
+	the point Maps was asked to show, and the ``@`` that follows is only where
+	the map happened to be centred.
 
 	Never raises and never performs I/O. A short link returns ``None`` here by
 	design: expanding it is a network round-trip and belongs in a background
 	job, never inline in a whitelisted call.
 	"""
-	text = str(url or "").strip()
+	text = str(url or "").strip().translate(_ARABIC_NUMERALS)
 	if not text:
 		return None
 
@@ -415,7 +483,14 @@ def parse_maps_link(url: object) -> tuple[float, float, str] | None:
 				return found
 
 	for haystack in candidates:
-		match = _AT_RE.search(haystack)
+		match = _PATH_PAIR_RE.search(haystack)
+		if match:
+			found = _coords(match.group(1), match.group(2), PRECISION_QUERY)
+			if found:
+				return found
+
+	for haystack in candidates:
+		match = _AT_RE.search(haystack) or _OSM_HASH_RE.search(haystack)
 		if match:
 			found = _coords(match.group(1), match.group(2), PRECISION_VIEWPORT)
 			if found:
@@ -435,6 +510,59 @@ def parse_maps_link(url: object) -> tuple[float, float, str] | None:
 				if found:
 					return found
 
+	for haystack in candidates:
+		found = _parse_bare_pair(haystack)
+		if found:
+			return found
+
+	return None
+
+
+def _signed(value: float, hemisphere: str | None) -> float:
+	"""Apply an ``S``/``W`` hemisphere letter as a negative sign."""
+	return -abs(value) if (hemisphere or "").upper() in ("S", "W") else value
+
+
+def _ordered_pair(
+	first: float, first_hemi: str | None, second: float, second_hemi: str | None
+) -> tuple[float, float] | None:
+	"""``(lat, lng)`` from two values whose hemisphere letters may say which is which.
+
+	No letters means "latitude first", the order every map app writes. Letters
+	that name the same axis twice (``N … N``) are contradictory and rejected.
+	"""
+	a = (first_hemi or "").upper()
+	b = (second_hemi or "").upper()
+	lat_letters, lng_letters = ("N", "S"), ("E", "W")
+	if (a in lat_letters and b in lat_letters) or (a in lng_letters and b in lng_letters):
+		return None
+	if a in lng_letters or b in lat_letters:
+		return (_signed(second, b), _signed(first, a))
+	return (_signed(first, a), _signed(second, b))
+
+
+def _parse_bare_pair(text: str) -> tuple[float, float, str] | None:
+	"""An input that is nothing but a decimal or DMS coordinate pair."""
+	match = _BARE_PAIR_RE.match(text)
+	if match:
+		pair = _ordered_pair(float(match.group(1)), match.group(2), float(match.group(3)), match.group(4))
+		if pair:
+			return _coords(pair[0], pair[1], PRECISION_QUERY)
+		return None
+
+	match = _DMS_PAIR_RE.match(text)
+	if match:
+		g = match.groups()
+		try:
+			first = int(g[0]) + int(g[1]) / 60 + float(g[2]) / 3600
+			second = int(g[4]) + int(g[5]) / 60 + float(g[6]) / 3600
+		except ValueError:
+			return None
+		if int(g[1]) >= 60 or float(g[2]) >= 60 or int(g[5]) >= 60 or float(g[6]) >= 60:
+			return None
+		pair = _ordered_pair(first, g[3], second, g[7])
+		if pair:
+			return _coords(pair[0], pair[1], PRECISION_QUERY)
 	return None
 
 
@@ -454,6 +582,16 @@ def _parse_query_coords(url: str) -> tuple[float, float, str] | None:
 			found = _coords(match.group(1), match.group(2), PRECISION_QUERY)
 			if found:
 				return found
+
+	# OpenStreetMap marker: the pair is split across ``mlat=`` and ``mlon=``.
+	for lat_value in params.get("mlat", []) or []:
+		for lng_value in params.get("mlon", []) or []:
+			lat_match = re.fullmatch(_COORD, str(lat_value or "").strip())
+			lng_match = re.fullmatch(_COORD, str(lng_value or "").strip())
+			if lat_match and lng_match:
+				found = _coords(lat_match.group(0), lng_match.group(0), PRECISION_QUERY)
+				if found:
+					return found
 	return None
 
 

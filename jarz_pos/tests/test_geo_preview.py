@@ -245,6 +245,32 @@ class TestPreviewTicketFlow(unittest.TestCase):
 		self.assertEqual(result["reason"], "no_coordinates_in_link")
 		self.assertEqual(self.enqueued, [])
 
+	def test_link_outside_egypt_is_read_but_refused(self):
+		result = self.service.preview_link("https://maps.google.com/?q=48.8566,2.3522", user="pos@jarz")
+		self.assertFalse(result["resolved"])
+		self.assertFalse(result["pending"])
+		self.assertEqual(result["reason"], self.service.OUTSIDE_SERVICE_AREA)
+		self.assertAlmostEqual(result["latitude"], 48.8566, places=4)
+		self.assertEqual(self.enqueued, [])
+
+	def test_typed_bare_coordinates_resolve_inline(self):
+		result = self.service.preview_link("30.0444, 31.2357", user="pos@jarz")
+		self.assertTrue(result["resolved"])
+		self.assertAlmostEqual(result["longitude"], 31.2357, places=4)
+
+	def test_short_link_expanding_outside_egypt_is_refused(self):
+		token = self.service.preview_link(self.SHORT, user="pos@jarz")["request_id"]
+		with patch.object(
+			self.service.geo,
+			"expand_short_link",
+			return_value="https://www.google.com/maps/place/X/data=!3d48.8566!4d2.3522",
+		):
+			self.service.preview_short_link_job(token, self.SHORT, "pos@jarz")
+		done = self.service.preview_link(request_id=token, user="pos@jarz")
+		self.assertFalse(done["resolved"])
+		self.assertTrue(done["short_link"])
+		self.assertEqual(done["reason"], self.service.OUTSIDE_SERVICE_AREA)
+
 	def test_poll_reports_pending_then_the_worker_result(self):
 		ticket = self.service.preview_link(self.SHORT, user="pos@jarz")
 		token = ticket["request_id"]
@@ -296,6 +322,36 @@ class TestPreviewTicketFlow(unittest.TestCase):
 			result = self.service.preview_link(self.SHORT, user="pos@jarz")
 		self.assertFalse(result["pending"])
 		self.assertEqual(result["reason"], "rate_limited")
+
+
+class TestLinkWritesStayInEgypt(unittest.TestCase):
+	"""A pasted link outside the service area must never reach the Address."""
+
+	def setUp(self):
+		from jarz_pos.services import geo_resolution
+
+		self.service = geo_resolution
+
+	def test_resolve_from_link_refuses_without_writing(self):
+		with patch.object(self.service, "set_address_pin", side_effect=AssertionError("must not write")):
+			result = self.service.resolve_address_from_link("ADDR-1", "https://maps.google.com/?q=48.8566,2.3522")
+		self.assertFalse(result["accepted"])
+		self.assertEqual(result["reason"], self.service.OUTSIDE_SERVICE_AREA)
+
+	def test_short_link_job_refuses_without_writing(self):
+		with (
+			patch.object(self.service.geo, "expand_short_link", return_value="https://maps.google.com/?q=48.8566,2.3522"),
+			patch.object(self.service, "set_address_pin", side_effect=AssertionError("must not write")),
+		):
+			result = self.service.resolve_short_link_job("ADDR-1", "https://maps.app.goo.gl/aBcDeF123")
+		self.assertFalse(result["accepted"])
+		self.assertEqual(result["reason"], self.service.OUTSIDE_SERVICE_AREA)
+
+	def test_cairo_link_still_writes(self):
+		with patch.object(self.service, "set_address_pin", return_value={"success": True, "accepted": True}) as write:
+			result = self.service.resolve_address_from_link("ADDR-1", "30.0444, 31.2357")
+		self.assertTrue(result["accepted"])
+		self.assertAlmostEqual(write.call_args.kwargs["latitude"], 30.0444, places=4)
 
 
 if __name__ == "__main__":

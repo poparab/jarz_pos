@@ -209,6 +209,14 @@ def dry_run_address_pin(
 					"url": link,
 				}
 			latitude, longitude, precision = parsed
+			if not _geo.in_service_area(latitude, longitude):
+				return {
+					"success": True,
+					"accepted": False,
+					"reason": _geo_service.OUTSIDE_SERVICE_AREA,
+					"address": name,
+					"url": link,
+				}
 			if accuracy_m in (None, ""):
 				accuracy_m = _geo.accuracy_for_precision(precision)
 

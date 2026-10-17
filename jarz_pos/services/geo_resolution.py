@@ -391,6 +391,12 @@ def set_address_pin(
 	return {"success": True, **decision, "written_fields": sorted(updates)}
 
 
+#: Reason returned when a pasted link names a real point outside Egypt
+#: (:data:`geo.SERVICE_AREA`). Only link-derived pins are gated: a courier's GPS
+#: fix or a manager's override is trusted as given.
+OUTSIDE_SERVICE_AREA = "outside_service_area"
+
+
 def resolve_address_from_link(
 	address_name: str,
 	url: str,
@@ -432,6 +438,14 @@ def resolve_address_from_link(
 		}
 
 	latitude, longitude, precision = parsed
+	if not geo.in_service_area(latitude, longitude):
+		return {
+			"success": True,
+			"accepted": False,
+			"reason": OUTSIDE_SERVICE_AREA,
+			"address": name,
+			"url": link,
+		}
 	result = set_address_pin(
 		name,
 		latitude=latitude,
@@ -497,6 +511,13 @@ def resolve_short_link_job(address_name: str, url: str, source: str = geo.SOURCE
 		}
 
 	latitude, longitude, precision = parsed
+	if not geo.in_service_area(latitude, longitude):
+		return {
+			"success": True,
+			"accepted": False,
+			"reason": OUTSIDE_SERVICE_AREA,
+			"expanded_url": expanded,
+		}
 	try:
 		result = set_address_pin(
 			name,
@@ -588,8 +609,17 @@ def _consume_preview_budget(user: str) -> bool:
 		return False
 
 
-def _preview_resolved(link: str, parsed: Any) -> dict[str, Any]:
+def _preview_resolved(link: str, parsed: Any, *, short_link: bool = False) -> dict[str, Any]:
 	latitude, longitude, precision = parsed
+	if not geo.in_service_area(latitude, longitude):
+		# The point is read correctly but undeliverable. Say so rather than
+		# show staff a pin in Paris they might confirm by reflex.
+		return {
+			**_preview_unresolved(link, OUTSIDE_SERVICE_AREA, short_link=short_link),
+			"latitude": latitude,
+			"longitude": longitude,
+			"precision": precision,
+		}
 	return {
 		"success": True,
 		"resolved": True,
@@ -727,7 +757,7 @@ def preview_short_link_job(request_id: str, url: str, user: str = "") -> dict[st
 	else:
 		parsed = geo.parse_maps_link(expanded)
 		if parsed:
-			result = _preview_resolved(link, parsed)
+			result = _preview_resolved(link, parsed, short_link=True)
 		else:
 			result = _preview_unresolved(link, "no_coordinates_in_expanded_link", short_link=True)
 		result["expanded_url"] = expanded
