@@ -613,12 +613,14 @@ def _preview_resolved(link: str, parsed: Any, *, short_link: bool = False) -> di
 	latitude, longitude, precision = parsed
 	if not geo.in_service_area(latitude, longitude):
 		# The point is read correctly but undeliverable. Say so rather than
-		# show staff a pin in Paris they might confirm by reflex.
+		# show staff a pin in Paris they might confirm by reflex. The point is
+		# kept under its own keys, never `latitude`/`longitude`: an installed
+		# app that predates `resolved` treats any success-plus-coordinates
+		# answer as a confirmed pin and would save it.
 		return {
 			**_preview_unresolved(link, OUTSIDE_SERVICE_AREA, short_link=short_link),
-			"latitude": latitude,
-			"longitude": longitude,
-			"precision": precision,
+			"outside_latitude": latitude,
+			"outside_longitude": longitude,
 		}
 	return {
 		"success": True,

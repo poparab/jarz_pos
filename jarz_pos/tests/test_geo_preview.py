@@ -250,7 +250,11 @@ class TestPreviewTicketFlow(unittest.TestCase):
 		self.assertFalse(result["resolved"])
 		self.assertFalse(result["pending"])
 		self.assertEqual(result["reason"], self.service.OUTSIDE_SERVICE_AREA)
-		self.assertAlmostEqual(result["latitude"], 48.8566, places=4)
+		self.assertAlmostEqual(result["outside_latitude"], 48.8566, places=4)
+		# An installed app that ignores `resolved` saves any answer carrying
+		# latitude/longitude, so a refused point must never travel under them.
+		self.assertNotIn("latitude", result)
+		self.assertNotIn("longitude", result)
 		self.assertEqual(self.enqueued, [])
 
 	def test_typed_bare_coordinates_resolve_inline(self):
@@ -270,6 +274,7 @@ class TestPreviewTicketFlow(unittest.TestCase):
 		self.assertFalse(done["resolved"])
 		self.assertTrue(done["short_link"])
 		self.assertEqual(done["reason"], self.service.OUTSIDE_SERVICE_AREA)
+		self.assertNotIn("latitude", done)
 
 	def test_poll_reports_pending_then_the_worker_result(self):
 		ticket = self.service.preview_link(self.SHORT, user="pos@jarz")
