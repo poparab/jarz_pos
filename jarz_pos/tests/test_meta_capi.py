@@ -487,11 +487,12 @@ class WiringTest(unittest.TestCase):
 			"excluded_customer_groups",
 			"do_not_send_phones",
 			"send_website_orders",
-			"website_start",
+			"website_first_order",
 			"website_url",
 		):
 			self.assertIn(name, fields)
 		self.assertEqual(fields["send_website_orders"]["default"], "0")
+		self.assertEqual(fields["website_first_order"]["fieldtype"], "Int")
 		self.assertEqual(fields["access_token"]["fieldtype"], "Password")
 		self.assertEqual(fields["access_token"]["permlevel"], 1)
 		self.assertEqual(fields["enabled"]["default"], "0")
@@ -804,6 +805,12 @@ class WebsiteKeysTest(unittest.TestCase):
 		self.assertIsNone(m.fbc_from(url, None))
 		self.assertIsNone(m.fbc_from(None, 1760000000000))
 
+	def test_fbc_is_dropped_when_the_stored_url_was_cut_inside_the_click_id(self):
+		cut = ("https://orderjarz.com/?utm_source=fb&fbclid=IwAR" + "x" * 200)[: m.WOO_TEXT_LIMIT]
+		self.assertIsNone(m.fbc_from(cut, 1760000000000))
+		ended = ("https://orderjarz.com/?fbclid=IwAR1abc&utm_source=fb&x=" + "y" * 200)[: m.WOO_TEXT_LIMIT]
+		self.assertEqual(m.fbc_from(ended, 1), "fb.1.1.IwAR1abc")
+
 	def test_user_data_hashes_keys_and_keeps_browser_fields_plain(self):
 		data = m.build_website_user_data(
 			phone=m.normalize_eg_mobile("01001234567"),
@@ -847,11 +854,12 @@ class WebsiteKeysTest(unittest.TestCase):
 
 
 class WebsiteSwitchTest(unittest.TestCase):
-	def test_live_needs_the_tick_and_the_start_time(self):
+	def test_live_needs_the_tick_and_the_first_order_number(self):
 		self.assertFalse(m.website_live({}))
 		self.assertFalse(m.website_live({"send_website_orders": 1}))
-		self.assertFalse(m.website_live({"website_start": "2026-10-20 10:00:00"}))
-		self.assertTrue(m.website_live({"send_website_orders": 1, "website_start": "2026-10-20 10:00:00"}))
+		self.assertFalse(m.website_live({"send_website_orders": 1, "website_first_order": 0}))
+		self.assertFalse(m.website_live({"website_first_order": 19100}))
+		self.assertTrue(m.website_live({"send_website_orders": 1, "website_first_order": 19100}))
 
 	def test_settings_default_the_url_and_stay_off(self):
 		with mock.patch.object(m.frappe, "get_single", return_value={"enabled": 1}, create=True):
@@ -860,7 +868,7 @@ class WebsiteSwitchTest(unittest.TestCase):
 		self.assertFalse(m.website_live(settings))
 
 	def test_website_orders_are_not_queued_while_off(self):
-		settings = {"enabled": 1, "start_date": None, "send_website_orders": 0, "website_start": None}
+		settings = {"enabled": 1, "start_date": None, "send_website_orders": 0, "website_first_order": 0}
 		with (
 			mock.patch.object(m, "load_settings", return_value=settings),
 			mock.patch.object(m, "_queue_since", return_value=D(2026, 10, 17)),
@@ -871,12 +879,12 @@ class WebsiteSwitchTest(unittest.TestCase):
 			m.queue_delivered_orders()
 		web.assert_not_called()
 
-	def test_website_orders_are_queued_from_the_cutover_only(self):
+	def test_website_orders_are_queued_when_live(self):
 		settings = {
 			"enabled": 1,
 			"start_date": None,
 			"send_website_orders": 1,
-			"website_start": "2026-10-20 10:00:00",
+			"website_first_order": 19100,
 		}
 		with (
 			mock.patch.object(m, "load_settings", return_value=settings),
@@ -884,12 +892,13 @@ class WebsiteSwitchTest(unittest.TestCase):
 			mock.patch.object(m, "_candidate_orders", return_value=[]),
 			mock.patch.object(m, "_website_candidate_orders", return_value=[]) as web,
 			mock.patch.object(m.frappe, "db", SimpleNamespace(commit=lambda: None), create=True),
-			mock.patch("frappe.utils.get_datetime", side_effect=lambda v: D.fromisoformat(str(v))),
+			mock.patch("frappe.utils.now_datetime", return_value=D(2026, 10, 30, 12, 0)),
 		):
 			result = m.queue_delivered_orders(backfill_days=7)
 		self.assertEqual(result["errors"], 0)
 		web.assert_called_once()
-		self.assertEqual(web.call_args[0][1], D(2026, 10, 20, 10, 0))
+		# The order number decides which orders count; the window only bounds the scan.
+		self.assertEqual(web.call_args[0][1], D(2026, 10, 30, 12, 0) - m.WEBSITE_LOOKBACK)
 
 	def test_sending_holds_website_rows_back_while_off(self):
 		settings = {
@@ -897,7 +906,7 @@ class WebsiteSwitchTest(unittest.TestCase):
 			"test_mode": 0,
 			"test_event_code": "",
 			"send_website_orders": 0,
-			"website_start": None,
+			"website_first_order": 0,
 		}
 		sql = mock.Mock(return_value=[])
 		db = SimpleNamespace(sql=sql, commit=lambda: None)
@@ -910,7 +919,7 @@ class WebsiteSwitchTest(unittest.TestCase):
 		query, params = sql.call_args[0]
 		self.assertIn("e.source, '') <>", query)
 		self.assertEqual(params["website"], m.SOURCE_WEBSITE)
-		settings.update(send_website_orders=1, website_start="2026-10-20 10:00:00")
+		settings.update(send_website_orders=1, website_first_order=19100)
 		with (
 			mock.patch.object(m, "load_settings", return_value=settings),
 			mock.patch.object(m, "_access_token", return_value="t"),
@@ -935,7 +944,7 @@ def _web_order(**over):
 
 
 class QueueWebsiteOneTest(unittest.TestCase):
-	def _queue(self, order, earlier=()):
+	def _queue(self, order, earlier=(), now=None):
 		inserted, marks = {}, []
 
 		def get_doc(values):
@@ -949,6 +958,7 @@ class QueueWebsiteOneTest(unittest.TestCase):
 			mock.patch.object(m.frappe, "get_all", mock.Mock(return_value=list(earlier)), create=True),
 			mock.patch.object(m.frappe, "db", db, create=True),
 			mock.patch.object(m, "_mark", lambda name, values: marks.append((name, values))),
+			mock.patch("frappe.utils.now_datetime", return_value=now or D(2026, 10, 21, 18, 0)),
 		):
 			status = m._queue_website_one(order, QUEUE_SETTINGS)
 		return status, inserted, marks
@@ -989,6 +999,94 @@ class QueueWebsiteOneTest(unittest.TestCase):
 		status, _, marks = self._queue(_web_order(name="ACC-SINV-20-1", amended_from="ACC-SINV-20"), earlier)
 		self.assertEqual(status, m.STATUS_APPROVED)
 		self.assertEqual(marks[0][0], "EV-1")
+
+	def test_late_delivery_gets_an_expired_row_not_none(self):
+		status, row, _ = self._queue(_web_order(), now=D(2026, 10, 28, 12, 0))
+		self.assertEqual((status, row["status_reason"]), (m.STATUS_EXPIRED, "Older than Meta's 7-day limit"))
+		self.assertEqual(row["event_id"], "woo-17529")
+
+
+class OriginSqlTest(unittest.TestCase):
+	"""Where an order came from is read off the FIRST invoice of its Woo order."""
+
+	def _sql(self, fn, settings=None, columns=None):
+		missing = set(columns or ())
+		sql = mock.Mock(return_value=[])
+		db = SimpleNamespace(sql=sql, has_column=lambda dt, col: col not in missing)
+		with mock.patch.object(m.frappe, "db", db, create=True):
+			rows = fn(settings or {"website_first_order": 19100}, D(2026, 10, 1))
+		return rows, sql
+
+	def test_origin_rule_matches_the_ops_reports(self):
+		db = SimpleNamespace(has_column=lambda dt, col: True)
+		with mock.patch.object(m.frappe, "db", db, create=True):
+			rule = m._woo_origin_sql("fi")
+		self.assertIn("fi.custom_order_channel", rule)
+		self.assertIn("NOT IN ('', 'pos')", rule)
+		self.assertIn("fi.woo_transaction_id", rule)
+		self.assertIn("= 'woo'", rule)
+		db = SimpleNamespace(has_column=lambda dt, col: col not in ("woo_source_type", "woo_transaction_id"))
+		with mock.patch.object(m.frappe, "db", db, create=True):
+			self.assertIsNone(m._woo_origin_sql("fi"))
+
+	def test_first_invoice_includes_cancelled_and_skips_returns(self):
+		first = m._first_invoice_sql("si")
+		self.assertIn("f.woo_order_id = si.woo_order_id", first)
+		self.assertIn("ORDER BY f.creation ASC", first)
+		self.assertIn("is_return", first)
+		self.assertNotIn("docstatus", first)
+
+	def test_website_query_is_classified_by_the_first_invoice_and_cutover(self):
+		_, sql = self._sql(m._website_candidate_orders)
+		query, params = sql.call_args[0]
+		self.assertIn("INNER JOIN `tabSales Invoice` fi ON fi.name = ", query)
+		self.assertIn("fi.creation AS first_creation", query)
+		self.assertIn("si.woo_order_id >= %(first_order)s", query)
+		self.assertIn("LOWER(TRIM(IFNULL(fi.custom_order_channel", query)
+		# A POS edit of a website order is stamped flutter and must still be found.
+		self.assertNotIn("IFNULL(si.custom_order_channel, '') = ''", query)
+		self.assertEqual(params["first_order"], 19100)
+
+	def test_website_query_needs_a_cutover_and_the_woo_markers(self):
+		rows, sql = self._sql(m._website_candidate_orders, settings={"website_first_order": 0})
+		self.assertEqual(rows, [])
+		sql.assert_not_called()
+		rows, sql = self._sql(m._website_candidate_orders, columns=("woo_source_type", "woo_transaction_id"))
+		self.assertEqual(rows, [])
+		sql.assert_not_called()
+
+	def test_chat_query_leaves_website_orders_out_and_takes_woo_recreated_pos_orders(self):
+		_, sql = self._sql(m._candidate_orders)
+		query = sql.call_args[0][0]
+		self.assertIn("si.custom_order_channel = 'flutter' AND NOT", query)
+		self.assertIn("fi.custom_order_channel = 'flutter'", query)
+		self.assertIn("AS first_invoice", query)
+
+	def test_chat_query_without_the_woo_app_is_unchanged(self):
+		_, sql = self._sql(m._candidate_orders, columns=("woo_order_id",))
+		query = sql.call_args[0][0]
+		self.assertIn("AND si.custom_order_channel = 'flutter'", query)
+		self.assertIn("NULL AS first_invoice", query)
+
+
+class ChatEventIdTest(unittest.TestCase):
+	def _id(self, order, first_amended_from=None):
+		db = SimpleNamespace(get_value=mock.Mock(return_value=first_amended_from))
+		with mock.patch.object(m.frappe, "db", db, create=True):
+			return m._chat_event_id(order)
+
+	def test_pos_order_keeps_its_own_id(self):
+		self.assertEqual(
+			self._id(_order(custom_order_channel="flutter", first_invoice="ACC-SINV-9")), "ACC-SINV-9"
+		)
+		order = _order(name="ACC-SINV-9-1", amended_from="ACC-SINV-9", custom_order_channel="flutter")
+		self.assertEqual(self._id(order), "ACC-SINV-9")
+
+	def test_pos_order_woo_recreated_is_the_same_order(self):
+		order = _order(name="ACC-SINV-40", custom_order_channel="", first_invoice="ACC-SINV-9")
+		self.assertEqual(self._id(order), "ACC-SINV-9")
+		order = _order(name="ACC-SINV-40", custom_order_channel="", first_invoice="ACC-SINV-9-1")
+		self.assertEqual(self._id(order, first_amended_from="ACC-SINV-9"), "ACC-SINV-9")
 
 
 def _web_inv(**over):
@@ -1072,9 +1170,69 @@ class WebsiteSendTimeTest(unittest.TestCase):
 		_, reason = self._event(_web_inv(), customer={"mobile_no": "", m.CUSTOMER_EXCLUDE_FIELD: 1})
 		self.assertEqual(reason, "Customer excluded from Meta")
 
+	def test_unreadable_landing_time_only_loses_the_click_id(self):
+		event, reason = self._event(_web_inv(woo_session_start="not a time"))
+		self.assertEqual(reason, "")
+		self.assertNotIn("fbc", event["user_data"])
+
 	def test_no_click_id_means_no_fbc(self):
 		event, _ = self._event(_web_inv(woo_session_entry="https://orderjarz.com/", woo_session_start=""))
 		self.assertNotIn("fbc", event["user_data"])
+
+
+class SendLoopIsolationTest(unittest.TestCase):
+	def test_a_row_that_cannot_be_built_fails_alone(self):
+		rows = [
+			SimpleNamespace(
+				name="EV-1",
+				invoice="I-1",
+				source=m.SOURCE_WEBSITE,
+				event_id="woo-1",
+				event_time=D(2026, 10, 20, 11, 0),
+				order_value=100,
+				attempts=0,
+			),
+			SimpleNamespace(
+				name="EV-2",
+				invoice="I-2",
+				source=m.SOURCE_CHAT,
+				event_id="I-2",
+				event_time=D(2026, 10, 20, 11, 0),
+				order_value=100,
+				attempts=0,
+			),
+		]
+		settings = {
+			"enabled": 1,
+			"test_mode": 0,
+			"test_event_code": "",
+			"send_website_orders": 1,
+			"website_first_order": 1,
+			"blocked_phones": (),
+			"website_url": "u",
+		}
+		db = SimpleNamespace(sql=mock.Mock(return_value=rows), commit=lambda: None)
+		marks, posted = [], []
+		with (
+			mock.patch.object(m, "load_settings", return_value=settings),
+			mock.patch.object(m, "_access_token", return_value="t"),
+			mock.patch.object(m.frappe, "db", db, create=True),
+			mock.patch.object(m.frappe, "log_error", mock.Mock(), create=True),
+			mock.patch.object(m.frappe, "get_traceback", mock.Mock(return_value=""), create=True),
+			mock.patch.object(m, "_website_event_for_row", side_effect=ValueError("bad")),
+			mock.patch.object(m, "_event_for_row", return_value=({"event_id": "I-2"}, "")),
+			mock.patch.object(
+				m, "_post_events", side_effect=lambda s, t, ev: (posted.extend(ev), (True, {}))[1]
+			),
+			mock.patch.object(m, "_mark", lambda name, values: marks.append((name, values))),
+			mock.patch("frappe.utils.now_datetime", return_value=D(2026, 10, 21, 12, 0)),
+		):
+			result = m.send_approved_events()
+		self.assertEqual(result["failed"], 1)
+		self.assertEqual(result["sent"], 1)
+		self.assertEqual(posted, [{"event_id": "I-2"}])
+		self.assertEqual(marks[0][0], "EV-1")
+		self.assertEqual(marks[0][1]["status"], m.STATUS_FAILED)
 
 
 if __name__ == "__main__":

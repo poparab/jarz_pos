@@ -21,7 +21,7 @@
   "do_not_send_phones",
   "section_website",
   "send_website_orders",
-  "website_start",
+  "website_first_order",
   "column_break_w",
   "website_url"
  ],
@@ -129,15 +129,15 @@
    "fieldtype": "Check",
    "label": "Send Website Orders",
    "default": "0",
-   "description": "Tick only after the website plugin has stopped sending Purchase (browser and server). Otherwise Meta counts those orders twice."
+   "description": "Tick only after the website plugin has stopped sending Purchase (browser and server), and set First Website Order #. Otherwise Meta counts those orders twice."
   },
   {
-   "fieldname": "website_start",
-   "fieldtype": "Datetime",
-   "label": "Website Orders From",
+   "fieldname": "website_first_order",
+   "fieldtype": "Int",
+   "label": "First Website Order #",
    "depends_on": "eval:doc.send_website_orders",
    "mandatory_depends_on": "eval:doc.send_website_orders",
-   "description": "The moment the plugin stopped sending Purchase. Only website orders placed from this moment are sent, so no order is counted by both."
+   "description": "The first Woo order number placed after the plugin stopped sending Purchase. Earlier orders were already counted by the plugin at checkout, so they are never sent."
   },
   {
    "fieldname": "column_break_w",
@@ -153,7 +153,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-10-17 20:00:00.000000",
+ "modified": "2026-10-17 21:00:00.000000",
  "modified_by": "Administrator",
  "module": "jarz pos",
  "name": "Meta CAPI Settings",

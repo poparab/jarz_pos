@@ -11,7 +11,11 @@ class MetaCAPISettings(Document):
 			frappe.throw(_("Add the Test Event Code, or untick Test Mode, before enabling."))
 		if (self.hold_above or 0) < 0:
 			frappe.throw(_("Hold amount cannot be negative."))
-		if self.send_website_orders and not self.website_start:
+		if (self.website_first_order or 0) < 0:
+			frappe.throw(_("First Website Order # cannot be negative."))
+		if self.send_website_orders and not self.website_first_order:
 			frappe.throw(
-				_("Set Website Orders From to the moment the website plugin stopped sending Purchase.")
+				_(
+					"Set First Website Order # to the first Woo order placed after the website plugin stopped sending Purchase."
+				)
 			)

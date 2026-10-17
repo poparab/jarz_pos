@@ -109,6 +109,11 @@ MAX_ATTEMPTS = 3
 MAX_QUEUE_PER_RUN = 500
 MAX_QUEUE_ROUNDS = 10  # a 7-day backfill can hold more than one page of orders
 MAX_SEND_PER_RUN = 500
+# How far back the website queue looks for a delivered order. Longer than Meta's
+# 7 days so an order delivered late still gets a row (Expired) instead of none.
+WEBSITE_LOOKBACK = timedelta(days=30)
+# The Woo app stores attribution text (landing URL, user agent) cut at 140.
+WOO_TEXT_LIMIT = 140
 BATCH_SIZE = 50
 HTTP_TIMEOUT = 30
 
@@ -226,10 +231,15 @@ def fbc_from(entry_url: Any, first_seen_ms: int | None) -> str | None:
 	"""Meta's ``fbc`` (``fb.1.<ms>.<fbclid>``) from the landing URL, or None.
 
 	*first_seen_ms* is when the visitor landed with the click id; the fbclid is
-	passed on unchanged, as Meta asks.
+	passed on unchanged, as Meta asks. The Woo app keeps only the first 140
+	characters of the URL, so a click id that runs to that cut may be missing
+	its tail and is not used.
 	"""
-	match = _FBCLID.search(str(entry_url or ""))
+	text = str(entry_url or "")
+	match = _FBCLID.search(text)
 	if not match or not first_seen_ms:
+		return None
+	if len(text) >= WOO_TEXT_LIMIT and match.end() == len(text):
 		return None
 	return f"fb.1.{int(first_seen_ms)}.{match.group(1)}"
 
@@ -447,15 +457,22 @@ def load_settings() -> dict[str, Any]:
 		"excluded_groups": parse_groups(_get(doc, "excluded_customer_groups", "")),
 		"blocked_phones": parse_phones(_get(doc, "do_not_send_phones", "")),
 		"send_website_orders": int(_get(doc, "send_website_orders", 0) or 0),
-		"website_start": _get(doc, "website_start"),
+		"website_first_order": _int(_get(doc, "website_first_order", 0)),
 		# A Single never picks up a new field's default, so the fallback lives here.
 		"website_url": str(_get(doc, "website_url", DEFAULT_WEBSITE_URL)).strip(),
 	}
 
 
+def _int(value: Any) -> int:
+	try:
+		return int(value or 0)
+	except (TypeError, ValueError):
+		return 0
+
+
 def website_live(settings: dict[str, Any]) -> bool:
-	"""Website orders are queued and sent only with the switch on and a start time set."""
-	return bool(settings.get("send_website_orders") and settings.get("website_start"))
+	"""Website orders are queued and sent only with the switch on and a first order number set."""
+	return bool(settings.get("send_website_orders") and _int(settings.get("website_first_order")) > 0)
 
 
 def _access_token(settings: dict[str, Any]) -> str | None:
@@ -505,8 +522,45 @@ def _queue_since(settings: dict[str, Any], backfill_days: int | None) -> datetim
 	return floor
 
 
+def _first_invoice_sql(alias: str = "si") -> str:
+	"""The first invoice ever made for *alias*'s Woo order, cancelled ones included.
+
+	Editing an order cancels its invoice and makes another, in POS (stamped
+	``flutter``) or from a Woo-side amendment (no channel). Only the first
+	invoice says where the order really came from.
+	"""
+	return f"""(SELECT f.name FROM `tabSales Invoice` f
+                 WHERE f.woo_order_id = {alias}.woo_order_id AND IFNULL(f.is_return, 0) = 0
+                 ORDER BY f.creation ASC, f.name ASC LIMIT 1)"""
+
+
+def _woo_origin_sql(alias: str) -> str | None:
+	"""SQL truth for "this invoice is a website (Woo-origin) order", or None without the Woo columns.
+
+	Same rule as ``api.ops_reports._woo_origin_sql``: channel ``woo``, or no
+	channel and the Woo app's own markers (an attribution source other than
+	``pos``, or an online payment id). A POS order pushed to Woo carries a Woo
+	id too, so the id alone proves nothing.
+	"""
+	has = frappe.db.has_column
+	markers = []
+	if has("Sales Invoice", "woo_source_type"):
+		markers.append(f"LOWER(TRIM(IFNULL({alias}.woo_source_type, ''))) NOT IN ('', 'pos')")
+	if has("Sales Invoice", "woo_transaction_id"):
+		markers.append(f"TRIM(IFNULL({alias}.woo_transaction_id, '')) <> ''")
+	if not markers:
+		return None
+	channel = f"LOWER(TRIM(IFNULL({alias}.custom_order_channel, '')))"
+	return f"({channel} = 'woo' OR ({channel} = '' AND ({' OR '.join(markers)})))"
+
+
 def _candidate_orders(settings: dict[str, Any], since: datetime) -> list[Any]:
 	"""Every delivered chat order inside the window that has no log row yet.
+
+	A chat order is one first entered in the POS app. A website order edited
+	in POS is stamped ``flutter`` too, and stays a website order; a POS order
+	that Woo re-created has no channel, and stays a chat order. Both are told
+	apart by the first invoice of their Woo order.
 
 	The send rules are NOT applied here: an order that fails one still gets a
 	row, Skipped with the reason, so every chat order is accounted for.
@@ -519,10 +573,26 @@ def _candidate_orders(settings: dict[str, Any], since: datetime) -> list[Any]:
 		"IFNULL(si.custom_is_partner_order, 0)" if has("Sales Invoice", "custom_is_partner_order") else "0"
 	)
 	excluded = f"IFNULL(c.{CUSTOMER_EXCLUDE_FIELD}, 0)" if has("Customer", CUSTOMER_EXCLUDE_FIELD) else "0"
+	origin = _woo_origin_sql("fi") if has("Sales Invoice", "woo_order_id") else None
+	if origin:
+		first = _first_invoice_sql("si")
+		has_woo = "IFNULL(si.woo_order_id, 0) > 0"
+		first_invoice = f"CASE WHEN {has_woo} THEN {first} END"
+		chat = f"""(
+            (si.custom_order_channel = 'flutter' AND NOT ({has_woo} AND EXISTS (
+                SELECT 1 FROM `tabSales Invoice` fi WHERE fi.name = {first} AND {origin})))
+            OR (IFNULL(si.custom_order_channel, '') = '' AND {has_woo} AND EXISTS (
+                SELECT 1 FROM `tabSales Invoice` fi
+                 WHERE fi.name = {first} AND fi.custom_order_channel = 'flutter'))
+          )"""
+	else:
+		first_invoice = "NULL"
+		chat = "si.custom_order_channel = 'flutter'"
 	# nosemgrep: frappe-sql-format-injection -- only module constants interpolated; every value is a bound parameter
 	return frappe.db.sql(
 		f"""
         SELECT si.name, si.amended_from, si.customer, si.customer_name, si.grand_total, si.creation,
+               si.custom_order_channel, {first_invoice} AS first_invoice,
                si.contact_mobile, c.mobile_no AS customer_mobile,
                si.custom_order_purpose, si.sales_partner, {partner} AS is_partner_order,
                c.customer_type, c.customer_group, {excluded} AS exclude_from_meta
@@ -530,7 +600,7 @@ def _candidate_orders(settings: dict[str, Any], since: datetime) -> list[Any]:
         INNER JOIN `tabCustomer` c ON c.name = si.customer
         WHERE si.docstatus = 1
           AND IFNULL(si.is_return, 0) = 0
-          AND si.custom_order_channel = 'flutter'
+          AND {chat}
           AND si.custom_sales_invoice_state = 'Delivered'
           AND si.creation >= %(since)s
           AND NOT EXISTS (SELECT 1 FROM `tabMeta CAPI Event` e WHERE e.invoice = si.name)
@@ -542,23 +612,23 @@ def _candidate_orders(settings: dict[str, Any], since: datetime) -> list[Any]:
 	)
 
 
-def _website_since(settings: dict[str, Any], backfill_days: int | None) -> datetime:
-	"""Never before ``Website Orders From``: orders placed earlier were already
-	reported by the plugin at checkout."""
-	from frappe.utils import get_datetime
+def _website_since() -> datetime:
+	"""How far back the website queue looks. Which orders count is decided by
+	``First Website Order #``, not by time; this only bounds the scan."""
+	from frappe.utils import now_datetime
 
-	since = _queue_since(dict(settings, start_date=None), backfill_days)
-	return max(since, get_datetime(settings["website_start"]))
+	return now_datetime() - WEBSITE_LOOKBACK
 
 
 def _website_candidate_orders(settings: dict[str, Any], since: datetime) -> list[Any]:
-	"""Every delivered website order first placed inside the window, with no log row yet.
+	"""Every delivered website order from ``First Website Order #`` on, with no log row yet.
 
-	A website order is a Woo order pulled in by the integration: no order
-	channel and a numeric Woo id. ``first_creation`` is when its first invoice
-	was made (the checkout); an amendment is a later invoice of the same Woo id
-	and keeps that time. The Woo fields belong to the Woo app and are read by
-	column name only.
+	A website order is one whose first invoice came in from the website (see
+	``_woo_origin_sql``); every later invoice of the same Woo order, edited in
+	POS or in Woo, is the same order. ``first_creation`` is when that first
+	invoice was made (minutes after checkout) and is the event time. Orders
+	numbered below the cutover were already reported by the plugin at checkout.
+	The Woo fields belong to the Woo app and are read by column name only.
 	"""
 	has = frappe.db.has_column
 	for column in (
@@ -569,6 +639,10 @@ def _website_candidate_orders(settings: dict[str, Any], since: datetime) -> list
 	):
 		if not has("Sales Invoice", column):
 			return []
+	origin = _woo_origin_sql("fi")
+	first_order = _int(settings.get("website_first_order"))
+	if not origin or first_order <= 0:
+		return []
 	partner = (
 		"IFNULL(si.custom_is_partner_order, 0)" if has("Sales Invoice", "custom_is_partner_order") else "0"
 	)
@@ -580,26 +654,24 @@ def _website_candidate_orders(settings: dict[str, Any], since: datetime) -> list
 	return frappe.db.sql(
 		f"""
         SELECT si.name, si.amended_from, si.customer, si.customer_name, si.grand_total, si.woo_order_id,
-               (SELECT MIN(f.creation) FROM `tabSales Invoice` f
-                 WHERE f.woo_order_id = si.woo_order_id AND IFNULL(f.custom_order_channel, '') = ''
-               ) AS first_creation,
+               fi.creation AS first_creation,
                si.contact_mobile, {woo_phone} AS woo_phone, c.mobile_no AS customer_mobile,
                si.custom_order_purpose, si.sales_partner, {partner} AS is_partner_order,
                c.customer_type, c.customer_group, {excluded} AS exclude_from_meta
         FROM `tabSales Invoice` si
         INNER JOIN `tabCustomer` c ON c.name = si.customer
+        INNER JOIN `tabSales Invoice` fi ON fi.name = {_first_invoice_sql("si")}
         WHERE si.docstatus = 1
           AND IFNULL(si.is_return, 0) = 0
-          AND IFNULL(si.custom_order_channel, '') = ''
-          AND IFNULL(si.woo_order_id, '') REGEXP '^[0-9]+$'
+          AND si.woo_order_id >= %(first_order)s
+          AND {origin}
           AND si.custom_sales_invoice_state = 'Delivered'
           AND si.creation >= %(since)s
           AND NOT EXISTS (SELECT 1 FROM `tabMeta CAPI Event` e WHERE e.invoice = si.name)
-        HAVING first_creation >= %(since)s
         ORDER BY si.creation ASC
         LIMIT %(limit)s
         """,
-		{"since": since, "limit": MAX_QUEUE_PER_RUN},
+		{"since": since, "first_order": first_order, "limit": MAX_QUEUE_PER_RUN},
 		as_dict=True,
 	)
 
@@ -629,8 +701,17 @@ def _duplicate_reason(event_id: str, invoice: str) -> str | None:
 	return None
 
 
+def _chat_event_id(order: Any) -> str:
+	"""The chat order's id. A POS order that Woo re-created (no channel) has no
+	``amended_from``; it is the same order as the first invoice of its Woo order."""
+	first = _get(order, "first_invoice")
+	if first and _get(order, "custom_order_channel") != "flutter":
+		return event_id_for(first, frappe.db.get_value("Sales Invoice", first, "amended_from"))
+	return event_id_for(order.name, order.amended_from)
+
+
 def _queue_one(order: Any, settings: dict[str, Any]) -> str:
-	event_id = event_id_for(order.name, order.amended_from)
+	event_id = _chat_event_id(order)
 	phone = normalize_eg_mobile(order.contact_mobile) or normalize_eg_mobile(order.customer_mobile)
 	reason = rule_skip_reason(
 		order,
@@ -672,6 +753,8 @@ def _queue_website_one(order: Any, settings: dict[str, Any]) -> str:
 	only the delivered ones go. Whether a phone or email is there to match on
 	is checked at send time.
 	"""
+	from frappe.utils import get_datetime, now_datetime
+
 	event_id = website_event_id(order.woo_order_id)
 	phones = order_phones(order.woo_phone, order.contact_mobile, order.customer_mobile)
 	phone = (
@@ -686,6 +769,9 @@ def _queue_website_one(order: Any, settings: dict[str, Any]) -> str:
 		status = STATUS_SKIPPED
 	elif float(order.grand_total or 0) <= 0:
 		status, reason = STATUS_SKIPPED, "Order value is zero"
+	elif is_expired(get_datetime(order.first_creation), now_datetime()):
+		# Delivered more than a week after checkout: Meta would refuse it.
+		status, reason = STATUS_EXPIRED, "Older than Meta's 7-day limit"
 	else:
 		status, reason = STATUS_APPROVED, ""
 	duplicate = _duplicate_reason(event_id, order.name)
@@ -744,7 +830,7 @@ def queue_delivered_orders(backfill_days: int | None = None) -> dict[str, Any]:
 			result,
 		)
 		if website_live(settings):
-			web_since = _website_since(settings, backfill_days)
+			web_since = _website_since()
 			_queue_pages(
 				lambda: _website_candidate_orders(settings, web_since),
 				lambda order: _queue_website_one(order, settings),
@@ -878,7 +964,10 @@ def _website_event_for_row(
 	if landed:
 		from frappe.utils import get_datetime
 
-		fbc = fbc_from(_get(inv, "woo_session_entry"), to_unix(get_datetime(landed), tz_name) * 1000)
+		try:
+			fbc = fbc_from(_get(inv, "woo_session_entry"), to_unix(get_datetime(landed), tz_name) * 1000)
+		except Exception:  # the Woo app stores this as text; an odd value only loses the click id
+			fbc = None
 	user_data = build_website_user_data(
 		phone=phone,
 		email=email,
@@ -968,10 +1057,15 @@ def send_approved_events() -> dict[str, Any]:
 				result["expired"] += 1
 				continue
 			blocked = settings.get("blocked_phones", ())
-			if _get(row, "source") == SOURCE_WEBSITE:
-				event, reason = _website_event_for_row(row, tz_name, blocked, settings.get("website_url"))
-			else:
-				event, reason = _event_for_row(row, tz_name, blocked)
+			try:
+				if _get(row, "source") == SOURCE_WEBSITE:
+					event, reason = _website_event_for_row(row, tz_name, blocked, settings.get("website_url"))
+				else:
+					event, reason = _event_for_row(row, tz_name, blocked)
+			except Exception:
+				frappe.log_error(frappe.get_traceback(), f"meta_capi: build event {row.name} failed")
+				_record_failure(row, "Could not build the event from the invoice", result)
+				continue
 			if not event:
 				_mark(row.name, {"status": STATUS_SKIPPED, "status_reason": reason})
 				result["skipped"] += 1
