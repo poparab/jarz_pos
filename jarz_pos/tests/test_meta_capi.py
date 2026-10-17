@@ -282,6 +282,12 @@ class SendTimeEligibilityTest(unittest.TestCase):
 		self.assertIsNone(event)
 		self.assertEqual(reason, "Phone on the do-not-send list")
 
+	def test_blocked_customer_mobile_wins_over_a_different_contact_number(self):
+		customer = {"mobile_no": "01112223333", m.CUSTOMER_EXCLUDE_FIELD: 0}
+		event, reason = self._event(_inv(), customer=customer, blocked=m.parse_phones("01112223333"))
+		self.assertIsNone(event)
+		self.assertEqual(reason, "Phone on the do-not-send list")
+
 	def test_customer_mobile_is_the_fallback_phone(self):
 		event, reason = self._event(_inv(contact_mobile=""), customer={"mobile_no": "01001234567"})
 		self.assertEqual(reason, "")
@@ -538,6 +544,15 @@ class RuleSkipReasonTest(unittest.TestCase):
 		self.assertEqual(self.reason(exclude_from_meta=1), "Customer excluded from Meta")
 		self.assertEqual(self.reason(blocked=m.parse_phones("01001234567")), "Phone on the do-not-send list")
 
+	def test_any_of_the_order_phones_can_block(self):
+		blocked = m.parse_phones("01112223333")
+		others = m.order_phones("01001234567", "+20 111 222 3333", "junk")
+		self.assertEqual(len(others), 2)
+		phone = m.normalize_eg_mobile("01001234567")
+		reason = m.rule_skip_reason(_order(), phone, ("B2B",), blocked, others)
+		self.assertEqual(reason, "Phone on the do-not-send list")
+		self.assertIsNone(m.rule_skip_reason(_order(), phone, ("B2B",), blocked))
+
 	def test_purpose_is_checked_before_the_group(self):
 		self.assertEqual(
 			self.reason(custom_order_purpose="Employee", customer_group="Employee"),
@@ -634,6 +649,20 @@ class QueueOneTest(unittest.TestCase):
 		status, row, _ = self._queue(_order(name="ACC-SINV-9-1", amended_from="ACC-SINV-9"), earlier)
 		self.assertEqual(status, m.STATUS_SKIPPED)
 		self.assertEqual(row["status_reason"], "Already queued: same order as ACC-SINV-9 (Sent)")
+
+	def test_rule_skipped_amendment_still_retires_the_original(self):
+		earlier = [SimpleNamespace(name="EV-1", invoice="ACC-SINV-9", status=m.STATUS_PENDING)]
+		order = _order(name="ACC-SINV-9-1", amended_from="ACC-SINV-9", exclude_from_meta=1)
+		status, row, marks = self._queue(order, earlier)
+		self.assertEqual(status, m.STATUS_SKIPPED)
+		self.assertEqual(row["status_reason"], "Customer excluded from Meta")
+		self.assertEqual([name for name, _ in marks], ["EV-1"])
+
+	def test_blocked_customer_mobile_is_skipped_behind_another_contact_number(self):
+		with mock.patch.dict(QUEUE_SETTINGS, {"blocked_phones": m.parse_phones("01112223333")}):
+			status, row, _ = self._queue(_order(customer_mobile="01112223333"))
+		self.assertEqual(status, m.STATUS_SKIPPED)
+		self.assertEqual(row["status_reason"], "Phone on the do-not-send list")
 
 
 class RetryTest(unittest.TestCase):
