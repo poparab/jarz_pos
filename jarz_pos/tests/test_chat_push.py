@@ -176,7 +176,13 @@ class ExcludeClosedFilterTest(unittest.TestCase):
 			mock.patch.object(cc, "pending_draft_conversations", return_value=set()),
 		):
 			self.chat.get_conversations(**kwargs)
-		return get_all.call_args.kwargs["filters"]
+		# On a real site Frappe makes its own get_all calls (e.g. Custom Field
+		# lookups) after ours, so pick the conversation query, not the last call.
+		calls = [
+			c for c in get_all.call_args_list if (c.args[:1] or (c.kwargs.get("doctype"),))[0] == cc.CONVERSATION
+		]
+		self.assertEqual(len(calls), 1, get_all.call_args_list)
+		return calls[0].kwargs["filters"]
 
 	def test_open_tab_drops_closed_only(self):
 		self.assertIn(
