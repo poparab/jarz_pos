@@ -747,6 +747,11 @@ jobs:
             test_chat_webhook
             test_chat_drafts
             test_chat_send
+            # Chat live updates (feature chat-live-updates). Mocked, no site:
+            # the instant push on a customer message (title, body, per-chat
+            # throttle, suppression, never raises), only inbound non-reaction
+            # messages push, and the Open tab's exclude_closed filter.
+            test_chat_push
           )
           rc=0
           for m in "${MODULES[@]}"; do

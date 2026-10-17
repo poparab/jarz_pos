@@ -111,8 +111,13 @@ def get_conversations(
 	mine: int | str | None = 0,
 	limit: int | str | None = 30,
 	before: str | None = None,
+	exclude_closed: int | str | None = 0,
 ) -> dict[str, Any]:
-	"""Inbox list, newest activity first. ``before`` is a ``last_message_at`` cursor."""
+	"""Inbox list, newest activity first. ``before`` is a ``last_message_at`` cursor.
+
+	``exclude_closed`` with ``status="all"`` is the app's "Open" tab: every chat
+	still in play, waiting (Open) or already replied to (Answered).
+	"""
 	_gate()
 	limit_n = _int(limit, 30, _MAX_LIST)
 	filters: list[list[Any]] = []
@@ -121,6 +126,8 @@ def get_conversations(
 		if status not in ("Open", "Answered", "Closed"):
 			frappe.throw(_("Unknown status filter: {0}").format(status))
 		filters.append([cc.CONVERSATION, "status", "=", status])
+	elif str(exclude_closed or "0") in ("1", "true", "True"):
+		filters.append([cc.CONVERSATION, "status", "!=", "Closed"])
 	if channel:
 		if channel not in cc.CHANNELS:
 			frappe.throw(_("Unknown channel: {0}").format(channel))

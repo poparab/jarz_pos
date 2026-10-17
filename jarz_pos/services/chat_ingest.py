@@ -784,6 +784,7 @@ def _persist_message(
 		and mtype in ("image", "audio", "video", "document", "sticker"),
 		"media_url": media_url if media_url and not stored_url else None,
 		"superseded": bool(superseded),
+		"push": inbound and mtype != "reaction",
 	}
 
 
@@ -869,6 +870,10 @@ def _after_commit(actions: list[dict[str, Any]], status_conversations: set[str])
 				)
 		except Exception:
 			cc.safe_log_error("chat: post-commit action failed")
+		if action.get("push"):
+			from jarz_pos.services.chat_alerts import push_new_message
+
+			push_new_message(action["conversation"], action["message"])
 	for conv in status_conversations:
 		cc.publish_chat_update(conv, "status")
 	try:
