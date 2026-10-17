@@ -41,12 +41,14 @@ UNKNOWN = "[؟]"
 TYPED_NUMBER_WARNING = "AI typed a number — check it"
 EDIT_DISTANCE_CAP = 2000
 
-#: USD per million tokens: (input, output).
+#: USD per million tokens: (input, output, cache read), from
+#: platform.claude.com/docs/en/about-claude/pricing (checked 2026-10-17).
+#: Cache read is per model: 0.1x input on Haiku 5.5, 0.05x on Sonnet 5.5.
 PRICES = {
-	"claude-haiku-5-5": (1.0, 5.0),
-	"claude-sonnet-5-5": (3.0, 15.0),
+	"claude-haiku-5-5": (0.10, 0.50, 0.01),
+	"claude-sonnet-5-5": (2.00, 10.00, 0.10),
 }
-CACHE_READ_FACTOR = 0.1
+#: A 5-minute cache write is 1.25x the input price on every model.
 CACHE_WRITE_FACTOR = 1.25
 
 _DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
@@ -719,11 +721,11 @@ def complaint_requires_edit(is_complaint: Any, draft_text: Any, final_text: Any)
 def cost_usd(
 	model: str, input_tokens: Any, output_tokens: Any, cache_read: Any = 0, cache_write: Any = 0
 ) -> float:
-	price_in, price_out = PRICES.get(str(model or ""), PRICES["claude-haiku-5-5"])
+	price_in, price_out, price_read = PRICES.get(str(model or ""), PRICES["claude-haiku-5-5"])
 	total = (
 		int(input_tokens or 0) * price_in
 		+ int(output_tokens or 0) * price_out
-		+ int(cache_read or 0) * price_in * CACHE_READ_FACTOR
+		+ int(cache_read or 0) * price_read
 		+ int(cache_write or 0) * price_in * CACHE_WRITE_FACTOR
 	)
 	return round(total / 1_000_000, 6)

@@ -313,15 +313,20 @@ class ReviewRulesTest(unittest.TestCase):
 
 class CostTest(unittest.TestCase):
 	def test_haiku(self):
-		self.assertAlmostEqual(d.cost_usd("claude-haiku-5-5", 1000, 500), 0.0035)
+		# $0.10 in / $0.50 out per million tokens
+		self.assertAlmostEqual(d.cost_usd("claude-haiku-5-5", 1000, 500), 0.00035)
 
 	def test_cache_tokens(self):
-		self.assertAlmostEqual(d.cost_usd("claude-haiku-5-5", 1000, 500, cache_read=10000), 0.0045)
-		self.assertAlmostEqual(d.cost_usd("claude-haiku-5-5", 0, 0, cache_write=1000), 0.00125)
+		# Haiku cache read $0.01 / MTok, 5-minute write 1.25x input = $0.125 / MTok
+		self.assertAlmostEqual(d.cost_usd("claude-haiku-5-5", 1000, 500, cache_read=10000), 0.00045)
+		self.assertAlmostEqual(d.cost_usd("claude-haiku-5-5", 0, 0, cache_write=1000), 0.000125)
 
 	def test_sonnet_and_unknown_model(self):
-		self.assertAlmostEqual(d.cost_usd("claude-sonnet-5-5", 1000, 1000), 0.018)
-		self.assertAlmostEqual(d.cost_usd("some-new-model", 1000, 500), 0.0035)
+		# $2 in / $10 out; cache read is 0.05x input ($0.10), not 0.1x
+		self.assertAlmostEqual(d.cost_usd("claude-sonnet-5-5", 1000, 1000), 0.012)
+		self.assertAlmostEqual(d.cost_usd("claude-sonnet-5-5", 0, 0, cache_read=10000), 0.001)
+		self.assertAlmostEqual(d.cost_usd("claude-sonnet-5-5", 0, 0, cache_write=1000), 0.0025)
+		self.assertAlmostEqual(d.cost_usd("some-new-model", 1000, 500), 0.00035)
 		self.assertEqual(d.cost_usd("claude-haiku-5-5", None, None), 0.0)
 
 
