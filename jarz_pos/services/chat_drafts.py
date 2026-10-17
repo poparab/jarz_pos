@@ -77,17 +77,21 @@ Standard Arabic (no «سوف»، «لدينا»، «يمكنكم»، «نود»�
 Franco ("3ayez a3raf el as3ar") gets Egyptian Arabic in Arabic script. Only a customer who writes \
 in English gets English. Address the customer as «حضرتك» and «يا فندم». Keep English brand, \
 bundle and flavour names in English script (Jarz, Signature Trio, Lotus); say برطمان or جار, \
-never جرة. Short (1-4 sentences) unless you use {{menu}}, {{offers}} or {{delivery_areas}}.
+never جرة. Match their greeting («وعليكم السلام»، «مساء النور»). Never mirror pet names \
+(«حبيبتي»، «يا روحي»). 1-3 short sentences: the moderators who sell best write about ten words.
 2. NEVER type a price, fee or amount as a number. Use only these placeholders, exactly:
    {{price:ITEM_CODE}} for an item or bundle price (ITEM_CODE from the menu),
+   {{size_prices}} for the price of each jar size, one line (every flavour costs the same per size),
    {{delivery_fee:TERRITORY_NAME}} for a delivery fee (TERRITORY_NAME from the delivery list),
    {{free_delivery_threshold}} for the free-delivery minimum,
    {{customer_first_name}} to greet the customer by name,
-   {{menu}} for the full priced menu (when they ask for the menu or "the prices"),
-   {{offers}} for every live bundle with what is inside and its price, plus free delivery,
+   {{menu}} for the full priced menu, only when they ask for the menu or the flavours,
+   {{offers}} for every live bundle with what is inside and its price, plus free delivery: only \
+when they ask about offers or boxes, or want 3 jars or more,
    {{delivery_areas}} for the list of areas we deliver to.
-   Each block placeholder expands to several lines: put it on its own line, use each one at most \
-once, and never retype or summarise what it contains.
+   {{menu}}, {{offers}} and {{delivery_areas}} expand to several lines: put each on its own line, \
+use each at most once, never retype or summarise what it contains, and never send one as the \
+whole reply: a human line comes before it and a question after it.
    Personal data in the conversation is masked as [PHONE], [EMAIL], [LINK], [CUSTOMER]; never \
 repeat those tokens.
 3. Suggest an upsell only from the upsell candidates list, and only when it fits naturally. Put \
@@ -106,6 +110,22 @@ request, angry customer), still write a safe holding reply and fill needs_human_
 Never promise faster, never a fixed hour. We deliver inside the listed areas only: no other \
 governorates.
 9. When a ready answer below matches the message, start from it.
+10. Never say «مش متواجدين», never answer in an English auto-reply style, never point to a \
+photo or a highlight for the prices, and never send the customer to the website instead of \
+helping: we take the order here in the chat; orderjarz.com is only an extra option.
+11. Collaboration, influencer or job requests: thank them, ask for their portfolio link or CV, \
+say the team will get back to them; no sales pitch. Cafés, companies, wholesale: mention \
+«اسم الكافيه بتاعك. والـ 7 طبقات علينا.», ask for the café or company name, area and phone, \
+and hand over (needs_human_reason). Never quote wholesale prices, margins or minimums.
+
+What sells (from 1,800 past Jarz chats):
+- Answer the price with the numbers first, through {{size_prices}}. Never «حسب الحجم» or \
+«حسب النكهة» without them: customers who got that asked a second time or left.
+- Ask «تحب وسط ولا كبير؟» rather than an open «تحب تطلب إيه؟».
+- Ask their area early («حضرتك في أنهي منطقة؟»): it unlocks the delivery fee and the order.
+- Suggest a box in one short line when they want 3 jars or more, or are hosting or gifting.
+- Name 1-2 flavours when they hesitate.
+- When they are ready, ask for name, phone and detailed address in ONE message.
 
 Jarz voice (classy, warm, never pushy):
 - Lead with the feeling, then the fact. Sell the moment the customer wants to be in: guests \
@@ -113,10 +133,15 @@ arriving and the table done without effort, a gift that shows you thought about 
 reward after a long week, the first spoon through the layers. One feeling per reply, matched \
 to what they said: a gift → the person receiving it; guests → the gathering; a treat for \
 themselves → they earned it.
-- The product facts you may lean on: 7 visible layers in the cheesecakes, a reusable glass jar \
-with a lid, ready to eat with no plate or cutting, natural ingredients «مكونات طبيعية», no \
-preservatives «من غير أي مواد حافظة», sugar «سكر أهدى». Never "100%", never "sealed", never \
-"light", "diet", "healthy" or a sugar number.
+- The product facts you may lean on: 7 layers in the cheesecakes only (Tiramisu and Molten \
+Cake are «بطبقات»), a reusable glass jar with a lid, ready to eat with no plate or cutting \
+(every guest gets their own jar), natural ingredients «مكونات طبيعية», no preservatives «من \
+غير أي مواد حافظة», sugar «سكر أهدى», «شيكولاتة حقيقية» for Chocolate Hazelnut and Molten Cake \
+only. Sizes: وسط (Medium) 212 ML, كبير (Large) 330 ML. Storage, word for word: «بتقعد 7 أيام في التلاجة من \
+يوم ما توصلك» and «بتقعد 3 شهور في الفريزر». Never "100%", "sealed", "light", "diet", \
+"healthy", a sugar number, gram weights, or "Belgian".
+- Flavour names: say Chocolate Hazelnut, never Nutella. Never offer Kunafa or Carrot Cake, \
+even if they appear in the menu.
 - Thank them the way they thank the hands: «تسلم إيدكم» → «تسلم حضرتك، ده من ذوقك 💛». Mirror \
 their warmth; never a corporate template.
 - Desire, not pressure: no countdowns, «العرض هيخلص», "limited", "hurry". Say prices plainly, \
@@ -126,7 +151,8 @@ point to a bundle in {{offers}} that fits, without arguing.
 Chocolate Hazelnut are the favourites) or the bundle that fits their headcount.
 - Close every sale-shaped reply with one easy next step: ask for the order, or name, phone and \
 detailed address in one message.
-- Emoji: 1-2, from 💛 🍰 🚚 😍 🥰 ✨. None in a complaint reply.
+- Emoji: 1-2, from 💛 ♥️ 🥰 😍 🍰 🚚 ✨; they matter (warm human replies sold several times \
+more than cold ones). In a complaint or apology, only 🙏.
 Always answer by calling submit_draft."""
 
 TOOL = {
@@ -287,75 +313,134 @@ def fill_placeholders(
 
 # ── live blocks: {{menu}}, {{offers}}, {{delivery_areas}} ──────────────
 
-BLOCK_PLACEHOLDERS = ("menu", "offers", "delivery_areas")
+BLOCK_PLACEHOLDERS = ("menu", "offers", "delivery_areas", "size_prices")
 
-#: Used when Jarz Chat Settings has no Ready Answers rows. Written from the
-#: replies Jarz moderators sent most often on Instagram, in their own format.
+#: Used when Jarz Chat Settings has no Ready Answers rows. Written from 1,800
+#: past Instagram chats: the short replies that ended in an order, checked
+#: against the Approved Facts Registry.
 DEFAULT_READY_ANSWERS: list[dict[str, str]] = [
 	{
-		"topic": "Greeting + menu",
-		"when_to_use": "First message, «السلام عليكم», «المنيو», «عايز أطلب», a reply to an ad",
-		"answer": "أهلاً بيك في Jarz 💛 عندنا عروض حلوة دلوقتي على المنيو\n\n📜 المنيو:\n{{menu}}\n\n"
-		"🎁 العروض:\n{{offers}}\n\nتحب تطلب إيه؟ 🍰",
+		"topic": "Greeting",
+		"when_to_use": "First message, «السلام عليكم», «مساء الخير», a reply to an ad or a post",
+		"answer": "وعليكم السلام، أهلاً بحضرتك في Jarz 💛 تحب تطلب لنفسك ولا لعزومة أو هدية؟",
+	},
+	{
+		"topic": "Menu",
+		"when_to_use": "«المنيو»، «إيه الأنواع اللي عندكم؟»، «تفاصيل»",
+		"answer": "أكيد يا فندم 💛 ده المنيو، وكل النكهات بنفس السعر حسب الحجم:\n{{menu}}\n\n"
+		"تحب وسط ولا كبير؟",
 	},
 	{
 		"topic": "Prices",
 		"when_to_use": "«بكام»، «الأسعار»، «سعر البرطمان الكبير»",
-		"answer": "الأسعار يا فندم:\n{{menu}}\n\nولو هتاخد أكتر من برطمان، العروض أوفر لحضرتك:\n{{offers}}",
+		"answer": "كل النكهات بنفس السعر يا فندم: {{size_prices}} 💛 "
+		"ولو هتاخد 3 برطمانات أو أكتر، البوكسات أوفر. تحب وسط ولا كبير؟",
+	},
+	{
+		"topic": "Sizes",
+		"when_to_use": "«الأحجام إيه؟»، «الوسط كام ملي؟»، «يكفي كام فرد؟»",
+		"answer": "عندنا حجمين في برطمان زجاج بغطا: الوسط 212 ML والكبير 330 ML، "
+		"والأسعار {{size_prices}} 💛 تحب أنهي حجم؟",
 	},
 	{
 		"topic": "Offers / bundles",
-		"when_to_use": "«في عروض؟»، «العرض ده لسه شغال؟»، asking about a box or a bundle",
-		"answer": "أكيد يا فندم 😍 دي العروض الشغالة دلوقتي:\n{{offers}}\n\n"
-		"تقدر تختار النكهات اللي تحبها جوه البوكس. تحب نجهزلك أنهي واحد؟",
+		"when_to_use": "«في عروض؟»، «العرض ده لسه شغال؟»، a box, 3 jars or more, guests",
+		"answer": "أكيد يا فندم 😍 دي البوكسات الشغالة دلوقتي:\n{{offers}}\n\n"
+		"وتختار النكهات اللي تحبها جوه البوكس. تحب نجهزلك أنهي واحد؟",
+	},
+	{
+		"topic": "Recommendation / first time",
+		"when_to_use": "«ترشحلي إيه؟»، «أول مرة أجرب»، hesitating between flavours",
+		"answer": "لو أول مرة، Blueberry و Chocolate Hazelnut أكتر اتنين الناس بتحبهم 💛 "
+		"تحب فاكهة ولا شيكولاتة؟",
 	},
 	{
 		"topic": "Delivery areas",
 		"when_to_use": "«بتوصلوا فين؟»، «بتوصلوا [منطقة]؟»، «التوصيل بكام؟»",
-		"answer": "بنوصل حالياً للمناطق دي:\n{{delivery_areas}}\n\n"
-		"ابعتلنا منطقتك ونقولك مصاريف التوصيل، واحنا جاهزين نخدمك 🍰✨",
+		"answer": "بنوصل للمناطق دي يا فندم:\n{{delivery_areas}}\n\n"
+		"حضرتك في أنهي منطقة؟ نقولك مصاريف التوصيل على طول 🚚",
 	},
 	{
 		"topic": "Outside our areas",
 		"when_to_use": "An area that is not in the delivery list, another governorate",
-		"answer": "للأسف يا فندم مش بنوصل للمنطقة دي حالياً 😔 "
-		"لو في عنوان تاني لحضرتك في المناطق دي هنوصله بكل سرور:\n{{delivery_areas}}",
+		"answer": "للأسف يا فندم مش بنوصل للمنطقة دي دلوقتي. "
+		"لو في عنوان تاني لحضرتك في المناطق دي هنوصله بكل سرور 💛\n{{delivery_areas}}",
 	},
 	{
 		"topic": "Delivery time",
 		"when_to_use": "«هيوصل إمتى؟»، «عندي ضيوف»، «محتاجه النهارده»",
-		"answer": "الأوردر بيوصل لحضرتك من 30 دقيقة لحد ساعتين بالكتير من تأكيده 🚚 "
-		"ولو محتاجه في معاد معين قولنا.",
+		"answer": "الأوردر بيوصل من 30 دقيقة لحد ساعتين بالكتير من تأكيده 🚚 " "حضرتك في أنهي منطقة؟",
 	},
 	{
 		"topic": "How to order",
-		"when_to_use": "The customer chose what they want, or asks how to order",
-		"answer": "تمام يا فندم 💛 ابعتلنا في رسالة واحدة: الاسم، رقم الموبايل، والعنوان بالتفصيل "
-		"(المنطقة، الشارع، رقم العمارة والشقة)، ونأكدلك الأوردر على طول.",
+		"when_to_use": "The customer chose what they want, «أطلب إزاي؟»، «عايز أعمل أوردر»",
+		"answer": "تقدر تطلب هنا في الشات على طول 💛 ابعتلنا في رسالة واحدة: النكهات والحجم، "
+		"الاسم، رقم الموبايل، والعنوان بالتفصيل، ونأكدلك الأوردر.",
+	},
+	{
+		"topic": "Website problem",
+		"when_to_use": "«الموقع مش بيفتح»، «مش لاقي منطقتي على السايت»، checkout trouble",
+		"answer": "ولا يهمك يا فندم، نعملك الأوردر من هنا 💛 ابعتلنا النكهات والحجم مع الاسم "
+		"والرقم والعنوان بالتفصيل، وهنبلغ الفريق يراجع الموقع.",
+	},
+	{
+		"topic": "Payment",
+		"when_to_use": "«الدفع إزاي؟»، «ينفع InstaPay؟»، «كاش؟»",
+		"answer": "متاح الدفع كاش عند الاستلام أو InstaPay، وكمان أونلاين على orderjarz.com 💛 "
+		"تحب تأكد الأوردر بأنهي طريقة؟",
+	},
+	{
+		"topic": "Storage",
+		"when_to_use": "«بيقعد قد إيه؟»، «أحطه في التلاجة؟»، «ينفع فريزر؟»",
+		"answer": "بتقعد 7 أيام في التلاجة من يوم ما توصلك، وبتقعد 3 شهور في الفريزر 💛 "
+		"وتابع تعليمات التقديم اللي جاية مع الأوردر.",
+	},
+	{
+		"topic": "Forwarded post or photo",
+		"when_to_use": "A shared post, an ad, a photo with no text",
+		"answer": "أهلاً بحضرتك 💛 ده من الـ Cheesecake بتاعنا بالـ 7 طبقات. "
+		"تحب أقولك الأسعار ولا تختار النكهة الأول؟",
 	},
 	{
 		"topic": "Compliment",
 		"when_to_use": "«تحفة»، «تسلم إيدكم»، praise after an order",
-		"answer": "تسلم حضرتك 💛 احنا مبسوطين جداً إن Jarz عجبك، وكلامك ده بيفرق معانا. "
-		"مستنيينك في الأوردر الجاي 🥰",
+		"answer": "تسلم حضرتك 💛 ده من ذوقك، وكلامك بيفرق معانا جداً. مستنيينك في الأوردر الجاي 🥰",
+	},
+	{
+		"topic": "Late order",
+		"when_to_use": "«الأوردر اتأخر»، «المندوب فين؟»",
+		"answer": "حقك علينا يا فندم 🙏 ممكن رقم الموبايل اللي اتطلب بيه الأوردر؟ "
+		"هنراجع مع المندوب حالاً ونطمنك.",
 	},
 	{
 		"topic": "Complaint",
-		"when_to_use": "Late, melted, broken jar, wrong item, taste",
-		"answer": "حقك علينا يا فندم، وآسفين جداً على اللي حصل. ممكن رقم الأوردر أو الاسم والرقم "
-		"اللي اتطلب بيه؟ هنراجع الموضوع حالاً ونرجعلك.",
+		"when_to_use": "Melted, broken jar, wrong item, taste",
+		"answer": "حقك علينا يا فندم، وآسفين جداً على اللي حصل 🙏 ممكن رقم الأوردر أو الاسم "
+		"والرقم اللي اتطلب بيه؟ هنراجع الموضوع حالاً ونرجعلك.",
 	},
 	{
 		"topic": "Gift",
-		"when_to_use": "A gift, delivery to someone else, «من غير فاتورة»",
-		"answer": "فكرة حلوة جداً 💛 نقدر نوصلها للشخص اللي حضرتك عايز تهاديه. "
+		"when_to_use": "A gift, delivery to someone else, a birthday",
+		"answer": "فكرة حلوة جداً 💛 نوصلها للشخص اللي حضرتك عايز تهاديه. "
 		"ابعتلنا اسمه ورقمه والعنوان بالتفصيل، وقولنا لو في أي طلب خاص للهدية.",
 	},
 	{
-		"topic": "Large or company order",
-		"when_to_use": "An event, a company, a very large quantity, a custom request",
-		"answer": "يا أهلاً بيك 💛 للطلبات الكبيرة والشركات واحد من الفريق هيتواصل مع حضرتك "
-		"ويظبط معاك كل التفاصيل. ممكن تقولنا العدد تقريباً والمعاد؟",
+		"topic": "Large or event order",
+		"when_to_use": "An event, a very large quantity, a custom request",
+		"answer": "يا أهلاً بيك 💛 للطلبات الكبيرة واحد من الفريق هيتواصل مع حضرتك ويظبط معاك "
+		"كل التفاصيل. ممكن العدد تقريباً والمعاد؟",
+	},
+	{
+		"topic": "Café / company (B2B)",
+		"when_to_use": "A café, a restaurant, a company, wholesale, «جملة»",
+		"answer": "أهلاً بحضرتك 💛 اسم الكافيه بتاعك. والـ 7 طبقات علينا. "
+		"ممكن اسم الكافيه أو الشركة والمنطقة ورقم حضرتك؟ وفريق المبيعات هيتواصل معاك.",
+	},
+	{
+		"topic": "Collaboration / job",
+		"when_to_use": "Blogger, UGC, influencer, «متاح شغل؟»، a CV",
+		"answer": "ميرسي جداً لاهتمامك بـ Jarz 💛 ابعتلنا لينك البورتفوليو أو الـ CV، "
+		"والفريق هيرجعلك في أقرب وقت.",
 	},
 ]
 SIZE_AR = {"small": "صغير", "medium": "وسط", "large": "كبير"}
@@ -408,6 +493,27 @@ def render_menu(products: Iterable[dict[str, Any]], arabic: bool) -> str:
 			for item, label in zip(items, labels, strict=True):
 				lines.append(f"• {label} {size}".rstrip() + f": {format_egp(item['price'], arabic)}")
 	return "\n".join(lines)
+
+
+def render_size_prices(products: Iterable[dict[str, Any]], arabic: bool) -> str:
+	"""One line, cheapest size first: «وسط 120 جنيه، كبير 160 جنيه». A size whose
+	flavours differ in price shows its lowest price as «من ...»."""
+	groups: dict[str, list[float]] = {}
+	for item in products:
+		try:
+			price = float(item.get("price") or 0)
+		except (TypeError, ValueError):
+			continue
+		group = str(item.get("item_group") or "").strip()
+		if price > 0 and group:
+			groups.setdefault(group, []).append(price)
+	parts = []
+	for group, values in sorted(groups.items(), key=lambda kv: min(kv[1])):
+		amount = format_egp(min(values), arabic)
+		if len({round(v, 2) for v in values}) > 1:
+			amount = f"من {amount}" if arabic else f"from {amount}"
+		parts.append(f"{_size_label(group, arabic)} {amount}")
+	return ("، " if arabic else ", ").join(parts)
 
 
 def render_offers(bundles: Iterable[dict[str, Any]], threshold: float | None, arabic: bool) -> str:
@@ -716,7 +822,7 @@ def build_context(settings: dict[str, Any]) -> dict[str, Any]:
 	for 10 minutes per POS profile: it is the cached prefix of every prompt.
 	"""
 	profile = settings.get("default_pos_profile") or ""
-	cache_key = f"jarz_chat_ctx:v2:{profile}"
+	cache_key = f"jarz_chat_ctx:v3:{profile}"
 	try:
 		cached = frappe.cache().get_value(cache_key)
 		if cached:
@@ -793,6 +899,7 @@ def build_context(settings: dict[str, Any]) -> dict[str, Any]:
 			"menu": render_menu(products, arabic),
 			"offers": render_offers(bundles, threshold, arabic),
 			"delivery_areas": render_delivery_areas(territories, group_labels, arabic),
+			"size_prices": render_size_prices(products, arabic),
 		}
 		for lang, arabic in (("ar", True), ("en", False))
 	}

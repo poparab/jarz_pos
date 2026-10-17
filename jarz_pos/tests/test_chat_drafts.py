@@ -17,6 +17,7 @@ installed.
 
 import datetime
 import random
+import re
 import sys
 import types
 import unittest
@@ -419,8 +420,18 @@ class RenderBlocksTest(unittest.TestCase):
 		_, warnings, _ = d.fill_placeholders("{{menu}}", ctx())
 		self.assertEqual(warnings, ["No live data for {{menu}}"])
 
+	def test_size_prices_cheapest_first(self):
+		self.assertEqual(d.render_size_prices(PRODUCTS, True), "وسط 120 جنيه، كبير من 160 جنيه")
+		self.assertEqual(d.render_size_prices(PRODUCTS, False), "Medium 120 EGP, Large from 160 EGP")
+		self.assertEqual(d.render_size_prices([], True), "")
+		blocks = {"ar": {"size_prices": d.render_size_prices(PRODUCTS[:3], True)}}
+		text, warnings, _ = d.fill_placeholders("كل النكهات بنفس السعر: {{size_prices}}", ctx(blocks=blocks))
+		self.assertEqual(text, "كل النكهات بنفس السعر: وسط 120 جنيه، كبير 160 جنيه")
+		self.assertEqual(warnings, [])
+
 	def test_block_templates_are_not_typed_numbers(self):
 		self.assertEqual(d.typed_number_warnings("الأسعار:\n{{menu}}\n{{offers}}"), [])
+		self.assertEqual(d.typed_number_warnings("Medium 212 ML و Large 330 ML"), [])
 
 
 class ReadyAnswersAndPromptTest(unittest.TestCase):
@@ -437,12 +448,38 @@ class ReadyAnswersAndPromptTest(unittest.TestCase):
 			self.assertIn("{{" + key + "}}", joined)
 		self.assertIn("من 30 دقيقة لحد ساعتين بالكتير", joined)
 
+	def test_defaults_are_short_and_never_a_bare_block(self):
+		by_topic = {r["topic"]: r["answer"] for r in d.DEFAULT_READY_ANSWERS}
+		self.assertNotIn("{{", by_topic["Greeting"])
+		# The price answer gives the numbers, not the whole menu.
+		self.assertIn("{{size_prices}}", by_topic["Prices"])
+		self.assertNotIn("{{menu}}", by_topic["Prices"])
+		for topic, answer in by_topic.items():
+			for key in ("menu", "offers", "delivery_areas"):
+				tag = "{{" + key + "}}"
+				if tag in answer:
+					self.assertTrue(answer.replace(tag, "").strip(), topic)
+					self.assertEqual(answer.count(tag), 1, topic)
+
+	def test_defaults_follow_the_facts_registry(self):
+		joined = "\n".join(r["answer"] for r in d.DEFAULT_READY_ANSWERS)
+		for banned in ("نوتيلا", "Nutella", "كنافة", "Kunafa", "Carrot", "جرة", "100%"):
+			self.assertNotIn(banned, joined)
+		self.assertIsNone(re.search(r"\d+\s*(?:جم|جرام|gm?\b)", joined), "gram weight")
+		self.assertIn("بتقعد 7 أيام في التلاجة من يوم ما توصلك", joined)
+		self.assertIn("بتقعد 3 شهور في الفريزر", joined)
+		self.assertIn("اسم الكافيه بتاعك. والـ 7 طبقات علينا.", joined)
+
 	def test_prompt_asks_for_egyptian_dialect_and_blocks(self):
 		self.assertIn("عامية مصرية", d.SYSTEM_PROMPT)
 		self.assertIn("Never Modern", d.SYSTEM_PROMPT)
 		for key in d.BLOCK_PLACEHOLDERS:
 			self.assertIn("{{" + key + "}}", d.SYSTEM_PROMPT)
 		self.assertIn("من 30 دقيقة لحد ساعتين بالكتير", d.SYSTEM_PROMPT)
+
+	def test_prompt_carries_what_sells(self):
+		for phrase in ("تحب وسط ولا كبير؟", "أنهي منطقة", "ONE message", "مش متواجدين", "Nutella"):
+			self.assertIn(phrase, d.SYSTEM_PROMPT)
 
 
 class ReadyAnswersSettingsTest(unittest.TestCase):
