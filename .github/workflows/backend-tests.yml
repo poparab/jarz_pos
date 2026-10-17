@@ -184,6 +184,10 @@ jobs:
             # `else: "Cash"` catch-all badged an ONLINE Talabat order as
             # Cash, and nothing in CI read that function at all.
             test_kanban_payment_method
+            # Board load speed: the fast path (finished columns cut before any
+            # card is built, per-order lookups batched) must show the same cards
+            # as the old build-everything path, field for field (pure mocks).
+            test_kanban_load_speed
             test_invoice_cases_integration
             test_b2b_permission_gating
             test_b2b_customer_search_filter
@@ -429,6 +433,10 @@ jobs:
             # becoming a fetch of an arbitrary URL.
             test_geo_preview
             test_geo_ladder
+            # L2 - the invoice-vs-Address pin rule (a staff pin written after the
+            # invoice snapshot wins, an older one loses). Pure; the kanban card
+            # payload shape is pinned here too.
+            test_address_pins
             test_courier_delivery_transitions
             # A6 — the OFD pin gate. The "both call sites enforce it" cases are
             # the reason this must be in CI: the failure mode is somebody editing
