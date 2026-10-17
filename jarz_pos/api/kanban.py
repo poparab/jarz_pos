@@ -2055,8 +2055,11 @@ def get_kanban_invoices(filters: str | dict | None = None) -> dict[str, Any]:
 		# The counts above stay those of every matching row.
 		legacy_load = _kanban_legacy_load()
 		trimmed_columns = ("delivered",) if legacy_load else _KANBAN_TRIMMED_COLUMNS
-		trim_cutoff = _kanban_trim_cutoff()
-		if not legacy_load and not is_filtered:
+		# Today's date is asked for only when there is something to trim, as
+		# before this change: today() reads System Settings on a cold cache.
+		trim_cutoff = None
+		if not legacy_load and not is_filtered and invoices:
+			trim_cutoff = _kanban_trim_cutoff()
 			invoices = _rows_in_visible_window(invoices, trimmed_columns, trim_cutoff)
 
 		# Territory shipping cache
@@ -2456,6 +2459,8 @@ def get_kanban_invoices(filters: str | dict | None = None) -> dict[str, Any]:
 		if not is_filtered:
 			for column_key in trimmed_columns:
 				if kanban_data.get(column_key):
+					if trim_cutoff is None:
+						trim_cutoff = _kanban_trim_cutoff()
 					kanban_data[column_key] = [
 						c for c in kanban_data[column_key] if (c.get("posting_date") or "") >= trim_cutoff
 					][:_KANBAN_TRIM_MAX_CARDS]
