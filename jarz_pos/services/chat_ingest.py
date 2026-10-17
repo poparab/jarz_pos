@@ -31,8 +31,12 @@ import frappe
 
 from jarz_pos.services import chat_common as cc
 
-#: Bodies above this are refused before hashing (Meta batches stay far below).
-MAX_BODY_BYTES = 2 * 1024 * 1024
+#: Bodies above this are refused before hashing. A WhatsApp ``history`` chunk
+#: (up to 180 days of chats at onboarding) is the largest payload Meta sends.
+MAX_BODY_BYTES = 8 * 1024 * 1024
+#: Contact names from ``smb_app_state_sync`` wait this long for their chat to arrive.
+CONTACT_NAME_TTL_SECONDS = 7 * 24 * 3600
+HISTORY_PROGRESS_KEY = "jarz_chat_history_progress"
 #: Echo heuristic: an app send and its echo within this many seconds are one message.
 ECHO_MATCH_SECONDS = 120
 #: Meta's customer-service window (WhatsApp / Messenger / Instagram DMs).
@@ -166,6 +170,8 @@ def _event(**kwargs: Any) -> dict[str, Any]:
 		"post_id": None,
 		"status": None,
 		"error": None,
+		"history": False,
+		"media_update": False,
 	}
 	base.update(kwargs)
 	return base
@@ -205,6 +211,10 @@ def _wa_message_content(msg: dict[str, Any]) -> dict[str, Any]:
 		inter = msg.get("interactive") or {}
 		reply = inter.get("button_reply") or inter.get("list_reply") or {}
 		out["body"] = str(reply.get("title") or "")
+	elif mtype == "media_placeholder":
+		# History-sync media: the file itself only follows for the last 14 days.
+		out["message_type"] = "unsupported"
+		out["raw"] = {"type": "media_placeholder"}
 	else:  # contacts, order, system, unsupported, unknown
 		out["message_type"] = "unsupported"
 		out["raw"] = msg
@@ -279,6 +289,109 @@ def _parse_whatsapp(entry: dict[str, Any], events: list[dict[str, Any]]) -> None
 						**content,
 					)
 				)
+		elif field == "history":
+			_parse_wa_history(value, events)
+		elif field == "smb_app_state_sync":
+			_parse_wa_contacts(value, events)
+
+
+def _wa_history_event(msg: dict[str, Any], thread_id: str | None, **extra: Any) -> dict[str, Any] | None:
+	"""One past message from a ``history`` webhook. A business message carries ``to``."""
+	if not msg.get("id"):
+		return None
+	outbound = bool(msg.get("to"))
+	wa_id = str(thread_id or (msg.get("to") if outbound else msg.get("from")) or "")
+	if not wa_id:
+		return None
+	content = _wa_message_content(msg)
+	if content["message_type"] == "reaction" and not content["body"]:
+		return None
+	return _event(
+		channel=cc.WHATSAPP,
+		external_id=wa_id,
+		phone=wa_id,
+		direction="Outbound" if outbound else "Inbound",
+		sent_via="Phone" if outbound else None,
+		external_message_id=str(msg["id"]),
+		timestamp=_epoch(msg.get("timestamp")),
+		history=True,
+		**content,
+		**extra,
+	)
+
+
+def _history_errors(holder: dict[str, Any], events: list[dict[str, Any]]) -> None:
+	for err in holder.get("errors") or []:
+		err = err or {}
+		events.append(
+			_event(
+				kind="history_error",
+				channel=cc.WHATSAPP,
+				error=f"{err.get('code', '')}: {err.get('title') or err.get('message') or ''}".strip(),
+			)
+		)
+
+
+def _parse_wa_history(value: dict[str, Any], events: list[dict[str, Any]]) -> None:
+	"""Past 1:1 chats Meta sends once after a coexistence onboarding (up to 180 days).
+
+	Chunks carry ``threads[].messages[]``. A later ``history`` webhook carries
+	``messages[]`` with the real media for placeholders from the last 14 days.
+	"""
+	_history_errors(value, events)
+	for chunk in value.get("history") or []:
+		if not isinstance(chunk, dict):
+			continue
+		_history_errors(chunk, events)
+		meta = chunk.get("metadata") or {}
+		if meta:
+			events.append(
+				_event(
+					kind="history_progress",
+					channel=cc.WHATSAPP,
+					status=f"phase {meta.get('phase', '?')} chunk {meta.get('chunk_order', '?')} "
+					f"progress {meta.get('progress', '?')}%",
+				)
+			)
+		for thread in chunk.get("threads") or []:
+			thread_id = str((thread or {}).get("id") or "")
+			for msg in (thread or {}).get("messages") or []:
+				event = _wa_history_event(msg or {}, thread_id)
+				if event:
+					events.append(event)
+	for msg in value.get("messages") or []:
+		event = _wa_history_event(msg or {}, None, media_update=True)
+		if event:
+			events.append(event)
+
+
+def _parse_wa_contacts(value: dict[str, Any], events: list[dict[str, Any]]) -> None:
+	"""Names from the WhatsApp Business app's address book (``smb_app_state_sync``)."""
+	for item in value.get("state_sync") or []:
+		item = item or {}
+		if item.get("type") != "contact" or item.get("action") == "remove":
+			continue
+		contact = item.get("contact") or {}
+		phone = "".join(ch for ch in str(contact.get("phone_number") or "") if ch.isdigit())
+		name = str(contact.get("full_name") or contact.get("first_name") or "").strip()
+		if phone and name:
+			events.append(
+				_event(kind="contact", channel=cc.WHATSAPP, external_id=phone, phone=phone, contact_name=name)
+			)
+
+
+def is_history_payload(payload: Any) -> bool:
+	"""True when a WhatsApp payload carries history sync (it goes to the long queue)."""
+	try:
+		if payload.get("object") != "whatsapp_business_account":
+			return False
+		return any(
+			change.get("field") == "history"
+			for entry in payload.get("entry") or []
+			for change in entry.get("changes") or []
+		)
+	except Exception:
+		return False
 
 
 def _messaging_attachments(message: dict[str, Any]) -> list[dict[str, Any]]:
@@ -568,8 +681,24 @@ def _find_conversation(channel: str, external_id: str) -> Any:
 	name = frappe.db.get_value(cc.CONVERSATION, {"channel_key": key}, "name")
 	if not name:
 		return None
-	fields = [*cc.SUMMARY_FIELDS, "alert_count", "source_post_id", "ad_referral"]
+	fields = [*cc.SUMMARY_FIELDS, "alert_count", "source_post_id", "ad_referral", "last_outbound_at"]
 	return frappe.db.get_value(cc.CONVERSATION, name, fields, as_dict=True)
+
+
+def _contact_key(phone: str) -> str:
+	return frappe.cache().make_key(f"jarz_chat_contact:{phone}")
+
+
+def _cached_contact_name(phone: str | None) -> str | None:
+	if not phone:
+		return None
+	try:
+		value = frappe.cache().get(_contact_key(phone))
+		if isinstance(value, bytes):
+			value = value.decode("utf-8", "ignore")
+		return str(value) if value else None
+	except Exception:
+		return None
 
 
 def _create_conversation(event: dict[str, Any], when: _dt.datetime) -> Any:
@@ -577,22 +706,25 @@ def _create_conversation(event: dict[str, Any], when: _dt.datetime) -> Any:
 	external_id = event["external_id"]
 	phone = None
 	customer = None
+	contact_name = event.get("contact_name") or ""
 	if channel == cc.WHATSAPP:
 		from jarz_pos.utils.phone import normalize_phone
 
 		phone = normalize_phone(event.get("phone") or external_id) or None
 		customer = _match_customer(phone)
+		contact_name = contact_name or _cached_contact_name(external_id) or ""
 	doc = frappe.get_doc(
 		{
 			"doctype": cc.CONVERSATION,
 			"channel": channel,
 			"external_id": external_id,
 			"channel_key": f"{channel}:{external_id}",
-			"contact_name": (event.get("contact_name") or "")[:140] or None,
+			"contact_name": contact_name[:140] or None,
 			"phone": phone,
 			"customer": customer,
 			"last_order": _last_order(customer),
-			"status": "Open",
+			# A chat that only exists because of imported history is not waiting on anyone.
+			"status": "Closed" if event.get("history") else "Open",
 			"unread_count": 0,
 			"alert_count": 0,
 			"source_post_id": event.get("post_id"),
@@ -658,6 +790,141 @@ def _apply_status(event: dict[str, Any]) -> str | None:
 	return None
 
 
+def _apply_contact(event: dict[str, Any]) -> str | None:
+	"""Name a WhatsApp chat from the business's address book. Returns the conversation touched.
+
+	The name is also cached, because the address book may sync before the
+	history that creates the chat. A name already set from the address book or
+	a customer profile is kept; only an empty or phone-only name is replaced.
+	"""
+	phone = str(event.get("external_id") or "")
+	name = str(event.get("contact_name") or "").strip()[:140]
+	if not phone or not name:
+		return None
+	try:
+		frappe.cache().set(_contact_key(phone), name, ex=CONTACT_NAME_TTL_SECONDS)
+	except Exception:
+		pass
+	conv = frappe.db.get_value(
+		cc.CONVERSATION, {"channel_key": f"{cc.WHATSAPP}:{phone}"}, ["name", "contact_name"], as_dict=True
+	)
+	if not conv:
+		return None
+	current = str(conv.contact_name or "").strip()
+	if current and any(ch.isalpha() for ch in current):
+		return None
+	frappe.db.set_value(cc.CONVERSATION, conv.name, "contact_name", name, update_modified=False)
+	return conv.name
+
+
+def _apply_media_update(event: dict[str, Any]) -> dict[str, Any] | None:
+	"""Fill a history media placeholder with the real file Meta sent afterwards."""
+	if not event.get("media_id"):
+		return None
+	row = frappe.db.get_value(
+		cc.MESSAGE,
+		{"external_message_id": event.get("external_message_id")},
+		["name", "conversation", "message_type", "body"],
+		as_dict=True,
+	)
+	if not row or row.message_type != "unsupported":
+		return None
+	frappe.db.set_value(
+		cc.MESSAGE,
+		row.name,
+		{
+			"message_type": event.get("message_type"),
+			"media_id": event.get("media_id"),
+			"media_mime": event.get("media_mime"),
+			"body": row.body or str(event.get("body") or ""),
+			"raw_json": None,
+		},
+		update_modified=False,
+	)
+	return {
+		"conversation": row.conversation,
+		"message": row.name,
+		"draft": False,
+		"media": True,
+		"media_url": None,
+		"superseded": False,
+		"push": False,
+		"quiet": True,
+	}
+
+
+def _persist_history_message(event: dict[str, Any], conv: Any, when: _dt.datetime) -> dict[str, Any] | None:
+	"""Insert one imported past message without disturbing the live inbox.
+
+	Status, waiting time, unread count, alerts and drafts stay as they are; no
+	push and no realtime event. Only the list order (last message) and the real
+	customer-service window move, and only when this message is newer.
+	"""
+	inbound = event.get("direction") == "Inbound"
+	body = str(event.get("body") or "")
+	media_url = event.get("media_url")
+	stored_url = media_url if media_url and len(str(media_url)) <= 140 else None
+	raw = None
+	if event.get("message_type") == "unsupported" and event.get("raw") is not None:
+		try:
+			raw = json.dumps(event["raw"], ensure_ascii=False)[:RAW_JSON_MAX]
+		except Exception:
+			raw = None
+	msg = frappe.get_doc(
+		{
+			"doctype": cc.MESSAGE,
+			"conversation": conv.name,
+			"direction": "Inbound" if inbound else "Outbound",
+			"external_message_id": event.get("external_message_id"),
+			"message_type": event.get("message_type") or "text",
+			"body": body,
+			"media_id": event.get("media_id"),
+			"media_url": stored_url,
+			"media_mime": event.get("media_mime"),
+			"sent_via": "" if inbound else (event.get("sent_via") or "Phone"),
+			"status": "received" if inbound else "sent",
+			"timestamp": when,
+			"raw_json": raw,
+		}
+	)
+	try:
+		msg.insert(ignore_permissions=True)
+	except (frappe.DuplicateEntryError, frappe.UniqueValidationError):
+		return None
+
+	updates: dict[str, Any] = {}
+	last_at = cc.to_dt(conv.get("last_message_at"))
+	if last_at is None or when >= last_at:
+		updates.update(
+			{
+				"last_message_at": when,
+				"last_message_preview": cc.preview(body, event.get("message_type")),
+				"last_direction": "Inbound" if inbound else "Outbound",
+			}
+		)
+	stamp = "last_inbound_at" if inbound else "last_outbound_at"
+	current = cc.to_dt(conv.get(stamp))
+	if current is None or when > current:
+		updates[stamp] = when
+	if inbound and event["channel"] not in cc.COMMENT_CHANNELS:
+		expires = when + _dt.timedelta(hours=DM_WINDOW_HOURS)
+		window = cc.to_dt(conv.get("window_expires_at"))
+		if expires > cc.now() and (window is None or expires > window):
+			updates["window_expires_at"] = expires
+	if updates:
+		frappe.db.set_value(cc.CONVERSATION, conv.name, updates, update_modified=False)
+	return {
+		"conversation": conv.name,
+		"message": msg.name,
+		"draft": False,
+		"media": bool(event.get("media_id")),
+		"media_url": None,
+		"superseded": False,
+		"push": False,
+		"quiet": True,
+	}
+
+
 def _persist_message(
 	event: dict[str, Any], settings: dict[str, Any], tz: str | None
 ) -> dict[str, Any] | None:
@@ -665,7 +932,20 @@ def _persist_message(
 	if not event.get("channel") or not event.get("external_id"):
 		return None
 	if _message_exists(event.get("external_message_id")):
+		if event.get("media_update"):
+			return _apply_media_update(event)
 		return None
+	if event.get("media_update"):
+		# Media for a placeholder we never stored: its sender side is unknowable here.
+		return None
+	if event.get("history"):
+		when = epoch_to_site(event.get("timestamp") or 0, tz) if event.get("timestamp") else cc.now()
+		conv = _find_conversation(event["channel"], event["external_id"])
+		if conv is None:
+			conv = _create_conversation(event, when)
+			if conv is None:
+				return None
+		return _persist_history_message(event, conv, when)
 	when = epoch_to_site(event.get("timestamp") or 0, tz) if event.get("timestamp") else cc.now()
 	inbound = event.get("direction") == "Inbound"
 
@@ -811,11 +1091,21 @@ def process_webhook(payload: Any = None) -> dict[str, Any]:
 			savepoint = f"chat_evt_{index}"
 			try:
 				frappe.db.savepoint(savepoint)
-				if event.get("kind") == "status":
+				kind = event.get("kind")
+				if kind == "status":
 					conv = _apply_status(event)
 					if conv:
 						status_conversations.add(conv)
 						result["statuses"] += 1
+				elif kind == "contact":
+					if _apply_contact(event):
+						result["contacts"] = result.get("contacts", 0) + 1
+				elif kind == "history_progress":
+					_note_history_progress(event.get("status"))
+				elif kind == "history_error":
+					# 2593109: the owner chose "Don't share chats" on the phone.
+					_note_history_progress(f"error {event.get('error')}")
+					cc.safe_log_error("chat: WhatsApp history sync refused", str(event.get("error") or ""))
 				else:
 					action = _persist_message(event, settings, tz)
 					if action:
@@ -844,12 +1134,26 @@ def process_webhook(payload: Any = None) -> dict[str, Any]:
 	return result
 
 
+def _note_history_progress(text: Any) -> None:
+	"""Remember the latest history-sync step for ``import_chat_history`` status reads."""
+	try:
+		frappe.cache().set(
+			frappe.cache().make_key(HISTORY_PROGRESS_KEY),
+			json.dumps({"at": cc.dt_str(cc.now()), "step": str(text or "")[:200]}),
+			ex=CONTACT_NAME_TTL_SECONDS,
+		)
+	except Exception:
+		pass
+
+
 def _after_commit(actions: list[dict[str, Any]], status_conversations: set[str]) -> None:
 	for action in actions:
 		try:
-			cc.publish_chat_update(
-				action["conversation"], "message", message=cc.load_message(action["message"])
-			)
+			if not action.get("quiet"):
+				# Imported history stays silent: thousands of rows must not flood realtime.
+				cc.publish_chat_update(
+					action["conversation"], "message", message=cc.load_message(action["message"])
+				)
 			if action.get("media"):
 				frappe.enqueue(
 					"jarz_pos.services.chat_ingest.download_media",

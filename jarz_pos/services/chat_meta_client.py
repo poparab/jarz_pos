@@ -147,6 +147,49 @@ def wa_media_info(media_id: str) -> dict[str, Any]:
 	return _request("GET", str(media_id), _wa_token())
 
 
+def wa_request_app_sync(sync_type: str) -> dict[str, Any]:
+	"""Ask Meta to send the WhatsApp Business app's past chats or contacts.
+
+	``sync_type`` is ``history`` or ``smb_app_state_sync``. Coexistence numbers
+	only, once each, within 24 h of onboarding (errors 2593107 / 2593108); the
+	data then arrives on the webhook.
+	"""
+	phone_id = _settings().get("whatsapp_phone_number_id")
+	if not phone_id:
+		raise MetaApiError("WhatsApp phone number id is not configured in Jarz Chat Settings", "config")
+	return _request(
+		"POST",
+		f"{phone_id}/smb_app_data",
+		_wa_token(),
+		json_body={"messaging_product": "whatsapp", "sync_type": sync_type},
+	)
+
+
+#: Messages per thread the Conversations API returns with full detail.
+PAGE_THREAD_MESSAGES = 20
+
+
+def page_conversations(platform: str, after: str | None = None, limit: int = 25) -> dict[str, Any]:
+	"""One page of the Facebook Page's Messenger or Instagram threads, newest first.
+
+	Each thread carries its participants and its last :data:`PAGE_THREAD_MESSAGES`
+	messages, which is all the detail Meta gives for older messages.
+	"""
+	page_id = _settings().get("facebook_page_id")
+	if not page_id:
+		raise MetaApiError("Facebook Page id is not configured in Jarz Chat Settings", "config")
+	params = {
+		"platform": platform,
+		"limit": int(limit),
+		"fields": "participants,updated_time,"
+		f"messages.limit({PAGE_THREAD_MESSAGES})"
+		"{id,created_time,from,to,message,attachments{mime_type,name,image_data,video_data,file_url}}",
+	}
+	if after:
+		params["after"] = after
+	return _request("GET", f"{page_id}/conversations", _page_token(), params=params)
+
+
 def download(url: str, token: str | None = None) -> tuple[bytes, str]:
 	"""Fetch a media URL. Returns ``(content, content_type)``.
 

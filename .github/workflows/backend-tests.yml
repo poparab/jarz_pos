@@ -752,6 +752,9 @@ jobs:
             # throttle, suppression, never raises), only inbound non-reaction
             # messages push, and the Open tab's exclude_closed filter.
             test_chat_push
+            # Past-chat import: WhatsApp history/contacts parsing, Page thread
+            # mapping, imported rows never push/reopen/realtime, backfill paging.
+            test_chat_history
           )
           rc=0
           for m in "${MODULES[@]}"; do

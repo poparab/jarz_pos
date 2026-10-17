@@ -98,10 +98,12 @@ def meta_webhook():
 
 	try:
 		# nosemgrep: whitelisted-side-effect-on-get -- GET is Meta's verify handshake and returns before this line; the enqueue runs only for HMAC-signed POSTs
+		history = chat_ingest.is_history_payload(payload)
 		frappe.enqueue(
 			"jarz_pos.services.chat_ingest.process_webhook",
-			queue="short",
-			timeout=300,
+			# A history chunk can hold thousands of messages; keep it off the live queue.
+			queue="long" if history else "short",
+			timeout=1800 if history else 300,
 			payload=payload,
 			enqueue_after_commit=False,
 		)

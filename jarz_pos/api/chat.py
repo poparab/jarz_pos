@@ -484,3 +484,35 @@ def link_customer(conversation: str, customer: str) -> dict[str, Any]:
 	summary = cc.load_summary(conv.name)
 	cc.publish_chat_update(conv.name, "status", summary=summary)
 	return {"conversation": summary, "customer": cc.customer_card(customer)}
+
+
+@frappe.whitelist(methods=["POST"])
+def import_chat_history(source: str = "status") -> dict[str, Any]:
+	"""Bring past chats into the inbox (System Manager only).
+
+	``whatsapp``: ask Meta for the business app's contacts and up to 6 months of
+	chats (coexistence numbers, once, within 24 h of onboarding; the owner must
+	tap "Share chats" on the phone). ``messenger`` / ``instagram``: queue a job
+	that imports the last 20 messages of every Page thread. ``status``: the
+	latest progress of each. Imported messages never push, draft or reopen a chat.
+	"""
+	_gate((ROLES.SYSTEM_MANAGER,))
+	from jarz_pos.services import chat_history
+
+	source = str(source or "status").strip().lower()
+	if source == "whatsapp":
+		return {"requested": chat_history.request_whatsapp_history(), "status": chat_history.history_status()}
+	channel = {"messenger": cc.MESSENGER, "instagram": cc.INSTAGRAM}.get(source)
+	if channel:
+		frappe.enqueue(
+			"jarz_pos.services.chat_history.backfill_page_history",
+			queue="long",
+			timeout=3600,
+			job_id=f"jarz_chat_history_{source}",
+			deduplicate=True,
+			channel=channel,
+		)
+		return {"queued": source, "status": chat_history.history_status()}
+	if source != "status":
+		frappe.throw(_("Source must be whatsapp, messenger, instagram or status."))
+	return {"status": chat_history.history_status()}
