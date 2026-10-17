@@ -163,6 +163,13 @@ except ImportError:
 		return filter_conditions
 
 
+# Area names for the board's batched address lines. Optional: without it the
+# board formats each address through get_address_details one at a time.
+try:
+	from jarz_pos.utils.invoice_utils import get_area_label
+except Exception:
+	get_area_label = None  # type: ignore
+
 try:
 	from jarz_pos.utils.address_pins import (
 		get_address_pin_map,
@@ -1603,6 +1610,236 @@ def get_kanban_columns() -> dict[str, Any]:
 		return _failure(error_msg)
 
 
+# ---------------------------------------------------------------------------
+# Board load speed (2026-10-17)
+#
+# The unfiltered board used to build a full card — address, phone, courier
+# check, items, notes, receipts — for every order of the last 60 days (1,227 on
+# production), then throw away all but the newest Delivered cards. 5.3 s per
+# load. Now the finished-work columns are cut to their visible window BEFORE
+# any card is built, and the per-order lookups run as one query per kind.
+# Every card that is shown is built exactly as before.
+#
+# Off switch: `bench --site <site> set-config jarz_kanban_legacy_load 1` puts
+# back the old build-everything path (Cancelled untrimmed) with no deploy.
+# ---------------------------------------------------------------------------
+
+#: Finished-work columns the unfiltered board shows only recent cards for.
+_KANBAN_TRIMMED_COLUMNS = ("delivered", "cancelled")
+#: Days back (plus today) a trimmed column keeps, and how many cards at most.
+_KANBAN_TRIM_DAYS = 2
+_KANBAN_TRIM_MAX_CARDS = 30
+
+
+def _kanban_legacy_load() -> bool:
+	try:
+		return _coerce_bool(frappe.conf.get("jarz_kanban_legacy_load"))
+	except Exception:
+		return False
+
+
+def _kanban_trim_cutoff() -> str:
+	return str(frappe.utils.add_days(frappe.utils.today(), -_KANBAN_TRIM_DAYS))
+
+
+def _invoice_state(inv: Any) -> tuple[str, str]:
+	"""The board state label of an invoice row and the column key it lands in."""
+	state = inv.get("custom_sales_invoice_state") or inv.get("sales_invoice_state") or "Received"
+	state_key = state.lower().replace(" ", "_")
+	# A legacy "Ready" row (not yet converted by the migration) shows in
+	# the In Progress column instead of vanishing with its removed column.
+	return state, _STATE_ALIASES.get(state_key, state_key)
+
+
+def _rows_in_visible_window(
+	invoices: list[Any], trimmed_columns: tuple[str, ...], cutoff: str
+) -> list[Any]:
+	"""Drop rows that the column trim at the end of the board would drop anyway.
+
+	Uses the very test the trim applies to the finished card — the card's
+	``posting_date`` is ``str(inv.posting_date)`` — so a row kept here is a
+	card the old path would have kept. The 30-card cap still runs on the built
+	cards, after sorting, because it depends on the column's sort order.
+	"""
+	kept = []
+	for inv in invoices:
+		if _invoice_state(inv)[1] in trimmed_columns and str(inv.posting_date) < cutoff:
+			continue
+		kept.append(inv)
+	return kept
+
+
+def _format_address_row(row: Any, area_label: Any = None) -> str:
+	"""get_address_details' formatting, for a row already fetched in bulk.
+
+	MUST stay identical to utils.invoice_utils.get_address_details;
+	test_kanban_load_speed pins the two against each other.
+	"""
+	area_label = area_label or get_area_label
+	full_address = sanitize_printable_text(row.get("address_line1") or "")
+	if row.get("address_line2"):
+		full_address += f", {sanitize_printable_text(row.get('address_line2'))}"
+	city = row.get("city")
+	if city:
+		full_address += f", {area_label(city) or sanitize_printable_text(city)}"
+	return full_address.strip(", ")
+
+
+def _get_address_details_map(address_names: list[Any]) -> dict[str, str]:
+	"""Formatted address line per Address name, in one query.
+
+	Anything the bulk read cannot answer (a missing Address, a failed query)
+	goes through get_address_details itself, so its result and its error log
+	are exactly what the per-order path produced.
+	"""
+	names = sorted({str(n) for n in address_names if n})
+	out: dict[str, str] = {}
+	if not names:
+		return out
+	if get_area_label is not None:
+		try:
+			rows = frappe.get_all(
+				"Address",
+				filters={"name": ["in", names]},
+				fields=["name", "address_line1", "address_line2", "city"],
+				limit=0,
+			)
+			area_labels: dict[str, str] = {}
+
+			def _area(city: str) -> str:
+				if city not in area_labels:
+					area_labels[city] = get_area_label(city)
+				return area_labels[city]
+
+			wanted = set(names)
+			for row in rows:
+				if row.name in wanted:
+					out[row.name] = _format_address_row(row, _area)
+		except Exception:
+			out = {}
+	for name in names:
+		if name not in out:
+			out[name] = get_address_details(name)
+	return out
+
+
+def _prefetch_customer_phones(customers: list[Any]) -> None:
+	"""Answer _resolve_customer_phone for many customers with a few queries.
+
+	Runs steps 1-3 of its lookup (Customer fields, primary Contact, primary
+	Address) in bulk and stores each answer under the same per-request cache key
+	it reads first. A customer none of the three resolves is left alone and
+	takes the full one-by-one path, step 4 included, so every phone shown is
+	the one _resolve_customer_phone would have returned.
+	"""
+	cache = getattr(frappe.local, "cache", None)
+	if not isinstance(cache, dict):
+		return
+	pending = sorted({str(c) for c in customers if c and f"cust_phone::{c}" not in cache})
+	if not pending:
+		return
+	try:
+		phone_fields = [f for f in ("mobile_no", "phone") if frappe.db.has_column("Customer", f)]
+		rows = frappe.get_all(
+			"Customer",
+			filters={"name": ["in", pending]},
+			fields=["name", *phone_fields, "customer_primary_contact", "customer_primary_address"],
+			limit=0,
+		)
+		wanted = set(pending)
+		rows = [r for r in rows if r.name in wanted]
+		found: dict[str, str] = {}
+		give_up: set[str] = set()
+
+		# 1) Customer fields
+		for row in rows:
+			for f in phone_fields:
+				if row.get(f):
+					found[row.name] = str(row.get(f))
+					break
+
+		# 2) Primary Contact: mobile_no, then phone
+		contact_of = {
+			r.name: r.customer_primary_contact
+			for r in rows
+			if r.name not in found and r.get("customer_primary_contact")
+		}
+		if contact_of:
+			contacts = {
+				c.name: c
+				for c in frappe.get_all(
+					"Contact",
+					filters={"name": ["in", sorted(set(contact_of.values()))]},
+					fields=["name", "mobile_no", "phone"],
+					limit=0,
+				)
+			}
+			for cust, contact_name in contact_of.items():
+				c = contacts.get(contact_name)
+				if not c:
+					# Missing Contact, or a name that only matched case-insensitively:
+					# leave this customer to the one-by-one path rather than let step 3
+					# answer for a step 2 that may have had a phone.
+					give_up.add(cust)
+					continue
+				val = c.get("mobile_no") or c.get("phone")
+				if val:
+					found[cust] = str(val)
+
+		# 3) Primary Address phone fields, in _resolve_customer_phone's order
+		address_of = {
+			r.name: r.customer_primary_address
+			for r in rows
+			if r.name not in found and r.name not in give_up and r.get("customer_primary_address")
+		}
+		address_fields = [
+			f for f in ("phone", "phone_number", "phone_no", "mobile_no") if frappe.db.has_column("Address", f)
+		]
+		if address_of and address_fields:
+			addresses = {
+				a.name: a
+				for a in frappe.get_all(
+					"Address",
+					filters={"name": ["in", sorted(set(address_of.values()))]},
+					fields=["name", *address_fields],
+					limit=0,
+				)
+			}
+			for cust, address_name in address_of.items():
+				a = addresses.get(address_name)
+				if not a:
+					continue
+				for f in address_fields:
+					if a.get(f):
+						found[cust] = str(a.get(f))
+						break
+	except Exception:
+		return
+	for cust, phone in found.items():
+		cache[f"cust_phone::{cust}"] = phone
+
+
+def _get_unsettled_courier_invoice_set(invoice_names: list[str]) -> set[str] | None:
+	"""Invoices with any Courier Transaction not yet Settled, in one query.
+
+	Same filter the per-order frappe.db.exists used. None on failure, so the
+	caller falls back to asking per order.
+	"""
+	if not invoice_names:
+		return set()
+	try:
+		return set(
+			frappe.get_all(
+				"Courier Transaction",
+				filters={"reference_invoice": ["in", invoice_names], "status": ["!=", "Settled"]},
+				pluck="reference_invoice",
+				limit=0,
+			)
+		)
+	except Exception:
+		return None
+
+
 @frappe.whitelist(allow_guest=False)
 def get_kanban_invoices(filters: str | dict | None = None) -> dict[str, Any]:
 	"""Get Sales Invoices organized by their state for Kanban display.
@@ -1814,6 +2051,14 @@ def get_kanban_invoices(filters: str | dict | None = None) -> dict[str, Any]:
 				f"{total_matching} matching invoices for {frappe.session.user}"
 			)
 
+		# Build only the cards the board will show (see _KANBAN_TRIMMED_COLUMNS).
+		# The counts above stay those of every matching row.
+		legacy_load = _kanban_legacy_load()
+		trimmed_columns = ("delivered",) if legacy_load else _KANBAN_TRIMMED_COLUMNS
+		trim_cutoff = _kanban_trim_cutoff()
+		if not legacy_load and not is_filtered:
+			invoices = _rows_in_visible_window(invoices, trimmed_columns, trim_cutoff)
+
 		# Territory shipping cache
 		territory_cache: dict[str, dict[str, float]] = {}
 		_sub_territory_cache: dict[str, bool] = {}
@@ -1866,8 +2111,13 @@ def get_kanban_invoices(filters: str | dict | None = None) -> dict[str, Any]:
 			addr_name_by_inv = {}
 			for inv in invoices:
 				addr_name_by_inv[inv.name] = inv.get("shipping_address_name") or inv.get("customer_address")
-			for inv_name, addr_name in addr_name_by_inv.items():
-				invoice_addresses[inv_name] = get_address_details(addr_name)
+			if legacy_load:
+				for inv_name, addr_name in addr_name_by_inv.items():
+					invoice_addresses[inv_name] = get_address_details(addr_name)
+			else:
+				address_lines = _get_address_details_map(list(addr_name_by_inv.values()))
+				for inv_name, addr_name in addr_name_by_inv.items():
+					invoice_addresses[inv_name] = address_lines.get(str(addr_name), "") if addr_name else ""
 		except Exception:
 			# Fallback: empty addresses
 			invoice_addresses = {inv.name: "" for inv in invoices}
@@ -1890,7 +2140,10 @@ def get_kanban_invoices(filters: str | dict | None = None) -> dict[str, Any]:
 					"Sales Invoice Item",
 					filters={"parent": ["in", [inv.name for inv in invoices]]},
 					fields=["parent", "item_code", "item_name", "qty", "rate", "amount"],
-					limit=QUERY_LIMITS.KANBAN_INVOICES,
+					# No cap: the cap was on rows across the WHOLE board, so past it
+					# random cards silently lost item lines. The invoice list above
+					# is what bounds this query.
+					limit=0,
 				)
 				for row in items_rows:
 					parent = row.get("parent")
@@ -1963,16 +2216,20 @@ def get_kanban_invoices(filters: str | dict | None = None) -> dict[str, Any]:
 		except Exception:
 			pass
 
+		# One query per kind instead of one per order for the phone and the
+		# unsettled-courier flag. None = the bulk read failed; ask per order.
+		unsettled_courier_invoices: set[str] | None = None
+		if not legacy_load:
+			_prefetch_customer_phones([inv.get("customer") for inv in invoices])
+			unsettled_courier_invoices = _get_unsettled_courier_invoice_set([inv.name for inv in invoices])
+
 		# Organize invoices by their current state
 		for inv in invoices:
-			state = (
-				inv.get("custom_sales_invoice_state") or inv.get("sales_invoice_state") or "Received"
-			)  # Default state
-			state_key = state.lower().replace(" ", "_")
-			# A legacy "Ready" row (not yet converted by the migration) shows in
-			# the In Progress column instead of vanishing with its removed column.
-			state_key = _STATE_ALIASES.get(state_key, state_key)
-			terr_ship = _get_territory_shipping(inv.get("territory") or "")
+			state, state_key = _invoice_state(inv)
+			# A COPY: the override / persisted-expense lines below write into it,
+			# and writing into the cached dict leaked one order's courier expense
+			# onto every later card in the same territory.
+			terr_ship = dict(_get_territory_shipping(inv.get("territory") or ""))
 			# Prefer approved override > persisted SI value > territory
 			override_status = inv.get("custom_shipping_override_status") or ""
 			override_amount = float(inv.get("custom_shipping_override") or 0)
@@ -2003,13 +2260,16 @@ def get_kanban_invoices(filters: str | dict | None = None) -> dict[str, Any]:
 			# Determine if there exists any UNSETTLED courier transaction for this invoice
 			has_unsettled = False
 			try:
-				has_unsettled = frappe.db.exists(
-					"Courier Transaction",
-					{
-						"reference_invoice": inv.name,
-						"status": ["!=", "Settled"],
-					},
-				)
+				if unsettled_courier_invoices is not None:
+					has_unsettled = inv.name in unsettled_courier_invoices
+				else:
+					has_unsettled = frappe.db.exists(
+						"Courier Transaction",
+						{
+							"reference_invoice": inv.name,
+							"status": ["!=", "Settled"],
+						},
+					)
 			except Exception:
 				has_unsettled = False
 
@@ -2188,17 +2448,17 @@ def get_kanban_invoices(filters: str | dict | None = None) -> dict[str, Any]:
 
 		kanban_data = _sort_kanban_columns(kanban_data)
 
-		# Trim "Delivered" column: keep only last 2 days + today, max 30 cards.
-		# Skipped once the board is filtered — the trim is there to stop a
-		# finished-work column from dominating the *live* board, but applying it
-		# to a search meant a delivered order older than two days could never be
-		# found, no matter what was typed.
-		delivered_key = "delivered"
-		if not is_filtered and delivered_key in kanban_data and kanban_data[delivered_key]:
-			cutoff = str(frappe.utils.add_days(frappe.utils.today(), -2))
-			kanban_data[delivered_key] = [
-				c for c in kanban_data[delivered_key] if (c.get("posting_date") or "") >= cutoff
-			][:30]
+		# Trim the finished-work columns (Delivered, Cancelled): keep only the
+		# last 2 days + today, max 30 cards. Skipped once the board is filtered —
+		# the trim is there to stop a finished-work column from dominating the
+		# *live* board, but applying it to a search meant an order older than two
+		# days could never be found, no matter what was typed.
+		if not is_filtered:
+			for column_key in trimmed_columns:
+				if kanban_data.get(column_key):
+					kanban_data[column_key] = [
+						c for c in kanban_data[column_key] if (c.get("posting_date") or "") >= trim_cutoff
+					][:_KANBAN_TRIM_MAX_CARDS]
 
 		# Return unified success. `card_count` is what the board actually shows
 		# after column trimming, so a filtered board can honestly say how many
