@@ -509,6 +509,167 @@ class ReadyAnswersSettingsTest(unittest.TestCase):
 		)
 
 
+class ReadyAnswersCapTest(unittest.TestCase):
+	"""C2: ready answers are pasted whole into the model prompt, so the table is bounded."""
+
+	def setUp(self):
+		from unittest.mock import patch
+
+		from jarz_pos.services import chat_settings
+
+		self.cs = chat_settings
+		self.cs._ready_cap_logged.clear()
+		self.addCleanup(self.cs._ready_cap_logged.clear)
+		patcher = patch.object(self.cs.frappe, "log_error", create=True)
+		self.log_error = patcher.start()
+		self.addCleanup(patcher.stop)
+
+	@staticmethod
+	def _row(n, answer=None, **extra):
+		return {"topic": f"Topic {n}", "when_to_use": "", "answer": answer if answer is not None else f"Answer {n}", **extra}
+
+	@staticmethod
+	def _doc_row(n, modified="2026-10-01 10:00:00", idx=None, active=1, answer=None):
+		return {
+			"topic": f"Topic {n}",
+			"when_to_use": "",
+			"answer": answer if answer is not None else f"Answer {n}",
+			"active": active,
+			"modified": modified,
+			"idx": idx if idx is not None else n,
+		}
+
+	def test_limits_are_the_agreed_ones(self):
+		self.assertEqual(self.cs.MAX_READY_ANSWERS, 50)
+		self.assertEqual(self.cs.MAX_READY_ANSWER_CHARS, 12000)
+
+	def test_under_the_caps_nothing_changes_and_nothing_is_logged(self):
+		rows = [self._row(n) for n in range(10)]
+		self.assertEqual(self.cs.cap_ready_answers(rows), rows)
+		self.log_error.assert_not_called()
+
+	def test_empty_and_none(self):
+		self.assertEqual(self.cs.cap_ready_answers([]), [])
+		self.assertEqual(self.cs.cap_ready_answers(None), [])
+
+	def test_at_most_fifty_answers_and_the_first_fifty_win(self):
+		rows = [self._row(n) for n in range(80)]
+		out = self.cs.cap_ready_answers(rows)
+		self.assertEqual(len(out), 50)
+		self.assertEqual(out, rows[:50])
+
+	def test_character_cap_stops_before_the_answer_that_would_overflow(self):
+		rows = [self._row(n, "x" * 1000) for n in range(30)]
+		out = self.cs.cap_ready_answers(rows)
+		rendered = "\n\n".join(self.cs.render_ready_answer(r) for r in out)
+		self.assertLessEqual(len(rendered), 12000)
+		self.assertLess(len(out), 30)
+		self.assertEqual(out, rows[: len(out)])
+		# The next whole answer genuinely did not fit.
+		self.assertGreater(len(rendered) + 2 + len(self.cs.render_ready_answer(rows[len(out)])), 12000)
+
+	def test_a_short_low_priority_answer_never_jumps_a_long_one(self):
+		rows = [self._row(0, "x" * 6000), self._row(1, "y" * 7000), self._row(2, "short")]
+		out = self.cs.cap_ready_answers(rows)
+		self.assertEqual([r["topic"] for r in out], ["Topic 0"])
+
+	def test_a_single_oversized_answer_is_cut_cleanly_not_dropped(self):
+		text = "\n".join(f"line number {i} of a very long reply" for i in range(2000))
+		first = self._row(0, text)
+		out = self.cs.cap_ready_answers([first, self._row(1)])
+		self.assertEqual(len(out), 1)
+		self.assertLessEqual(len(self.cs.render_ready_answer(out[0])), 12000)
+		self.assertTrue(out[0]["answer"].endswith("…"))
+		# Cut at a line boundary: the kept text is whole lines plus the mark.
+		kept = out[0]["answer"][:-1].split("\n")
+		self.assertTrue(all(line.startswith("line number") and line.endswith("reply") for line in kept))
+		# The caller's row is not mutated.
+		self.assertEqual(first["answer"], text)
+
+	def test_truncate_cleanly_prefers_a_word_boundary(self):
+		out = self.cs._truncate_cleanly("alpha beta gamma delta epsilon", 20)
+		self.assertLessEqual(len(out), 20)
+		self.assertTrue(out.endswith("…"))
+		self.assertIn(out[:-1].split(" ")[-1], {"alpha", "beta", "gamma", "delta"})
+		self.assertEqual(self.cs._truncate_cleanly("short", 20), "short")
+		self.assertEqual(self.cs._truncate_cleanly("abcdef", 1), "a")
+
+	def test_dropping_answers_is_logged_once_per_outcome(self):
+		rows = [self._row(n) for n in range(60)]
+		self.cs.cap_ready_answers(rows)
+		self.cs.cap_ready_answers(rows)
+		self.cs.cap_ready_answers(rows)
+		self.assertEqual(self.log_error.call_count, 1)
+		message = self.log_error.call_args.args[0]
+		self.assertIn("kept 50 of 60", message)
+		# A different outcome is a new fact and is logged again.
+		self.cs.cap_ready_answers([self._row(n) for n in range(70)])
+		self.assertEqual(self.log_error.call_count, 2)
+
+	def test_a_failing_log_does_not_break_the_cap(self):
+		self.log_error.side_effect = RuntimeError("no database")
+		out = self.cs.cap_ready_answers([self._row(n) for n in range(60)])
+		self.assertEqual(len(out), 50)
+
+	def test_build_settings_orders_most_recently_modified_first(self):
+		doc = {
+			"ready_answers": [
+				self._doc_row(1, modified="2026-09-01 08:00:00"),
+				self._doc_row(2, modified="2026-10-05 08:00:00"),
+				self._doc_row(3, modified="2026-09-20 08:00:00"),
+			]
+		}
+		out = self.cs.build_settings(doc)
+		self.assertEqual([r["topic"] for r in out["ready_answers"]], ["Topic 2", "Topic 3", "Topic 1"])
+
+	def test_equal_modified_falls_back_to_grid_order(self):
+		doc = {"ready_answers": [self._doc_row(3, idx=3), self._doc_row(1, idx=1), self._doc_row(2, idx=2)]}
+		out = self.cs.build_settings(doc)
+		self.assertEqual([r["topic"] for r in out["ready_answers"]], ["Topic 1", "Topic 2", "Topic 3"])
+
+	def test_order_is_deterministic_across_input_permutations(self):
+		rows = [self._doc_row(n, modified=f"2026-10-0{1 + n % 3} 09:00:00", idx=n + 1) for n in range(9)]
+		expected = [r["topic"] for r in self.cs.build_settings({"ready_answers": rows})["ready_answers"]]
+		for shift in (1, 4, 7):
+			rotated = rows[shift:] + rows[:shift]
+			got = [r["topic"] for r in self.cs.build_settings({"ready_answers": rotated})["ready_answers"]]
+			self.assertEqual(got, expected)
+
+	def test_build_settings_skips_disabled_rows_before_counting(self):
+		rows = [self._doc_row(n, active=0) for n in range(100)] + [self._doc_row(1000 + n) for n in range(5)]
+		out = self.cs.build_settings({"ready_answers": rows})["ready_answers"]
+		self.assertEqual(len(out), 5)
+		self.assertTrue(all(r["topic"].startswith("Topic 10") for r in out))
+		self.log_error.assert_not_called()
+
+	def test_build_settings_caps_a_large_table_and_keeps_the_newest(self):
+		rows = [self._doc_row(n, modified=f"2026-10-01 {n // 60:02d}:{n % 60:02d}:00") for n in range(120)]
+		out = self.cs.build_settings({"ready_answers": rows})["ready_answers"]
+		self.assertEqual(len(out), 50)
+		self.assertEqual(out[0]["topic"], "Topic 119")
+		self.assertEqual(out[-1]["topic"], "Topic 70")
+		self.assertEqual(self.log_error.call_count, 1)
+
+	def test_output_shape_is_unchanged(self):
+		out = self.cs.build_settings({"ready_answers": [self._doc_row(1)]})["ready_answers"]
+		self.assertEqual(set(out[0]), {"topic", "when_to_use", "answer"})
+
+	def test_prompt_lines_are_capped_even_for_a_settings_dict_built_elsewhere(self):
+		"""``build_prompt_context`` re-applies the cap; the same call it makes is checked here."""
+		rows = [self._row(n, "z" * 500) for n in range(200)]
+		lines = [d.render_ready_answer(r) for r in d.cap_ready_answers(rows)]
+		self.assertLessEqual(len(lines), 50)
+		self.assertLessEqual(len("\n\n".join(lines)), 12000)
+
+	def test_prompt_module_uses_the_shared_helpers(self):
+		self.assertIs(d.cap_ready_answers, self.cs.cap_ready_answers)
+		self.assertIs(d.render_ready_answer, self.cs.render_ready_answer)
+
+	def test_default_answers_are_untouched_by_the_cap(self):
+		out = d.cap_ready_answers(d.DEFAULT_READY_ANSWERS)
+		self.assertEqual(out, list(d.DEFAULT_READY_ANSWERS))
+
+
 class FirstNameTest(unittest.TestCase):
 	def test_skips_phone_like_names(self):
 		self.assertEqual(d.first_name("+201111034268", "Sara Ali"), "Sara")

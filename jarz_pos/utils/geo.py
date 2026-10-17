@@ -37,6 +37,7 @@ from __future__ import annotations
 import math
 import re
 import time
+from collections.abc import Iterable
 from typing import Optional
 from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
@@ -108,6 +109,29 @@ def accepts_write(current_source: object, incoming_source: object) -> bool:
 	carries a better pin.
 	"""
 	return confidence_rank(incoming_source) >= confidence_rank(current_source)
+
+
+#: Highest rank an explicit POS staff edit may replace: a customer's own pin
+#: (what the website or a Woo order supplied). Courier-sourced pins
+#: (``courier_web`` and up) and ``manual_override`` are never replaceable by it.
+STAFF_CORRECTABLE_MAX_RANK = CONFIDENCE_RANK["customer_pin"]
+
+
+def accepts_staff_correction(current_source: object, incoming_source: object) -> bool:
+	"""True when an explicit POS staff edit may replace *current_source* below the ladder.
+
+	Only a ``pos_link`` write qualifies (the POS app's stored source), and only
+	over a pin at or below ``customer_pin``: staff looking at a customer's wrong
+	pin may replace it, but never a courier's door-step fix or a manager's
+	override. This widens the ladder for ONE case; every other caller keeps
+	:func:`accepts_write`. The caller is responsible for requiring an explicit
+	opt-in from a whitelisted POS endpoint and for checking the coordinates
+	actually changed.
+	"""
+	return (
+		normalize_source(incoming_source) == SOURCE_POS_LINK
+		and confidence_rank(current_source) <= STAFF_CORRECTABLE_MAX_RANK
+	)
 
 
 def clamp_confidence(current_source: object, incoming_source: object) -> tuple[str, int]:
@@ -656,6 +680,81 @@ def distance_m_or_none(lat1: object, lng1: object, lat2: object, lng2: object) -
 		return haversine_m(float(lat1), float(lng1), float(lat2), float(lng2))
 	except Exception:
 		return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Delivery reference points — swapped-pair detection and distance
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: Greater Cairo (Tahrir). The reference used when the site holds no delivery
+#: coordinates at all (no Territory / POS Profile carries a centroid), which is
+#: the case today: the business delivers in Greater Cairo.
+GREATER_CAIRO = (30.0444, 31.2357)
+
+#: A swapped reading must land this close to a delivery reference...
+SWAP_NEAR_M = 40_000.0
+#: ...and the typed reading must be this far from every one of them, otherwise
+#: the typed order is kept. The gap between the two is the "ambiguous" band.
+SWAP_FAR_M = 80_000.0
+
+
+def is_unlabelled_bare_pair(text: object) -> bool:
+	"""True when *text* is nothing but a typed ``a, b`` decimal pair, no letters.
+
+	Only this shape can be a latitude/longitude transposition. A URL names its
+	axes (``!3d``/``!4d``, ``@lat,lng``, ``q=``) and a pair carrying hemisphere
+	letters (``30.04 N, 31.23 E``, DMS) states its own order, so neither is ever
+	reordered. Pure; never raises.
+	"""
+	try:
+		match = _BARE_PAIR_RE.match(str(text or "").strip().translate(_ARABIC_NUMERALS))
+	except Exception:
+		return False
+	return bool(match) and not (match.group(2) or match.group(4))
+
+
+def nearest_reference(
+	lat: object, lng: object, points: Iterable[tuple[float, float]] | None
+) -> tuple[float, tuple[float, float]] | None:
+	"""``(distance_m, point)`` for the *points* entry nearest to *lat*/*lng*, or ``None``."""
+	best: tuple[float, tuple[float, float]] | None = None
+	for point in points or ():
+		gap = distance_m_or_none(lat, lng, point[0], point[1])
+		if gap is not None and (best is None or gap < best[0]):
+			best = (gap, (float(point[0]), float(point[1])))
+	return best
+
+
+def maybe_swap_bare_pair(
+	lat: object, lng: object, points: Iterable[tuple[float, float]] | None
+) -> tuple[float, float, bool]:
+	"""``(lat, lng, swapped)`` for a typed pair that may have its axes transposed.
+
+	``31.2357, 30.0444`` (Cairo typed longitude-first) is a *valid* Egypt point
+	near Alexandria, so the service-area box cannot tell. When BOTH orders fall
+	inside :data:`SERVICE_AREA`, the delivery reference *points* decide: swap only
+	if the swapped order is within :data:`SWAP_NEAR_M` of a reference AND the
+	typed order is farther than :data:`SWAP_FAR_M` from all of them. Anything
+	less clear-cut keeps the typed order. Pure; never raises; with no *points*
+	nothing is swapped (the caller supplies the Cairo fallback).
+	"""
+	try:
+		typed = (float(lat), float(lng))
+		swapped = (typed[1], typed[0])
+		refs = list(points or [])
+		if not refs or typed == swapped:
+			return typed[0], typed[1], False
+		if not (in_service_area(*typed) and in_service_area(*swapped)):
+			return typed[0], typed[1], False
+		typed_near = nearest_reference(typed[0], typed[1], refs)
+		swapped_near = nearest_reference(swapped[0], swapped[1], refs)
+		if typed_near is None or swapped_near is None:
+			return typed[0], typed[1], False
+		if swapped_near[0] <= SWAP_NEAR_M and typed_near[0] > SWAP_FAR_M:
+			return swapped[0], swapped[1], True
+	except Exception:
+		pass
+	return lat, lng, False  # type: ignore[return-value]
 
 
 # ─────────────────────────────────────────────────────────────────────────────

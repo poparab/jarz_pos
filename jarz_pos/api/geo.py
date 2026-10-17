@@ -136,6 +136,12 @@ def set_address_pin(
 	A write whose confidence sits below what the address already carries is
 	reported as ``accepted=False`` and changes nothing — that is not an error,
 	and the client should say "kept the better existing pin".
+
+	One exception, and it is why this endpoint passes ``staff_correction=True``:
+	this is the call the POS app makes when staff explicitly edit an address pin,
+	and a ``pos_link`` pin written that way replaces a ``customer_pin`` (never a
+	courier or manual-override pin) when the coordinates actually change. The
+	stored source stays ``pos_link`` and the use is logged on the Address.
 	"""
 	_ensure_geo_write_permission()
 	try:
@@ -146,7 +152,9 @@ def set_address_pin(
 
 		link = str(link or url or "").strip()
 		if link:
-			return _geo_service.resolve_address_from_link(name, link, source=source, accuracy_m=accuracy_m)
+			return _geo_service.resolve_address_from_link(
+				name, link, source=source, accuracy_m=accuracy_m, staff_correction=True
+			)
 
 		if latitude in (None, "") or longitude in (None, ""):
 			return {
@@ -161,6 +169,7 @@ def set_address_pin(
 			source=source,
 			accuracy_m=accuracy_m,
 			note=note,
+			staff_correction=True,
 		)
 	except frappe.PermissionError:
 		raise
@@ -193,6 +202,7 @@ def dry_run_address_pin(
 		frappe.has_permission("Address", ptype="read", doc=name, throw=True)
 
 		precision = None
+		swap_info: dict[str, Any] | None = None
 		link = str(link or url or "").strip()
 		if link:
 			parsed = _geo.parse_maps_link(link)
@@ -209,6 +219,9 @@ def dry_run_address_pin(
 					"url": link,
 				}
 			latitude, longitude, precision = parsed
+			# Mirror resolve_address_from_link exactly (swap first, then the area gate).
+			swap_info = _geo_service.apply_bare_pair_swap(link, latitude, longitude)
+			latitude, longitude = swap_info["latitude"], swap_info["longitude"]
 			if not _geo.in_service_area(latitude, longitude):
 				return {
 					"success": True,
@@ -232,9 +245,12 @@ def dry_run_address_pin(
 			longitude=longitude,
 			source=source,
 			accuracy_m=accuracy_m,
+			staff_correction=True,
 		)
 		decision["precision"] = precision
 		decision["dry_run"] = True
+		if swap_info and swap_info.get("swapped"):
+			decision.update({k: v for k, v in swap_info.items() if k not in ("latitude", "longitude")})
 		return {"success": True, **decision}
 	except frappe.PermissionError:
 		raise

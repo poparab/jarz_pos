@@ -671,6 +671,15 @@ def ensure_address_geo_fields() -> None:
 			description="Set when the pin reaches courier_verified confidence.",
 			read_only=1,
 		)
+		_ensure_custom_field(
+			dt="Address",
+			fieldname="custom_geo_updated_on",
+			label="Geo Updated On",
+			fieldtype="Datetime",
+			insert_after="custom_geo_verified_on",
+			description="Set on every accepted pin write. Lets a newer staff pin outrank an older invoice snapshot.",
+			read_only=1,
+		)
 	except Exception as e:
 		_log(f"ensure_address_geo_fields error: {e}")
 

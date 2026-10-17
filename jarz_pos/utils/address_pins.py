@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Iterable
+from datetime import datetime
 from typing import Any, Optional
 
 import frappe
@@ -38,11 +39,18 @@ from jarz_pos.utils.geo import (
 	SOURCE_COURIER_VERIFIED,
 	SOURCE_CUSTOMER_PIN,
 	SOURCE_MANUAL_OVERRIDE,
+	SOURCE_POS_LINK,
 	distance_m_or_none,
 	extract_location_link,
 	is_valid_coordinate,
 	maps_link_for,
 )
+
+#: Address column stamped by ``geo_resolution.set_address_pin`` on every accepted
+#: write. Carried through the card projection under :data:`_UPDATED_KEY`, an
+#: internal key that :func:`invoice_pin_override` strips before the payload leaves.
+GEO_UPDATED_COLUMN = "custom_geo_updated_on"
+_UPDATED_KEY = "_geo_updated_on"
 
 #: Optional Address columns carrying the pin. Selected only when present.
 GEO_COLUMNS = (
@@ -50,6 +58,10 @@ GEO_COLUMNS = (
 	"custom_longitude",
 	"custom_geo_source",
 	"custom_geo_confidence",
+	# When the pin was last WRITTEN (``Address.modified`` is useless for this:
+	# the geo writer uses ``update_modified=False``). Optional like the rest, so
+	# a site that has not migrated it keeps the previous behaviour.
+	GEO_UPDATED_COLUMN,
 )
 
 #: Optional Sales Invoice columns carrying THIS order's pin snapshot. The
@@ -141,6 +153,9 @@ def pin_fields_from_address(row: dict[str, Any] | None) -> dict[str, Any]:
 			out["location_link"] = extract_location_link(row.get("address_line2"))
 		out["geo_source"] = str(row.get("custom_geo_source") or "").strip()
 		out["geo_confidence"] = _safe_int(row.get("custom_geo_confidence"))
+		written = row.get(GEO_UPDATED_COLUMN)
+		if written not in (None, ""):
+			out[_UPDATED_KEY] = written
 	except Exception:
 		return empty_pin_fields()
 	return out
@@ -228,6 +243,48 @@ def _clean_flag(value: Any) -> str:
 	return ",".join(t for t in tokens if t)
 
 
+def _as_datetime(value: Any) -> datetime | None:
+	"""A naive ``datetime`` from a Frappe datetime value (object or string), else ``None``."""
+	try:
+		if isinstance(value, datetime):
+			return value.replace(tzinfo=None)
+		text = str(value or "").strip()
+		if not text:
+			return None
+		return datetime.fromisoformat(text).replace(tzinfo=None)
+	except (TypeError, ValueError):
+		return None
+
+
+def _public(fields: dict[str, Any]) -> dict[str, Any]:
+	"""*fields* without the internal pin-written-at key (the card shape must not grow)."""
+	fields.pop(_UPDATED_KEY, None)
+	return fields
+
+
+def _pos_link_newer_than_snapshot(address_fields: dict[str, Any], si_row_getter: Any) -> bool:
+	"""True when the Address carries a ``pos_link`` pin written AFTER this invoice.
+
+	A ``pos_link`` pin is a person pasting or confirming a location in the POS app.
+	Written after the invoice's snapshot was taken, it is a staff correction of
+	that snapshot (or, after a ``pin_removed`` flag, a fresh pin) and must show.
+	One written earlier or at the same moment is just the pin the order was
+	taken with and loses to the snapshot, as before.
+
+	The snapshot has no timestamp of its own, so the invoice's ``creation`` stands
+	in for it (the Woo inbound sync writes both in the same request). An
+	unmigrated site, an unstamped pin or a missing ``creation`` all compare as
+	"not newer", which is the previous behaviour.
+	"""
+	if not address_fields.get("has_location_pin"):
+		return False
+	if _clean_text(address_fields.get("geo_source")).lower() != SOURCE_POS_LINK:
+		return False
+	written = _as_datetime(address_fields.get(_UPDATED_KEY))
+	created = _as_datetime(si_row_getter("creation"))
+	return written is not None and created is not None and written > created
+
+
 def invoice_pin_override(si_row: Any, address_fields: dict[str, Any] | None) -> dict[str, Any]:
 	"""Merge THIS invoice's pin snapshot over the Address pin keys. Pure; never raises.
 
@@ -237,30 +294,37 @@ def invoice_pin_override(si_row: Any, address_fields: dict[str, Any] | None) -> 
 	  within :data:`VERIFIED_NEAR_M` of it, which is a verified refinement of
 	  the same door and is kept.
 	  A staff-confirmed Address pin (:data:`STAFF_CONFIRMED_SOURCES`) wins at
-	  any distance.
+	  any distance, and so does a ``pos_link`` Address pin written after the
+	  invoice was created (:func:`_pos_link_newer_than_snapshot`): staff
+	  corrected the customer's pin from the POS app.
 	* No usable snapshot (blank, ``0,0``, out of range, columns not migrated)
 	  -> the Address pin exactly as before, EXCEPT when the snapshot carries a
-	  flag (e.g. ``outside_egypt``): the website rejected this order's pin, so
-	  the shared Address pin belongs to some other order and is blanked unless
-	  staff confirmed it.
+	  flag (e.g. ``outside_egypt``, ``pin_removed``): the website rejected or
+	  dropped this order's pin, so the shared Address pin belongs to some other
+	  order and is blanked unless staff confirmed it (a staff-confirmed source,
+	  or a ``pos_link`` pin written after the invoice).
 
 	``pin_source`` and ``pin_flag`` always come from the snapshot (``""`` when
 	absent); the flag passes through even when there is no usable pin.
 	"""
-	base = dict(address_fields) if address_fields else empty_pin_fields()
+	base = _public(dict(address_fields)) if address_fields else empty_pin_fields()
 	base.setdefault("pin_source", "")
 	base.setdefault("pin_flag", "")
 	if not si_row:
 		return base
 	try:
 		getter = si_row.get
-		out = dict(base)
+		work = dict(address_fields) if address_fields else empty_pin_fields()
+		out = _public(dict(work))
+		out.setdefault("pin_source", "")
+		out.setdefault("pin_flag", "")
 		out["pin_source"] = _clean_text(getter("custom_delivery_pin_source"))
 		out["pin_flag"] = _clean_flag(getter("custom_delivery_pin_flag"))
 
 		staff_confirmed = bool(out.get("has_location_pin")) and (
 			_clean_text(out.get("geo_source")).lower() in STAFF_CONFIRMED_SOURCES
 		)
+		staff_confirmed = staff_confirmed or _pos_link_newer_than_snapshot(work, getter)
 
 		lat = _finite_float(getter("custom_delivery_pin_latitude"))
 		lng = _finite_float(getter("custom_delivery_pin_longitude"))

@@ -14,6 +14,7 @@ Pure ``unittest``: ``frappe`` is stubbed, no site, no network.
 """
 
 import unittest
+from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 from jarz_pos.utils import address_pins, geo
@@ -544,6 +545,176 @@ class TestInvoicePinSchema(unittest.TestCase):
 		sweep = "jarz_pos.utils.cleanup.remove_colliding_custom_fields_for_fixtures"
 		self.assertIn(seeder, before)
 		self.assertGreater(before.index(seeder), before.index(sweep))
+
+
+class TestNewerPosLinkBeatsTheSnapshot(unittest.TestCase):
+	"""L2 / L4: a pos_link Address pin written AFTER the invoice snapshot wins.
+
+	``Address.modified`` cannot say when a pin was written (the geo writer uses
+	``update_modified=False``), so the Address carries ``custom_geo_updated_on`` and
+	the invoice's ``creation`` stands in for the snapshot time.
+	"""
+
+	CREATED = datetime(2026, 10, 10, 12, 0, 0)
+
+	def _addr(self, lat, lng, source="pos_link", rank=20, updated=None):
+		return address_pins.pin_fields_from_address(
+			{
+				"custom_latitude": lat,
+				"custom_longitude": lng,
+				"custom_geo_source": source,
+				"custom_geo_confidence": rank,
+				"custom_geo_updated_on": updated,
+			}
+		)
+
+	def _inv(self, created=None, **kwargs):
+		row = _invoice(**kwargs)
+		row["creation"] = created if created is not None else self.CREATED
+		return row
+
+	def test_pos_link_written_after_the_invoice_wins(self):
+		addr = self._addr(FAR_LAT, FAR_LNG, updated=self.CREATED + timedelta(hours=1))
+		out = address_pins.invoice_pin_override(self._inv(), addr)
+		self.assertEqual(out["address_latitude"], FAR_LAT)
+		self.assertEqual(out["address_longitude"], FAR_LNG)
+		self.assertEqual(out["geo_source"], "pos_link")
+		self.assertEqual(out["geo_confidence"], 20)
+		self.assertEqual(out["location_link"], geo.maps_link_for(FAR_LAT, FAR_LNG))
+		# The snapshot's metadata still rides along.
+		self.assertEqual(out["pin_source"], "customer_checkout")
+
+	def test_older_pos_link_still_loses_to_the_snapshot(self):
+		addr = self._addr(FAR_LAT, FAR_LNG, updated=self.CREATED - timedelta(hours=1))
+		out = address_pins.invoice_pin_override(self._inv(), addr)
+		self.assertEqual(out["address_latitude"], SNAP_LAT)
+		self.assertEqual(out["geo_source"], "customer_pin")
+
+	def test_pos_link_written_at_the_same_moment_loses(self):
+		addr = self._addr(FAR_LAT, FAR_LNG, updated=self.CREATED)
+		out = address_pins.invoice_pin_override(self._inv(), addr)
+		self.assertEqual(out["address_latitude"], SNAP_LAT)
+
+	def test_unstamped_pos_link_keeps_the_old_behaviour(self):
+		"""A site that has not migrated the column, or a pin written before it existed."""
+		for updated in (None, "", "not a date"):
+			with self.subTest(updated=updated):
+				addr = self._addr(FAR_LAT, FAR_LNG, updated=updated)
+				out = address_pins.invoice_pin_override(self._inv(), addr)
+				self.assertEqual(out["address_latitude"], SNAP_LAT)
+
+	def test_invoice_without_creation_keeps_the_old_behaviour(self):
+		addr = self._addr(FAR_LAT, FAR_LNG, updated=self.CREATED + timedelta(hours=1))
+		row = _invoice()
+		out = address_pins.invoice_pin_override(row, addr)
+		self.assertEqual(out["address_latitude"], SNAP_LAT)
+
+	def test_newer_customer_pin_does_not_count(self):
+		"""Only an explicit staff pin (pos_link) outranks the snapshot by recency."""
+		for source, rank in (("customer_pin", 30), ("courier_web", 35), ("territory_centroid", 10)):
+			with self.subTest(source=source):
+				addr = self._addr(FAR_LAT, FAR_LNG, source, rank, updated=self.CREATED + timedelta(hours=1))
+				out = address_pins.invoice_pin_override(self._inv(), addr)
+				self.assertEqual(out["address_latitude"], SNAP_LAT)
+
+	def test_timestamps_may_be_strings_or_datetimes(self):
+		later = (self.CREATED + timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S.%f")
+		for created, updated in (
+			(self.CREATED, later),
+			(self.CREATED.isoformat(sep=" "), self.CREATED + timedelta(minutes=5)),
+			(self.CREATED.isoformat(sep=" "), later),
+		):
+			with self.subTest(created=created, updated=updated):
+				out = address_pins.invoice_pin_override(
+					self._inv(created=created), self._addr(FAR_LAT, FAR_LNG, updated=updated)
+				)
+				self.assertEqual(out["address_latitude"], FAR_LAT)
+
+	def test_card_payload_shape_does_not_change(self):
+		addr = self._addr(FAR_LAT, FAR_LNG, updated=self.CREATED + timedelta(hours=1))
+		self.assertIn("_geo_updated_on", addr)
+		for row in (self._inv(), _invoice(), None):
+			with self.subTest(row=bool(row)):
+				out = address_pins.invoice_pin_override(row, addr)
+				self.assertEqual(set(out), PIN_KEYS)
+		self.assertEqual(set(address_pins.invoice_pin_override(self._inv(), None)), PIN_KEYS)
+
+	# ── L4: the Woo app's pin_removed flag ──────────────────────────────
+
+	def test_pin_removed_flag_is_accepted_and_hides_the_shared_pin(self):
+		"""Removed at checkout: the shared Address pin belongs to some other order."""
+		out = address_pins.invoice_pin_override(
+			self._inv(lat=None, lng=None, source="", flag="pin_removed"),
+			self._addr(FAR_LAT, FAR_LNG, "customer_pin", 30, updated=self.CREATED - timedelta(days=1)),
+		)
+		self.assertEqual(out["pin_flag"], "pin_removed")
+		self.assertFalse(out["has_location_pin"])
+		self.assertIsNone(out["address_latitude"])
+		self.assertEqual(out["location_link"], "")
+		self.assertEqual(set(out), PIN_KEYS)
+
+	def test_pin_removed_with_blank_string_coordinates(self):
+		out = address_pins.invoice_pin_override(
+			self._inv(lat="", lng="", source="", flag=" pin_removed "), address_pins.empty_pin_fields()
+		)
+		self.assertEqual(out["pin_flag"], "pin_removed")
+		self.assertFalse(out["has_location_pin"])
+
+	def test_pin_removed_combines_with_other_flags(self):
+		out = address_pins.invoice_pin_override(
+			self._inv(lat=None, lng=None, source="", flag="outside_area, pin_removed"),
+			address_pins.empty_pin_fields(),
+		)
+		self.assertEqual(out["pin_flag"], "outside_area,pin_removed")
+
+	def test_staff_correction_after_the_removal_still_shows(self):
+		"""The customer removed the pin; staff then pasted one in the POS app."""
+		addr = self._addr(FAR_LAT, FAR_LNG, "pos_link", 20, updated=self.CREATED + timedelta(minutes=30))
+		out = address_pins.invoice_pin_override(self._inv(lat=None, lng=None, source="", flag="pin_removed"), addr)
+		self.assertTrue(out["has_location_pin"])
+		self.assertEqual(out["address_latitude"], FAR_LAT)
+		self.assertEqual(out["geo_source"], "pos_link")
+		self.assertEqual(out["pin_flag"], "pin_removed")
+
+	def test_pos_link_older_than_the_removal_stays_hidden(self):
+		addr = self._addr(FAR_LAT, FAR_LNG, "pos_link", 20, updated=self.CREATED - timedelta(minutes=30))
+		out = address_pins.invoice_pin_override(self._inv(lat=None, lng=None, source="", flag="pin_removed"), addr)
+		self.assertFalse(out["has_location_pin"])
+
+	def test_staff_verified_pin_survives_the_removal(self):
+		addr = self._addr(FAR_LAT, FAR_LNG, "manual_override", 50)
+		out = address_pins.invoice_pin_override(self._inv(lat=None, lng=None, source="", flag="pin_removed"), addr)
+		self.assertTrue(out["has_location_pin"])
+		self.assertEqual(out["geo_source"], "manual_override")
+
+	def test_geo_updated_column_is_selected_when_present_and_skipped_when_not(self):
+		self.assertIn("custom_geo_updated_on", address_pins.GEO_COLUMNS)
+		mf = _frappe_stub(
+			rows=[
+				{
+					"name": "ADDR-1",
+					"address_line2": "",
+					"custom_latitude": 30.05,
+					"custom_longitude": 31.24,
+					"custom_geo_source": "pos_link",
+					"custom_geo_confidence": 20,
+					"custom_geo_updated_on": self.CREATED,
+				}
+			]
+		)
+		with patch.object(address_pins, "frappe", mf):
+			out = address_pins.get_address_pin_map(["ADDR-1"])
+		self.assertIn("custom_geo_updated_on", mf.get_all.call_args.kwargs["fields"])
+		self.assertEqual(out["ADDR-1"]["_geo_updated_on"], self.CREATED)
+
+		# A site that has not migrated the column: the query must not ask for it.
+		mf = _frappe_stub(rows=[])
+		mf.get_meta.return_value.has_field.side_effect = (
+			lambda f: f != "custom_geo_updated_on" and f in address_pins.GEO_COLUMNS
+		)
+		with patch.object(address_pins, "frappe", mf):
+			address_pins.get_address_pin_map(["ADDR-1"])
+		self.assertNotIn("custom_geo_updated_on", mf.get_all.call_args.kwargs["fields"])
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -20,7 +20,7 @@ Pure ``unittest``: no site, no network — every HTTP call is stubbed.
 """
 
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from jarz_pos.utils import geo
 
@@ -357,6 +357,260 @@ class TestLinkWritesStayInEgypt(unittest.TestCase):
 			result = self.service.resolve_address_from_link("ADDR-1", "30.0444, 31.2357")
 		self.assertTrue(result["accepted"])
 		self.assertAlmostEqual(write.call_args.kwargs["latitude"], 30.0444, places=4)
+
+
+class _ReferenceTestBase(unittest.TestCase):
+	"""Shared setup: a clean reference cache and controllable Territory / POS Profile points."""
+
+	def setUp(self):
+		from jarz_pos.services import geo_resolution
+
+		self.service = geo_resolution
+		self.service.clear_reference_cache()
+		self.addCleanup(self.service.clear_reference_cache)
+		self.points = {"Territory": [], "POS Profile": []}
+		self.loads = []
+
+		def _load(doctype):
+			self.loads.append(doctype)
+			return list(self.points.get(doctype, []))
+
+		patcher = patch.object(geo_resolution, "_load_reference_points", side_effect=_load)
+		patcher.start()
+		self.addCleanup(patcher.stop)
+
+
+class TestSwappedBarePair(_ReferenceTestBase):
+	"""L6: a typed Cairo pair with its axes transposed lands near Alexandria and was accepted."""
+
+	def test_swapped_cairo_pair_is_corrected_in_the_preview(self):
+		result = self.service.preview_link("31.2357, 30.0444", user="pos@jarz")
+		self.assertTrue(result["resolved"])
+		self.assertTrue(result["swapped"])
+		self.assertAlmostEqual(result["latitude"], 30.0444, places=4)
+		self.assertAlmostEqual(result["longitude"], 31.2357, places=4)
+		self.assertAlmostEqual(result["typed_latitude"], 31.2357, places=4)
+		self.assertAlmostEqual(result["typed_longitude"], 30.0444, places=4)
+		self.assertTrue(result["precision_note"])
+		self.assertEqual(result["swap_reference"], self.service.REFERENCE_CAIRO_FALLBACK)
+
+	def test_correctly_typed_pair_is_not_swapped(self):
+		result = self.service.preview_link("30.0444, 31.2357", user="pos@jarz")
+		self.assertFalse(result["swapped"])
+		self.assertAlmostEqual(result["latitude"], 30.0444, places=4)
+		self.assertNotIn("precision_note", result)
+		self.assertNotIn("typed_latitude", result)
+
+	def test_urls_are_never_swapped(self):
+		for url in (
+			"https://maps.google.com/?q=31.2357,30.0444",
+			"https://www.google.com/maps/@31.2357,30.0444,17z",
+		):
+			with self.subTest(url=url):
+				result = self.service.preview_link(url, user="pos@jarz")
+				self.assertFalse(result["swapped"])
+				self.assertAlmostEqual(result["latitude"], 31.2357, places=4)
+
+	def test_hemisphere_labelled_pair_is_never_swapped(self):
+		result = self.service.preview_link("31.2357 N, 30.0444 E", user="pos@jarz")
+		self.assertFalse(result["swapped"])
+		self.assertAlmostEqual(result["latitude"], 31.2357, places=4)
+
+	def test_territory_centroids_are_the_reference_when_they_exist(self):
+		"""With a delivery area in Alexandria, the typed order is near a centroid: keep it."""
+		self.points["Territory"] = [(31.2001, 29.9187), (30.0444, 31.2357)]
+		result = self.service.preview_link("31.2001, 29.9187", user="pos@jarz")
+		self.assertFalse(result["swapped"])
+		self.assertAlmostEqual(result["latitude"], 31.2001, places=4)
+		self.assertEqual(result["distance_reference"], self.service.REFERENCE_TERRITORY)
+
+	def test_swap_uses_territory_centroids_when_present(self):
+		self.points["Territory"] = [(30.0444, 31.2357)]
+		result = self.service.preview_link("31.2357, 30.0444", user="pos@jarz")
+		self.assertTrue(result["swapped"])
+		self.assertEqual(result["swap_reference"], self.service.REFERENCE_TERRITORY)
+
+	def test_ambiguous_pair_keeps_the_typed_order(self):
+		# Swapped reading is ~56 km from the only centroid: neither close nor far enough.
+		self.points["Territory"] = [(30.0444, 31.2357)]
+		result = self.service.preview_link("31.2357, 30.55", user="pos@jarz")
+		self.assertFalse(result["swapped"])
+		self.assertAlmostEqual(result["latitude"], 31.2357, places=4)
+
+	def test_resolve_address_from_link_saves_the_corrected_pair(self):
+		with patch.object(
+			self.service, "set_address_pin", return_value={"success": True, "accepted": True}
+		) as write:
+			result = self.service.resolve_address_from_link("ADDR-1", "31.2357, 30.0444")
+		self.assertAlmostEqual(write.call_args.kwargs["latitude"], 30.0444, places=4)
+		self.assertAlmostEqual(write.call_args.kwargs["longitude"], 31.2357, places=4)
+		self.assertTrue(result["swapped"])
+
+	def test_staff_correction_flag_reaches_the_writer_only_when_asked(self):
+		for asked in (True, False):
+			with self.subTest(asked=asked):
+				with patch.object(
+					self.service, "set_address_pin", return_value={"success": True, "accepted": True}
+				) as write:
+					self.service.resolve_address_from_link("ADDR-1", "30.0444, 31.2357", staff_correction=asked)
+				self.assertIs(write.call_args.kwargs["staff_correction"], asked)
+
+	def test_the_background_pin_job_never_passes_staff_correction(self):
+		with (
+			patch.object(
+				self.service.geo,
+				"expand_short_link",
+				return_value="https://www.google.com/maps/@30.0444,31.2357,17z",
+			),
+			patch.object(
+				self.service, "set_address_pin", return_value={"success": True, "accepted": True}
+			) as write,
+			patch.object(self.service.frappe, "db", MagicMock()),
+		):
+			self.service.resolve_short_link_job("ADDR-1", "https://maps.app.goo.gl/aBcDeF123")
+		self.assertNotIn("staff_correction", write.call_args.kwargs)
+
+	def test_swap_decision_never_raises(self):
+		with patch.object(self.service, "territory_reference_points", side_effect=RuntimeError("db down")):
+			out = self.service.apply_bare_pair_swap("31.2357, 30.0444", 31.2357, 30.0444)
+		self.assertFalse(out["swapped"])
+		self.assertEqual((out["latitude"], out["longitude"]), (31.2357, 30.0444))
+
+
+class TestDistanceFromBranch(_ReferenceTestBase):
+	"""L7: the Flutter field rejects a preview above 150 km, so the response must carry it."""
+
+	FLUTTER_LIMIT_M = 150_000
+
+	def test_cairo_is_close(self):
+		result = self.service.preview_link("30.0444, 31.2357", user="pos@jarz")
+		self.assertLess(result["distance_from_branch_m"], 5_000)
+		self.assertEqual(result["distance_reference"], self.service.REFERENCE_CAIRO_FALLBACK)
+
+	def test_aswan_is_beyond_the_client_limit(self):
+		result = self.service.preview_link("24.0889, 32.8998", user="pos@jarz")
+		self.assertTrue(result["resolved"])
+		self.assertGreater(result["distance_from_branch_m"], self.FLUTTER_LIMIT_M)
+
+	def test_a_value_is_always_an_int_number_of_metres(self):
+		result = self.service.preview_link("30.0500, 31.2400", user="pos@jarz")
+		self.assertIsInstance(result["distance_from_branch_m"], int)
+
+	def test_pos_profile_coordinates_take_precedence(self):
+		self.points["POS Profile"] = [(24.0889, 32.8998)]
+		self.points["Territory"] = [(30.0444, 31.2357)]
+		result = self.service.preview_link("24.0889, 32.8998", user="pos@jarz")
+		self.assertLess(result["distance_from_branch_m"], 100)
+		self.assertEqual(result["distance_reference"], self.service.REFERENCE_POS_PROFILE)
+
+	def test_nearest_of_several_references_wins(self):
+		self.points["Territory"] = [(30.0444, 31.2357), (24.0889, 32.8998)]
+		result = self.service.preview_link("24.1, 32.9", user="pos@jarz")
+		self.assertLess(result["distance_from_branch_m"], 5_000)
+		self.assertEqual(result["distance_reference"], self.service.REFERENCE_TERRITORY)
+
+	def test_territory_centroids_are_used_without_pos_profile_coordinates(self):
+		self.points["Territory"] = [(30.0444, 31.2357)]
+		result = self.service.preview_link("30.0444, 31.2357", user="pos@jarz")
+		self.assertLess(result["distance_from_branch_m"], 100)
+		self.assertEqual(result["distance_reference"], self.service.REFERENCE_TERRITORY)
+
+	def test_short_link_background_job_carries_the_distance_too(self):
+		cache = _FakeCache()
+		key = self.service._preview_ticket_key("a" * 32)
+		cache.store[key] = {"user": "pos@jarz", "url": "https://maps.app.goo.gl/x", "result": None}
+		with (
+			patch.object(self.service.frappe, "cache", return_value=cache),
+			patch.object(
+				self.service.geo,
+				"expand_short_link",
+				return_value="https://www.google.com/maps/@24.0889,32.8998,17z",
+			),
+		):
+			result = self.service.preview_short_link_job("a" * 32, "https://maps.app.goo.gl/x", "pos@jarz")
+			polled = self.service.preview_link(request_id="a" * 32, user="pos@jarz")
+		self.assertTrue(result["resolved"])
+		self.assertGreater(result["distance_from_branch_m"], self.FLUTTER_LIMIT_M)
+		self.assertEqual(polled["distance_from_branch_m"], result["distance_from_branch_m"])
+
+	def test_unmeasurable_point_degrades_to_none_not_an_error(self):
+		with patch.object(self.service, "branch_reference_points", side_effect=RuntimeError("boom")):
+			metres, basis = self.service.distance_from_branch_m(30.0, 31.0)
+		self.assertIsNone(metres)
+		self.assertEqual(basis, self.service.REFERENCE_CAIRO_FALLBACK)
+
+	def test_refused_point_carries_no_distance_under_latitude(self):
+		result = self.service.preview_link("https://maps.google.com/?q=48.8566,2.3522", user="pos@jarz")
+		self.assertFalse(result["resolved"])
+		self.assertNotIn("latitude", result)
+
+
+class TestReferencePointLoading(unittest.TestCase):
+	"""Neither Territory nor POS Profile carries coordinates today; the loader probes for them."""
+
+	def setUp(self):
+		from jarz_pos.services import geo_resolution
+
+		self.service = geo_resolution
+		self.service.clear_reference_cache()
+		self.addCleanup(self.service.clear_reference_cache)
+
+	def _frappe(self, fields, rows):
+		fake = MagicMock()
+		fake.get_meta.return_value.has_field.side_effect = lambda f: f in fields
+		fake.get_all.return_value = rows
+		return fake
+
+	def test_no_coordinate_fields_means_no_query_and_the_cairo_fallback(self):
+		fake = self._frappe({"disabled"}, [])
+		with patch.object(self.service, "frappe", fake):
+			points, basis = self.service.territory_reference_points()
+		self.assertEqual(points, [self.service.geo.GREATER_CAIRO])
+		self.assertEqual(basis, self.service.REFERENCE_CAIRO_FALLBACK)
+		fake.get_all.assert_not_called()
+
+	def test_custom_coordinate_fields_are_read_and_filtered(self):
+		rows = [
+			{"custom_latitude": 30.0444, "custom_longitude": 31.2357},
+			{"custom_latitude": 0, "custom_longitude": 0},  # unset
+			{"custom_latitude": 48.85, "custom_longitude": 2.35},  # outside Egypt
+			{"custom_latitude": None, "custom_longitude": None},
+		]
+		fake = self._frappe({"custom_latitude", "custom_longitude", "disabled"}, rows)
+		with patch.object(self.service, "frappe", fake):
+			points, basis = self.service.territory_reference_points()
+		self.assertEqual(points, [(30.0444, 31.2357)])
+		self.assertEqual(basis, self.service.REFERENCE_TERRITORY)
+		self.assertEqual(fake.get_all.call_args.kwargs["filters"], {"disabled": 0})
+
+	def test_plain_latitude_longitude_fields_are_a_fallback_pair(self):
+		fake = self._frappe({"latitude", "longitude"}, [{"latitude": 31.2, "longitude": 29.9}])
+		with patch.object(self.service, "frappe", fake):
+			points, _ = self.service.territory_reference_points()
+		self.assertEqual(points, [(31.2, 29.9)])
+
+	def test_points_are_cached_between_calls(self):
+		fake = self._frappe(
+			{"custom_latitude", "custom_longitude"}, [{"custom_latitude": 30.0, "custom_longitude": 31.0}]
+		)
+		with patch.object(self.service, "frappe", fake):
+			self.service.territory_reference_points()
+			self.service.territory_reference_points()
+			self.service.branch_reference_points()
+		# One load per DocType (Territory, then POS Profile for the branch lookup), not per call.
+		self.assertEqual(fake.get_all.call_count, 2)
+		self.service.clear_reference_cache()
+		with patch.object(self.service, "frappe", fake):
+			self.service.territory_reference_points()
+		self.assertEqual(fake.get_all.call_count, 3)
+
+	def test_query_failure_degrades_to_no_points(self):
+		fake = self._frappe({"custom_latitude", "custom_longitude"}, [])
+		fake.get_all.side_effect = RuntimeError("db down")
+		with patch.object(self.service, "frappe", fake):
+			points, basis = self.service.territory_reference_points()
+		self.assertEqual(basis, self.service.REFERENCE_CAIRO_FALLBACK)
+		self.assertEqual(points, [self.service.geo.GREATER_CAIRO])
 
 
 if __name__ == "__main__":

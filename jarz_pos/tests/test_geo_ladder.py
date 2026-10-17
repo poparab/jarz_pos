@@ -248,6 +248,174 @@ class TestServiceEnforcesTheLadder(unittest.TestCase):
 		self.assertGreater(result["moved_m"], 0)
 
 
+class TestStaffCorrection(unittest.TestCase):
+	"""L1: an explicit POS staff edit may replace a customer_pin, and nothing above it.
+
+	The widening is an opt-in flag on the whitelisted endpoints; ``evaluate_pin_write``
+	stays the single decision point so the dry run and the write agree.
+	"""
+
+	def _evaluate(self, current_source, incoming_source="pos_link", *, staff=True, moved=True):
+		from jarz_pos.services import geo_resolution
+
+		current = {
+			"custom_geo_source": current_source,
+			"custom_latitude": 30.0,
+			"custom_longitude": 31.0,
+		}
+		lat, lng = (30.05, 31.05) if moved else (30.0, 31.0)
+		with patch.object(geo_resolution, "get_address_geo", return_value=current):
+			return geo_resolution.evaluate_pin_write(
+				"ADDR-0001",
+				latitude=lat,
+				longitude=lng,
+				source=incoming_source,
+				staff_correction=staff,
+			)
+
+	def test_default_is_off_so_every_other_caller_keeps_the_ladder(self):
+		for current in ("customer_pin", "courier_web", "courier_verified", "manual_override"):
+			with self.subTest(current=current):
+				result = self._evaluate(current, staff=False)
+				self.assertFalse(result["accepted"])
+				self.assertEqual(result["reason"], "lower_confidence")
+				self.assertFalse(result["staff_correction"])
+
+	def test_staff_edit_replaces_a_customer_pin(self):
+		result = self._evaluate("customer_pin")
+		self.assertTrue(result["accepted"])
+		self.assertEqual(result["reason"], "staff_correction")
+		self.assertTrue(result["staff_correction"])
+		# The stored source stays pos_link, at its own rank (not the replaced 30).
+		self.assertEqual(result["resulting_source"], "pos_link")
+		self.assertEqual(result["resulting_rank"], 20)
+
+	def test_staff_edit_replaces_every_pin_at_or_below_customer_pin(self):
+		for current in ("", "territory_centroid", "pos_link", "customer_pin"):
+			with self.subTest(current=current):
+				self.assertTrue(self._evaluate(current)["accepted"])
+
+	def test_staff_edit_never_replaces_courier_or_manual_pins(self):
+		for current in ("courier_web", "courier_verified", "manual_override"):
+			with self.subTest(current=current):
+				result = self._evaluate(current)
+				self.assertFalse(result["accepted"])
+				self.assertEqual(result["resulting_source"], current)
+				self.assertFalse(result["staff_correction"])
+
+	def test_only_pos_link_is_a_staff_correction(self):
+		"""The flag widens nothing for a customer_pin or courier write."""
+		for incoming in ("customer_pin", "courier_web", "courier_verified", "territory_centroid"):
+			with self.subTest(incoming=incoming):
+				result = self._evaluate("customer_pin", incoming)
+				self.assertFalse(result["staff_correction"])
+		self.assertFalse(self._evaluate("customer_pin", "territory_centroid")["accepted"])
+
+	def test_unchanged_coordinates_are_not_a_correction(self):
+		"""Re-saving the same point must not relabel a customer_pin as pos_link."""
+		result = self._evaluate("customer_pin", moved=False)
+		self.assertFalse(result["accepted"])
+		self.assertFalse(result["staff_correction"])
+
+	def test_ordinary_accepted_write_is_not_reported_as_a_correction(self):
+		result = self._evaluate("pos_link")
+		self.assertTrue(result["accepted"])
+		self.assertEqual(result["reason"], "accepted")
+		self.assertFalse(result["staff_correction"])
+
+	def test_cross_app_ranks_are_untouched(self):
+		self.assertEqual(geo.CONFIDENCE_RANK["pos_link"], 20)
+		self.assertEqual(geo.CONFIDENCE_RANK["customer_pin"], 30)
+		self.assertEqual(geo.CONFIDENCE_RANK["courier_web"], 35)
+
+	def test_helper_matrix(self):
+		for current, incoming in itertools.product(ALL_SOURCES, ALL_SOURCES):
+			expected = incoming == "pos_link" and geo.CONFIDENCE_RANK[current] <= 30
+			with self.subTest(current=current, incoming=incoming):
+				self.assertEqual(geo.accepts_staff_correction(current, incoming), expected)
+
+
+class TestStaffCorrectionWrite(unittest.TestCase):
+	"""``set_address_pin`` honours the decision, stamps the time and logs the use."""
+
+	def _write(self, current_source, *, staff, field_present=True):
+		from unittest.mock import MagicMock
+
+		from jarz_pos.services import geo_resolution
+
+		fake = MagicMock()
+		fake.session.user = "staff@jarz"
+		fake.get_meta.return_value.has_field.side_effect = (
+			lambda f: field_present or f != "custom_geo_updated_on"
+		)
+		current = {"custom_geo_source": current_source, "custom_latitude": 30.0, "custom_longitude": 31.0}
+		stamp = object()
+		with (
+			patch.object(geo_resolution, "frappe", fake),
+			patch.object(geo_resolution, "_assert_geo_fields"),
+			patch.object(geo_resolution, "get_address_geo", return_value=current),
+			patch.object(geo_resolution, "now_datetime", return_value=stamp),
+		):
+			result = geo_resolution.set_address_pin(
+				"ADDR-0001", latitude=30.05, longitude=31.05, source="pos_link", staff_correction=staff
+			)
+		return result, fake, stamp
+
+	def test_correction_writes_pos_link_stamps_and_logs(self):
+		result, fake, stamp = self._write("customer_pin", staff=True)
+		self.assertTrue(result["accepted"])
+		args, kwargs = fake.db.set_value.call_args
+		self.assertEqual(args[0], "Address")
+		updates = args[2]
+		self.assertEqual(updates["custom_geo_source"], "pos_link")
+		self.assertEqual(updates["custom_geo_confidence"], 20)
+		self.assertIs(updates["custom_geo_updated_on"], stamp)
+		self.assertIs(kwargs["update_modified"], False)
+		comment = fake.get_doc.call_args.args[0]
+		self.assertEqual(comment["reference_doctype"], "Address")
+		self.assertIn("POS staff geo correction by staff@jarz", comment["content"])
+		self.assertIn("customer_pin", comment["content"])
+
+	def test_without_the_flag_nothing_is_written(self):
+		result, fake, _ = self._write("customer_pin", staff=False)
+		self.assertFalse(result["accepted"])
+		fake.db.set_value.assert_not_called()
+		fake.get_doc.assert_not_called()
+
+	def test_ordinary_write_is_stamped_but_not_logged_as_a_correction(self):
+		result, fake, stamp = self._write("territory_centroid", staff=True)
+		self.assertTrue(result["accepted"])
+		self.assertFalse(result["staff_correction"])
+		self.assertIs(fake.db.set_value.call_args.args[2]["custom_geo_updated_on"], stamp)
+		fake.get_doc.assert_not_called()
+
+	def test_unmigrated_site_skips_the_stamp_but_still_writes(self):
+		result, fake, _ = self._write("customer_pin", staff=True, field_present=False)
+		self.assertTrue(result["accepted"])
+		self.assertNotIn("custom_geo_updated_on", fake.db.set_value.call_args.args[2])
+
+	def test_audit_failure_does_not_undo_the_correction(self):
+		from unittest.mock import MagicMock
+
+		from jarz_pos.services import geo_resolution
+
+		fake = MagicMock()
+		fake.get_doc.side_effect = RuntimeError("comment insert failed")
+		fake.get_meta.return_value.has_field.return_value = True
+		current = {"custom_geo_source": "customer_pin", "custom_latitude": 30.0, "custom_longitude": 31.0}
+		with (
+			patch.object(geo_resolution, "frappe", fake),
+			patch.object(geo_resolution, "_assert_geo_fields"),
+			patch.object(geo_resolution, "get_address_geo", return_value=current),
+		):
+			result = geo_resolution.set_address_pin(
+				"ADDR-0001", latitude=30.05, longitude=31.05, source="pos_link", staff_correction=True
+			)
+		self.assertTrue(result["accepted"])
+		fake.db.set_value.assert_called_once()
+		fake.log_error.assert_called_once()
+
+
 class TestBeforeSaveClamp(unittest.TestCase):
 	"""``events.address.clamp_geo_confidence`` — zero queries, never raises."""
 

@@ -59,6 +59,7 @@ ADDRESS_FIELDS = {
 	"custom_geo_confidence": ("Int", "custom_geo_source"),
 	"custom_geo_accuracy_m": ("Float", "custom_geo_confidence"),
 	"custom_geo_verified_on": ("Datetime", "custom_geo_accuracy_m"),
+	"custom_geo_updated_on": ("Datetime", "custom_geo_verified_on"),
 }
 
 #: Frozen verbatim. Leading blank is Frappe's convention for an optional Select;
@@ -203,7 +204,7 @@ class TestAddressGeoFields(unittest.TestCase):
 
 	def test_derived_fields_are_read_only(self):
 		"""The rank is derived from the source; typing it in defeats the ladder."""
-		for fieldname in ("custom_geo_confidence", "custom_geo_verified_on"):
+		for fieldname in ("custom_geo_confidence", "custom_geo_verified_on", "custom_geo_updated_on"):
 			with self.subTest(field=fieldname):
 				self.assertEqual(self.fields[fieldname].get("read_only"), 1)
 

@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from typing import Any, Optional
 
 import frappe
@@ -59,6 +60,14 @@ GEO_FIELDS = (
 	"custom_geo_accuracy_m",
 	"custom_geo_verified_on",
 )
+
+#: Optional seventh column: when the pin was last written. ``Address.modified``
+#: cannot say (the writes below pass ``update_modified=False``), and the order
+#: board needs it to tell a staff correction made AFTER an order's pin snapshot
+#: from the pin the order was taken with (``utils.address_pins``). Not part of
+#: :data:`GEO_FIELDS`: a site that has not migrated it still writes pins, it just
+#: cannot date them. Stamped on every accepted write, whatever the source.
+GEO_UPDATED_FIELD = "custom_geo_updated_on"
 
 #: Fields that must never appear in a geo write. ``address_line2`` carries the
 #: pasted Maps link and is part of Woo's dedup signature and outbound trigger
@@ -97,6 +106,14 @@ def geo_fields_present() -> bool:
 	except Exception:
 		return False
 	return all(meta.get_field(field) for field in GEO_FIELDS)
+
+
+def _has_address_field(fieldname: str) -> bool:
+	"""True when Address carries *fieldname* on this site. Never raises."""
+	try:
+		return bool(frappe.get_meta("Address").has_field(fieldname))
+	except Exception:
+		return False
 
 
 def _assert_geo_fields() -> None:
@@ -181,12 +198,23 @@ def evaluate_pin_write(
 	longitude: Any,
 	source: str,
 	accuracy_m: Any = None,
+	staff_correction: bool = False,
 ) -> dict[str, Any]:
 	"""Decide what a pin write *would* do. Writes nothing.
 
 	Shared by :func:`set_address_pin` and the API dry-run so the two can never
 	disagree about the outcome — the failure mode a separate "preview"
 	implementation always eventually produces.
+
+	``staff_correction`` is the one deliberate widening of the ladder: an
+	EXPLICIT edit made by POS staff in the app may replace a ``customer_pin``
+	(or a lower pin) with a ``pos_link`` one, because staff looking at the map
+	know better than the pin a customer's phone sent. It never replaces a
+	``courier_*`` or ``manual_override`` pin, and only when the coordinates
+	actually change (re-saving the same point must not relabel its source).
+	Only whitelisted POS endpoints pass it; backfills, the short-link job and the
+	Woo lane never do. The stored source stays ``pos_link`` and the rank written
+	is the incoming one, so the ladder is not otherwise touched.
 	"""
 	name = str(address_name or "").strip()
 	incoming_source = geo.normalize_source(source)
@@ -209,6 +237,23 @@ def evaluate_pin_write(
 
 	accepted = winner_source == incoming_source and geo.accepts_write(current_source, incoming_source)
 
+	changed = _coordinates_changed(
+		current.get("custom_latitude"),
+		current.get("custom_longitude"),
+		latitude,
+		longitude,
+	)
+	corrected = False
+	if (
+		not accepted
+		and staff_correction
+		and changed
+		and geo.accepts_staff_correction(current_source, incoming_source)
+	):
+		accepted = True
+		corrected = True
+		winner_source, winner_rank = incoming_source, incoming_rank
+
 	resolved_accuracy = None
 	try:
 		if accuracy_m is not None and str(accuracy_m).strip() != "":
@@ -218,7 +263,8 @@ def evaluate_pin_write(
 
 	return {
 		"accepted": accepted,
-		"reason": "accepted" if accepted else "lower_confidence",
+		"reason": "staff_correction" if corrected else ("accepted" if accepted else "lower_confidence"),
+		"staff_correction": corrected,
 		"address": name,
 		"source": incoming_source,
 		"incoming_rank": incoming_rank,
@@ -231,12 +277,7 @@ def evaluate_pin_write(
 		"accuracy_m": resolved_accuracy,
 		"current_latitude": current.get("custom_latitude"),
 		"current_longitude": current.get("custom_longitude"),
-		"coordinates_changed": _coordinates_changed(
-			current.get("custom_latitude"),
-			current.get("custom_longitude"),
-			latitude,
-			longitude,
-		),
+		"coordinates_changed": changed,
 		"moved_m": geo.distance_m_or_none(
 			current.get("custom_latitude"),
 			current.get("custom_longitude"),
@@ -303,8 +344,13 @@ def set_address_pin(
 	source: str,
 	accuracy_m: Any = None,
 	note: str | None = None,
+	staff_correction: bool = False,
 ) -> dict[str, Any]:
 	"""Write a pin onto an Address, subject to the never-downgrade ladder.
+
+	``staff_correction=True`` is the explicit opt-in described on
+	:func:`evaluate_pin_write` (POS staff replacing a ``customer_pin``); it is
+	logged on the Address like a manual override.
 
 	Returns ``{"success": True, "accepted": bool, ...}``. A rejected write is a
 	success with ``accepted=False`` — see the module docstring for why a routine
@@ -322,6 +368,7 @@ def set_address_pin(
 		longitude=longitude,
 		source=source,
 		accuracy_m=accuracy_m,
+		staff_correction=staff_correction,
 	)
 	if not decision.get("accepted"):
 		return {"success": True, **decision}
@@ -364,6 +411,11 @@ def set_address_pin(
 	if resolved_source == geo.SOURCE_COURIER_VERIFIED:
 		updates["custom_geo_verified_on"] = now_datetime()
 
+	# Date every accepted write (see GEO_UPDATED_FIELD). Meta-guarded: the column
+	# arrives with `bench migrate`, and a pin write must not fail before then.
+	if _has_address_field(GEO_UPDATED_FIELD):
+		updates[GEO_UPDATED_FIELD] = now_datetime()
+
 	_assert_no_woo_trigger_fields(updates)
 
 	frappe.db.set_value("Address", decision["address"], updates, update_modified=False)
@@ -388,7 +440,168 @@ def set_address_pin(
 		except Exception:
 			frappe.log_error(frappe.get_traceback(), "geo_resolution: manual override audit failed")
 
+	# A staff correction replaces a customer's pin, so who did it and what it
+	# replaced is recorded, same best-effort shape as the manual override above.
+	if decision.get("staff_correction"):
+		try:
+			frappe.get_doc(
+				{
+					"doctype": "Comment",
+					"comment_type": "Info",
+					"reference_doctype": "Address",
+					"reference_name": decision["address"],
+					"content": (
+						f"POS staff geo correction by {frappe.session.user}: replaced "
+						f"{decision.get('current_source') or 'unknown'} pin "
+						f"{decision.get('current_latitude')}, {decision.get('current_longitude')} with "
+						f"{decision['latitude']}, {decision['longitude']}" + (f" — {note}" if note else "")
+					),
+				}
+			).insert(ignore_permissions=True)
+		except Exception:
+			frappe.log_error(frappe.get_traceback(), "geo_resolution: staff correction audit failed")
+
 	return {"success": True, **decision, "written_fields": sorted(updates)}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Delivery reference points — swapped typed pairs and distance from the branch
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: Where each reference basis comes from, reported next to the numbers so the
+#: client (and a reader of the Error Log) knows how much weight to give them.
+REFERENCE_POS_PROFILE = "pos_profile"
+REFERENCE_TERRITORY = "territory"
+REFERENCE_CAIRO_FALLBACK = "cairo_fallback"
+
+#: Latitude/longitude field pairs probed on POS Profile and Territory, in
+#: order. Neither stock DocType has coordinates and this app adds none, so on a
+#: site where nobody has added such a field the answer is the Cairo fallback.
+_REFERENCE_FIELD_PAIRS = (
+	("custom_latitude", "custom_longitude"),
+	("latitude", "longitude"),
+)
+
+#: Reference points change when someone edits a Territory, not per request, and
+#: this is read on every preview paste: cache per process for a while.
+_REFERENCE_CACHE_TTL_SEC = 10 * 60
+_reference_cache: dict[str, tuple[float, list[tuple[float, float]]]] = {}
+
+
+def clear_reference_cache() -> None:
+	"""Forget cached reference points (tests, and after bulk-editing Territories)."""
+	_reference_cache.clear()
+
+
+def _load_reference_points(doctype: str) -> list[tuple[float, float]]:
+	"""Valid in-Egypt ``(lat, lng)`` pairs held on *doctype* rows. Never raises."""
+	try:
+		meta = frappe.get_meta(doctype)
+		pair = next((p for p in _REFERENCE_FIELD_PAIRS if meta.has_field(p[0]) and meta.has_field(p[1])), None)
+		if not pair:
+			return []
+		filters = {"disabled": 0} if meta.has_field("disabled") else {}
+		rows = frappe.get_all(doctype, filters=filters, fields=list(pair), limit=0) or []
+		points: list[tuple[float, float]] = []
+		for row in rows:
+			lat, lng = row.get(pair[0]), row.get(pair[1])
+			if geo.in_service_area(lat, lng):
+				points.append((float(lat), float(lng)))
+		return points
+	except Exception:
+		return []
+
+
+def _cached_reference_points(doctype: str) -> list[tuple[float, float]]:
+	now = time.monotonic()
+	hit = _reference_cache.get(doctype)
+	if hit and now - hit[0] < _REFERENCE_CACHE_TTL_SEC:
+		return hit[1]
+	points = _load_reference_points(doctype)
+	_reference_cache[doctype] = (now, points)
+	return points
+
+
+def territory_reference_points() -> tuple[list[tuple[float, float]], str]:
+	"""Delivery Territory centroids, else Greater Cairo. ``(points, basis)``.
+
+	The reference used to decide whether a typed pair is transposed. With no
+	centroids on the site the answer is Greater Cairo alone (the area Jarz
+	delivers in), under the same thresholds.
+	"""
+	points = _cached_reference_points("Territory")
+	if points:
+		return points, REFERENCE_TERRITORY
+	return [geo.GREATER_CAIRO], REFERENCE_CAIRO_FALLBACK
+
+
+def branch_reference_points() -> tuple[list[tuple[float, float]], str]:
+	"""POS Profile branch coordinates, else Territory centroids, else Greater Cairo."""
+	points = _cached_reference_points("POS Profile")
+	if points:
+		return points, REFERENCE_POS_PROFILE
+	return territory_reference_points()
+
+
+def distance_from_branch_m(latitude: Any, longitude: Any) -> tuple[int | None, str]:
+	"""``(metres, basis)``: how far a point is from the nearest delivery reference.
+
+	Semantics, which the client relies on (``LocationLinkField`` rejects a
+	preview above 150 km): the great-circle distance in metres to the NEAREST of
+	(1) the POS Profile branch coordinates, if any POS Profile carries them;
+	otherwise (2) the delivery Territory centroids, if any carry them; otherwise
+	(3) Greater Cairo. It is a plausibility check on a pasted pin ("is this even
+	our part of the country"), not a measured delivery distance, so ``basis``
+	says which of the three answered. Never raises; ``None`` when the point
+	cannot be measured.
+	"""
+	try:
+		points, basis = branch_reference_points()
+		nearest = geo.nearest_reference(latitude, longitude, points)
+		if nearest is None:
+			return None, basis
+		return int(round(nearest[0])), basis
+	except Exception:
+		return None, REFERENCE_CAIRO_FALLBACK
+
+
+def apply_bare_pair_swap(link: Any, latitude: float, longitude: float) -> dict[str, Any]:
+	"""Correct a typed ``a, b`` pair whose latitude and longitude are transposed.
+
+	Only for an input that is nothing but an unlabelled decimal pair
+	(:func:`geo.is_unlabelled_bare_pair`): a URL or a hemisphere-labelled pair
+	names its own axes. See :func:`geo.maybe_swap_bare_pair` for the rule
+	(swapped within 40 km of a delivery reference, typed farther than 80 km from
+	every one; anything else keeps the typed order). Returns
+	``{"latitude", "longitude", "swapped", ...}``; when swapped it also carries
+	``typed_latitude``/``typed_longitude``, ``swap_reference`` and a
+	``precision_note`` for the UI. Never raises.
+	"""
+	result: dict[str, Any] = {"latitude": latitude, "longitude": longitude, "swapped": False}
+	try:
+		if not geo.is_unlabelled_bare_pair(link):
+			return result
+		points, basis = territory_reference_points()
+		new_lat, new_lng, swapped = geo.maybe_swap_bare_pair(latitude, longitude, points)
+		if not swapped:
+			return result
+		result.update(
+			{
+				"latitude": new_lat,
+				"longitude": new_lng,
+				"swapped": True,
+				"typed_latitude": latitude,
+				"typed_longitude": longitude,
+				"swap_reference": basis,
+				"precision_note": _(
+					"The typed pair looked like longitude, latitude (it lands far from the delivery "
+					"area), so it was read as {0}, {1}. Check the pin on the map."
+				).format(new_lat, new_lng),
+			}
+		)
+	except Exception:
+		pass
+	return result
 
 
 #: Reason returned when a pasted link names a real point outside Egypt
@@ -403,8 +616,13 @@ def resolve_address_from_link(
 	*,
 	source: str = geo.SOURCE_POS_LINK,
 	accuracy_m: Any = None,
+	staff_correction: bool = False,
 ) -> dict[str, Any]:
 	"""Parse a Maps link and, if it yields coordinates, pin the Address.
+
+	``staff_correction`` is forwarded to :func:`set_address_pin`; the short-link
+	job it may queue never receives it (a background redirect fetch is not an
+	explicit staff edit).
 
 	A short link (``maps.app.goo.gl/...``) carries no coordinates until it is
 	expanded over HTTP, so it is queued for a background worker and reported as
@@ -438,6 +656,9 @@ def resolve_address_from_link(
 		}
 
 	latitude, longitude, precision = parsed
+	# Same correction the preview applied, so what staff confirmed is what is saved.
+	swap = apply_bare_pair_swap(link, latitude, longitude)
+	latitude, longitude = swap["latitude"], swap["longitude"]
 	if not geo.in_service_area(latitude, longitude):
 		return {
 			"success": True,
@@ -452,9 +673,12 @@ def resolve_address_from_link(
 		longitude=longitude,
 		source=source,
 		accuracy_m=(accuracy_m if accuracy_m not in (None, "") else geo.accuracy_for_precision(precision)),
+		staff_correction=staff_correction,
 	)
 	result["precision"] = precision
 	result["url"] = link
+	if swap["swapped"]:
+		result.update({k: v for k, v in swap.items() if k not in ("latitude", "longitude")})
 	return result
 
 
@@ -611,6 +835,11 @@ def _consume_preview_budget(user: str) -> bool:
 
 def _preview_resolved(link: str, parsed: Any, *, short_link: bool = False) -> dict[str, Any]:
 	latitude, longitude, precision = parsed
+	# A typed pair can have its axes transposed; a URL never is (see
+	# apply_bare_pair_swap). Short-link expansions are URLs, so the helper is a
+	# no-op for them.
+	swap = apply_bare_pair_swap(link, latitude, longitude)
+	latitude, longitude = swap["latitude"], swap["longitude"]
 	if not geo.in_service_area(latitude, longitude):
 		# The point is read correctly but undeliverable. Say so rather than
 		# show staff a pin in Paris they might confirm by reflex. The point is
@@ -622,7 +851,9 @@ def _preview_resolved(link: str, parsed: Any, *, short_link: bool = False) -> di
 			"outside_latitude": latitude,
 			"outside_longitude": longitude,
 		}
-	return {
+	# The inline and the short-link-job paths both end here, so both carry it.
+	distance_m, distance_basis = distance_from_branch_m(latitude, longitude)
+	resolved = {
 		"success": True,
 		"resolved": True,
 		"pending": False,
@@ -632,7 +863,15 @@ def _preview_resolved(link: str, parsed: Any, *, short_link: bool = False) -> di
 		"longitude": longitude,
 		"precision": precision,
 		"accuracy_m": geo.accuracy_for_precision(precision),
+		# Metres to the nearest delivery reference (semantics on
+		# distance_from_branch_m); the client rejects a preview above 150 km.
+		"distance_from_branch_m": distance_m,
+		"distance_reference": distance_basis,
+		"swapped": bool(swap["swapped"]),
 	}
+	if swap["swapped"]:
+		resolved.update({k: v for k, v in swap.items() if k not in ("latitude", "longitude", "swapped")})
+	return resolved
 
 
 def _preview_unresolved(link: str, reason: str, *, short_link: bool) -> dict[str, Any]:

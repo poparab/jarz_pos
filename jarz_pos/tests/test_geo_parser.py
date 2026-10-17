@@ -400,5 +400,101 @@ class TestPrecisionAccuracy(unittest.TestCase):
 		self.assertEqual(geo.accuracy_for_precision("nonsense", 42.0), 42.0)
 
 
+class TestUnlabelledBarePair(unittest.TestCase):
+	"""L6: only a typed ``a, b`` pair can be a latitude/longitude transposition."""
+
+	def test_typed_pairs_are_bare(self):
+		for text in ("30.0444, 31.2357", "31.2357,30.0444", " 30.0444 31.2357 ", "30.0444;31.2357"):
+			with self.subTest(text=text):
+				self.assertTrue(geo.is_unlabelled_bare_pair(text))
+
+	def test_arabic_numerals_are_bare(self):
+		self.assertTrue(geo.is_unlabelled_bare_pair("٣٠٫٠٤٤٤، ٣١٫٢٣٥٧"))
+
+	def test_urls_are_never_bare(self):
+		for text in (
+			"https://www.google.com/maps/@30.0444,31.2357,17z",
+			"https://maps.google.com/?q=31.2357,30.0444",
+			"https://www.google.com/maps/place/X/data=!3d30.05!4d31.24",
+		):
+			with self.subTest(text=text):
+				self.assertFalse(geo.is_unlabelled_bare_pair(text))
+
+	def test_hemisphere_labelled_pairs_state_their_own_order(self):
+		for text in ("30.0444 N, 31.2357 E", "31.2357 E, 30.0444 N"):
+			with self.subTest(text=text):
+				self.assertFalse(geo.is_unlabelled_bare_pair(text))
+
+	def test_garbage_and_none(self):
+		for text in (None, "", "Flat 4, Nasr City", 42, object()):
+			with self.subTest(text=text):
+				self.assertFalse(geo.is_unlabelled_bare_pair(text))
+
+
+class TestNearestReference(unittest.TestCase):
+	def test_picks_the_closest_point(self):
+		points = [(31.2, 29.9), geo.GREATER_CAIRO]
+		gap, point = geo.nearest_reference(30.05, 31.24, points)
+		self.assertEqual(point, geo.GREATER_CAIRO)
+		self.assertLess(gap, 2_000)
+
+	def test_no_points_or_bad_input(self):
+		self.assertIsNone(geo.nearest_reference(30.0, 31.0, []))
+		self.assertIsNone(geo.nearest_reference(30.0, 31.0, None))
+		self.assertIsNone(geo.nearest_reference("x", 31.0, [geo.GREATER_CAIRO]))
+
+
+class TestMaybeSwapBarePair(unittest.TestCase):
+	"""``31.2357, 30.0444`` is a valid Egypt point (near Alexandria), so the box cannot tell."""
+
+	CAIRO = [geo.GREATER_CAIRO]
+
+	def test_swapped_cairo_is_corrected(self):
+		lat, lng, swapped = geo.maybe_swap_bare_pair(31.2357, 30.0444, self.CAIRO)
+		self.assertTrue(swapped)
+		self.assertEqual((lat, lng), (30.0444, 31.2357))
+
+	def test_correct_cairo_is_kept(self):
+		lat, lng, swapped = geo.maybe_swap_bare_pair(30.0444, 31.2357, self.CAIRO)
+		self.assertFalse(swapped)
+		self.assertEqual((lat, lng), (30.0444, 31.2357))
+
+	def test_swap_must_land_within_40_km_of_a_reference(self):
+		# Swapped reading is ~55 km from Cairo, the typed reading is far: ambiguous, keep typed.
+		lat, lng, swapped = geo.maybe_swap_bare_pair(31.2357, 30.55, self.CAIRO)
+		self.assertFalse(swapped)
+		self.assertEqual((lat, lng), (31.2357, 30.55))
+
+	def test_typed_order_must_be_far_from_every_reference(self):
+		# Both readings are close to some reference: keep what was typed.
+		points = [(30.0444, 31.2357), (31.2357, 30.0444)]
+		lat, lng, swapped = geo.maybe_swap_bare_pair(31.2357, 30.0444, points)
+		self.assertFalse(swapped)
+		self.assertEqual((lat, lng), (31.2357, 30.0444))
+
+	def test_thresholds_are_the_agreed_ones(self):
+		self.assertEqual(geo.SWAP_NEAR_M, 40_000.0)
+		self.assertEqual(geo.SWAP_FAR_M, 80_000.0)
+
+	def test_only_when_both_orders_are_inside_egypt(self):
+		# 24.0889, 32.8998 (Aswan): the swapped order has latitude 32.9, outside the box.
+		lat, lng, swapped = geo.maybe_swap_bare_pair(24.0889, 32.8998, self.CAIRO)
+		self.assertFalse(swapped)
+		self.assertEqual((lat, lng), (24.0889, 32.8998))
+
+	def test_no_reference_points_means_no_swap(self):
+		for points in (None, [], ()):
+			with self.subTest(points=points):
+				self.assertEqual(geo.maybe_swap_bare_pair(31.2357, 30.0444, points), (31.2357, 30.0444, False))
+
+	def test_never_raises(self):
+		for lat, lng in ((None, None), ("x", "y"), (float("nan"), 30.0)):
+			with self.subTest(lat=lat, lng=lng):
+				geo.maybe_swap_bare_pair(lat, lng, self.CAIRO)  # must not raise
+
+	def test_equal_axes_are_not_swapped(self):
+		self.assertEqual(geo.maybe_swap_bare_pair(30.5, 30.5, self.CAIRO), (30.5, 30.5, False))
+
+
 if __name__ == "__main__":
 	unittest.main()

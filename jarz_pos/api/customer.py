@@ -90,6 +90,11 @@ def _apply_address_geo(
 		# storing an unrankable pin.
 		return {"applied": False, "reason": "unknown_geo_source", "geo_source": source}
 
+	# Both callers are POS endpoints: an explicit staff edit of the pin may
+	# replace a customer's own pin (never a courier/manual one), see
+	# geo_resolution.evaluate_pin_write. Only the pos_link source qualifies.
+	staff_edit = source == geo_utils.SOURCE_POS_LINK
+
 	try:
 		if has_coords:
 			result = geo_resolution.set_address_pin(
@@ -97,9 +102,12 @@ def _apply_address_geo(
 				latitude=latitude,
 				longitude=longitude,
 				source=source,
+				staff_correction=staff_edit,
 			)
 		else:
-			result = geo_resolution.resolve_address_from_link(name, link, source=source)
+			result = geo_resolution.resolve_address_from_link(
+				name, link, source=source, staff_correction=staff_edit
+			)
 
 		return {"applied": bool(result.get("accepted")), **result}
 	except frappe.PermissionError:

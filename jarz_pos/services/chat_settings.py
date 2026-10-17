@@ -55,6 +55,104 @@ def _secret(doc: Any, fieldname: str) -> str:
 		return ""
 
 
+#: Ready answers are pasted whole into the model prompt on every draft, so an
+#: unbounded table is an unbounded prompt (cost, latency, and the model losing the
+#: thread). Past these caps the lowest-priority rows are left out.
+MAX_READY_ANSWERS = 50
+MAX_READY_ANSWER_CHARS = 12000
+
+_TRUNCATION_MARK = "\u2026"
+_ready_cap_logged: set[tuple[int, int, int]] = set()
+
+
+def render_ready_answer(row: dict[str, Any]) -> str:
+	"""One ready answer as it appears in the prompt (also the unit the cap counts)."""
+	when = f" (when: {row['when_to_use']})" if row.get("when_to_use") else ""
+	return f"### {row['topic']}{when}\n{row['answer']}"
+
+
+def _truncate_cleanly(text: str, limit: int) -> str:
+	"""Cut *text* to at most *limit* characters at a line or word boundary."""
+	if len(text) <= limit:
+		return text
+	if limit <= len(_TRUNCATION_MARK):
+		return text[:limit]
+	room = limit - len(_TRUNCATION_MARK)
+	head = text[:room]
+	# Prefer the last line break, then the last space, if that keeps most of the text.
+	for sep in ("\n", " "):
+		cut = head.rfind(sep)
+		if cut >= room // 2:
+			head = head[:cut]
+			break
+	return head.rstrip() + _TRUNCATION_MARK
+
+
+def _log_ready_cap_once(total: int, kept: int, cut_chars: int) -> None:
+	"""Record that the cap dropped answers; once per distinct outcome per process.
+
+	The prompt is rebuilt every few minutes, so logging each time would bury the
+	Error Log. ``log_error`` can itself raise (it needs a DB), hence the guard.
+	"""
+	signature = (total, kept, cut_chars)
+	if signature in _ready_cap_logged:
+		return
+	_ready_cap_logged.add(signature)
+	try:
+		frappe.log_error(
+			f"Jarz Chat ready answers capped for the model prompt: kept {kept} of {total} "
+			f"(max {MAX_READY_ANSWERS} answers / {MAX_READY_ANSWER_CHARS} characters). "
+			"Disable or shorten the lowest-priority Ready Answers to bring them under the cap.",
+			"Jarz Chat ready answers capped",
+		)
+	except Exception:
+		pass
+
+
+def cap_ready_answers(
+	rows: list[dict[str, Any]],
+	max_answers: int = MAX_READY_ANSWERS,
+	max_chars: int = MAX_READY_ANSWER_CHARS,
+) -> list[dict[str, Any]]:
+	"""Keep the leading *rows* that fit the prompt budget; *rows* are already in priority order.
+
+	Whole answers are kept until the next one would pass *max_answers* or push the
+	rendered total (:func:`render_ready_answer` plus a blank line between answers)
+	past *max_chars*; then it stops, so a lower-priority short answer never jumps a
+	higher-priority long one. If even the first answer alone is over budget its
+	text is cut at a line/word boundary with an ellipsis. Logs once when anything
+	is dropped or cut. Never raises.
+	"""
+	rows = list(rows or [])
+	try:
+		kept: list[dict[str, Any]] = []
+		used = 0
+		cut_chars = 0
+		for row in rows:
+			if len(kept) >= max_answers:
+				break
+			size = len(render_ready_answer(row)) + (2 if kept else 0)
+			if used + size > max_chars:
+				if kept:
+					break
+				# First answer alone is too long: keep the head of it.
+				overhead = len(render_ready_answer({**row, "answer": ""}))
+				allowed = max(0, max_chars - overhead)
+				full = str(row.get("answer") or "")
+				trimmed = _truncate_cleanly(full, allowed)
+				cut_chars = len(full) - len(trimmed)
+				kept.append({**row, "answer": trimmed})
+				used = max_chars
+				break
+			kept.append(row)
+			used += size
+		if len(kept) < len(rows) or cut_chars:
+			_log_ready_cap_once(len(rows), len(kept), cut_chars)
+		return kept
+	except Exception:
+		return rows[:max_answers]
+
+
 def build_settings(doc: Any, flags: dict[str, Any] | None = None) -> dict[str, Any]:
 	"""Normalise a Settings document into the contract dict.
 
@@ -94,8 +192,12 @@ def build_settings(doc: Any, flags: dict[str, Any] | None = None) -> dict[str, A
 			continue
 		upsell.append({"item_code": code, "pitch": _clean(getter("pitch"))})
 
-	ready: list[dict[str, Any]] = []
-	for row in get("ready_answers") or []:
+	# Enabled rows only, most recently modified first. The child DocType has no
+	# priority field, so ties (every row saved together shares the parent's
+	# ``modified``) fall back to ``idx``, the order staff arranged the grid in. The
+	# sorts are stable, so the result is deterministic; then the prompt cap applies.
+	ready_rows: list[tuple[str, int, dict[str, Any]]] = []
+	for position, row in enumerate(get("ready_answers") or []):
 		getter = (
 			row.get if hasattr(row, "get") else (lambda key, default=None, _r=row: getattr(_r, key, default))
 		)
@@ -104,7 +206,20 @@ def build_settings(doc: Any, flags: dict[str, Any] | None = None) -> dict[str, A
 		active = getter("active")
 		if not topic or not answer or (active not in (None, "") and not int(active or 0)):
 			continue
-		ready.append({"topic": topic, "when_to_use": _clean(getter("when_to_use")), "answer": answer})
+		try:
+			idx = int(getter("idx") or position + 1)
+		except (TypeError, ValueError):
+			idx = position + 1
+		ready_rows.append(
+			(
+				str(getter("modified") or ""),
+				idx,
+				{"topic": topic, "when_to_use": _clean(getter("when_to_use")), "answer": answer},
+			)
+		)
+	ready_rows.sort(key=lambda item: item[1])
+	ready_rows.sort(key=lambda item: item[0], reverse=True)
+	ready = cap_ready_answers([item[2] for item in ready_rows])
 
 	settings: dict[str, Any] = {
 		"enabled": bool(flags.get("enabled", get("enabled"))),

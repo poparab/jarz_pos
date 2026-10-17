@@ -32,6 +32,7 @@ from typing import Any
 import frappe
 
 from jarz_pos.services import chat_common as cc
+from jarz_pos.services.chat_settings import cap_ready_answers, render_ready_answer
 
 INTENTS = ("Inquiry", "Order", "Complaint", "Other")
 HISTORY_MESSAGES = 20
@@ -906,10 +907,12 @@ def build_context(settings: dict[str, Any]) -> dict[str, Any]:
 		for lang, arabic in (("ar", True), ("en", False))
 	}
 
-	ready_lines = []
-	for row in settings.get("ready_answers") or DEFAULT_READY_ANSWERS:
-		when = f" (when: {row['when_to_use']})" if row.get("when_to_use") else ""
-		ready_lines.append(f"### {row['topic']}{when}\n{row['answer']}")
+	# Settings already arrive ordered and capped; capping again here guards any
+	# settings dict built another way, and is a no-op (no log) when nothing drops.
+	ready_lines = [
+		render_ready_answer(row)
+		for row in cap_ready_answers(settings.get("ready_answers") or DEFAULT_READY_ANSWERS)
+	]
 
 	parts = [
 		"# Jarz business context",
