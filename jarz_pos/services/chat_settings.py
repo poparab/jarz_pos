@@ -94,6 +94,18 @@ def build_settings(doc: Any, flags: dict[str, Any] | None = None) -> dict[str, A
 			continue
 		upsell.append({"item_code": code, "pitch": _clean(getter("pitch"))})
 
+	ready: list[dict[str, Any]] = []
+	for row in get("ready_answers") or []:
+		getter = (
+			row.get if hasattr(row, "get") else (lambda key, default=None, _r=row: getattr(_r, key, default))
+		)
+		topic = _clean(getter("topic"))
+		answer = _clean(getter("answer"))
+		active = getter("active")
+		if not topic or not answer or (active not in (None, "") and not int(active or 0)):
+			continue
+		ready.append({"topic": topic, "when_to_use": _clean(getter("when_to_use")), "answer": answer})
+
 	settings: dict[str, Any] = {
 		"enabled": bool(flags.get("enabled", get("enabled"))),
 		"auto_draft": bool(flags.get("auto_draft", True)),
@@ -106,6 +118,7 @@ def build_settings(doc: Any, flags: dict[str, Any] | None = None) -> dict[str, A
 		"brand_instructions": _clean(get("brand_instructions")),
 		"planted_draft_percent": planted,
 		"upsell_items": upsell,
+		"ready_answers": ready,
 		"graph_api_version": _clean(get("graph_api_version")) or DEFAULT_GRAPH_VERSION,
 		"whatsapp_phone_number_id": _clean(get("whatsapp_phone_number_id")),
 		"whatsapp_business_account_id": _clean(get("whatsapp_business_account_id")),

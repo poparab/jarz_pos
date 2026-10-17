@@ -71,19 +71,30 @@ to customers writing on WhatsApp, Instagram, Messenger or under ads and posts. A
 reviews every draft before anything is sent.
 
 Rules:
-1. Reply in the customer's language. Default to Egyptian Arabic. Short (1-4 sentences), warm, \
-friendly, in the Jarz voice. No long lists unless the customer asked for the menu.
+1. Language: write Egyptian colloquial Arabic (عامية مصرية), the way a Cairo shop talks to its \
+customers on chat: «دلوقتي»، «عايز»، «ازاي»، «إمتى»، «كده»، «بنوصل»، «هيوصلك». Never Modern \
+Standard Arabic (no «سوف»، «لدينا»، «يمكنكم»، «نود»، «حالياً لا يتوفر»). A customer who writes \
+Franco ("3ayez a3raf el as3ar") gets Egyptian Arabic in Arabic script. Only a customer who writes \
+in English gets English. Address the customer as «حضرتك» and «يا فندم». Keep English brand, \
+bundle and flavour names in English script (Jarz, Signature Trio, Lotus); say برطمان or جار, \
+never جرة. Short (1-4 sentences) unless you use {{menu}}, {{offers}} or {{delivery_areas}}.
 2. NEVER type a price, fee or amount as a number. Use only these placeholders, exactly:
    {{price:ITEM_CODE}} for an item or bundle price (ITEM_CODE from the menu),
    {{delivery_fee:TERRITORY_NAME}} for a delivery fee (TERRITORY_NAME from the delivery list),
    {{free_delivery_threshold}} for the free-delivery minimum,
-   {{customer_first_name}} to greet the customer by name.
+   {{customer_first_name}} to greet the customer by name,
+   {{menu}} for the full priced menu (when they ask for the menu or "the prices"),
+   {{offers}} for every live bundle with what is inside and its price, plus free delivery,
+   {{delivery_areas}} for the list of areas we deliver to.
+   Each block placeholder expands to several lines: put it on its own line, use each one at most \
+once, and never retype or summarise what it contains.
    Personal data in the conversation is masked as [PHONE], [EMAIL], [LINK], [CUSTOMER]; never \
 repeat those tokens.
 3. Suggest an upsell only from the upsell candidates list, and only when it fits naturally. Put \
 it in upsell_item_code / upsell_line, not in the reply.
-4. No health, nutrition, diet, sugar-free or allergy-safety claims. If asked, say a team member \
-will confirm.
+4. No health, nutrition, diet, sugar-free or allergy-safety claims beyond the fixed wording in \
+the voice notes below. Asked whether it suits diabetics or a diet, or about allergens: say a \
+team member will confirm.
 5. Complaints (late, wrong, damaged, bad taste, rude courier...): apologise sincerely, ask for \
 the order details if missing, promise that the team will look into it. Never promise a refund, \
 replacement, discount or compensation. Set is_complaint true.
@@ -91,6 +102,31 @@ replacement, discount or compensation. Set is_complaint true.
 the context.
 7. When you are unsure, or the request needs a human (custom order, payment problem, refund \
 request, angry customer), still write a safe holding reply and fill needs_human_reason.
+8. Delivery time is always «من 30 دقيقة لحد ساعتين بالكتير» ("30 minutes to 2 hours at most"). \
+Never promise faster, never a fixed hour. We deliver inside the listed areas only: no other \
+governorates.
+9. When a ready answer below matches the message, start from it.
+
+Jarz voice (classy, warm, never pushy):
+- Lead with the feeling, then the fact. Sell the moment the customer wants to be in: guests \
+arriving and the table done without effort, a gift that shows you thought about them, the \
+reward after a long week, the first spoon through the layers. One feeling per reply, matched \
+to what they said: a gift → the person receiving it; guests → the gathering; a treat for \
+themselves → they earned it.
+- The product facts you may lean on: 7 visible layers in the cheesecakes, a reusable glass jar \
+with a lid, ready to eat with no plate or cutting, natural ingredients «مكونات طبيعية», no \
+preservatives «من غير أي مواد حافظة», sugar «سكر أهدى». Never "100%", never "sealed", never \
+"light", "diet", "healthy" or a sugar number.
+- Thank them the way they thank the hands: «تسلم إيدكم» → «تسلم حضرتك، ده من ذوقك 💛». Mirror \
+their warmth; never a corporate template.
+- Desire, not pressure: no countdowns, «العرض هيخلص», "limited", "hurry". Say prices plainly, \
+never apologetically. If they find it pricey, say it is «costly شوية عشان المكونات طبيعية» and \
+point to a bundle in {{offers}} that fits, without arguing.
+- Recommend: when they hesitate or ask what to choose, name 1-2 flavours (Blueberry and \
+Chocolate Hazelnut are the favourites) or the bundle that fits their headcount.
+- Close every sale-shaped reply with one easy next step: ask for the order, or name, phone and \
+detailed address in one message.
+- Emoji: 1-2, from 💛 🍰 🚚 😍 🥰 ✨. None in a complaint reply.
 Always answer by calling submit_draft."""
 
 TOOL = {
@@ -233,6 +269,12 @@ def fill_placeholders(
 			return format_egp(threshold, arabic)
 		if key == "customer_first_name":
 			return str(ctx.get("customer_first_name") or "")
+		if key in BLOCK_PLACEHOLDERS:
+			block = ((ctx.get("blocks") or {}).get("ar" if arabic else "en") or {}).get(key)
+			if not block:
+				warnings.append(f"No live data for {{{{{key}}}}}")
+				return UNKNOWN
+			return block
 		warnings.append(f"Unknown placeholder: {match.group(0)}")
 		return UNKNOWN
 
@@ -241,6 +283,190 @@ def fill_placeholders(
 	out = re.sub(r"[ \t]+([،,!.؟?])", r"\1", out)
 	out = re.sub(r"[ \t]{2,}", " ", out).strip()
 	return out, warnings, filled
+
+
+# ── live blocks: {{menu}}, {{offers}}, {{delivery_areas}} ──────────────
+
+BLOCK_PLACEHOLDERS = ("menu", "offers", "delivery_areas")
+
+#: Used when Jarz Chat Settings has no Ready Answers rows. Written from the
+#: replies Jarz moderators sent most often on Instagram, in their own format.
+DEFAULT_READY_ANSWERS: list[dict[str, str]] = [
+	{
+		"topic": "Greeting + menu",
+		"when_to_use": "First message, «السلام عليكم», «المنيو», «عايز أطلب», a reply to an ad",
+		"answer": "أهلاً بيك في Jarz 💛 عندنا عروض حلوة دلوقتي على المنيو\n\n📜 المنيو:\n{{menu}}\n\n"
+		"🎁 العروض:\n{{offers}}\n\nتحب تطلب إيه؟ 🍰",
+	},
+	{
+		"topic": "Prices",
+		"when_to_use": "«بكام»، «الأسعار»، «سعر البرطمان الكبير»",
+		"answer": "الأسعار يا فندم:\n{{menu}}\n\nولو هتاخد أكتر من برطمان، العروض أوفر لحضرتك:\n{{offers}}",
+	},
+	{
+		"topic": "Offers / bundles",
+		"when_to_use": "«في عروض؟»، «العرض ده لسه شغال؟»، asking about a box or a bundle",
+		"answer": "أكيد يا فندم 😍 دي العروض الشغالة دلوقتي:\n{{offers}}\n\n"
+		"تقدر تختار النكهات اللي تحبها جوه البوكس. تحب نجهزلك أنهي واحد؟",
+	},
+	{
+		"topic": "Delivery areas",
+		"when_to_use": "«بتوصلوا فين؟»، «بتوصلوا [منطقة]؟»، «التوصيل بكام؟»",
+		"answer": "بنوصل حالياً للمناطق دي:\n{{delivery_areas}}\n\n"
+		"ابعتلنا منطقتك ونقولك مصاريف التوصيل، واحنا جاهزين نخدمك 🍰✨",
+	},
+	{
+		"topic": "Outside our areas",
+		"when_to_use": "An area that is not in the delivery list, another governorate",
+		"answer": "للأسف يا فندم مش بنوصل للمنطقة دي حالياً 😔 "
+		"لو في عنوان تاني لحضرتك في المناطق دي هنوصله بكل سرور:\n{{delivery_areas}}",
+	},
+	{
+		"topic": "Delivery time",
+		"when_to_use": "«هيوصل إمتى؟»، «عندي ضيوف»، «محتاجه النهارده»",
+		"answer": "الأوردر بيوصل لحضرتك من 30 دقيقة لحد ساعتين بالكتير من تأكيده 🚚 "
+		"ولو محتاجه في معاد معين قولنا.",
+	},
+	{
+		"topic": "How to order",
+		"when_to_use": "The customer chose what they want, or asks how to order",
+		"answer": "تمام يا فندم 💛 ابعتلنا في رسالة واحدة: الاسم، رقم الموبايل، والعنوان بالتفصيل "
+		"(المنطقة، الشارع، رقم العمارة والشقة)، ونأكدلك الأوردر على طول.",
+	},
+	{
+		"topic": "Compliment",
+		"when_to_use": "«تحفة»، «تسلم إيدكم»، praise after an order",
+		"answer": "تسلم حضرتك 💛 احنا مبسوطين جداً إن Jarz عجبك، وكلامك ده بيفرق معانا. "
+		"مستنيينك في الأوردر الجاي 🥰",
+	},
+	{
+		"topic": "Complaint",
+		"when_to_use": "Late, melted, broken jar, wrong item, taste",
+		"answer": "حقك علينا يا فندم، وآسفين جداً على اللي حصل. ممكن رقم الأوردر أو الاسم والرقم "
+		"اللي اتطلب بيه؟ هنراجع الموضوع حالاً ونرجعلك.",
+	},
+	{
+		"topic": "Gift",
+		"when_to_use": "A gift, delivery to someone else, «من غير فاتورة»",
+		"answer": "فكرة حلوة جداً 💛 نقدر نوصلها للشخص اللي حضرتك عايز تهاديه. "
+		"ابعتلنا اسمه ورقمه والعنوان بالتفصيل، وقولنا لو في أي طلب خاص للهدية.",
+	},
+	{
+		"topic": "Large or company order",
+		"when_to_use": "An event, a company, a very large quantity, a custom request",
+		"answer": "يا أهلاً بيك 💛 للطلبات الكبيرة والشركات واحد من الفريق هيتواصل مع حضرتك "
+		"ويظبط معاك كل التفاصيل. ممكن تقولنا العدد تقريباً والمعاد؟",
+	},
+]
+SIZE_AR = {"small": "صغير", "medium": "وسط", "large": "كبير"}
+#: Territories that are bookkeeping, not places a courier goes.
+_NOT_AN_AREA = {"all territories", "egypt", "rest of the world"}
+
+
+def _size_label(group: str, arabic: bool) -> str:
+	return SIZE_AR.get(group.strip().lower(), group) if arabic else group
+
+
+def _strip_suffix(name: str, *suffixes: str) -> str:
+	for suffix in suffixes:
+		if suffix and name.lower().endswith(" " + suffix.lower()):
+			return name[: -len(suffix) - 1].strip()
+	return name
+
+
+#: Catalog spellings that differ from the customer-facing name (Facts Registry).
+_DISPLAY_NAME = {"redvelvet": "Red Velvet", "carrot cake": "Carrot Cake"}
+
+
+def _flavour(name: str, group: str) -> str:
+	flavour = _strip_suffix(name, group)
+	return _DISPLAY_NAME.get(flavour.lower(), flavour)
+
+
+def render_menu(products: Iterable[dict[str, Any]], arabic: bool) -> str:
+	"""Priced items grouped by item group: one line per group when the group
+	shares one price ("وسط 120 جنيه: Lotus، Mango"), else one line per item.
+	Flavour names stay in English script in both languages (brand rule).
+	Zero-priced items (components, samples) are left out."""
+	groups: dict[str, list[dict[str, Any]]] = {}
+	for item in products:
+		try:
+			price = float(item.get("price") or 0)
+		except (TypeError, ValueError):
+			continue
+		if price <= 0:
+			continue
+		groups.setdefault(str(item.get("item_group") or ""), []).append({**item, "price": price})
+	lines = []
+	for group, items in groups.items():
+		size = _size_label(group, arabic)
+		labels = [_flavour(str(i.get("name") or i.get("id")), group) for i in items]
+		if len({round(i["price"], 2) for i in items}) == 1 and group:
+			names = ("، " if arabic else ", ").join(dict.fromkeys(labels))
+			lines.append(f"• {size} {format_egp(items[0]['price'], arabic)}: {names}")
+		else:
+			for item, label in zip(items, labels, strict=True):
+				lines.append(f"• {label} {size}".rstrip() + f": {format_egp(item['price'], arabic)}")
+	return "\n".join(lines)
+
+
+def render_offers(bundles: Iterable[dict[str, Any]], threshold: float | None, arabic: bool) -> str:
+	"""Each bundle with what is inside, its price and a free-delivery mark."""
+	lines = []
+	for bundle in bundles:
+		try:
+			price = float(bundle.get("price") or 0)
+		except (TypeError, ValueError):
+			continue
+		if price <= 0:
+			continue
+		inside = " + ".join(
+			f"{int(g.get('quantity') or 0)} {_size_label(str(g.get('group_name') or ''), arabic)}"
+			for g in bundle.get("item_groups") or []
+			if int(g.get("quantity") or 0) > 0
+		)
+		line = f"• {bundle.get('name')}"
+		if inside:
+			line += f" ({inside})"
+		line += f" = {format_egp(price, arabic)}"
+		if bundle.get("free_shipping"):
+			line += " + توصيل مجاني 🚚" if arabic else " + free delivery 🚚"
+		lines.append(line)
+	if threshold:
+		lines.append(
+			f"🚚 توصيل مجاني لأي طلب فوق {format_egp(threshold, True)}"
+			if arabic
+			else f"🚚 Free delivery on any order above {format_egp(threshold, False)}"
+		)
+	return "\n".join(lines)
+
+
+def render_delivery_areas(
+	territories: Iterable[dict[str, Any]], group_labels: dict[str, dict[str, str]], arabic: bool
+) -> str:
+	"""The places we deliver to, one name each: sub-areas of a district fold into
+	the district ("الشيخ زايد"), bookkeeping and zero-fee territories drop out.
+	Names are Arabic in both languages when one exists: the English names are
+	internal codes (EGNASRCITY)."""
+	seen: dict[str, None] = {}
+	for row in territories:
+		name = str(row.get("name") or "").strip()
+		if not name or name.startswith("_") or name.lower() in _NOT_AN_AREA:
+			continue
+		try:
+			fee = float(row.get("delivery_income") or 0)
+		except (TypeError, ValueError):
+			continue
+		if fee <= 0:
+			continue
+		parent = str(row.get("parent_territory") or "").strip()
+		if parent and parent.lower() not in _NOT_AN_AREA and parent in group_labels:
+			labels = group_labels[parent]
+		else:
+			labels = {"en": name, "ar": str(row.get("custom_territory_name_ar") or "").strip()}
+		label = labels.get("ar") or labels.get("en") or name
+		seen.setdefault(label, None)
+	return ("، " if arabic else ", ").join(seen)
 
 
 def typed_number_warnings(template: Any) -> list[str]:
@@ -415,20 +641,35 @@ def _quiet():
 		yield
 
 
-def _territories() -> list[dict[str, Any]]:
-	fields = ["name", "delivery_income"]
+def _territory_fields(*base: str) -> list[str]:
+	fields = list(base)
 	try:
 		if frappe.db.has_column("Territory", "custom_territory_name_ar"):
 			fields.append("custom_territory_name_ar")
 	except Exception:
 		pass
+	return fields
+
+
+def _territories() -> list[dict[str, Any]]:
+	fields = _territory_fields("name", "delivery_income", "parent_territory")
 	try:
 		rows = frappe.get_all(
-			"Territory", filters={"is_group": 0}, fields=fields, order_by="name asc", ignore_permissions=True
+			"Territory", filters={"is_group": 0}, fields=fields, order_by="lft asc", ignore_permissions=True
 		)
 	except Exception:
 		return []
 	return [r for r in rows if r.get("delivery_income") not in (None, "")]
+
+
+def _territory_group_labels() -> dict[str, dict[str, str]]:
+	try:
+		rows = frappe.get_all(
+			"Territory", filters={"is_group": 1}, fields=_territory_fields("name"), ignore_permissions=True
+		)
+	except Exception:
+		return {}
+	return {r.name: {"en": r.name, "ar": str(r.get("custom_territory_name_ar") or "").strip()} for r in rows}
 
 
 def _free_delivery_threshold() -> float | None:
@@ -475,7 +716,7 @@ def build_context(settings: dict[str, Any]) -> dict[str, Any]:
 	for 10 minutes per POS profile: it is the cached prefix of every prompt.
 	"""
 	profile = settings.get("default_pos_profile") or ""
-	cache_key = f"jarz_chat_ctx:{profile}"
+	cache_key = f"jarz_chat_ctx:v2:{profile}"
 	try:
 		cached = frappe.cache().get_value(cache_key)
 		if cached:
@@ -488,15 +729,17 @@ def build_context(settings: dict[str, Any]) -> dict[str, Any]:
 	prices: dict[str, float] = {}
 	names: dict[str, str] = {}
 	menu_lines: list[str] = []
+	products: list[dict[str, Any]] = []
+	bundles: list[dict[str, Any]] = []
 	if profile:
 		from jarz_pos.api import pos as pos_api
 
 		try:
 			with _quiet():
-				products = pos_api.get_profile_products(profile)
+				products = pos_api.get_profile_products(profile) or []
 		except Exception:
 			products = []
-		for item in products or []:
+		for item in products:
 			code = str(item.get("id") or "")
 			if not code:
 				continue
@@ -506,10 +749,10 @@ def build_context(settings: dict[str, Any]) -> dict[str, Any]:
 			menu_lines.append(f"{code} | {item.get('name') or code} | {item.get('item_group') or ''}")
 		try:
 			with _quiet():
-				bundles = pos_api.get_profile_bundles(profile)
+				bundles = pos_api.get_profile_bundles(profile) or []
 		except Exception:
 			bundles = []
-		for bundle in bundles or []:
+		for bundle in bundles:
 			code = str(bundle.get("erpnext_item") or "")
 			if not code:
 				continue
@@ -520,7 +763,8 @@ def build_context(settings: dict[str, Any]) -> dict[str, Any]:
 
 	fees: dict[str, float] = {}
 	territory_lines: list[str] = []
-	for row in _territories():
+	territories = _territories()
+	for row in territories:
 		fee = float(row.get("delivery_income") or 0)
 		fees[str(row.name).strip().lower()] = fee
 		label = str(row.name)
@@ -543,6 +787,21 @@ def build_context(settings: dict[str, Any]) -> dict[str, Any]:
 		pitch = row.get("pitch") or ""
 		upsell_lines.append(f"{code} | {label}" + (f" | {pitch}" if pitch else ""))
 
+	group_labels = _territory_group_labels()
+	blocks = {
+		lang: {
+			"menu": render_menu(products, arabic),
+			"offers": render_offers(bundles, threshold, arabic),
+			"delivery_areas": render_delivery_areas(territories, group_labels, arabic),
+		}
+		for lang, arabic in (("ar", True), ("en", False))
+	}
+
+	ready_lines = []
+	for row in settings.get("ready_answers") or DEFAULT_READY_ANSWERS:
+		when = f" (when: {row['when_to_use']})" if row.get("when_to_use") else ""
+		ready_lines.append(f"### {row['topic']}{when}\n{row['answer']}")
+
 	parts = [
 		"# Jarz business context",
 		"Prices are never shown to you; use {{price:ITEM_CODE}}.",
@@ -556,6 +815,10 @@ def build_context(settings: dict[str, Any]) -> dict[str, Any]:
 		else "No free-delivery offer is active.",
 		"## Upsell candidates (ITEM_CODE | name | pitch)",
 		"\n".join(upsell_lines) or "(none: do not upsell)",
+		"## Ready answers",
+		"Jarz's saved replies. When the customer's message matches one, adapt it: keep its "
+		"placeholders and its offer, fit the wording to the conversation, never paste two at once.",
+		"\n\n".join(ready_lines),
 	]
 	brand = settings.get("brand_instructions")
 	if brand:
@@ -567,6 +830,7 @@ def build_context(settings: dict[str, Any]) -> dict[str, Any]:
 		"delivery_fees": fees,
 		"free_delivery_threshold": threshold,
 		"candidates": candidates,
+		"blocks": blocks,
 	}
 	try:
 		frappe.cache().set_value(

@@ -1,0 +1,59 @@
+{
+ "actions": [],
+ "creation": "2026-10-17 12:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "topic",
+  "when_to_use",
+  "answer",
+  "active"
+ ],
+ "fields": [
+  {
+   "columns": 2,
+   "fieldname": "topic",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Topic",
+   "reqd": 1
+  },
+  {
+   "columns": 3,
+   "fieldname": "when_to_use",
+   "fieldtype": "Small Text",
+   "in_list_view": 1,
+   "label": "When To Use"
+  },
+  {
+   "columns": 4,
+   "description": "Egyptian Arabic. Never type prices: use {{menu}}, {{offers}}, {{delivery_areas}}, {{price:ITEM_CODE}}, {{delivery_fee:AREA}}, {{free_delivery_threshold}}.",
+   "fieldname": "answer",
+   "fieldtype": "Long Text",
+   "in_list_view": 1,
+   "label": "Answer",
+   "reqd": 1
+  },
+  {
+   "columns": 1,
+   "default": "1",
+   "fieldname": "active",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Active"
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "istable": 1,
+ "links": [],
+ "modified": "2026-10-17 12:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "jarz pos",
+ "name": "Jarz Chat Ready Answer",
+ "owner": "Administrator",
+ "permissions": [],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}

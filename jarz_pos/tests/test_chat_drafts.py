@@ -324,6 +324,149 @@ class CostTest(unittest.TestCase):
 		self.assertEqual(d.cost_usd("claude-haiku-5-5", None, None), 0.0)
 
 
+PRODUCTS = [
+	{"id": "Lotus Medium", "name": "Lotus Medium", "item_group": "Medium", "price": 120},
+	{"id": "Redvelvet Medium", "name": "Redvelvet Medium", "item_group": "Medium", "price": 120},
+	{"id": "Lotus Large", "name": "Lotus Large", "item_group": "Large", "price": 160},
+	{"id": "Tiramisu Large", "name": "Tiramisu Large", "item_group": "Large", "price": 175},
+	{"id": "Spoon", "name": "Spoon", "item_group": "Consumables", "price": 0},
+]
+BUNDLES = [
+	{
+		"name": "Jarz Signature Trio",
+		"price": 480.0,
+		"free_shipping": 1,
+		"item_groups": [{"group_name": "Large", "quantity": 3}],
+	},
+	{
+		"name": "Jarz Indulgence Five",
+		"price": 640.0,
+		"free_shipping": 0,
+		"item_groups": [{"group_name": "Large", "quantity": 4}, {"group_name": "Medium", "quantity": 1}],
+	},
+	{"name": "Dead bundle", "price": 0, "item_groups": []},
+]
+TERRITORIES = [
+	{
+		"name": "EGNASRCITY",
+		"delivery_income": 50,
+		"parent_territory": "Egypt",
+		"custom_territory_name_ar": "مدينة نصر",
+	},
+	{
+		"name": "Zayed Hay 1",
+		"delivery_income": 60,
+		"parent_territory": "EGZAYED",
+		"custom_territory_name_ar": "الحي الأول",
+	},
+	{
+		"name": "Zayed Hay 2",
+		"delivery_income": 60,
+		"parent_territory": "EGZAYED",
+		"custom_territory_name_ar": "الحي التاني",
+	},
+	{"name": "_B2BVALID_Territory", "delivery_income": 10, "parent_territory": "EGZAYED"},
+	{
+		"name": "EGISM",
+		"delivery_income": 0,
+		"parent_territory": "Egypt",
+		"custom_territory_name_ar": "الإسماعيلية",
+	},
+	{"name": "EGMAADI", "delivery_income": 70, "parent_territory": "Egypt"},
+]
+GROUP_LABELS = {"EGZAYED": {"en": "EGZAYED", "ar": "الشيخ زايد"}, "Egypt": {"en": "Egypt", "ar": ""}}
+
+
+class RenderBlocksTest(unittest.TestCase):
+	def test_menu_groups_shared_price_and_skips_free_items(self):
+		ar = d.render_menu(PRODUCTS, True)
+		# Flavours stay in English script; the catalog's "Redvelvet" reads "Red Velvet".
+		self.assertIn("• وسط 120 جنيه: Lotus، Red Velvet", ar)
+		# Large has two prices, so one line per item, size suffix taken off the name.
+		self.assertIn("• Lotus كبير: 160 جنيه", ar)
+		self.assertIn("• Tiramisu كبير: 175 جنيه", ar)
+		self.assertNotIn("Spoon", ar)
+		en = d.render_menu(PRODUCTS, False)
+		self.assertIn("Medium 120 EGP: Lotus, Red Velvet", en)
+
+	def test_offers(self):
+		ar = d.render_offers(BUNDLES, 500, True)
+		self.assertIn("• Jarz Signature Trio (3 كبير) = 480 جنيه + توصيل مجاني 🚚", ar)
+		self.assertIn("• Jarz Indulgence Five (4 كبير + 1 وسط) = 640 جنيه", ar)
+		self.assertNotIn("Dead bundle", ar)
+		self.assertIn("توصيل مجاني لأي طلب فوق 500 جنيه", ar)
+		en = d.render_offers(BUNDLES, None, False)
+		self.assertIn("+ free delivery", en)
+		self.assertNotIn("above", en)
+
+	def test_delivery_areas_fold_groups_and_drop_junk(self):
+		ar = d.render_delivery_areas(TERRITORIES, GROUP_LABELS, True)
+		self.assertEqual(ar, "مدينة نصر، الشيخ زايد، EGMAADI")
+		en = d.render_delivery_areas(TERRITORIES, GROUP_LABELS, False)
+		self.assertEqual(en, "مدينة نصر, الشيخ زايد, EGMAADI")
+
+	def test_block_placeholders_fill_from_context(self):
+		blocks = {"ar": {"menu": "• وسط 120 جنيه: لوتس", "offers": "", "delivery_areas": "مدينة نصر"}}
+		text, warnings, _ = d.fill_placeholders(
+			"المنيو:\n{{menu}}\nبنوصل: {{delivery_areas}}", ctx(blocks=blocks)
+		)
+		self.assertIn("• وسط 120 جنيه: لوتس", text)
+		self.assertIn("بنوصل: مدينة نصر", text)
+		self.assertEqual(warnings, [])
+		text, warnings, _ = d.fill_placeholders("{{offers}}", ctx(blocks=blocks))
+		self.assertEqual(text, d.UNKNOWN)
+		self.assertEqual(warnings, ["No live data for {{offers}}"])
+		_, warnings, _ = d.fill_placeholders("{{menu}}", ctx())
+		self.assertEqual(warnings, ["No live data for {{menu}}"])
+
+	def test_block_templates_are_not_typed_numbers(self):
+		self.assertEqual(d.typed_number_warnings("الأسعار:\n{{menu}}\n{{offers}}"), [])
+
+
+class ReadyAnswersAndPromptTest(unittest.TestCase):
+	def test_defaults_type_no_prices(self):
+		for row in d.DEFAULT_READY_ANSWERS:
+			self.assertTrue(row["topic"] and row["answer"])
+			self.assertEqual(d.typed_number_warnings(row["answer"]), [], row["topic"])
+			for match in d._PLACEHOLDER.finditer(row["answer"]):
+				self.assertIn(match.group(1), d.BLOCK_PLACEHOLDERS + ("price", "customer_first_name"))
+
+	def test_defaults_cover_menu_offers_areas(self):
+		joined = "\n".join(r["answer"] for r in d.DEFAULT_READY_ANSWERS)
+		for key in d.BLOCK_PLACEHOLDERS:
+			self.assertIn("{{" + key + "}}", joined)
+		self.assertIn("من 30 دقيقة لحد ساعتين بالكتير", joined)
+
+	def test_prompt_asks_for_egyptian_dialect_and_blocks(self):
+		self.assertIn("عامية مصرية", d.SYSTEM_PROMPT)
+		self.assertIn("Never Modern", d.SYSTEM_PROMPT)
+		for key in d.BLOCK_PLACEHOLDERS:
+			self.assertIn("{{" + key + "}}", d.SYSTEM_PROMPT)
+		self.assertIn("من 30 دقيقة لحد ساعتين بالكتير", d.SYSTEM_PROMPT)
+
+
+class ReadyAnswersSettingsTest(unittest.TestCase):
+	def test_build_settings_reads_active_rows(self):
+		from jarz_pos.services import chat_settings
+
+		doc = {
+			"ready_answers": [
+				{"topic": " Prices ", "when_to_use": "بكام", "answer": "{{menu}}", "active": 1},
+				{"topic": "Off", "answer": "x", "active": 0},
+				{"topic": "", "answer": "no topic", "active": 1},
+				SimpleNamespace(topic="Areas", when_to_use=None, answer="{{delivery_areas}}", active=None),
+			]
+		}
+		out = chat_settings.build_settings(doc)
+		self.assertEqual(
+			out["ready_answers"],
+			[
+				{"topic": "Prices", "when_to_use": "بكام", "answer": "{{menu}}"},
+				{"topic": "Areas", "when_to_use": "", "answer": "{{delivery_areas}}"},
+			],
+		)
+
+
 class FirstNameTest(unittest.TestCase):
 	def test_skips_phone_like_names(self):
 		self.assertEqual(d.first_name("+201111034268", "Sara Ali"), "Sara")

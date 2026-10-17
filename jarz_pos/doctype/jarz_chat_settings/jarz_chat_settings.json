@@ -18,6 +18,7 @@
   "brand_instructions",
   "planted_draft_percent",
   "upsell_items",
+  "ready_answers",
   "sec_meta",
   "graph_api_version",
   "meta_app_secret",
@@ -121,6 +122,13 @@
    "description": "The ONLY items the AI may suggest as an upsell."
   },
   {
+   "fieldname": "ready_answers",
+   "fieldtype": "Table",
+   "label": "Ready Answers",
+   "options": "Jarz Chat Ready Answer",
+   "description": "Jarz's saved replies (menu, prices, offers, delivery areas...). The AI adapts the matching one instead of improvising. Empty means the built-in defaults. Placeholders such as {{menu}}, {{offers}}, {{delivery_areas}} and {{price:ITEM_CODE}} are filled live."
+  },
+  {
    "fieldname": "sec_meta",
    "fieldtype": "Section Break",
    "label": "Meta (WhatsApp / Instagram / Messenger)"
@@ -178,7 +186,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-10-16 12:00:00.000000",
+ "modified": "2026-10-17 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "jarz pos",
  "name": "Jarz Chat Settings",
