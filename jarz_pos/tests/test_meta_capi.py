@@ -1235,6 +1235,8 @@ class SendLoopIsolationTest(unittest.TestCase):
 			),
 			mock.patch.object(m, "_mark", lambda name, values: marks.append((name, values))),
 			mock.patch("frappe.utils.now_datetime", return_value=D(2026, 10, 21, 12, 0)),
+			# Reads System Settings through frappe.db, which this test replaces.
+			mock.patch("frappe.utils.get_system_timezone", return_value="Africa/Cairo"),
 		):
 			result = m.send_approved_events()
 		self.assertEqual(result["failed"], 1)
