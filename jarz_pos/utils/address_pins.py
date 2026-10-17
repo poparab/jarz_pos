@@ -88,6 +88,11 @@ VERIFIED_NEAR_M = 150.0
 #: fixed it" (the area_mismatch case), not a different delivery.
 STAFF_CONFIRMED_SOURCES = frozenset({SOURCE_COURIER_VERIFIED, SOURCE_MANUAL_OVERRIDE})
 
+#: Snapshot flags that mean "this order has no location". Dropped from the card
+#: once a staff-confirmed pin is shown, or the chip reads "Pinned" while its
+#: tooltip says there is no location.
+NO_PIN_FLAGS = frozenset({"pin_removed", "outside_egypt"})
+
 #: What a card carries when there is no address, no pin, or the lookup failed.
 #: ``pin_source`` / ``pin_flag`` come from the invoice snapshot only; the flag
 #: can be set even when no usable pin exists (``outside_egypt``).
@@ -305,7 +310,9 @@ def invoice_pin_override(si_row: Any, address_fields: dict[str, Any] | None) -> 
 	  or a ``pos_link`` pin written after the invoice).
 
 	``pin_source`` and ``pin_flag`` always come from the snapshot (``""`` when
-	absent); the flag passes through even when there is no usable pin.
+	absent); the flag passes through even when there is no usable pin. When a
+	staff-confirmed pin is shown in place of a missing snapshot, the
+	:data:`NO_PIN_FLAGS` tokens are dropped (the order now has a location).
 	"""
 	base = _public(dict(address_fields)) if address_fields else empty_pin_fields()
 	base.setdefault("pin_source", "")
@@ -334,6 +341,10 @@ def invoice_pin_override(si_row: Any, address_fields: dict[str, Any] | None) -> 
 				blank["pin_source"] = out["pin_source"]
 				blank["pin_flag"] = out["pin_flag"]
 				return blank
+			if staff_confirmed and out["pin_flag"]:
+				out["pin_flag"] = ",".join(
+					t for t in out["pin_flag"].split(",") if t not in NO_PIN_FLAGS
+				)
 			return out
 
 		if staff_confirmed:

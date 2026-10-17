@@ -352,7 +352,7 @@ class TestInvoicePinOverride(unittest.TestCase):
 		)
 		self.assertTrue(out["has_location_pin"])
 		self.assertEqual(out["address_latitude"], FAR_LAT)
-		self.assertEqual(out["pin_flag"], "outside_egypt")
+		self.assertEqual(out["pin_flag"], "")
 
 	def test_near_pin_of_equal_confidence_does_not_beat_the_snapshot(self):
 		"""Only a HIGHER-confidence pin is a refinement; a peer customer pin is not."""
@@ -674,7 +674,16 @@ class TestNewerPosLinkBeatsTheSnapshot(unittest.TestCase):
 		self.assertTrue(out["has_location_pin"])
 		self.assertEqual(out["address_latitude"], FAR_LAT)
 		self.assertEqual(out["geo_source"], "pos_link")
-		self.assertEqual(out["pin_flag"], "pin_removed")
+		# The order has a location again: no "no location" tooltip on a Pinned chip.
+		self.assertEqual(out["pin_flag"], "")
+
+	def test_staff_pin_after_the_removal_keeps_unrelated_flags(self):
+		addr = self._addr(FAR_LAT, FAR_LNG, "pos_link", 20, updated=self.CREATED + timedelta(minutes=30))
+		out = address_pins.invoice_pin_override(
+			self._inv(lat=None, lng=None, source="", flag="outside_area, pin_removed"), addr
+		)
+		self.assertTrue(out["has_location_pin"])
+		self.assertEqual(out["pin_flag"], "outside_area")
 
 	def test_pos_link_older_than_the_removal_stays_hidden(self):
 		addr = self._addr(FAR_LAT, FAR_LNG, "pos_link", 20, updated=self.CREATED - timedelta(minutes=30))
@@ -686,6 +695,7 @@ class TestNewerPosLinkBeatsTheSnapshot(unittest.TestCase):
 		out = address_pins.invoice_pin_override(self._inv(lat=None, lng=None, source="", flag="pin_removed"), addr)
 		self.assertTrue(out["has_location_pin"])
 		self.assertEqual(out["geo_source"], "manual_override")
+		self.assertEqual(out["pin_flag"], "")
 
 	def test_geo_updated_column_is_selected_when_present_and_skipped_when_not(self):
 		self.assertIn("custom_geo_updated_on", address_pins.GEO_COLUMNS)
