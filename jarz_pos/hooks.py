@@ -635,7 +635,8 @@ scheduler_events = {
 		"jarz_pos.services.customer_followups.generate_touches",
 		# Meta Conversions API: log every newly delivered chat (flutter) order as
 		# Pending Approval / Held / Approved / Skipped, then send the approved
-		# ones as Purchase. Website orders are left to the Woo pixel plugin.
+		# ones as Purchase. Delivered website orders are sent too once Send
+		# Website Orders is ticked (the Woo plugin's checkout Purchase is off).
 		# Off until Meta CAPI Settings is enabled; idempotent per invoice;
 		# never raise. See jarz_pos.services.meta_capi.
 		"jarz_pos.services.meta_capi.queue_delivered_orders",

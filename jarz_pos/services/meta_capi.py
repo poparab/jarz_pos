@@ -702,12 +702,24 @@ def _duplicate_reason(event_id: str, invoice: str) -> str | None:
 
 
 def _chat_event_id(order: Any) -> str:
-	"""The chat order's id. A POS order that Woo re-created (no channel) has no
-	``amended_from``; it is the same order as the first invoice of its Woo order."""
+	"""The chat order's id: the first invoice of its Woo order, whatever happened
+	since. A POS order that Woo re-created (no channel, no ``amended_from``) and a
+	POS edit of that re-creation are both still the same order."""
 	first = _get(order, "first_invoice")
-	if first and _get(order, "custom_order_channel") != "flutter":
+	if first:
+		if first == order.name:
+			return event_id_for(order.name, order.amended_from)
 		return event_id_for(first, frappe.db.get_value("Sales Invoice", first, "amended_from"))
 	return event_id_for(order.name, order.amended_from)
+
+
+def _log(title: str) -> None:
+	"""Error Log write that can never break the loop it reports on (v16's
+	``log_error`` can raise)."""
+	try:
+		frappe.log_error(frappe.get_traceback(), title)
+	except Exception:
+		pass
 
 
 def _queue_one(order: Any, settings: dict[str, Any]) -> str:
@@ -808,7 +820,7 @@ def _queue_pages(fetch, queue_one, result: dict[str, Any]) -> None:
 				result["errors"] += 1
 				failed.add(order.name)
 				frappe.db.rollback(save_point="meta_capi_queue")
-				frappe.log_error(frappe.get_traceback(), f"meta_capi: queue {order.name} failed")
+				_log(f"meta_capi: queue {order.name} failed")
 		frappe.db.commit()
 		# A short page is the last one; a page of only failures would repeat forever.
 		if len(orders) < MAX_QUEUE_PER_RUN or all(o.name in failed for o in orders):
@@ -1063,7 +1075,7 @@ def send_approved_events() -> dict[str, Any]:
 				else:
 					event, reason = _event_for_row(row, tz_name, blocked)
 			except Exception:
-				frappe.log_error(frappe.get_traceback(), f"meta_capi: build event {row.name} failed")
+				_log(f"meta_capi: build event {row.name} failed")
 				_record_failure(row, "Could not build the event from the invoice", result)
 				continue
 			if not event:
@@ -1071,6 +1083,7 @@ def send_approved_events() -> dict[str, Any]:
 				result["skipped"] += 1
 				continue
 			ready.append((row, event))
+		frappe.db.commit()
 
 		for batch in chunks(ready, BATCH_SIZE):
 			ok, body = _post_events(settings, token, [event for _row, event in batch])
@@ -1084,7 +1097,8 @@ def send_approved_events() -> dict[str, Any]:
 					_record_success(row, one_body, settings, now, result)
 				else:
 					_record_failure(row, one_body, result)
-		frappe.db.commit()
+				frappe.db.commit()
+			frappe.db.commit()
 	except Exception:
 		result["errors"] += 1
 		try:

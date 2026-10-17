@@ -1088,6 +1088,15 @@ class ChatEventIdTest(unittest.TestCase):
 		order = _order(name="ACC-SINV-40", custom_order_channel="", first_invoice="ACC-SINV-9-1")
 		self.assertEqual(self._id(order, first_amended_from="ACC-SINV-9"), "ACC-SINV-9")
 
+	def test_pos_edit_of_a_woo_recreation_is_still_the_first_order(self):
+		order = _order(
+			name="ACC-SINV-40-1",
+			amended_from="ACC-SINV-40",
+			custom_order_channel="flutter",
+			first_invoice="ACC-SINV-9",
+		)
+		self.assertEqual(self._id(order), "ACC-SINV-9")
+
 
 def _web_inv(**over):
 	inv = vars(_inv(contact_mobile="")).copy()
