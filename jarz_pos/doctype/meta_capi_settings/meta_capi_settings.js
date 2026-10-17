@@ -46,7 +46,7 @@ frappe.ui.form.on("Meta CAPI Settings", {
 			() => {
 				frappe.confirm(
 					__(
-						"Queue delivered chat orders from the last 7 days, ignoring the start date?"
+						"Queue delivered orders from the last 7 days, ignoring the start date? Website orders still begin at Website Orders From."
 					),
 					() =>
 						meta_capi_call(

@@ -18,7 +18,12 @@
   "access_token",
   "section_filters",
   "excluded_customer_groups",
-  "do_not_send_phones"
+  "do_not_send_phones",
+  "section_website",
+  "send_website_orders",
+  "website_start",
+  "column_break_w",
+  "website_url"
  ],
  "fields": [
   {
@@ -112,11 +117,43 @@
    "fieldtype": "Small Text",
    "label": "Do-Not-Send Phones",
    "description": "One mobile per line, in any format (01..., +20..., 0020...). Orders for these numbers are Skipped and never sent, also when the number is added after the order was queued."
+  },
+  {
+   "fieldname": "section_website",
+   "fieldtype": "Section Break",
+   "label": "Website Orders",
+   "description": "Send website orders to Meta when they are delivered, so cancelled orders never count and an edited order counts once."
+  },
+  {
+   "fieldname": "send_website_orders",
+   "fieldtype": "Check",
+   "label": "Send Website Orders",
+   "default": "0",
+   "description": "Tick only after the website plugin has stopped sending Purchase (browser and server). Otherwise Meta counts those orders twice."
+  },
+  {
+   "fieldname": "website_start",
+   "fieldtype": "Datetime",
+   "label": "Website Orders From",
+   "depends_on": "eval:doc.send_website_orders",
+   "mandatory_depends_on": "eval:doc.send_website_orders",
+   "description": "The moment the plugin stopped sending Purchase. Only website orders placed from this moment are sent, so no order is counted by both."
+  },
+  {
+   "fieldname": "column_break_w",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "website_url",
+   "fieldtype": "Data",
+   "label": "Website URL",
+   "default": "https://orderjarz.com/",
+   "description": "Sent to Meta as the page the order came from."
   }
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-10-17 18:00:00.000000",
+ "modified": "2026-10-17 20:00:00.000000",
  "modified_by": "Administrator",
  "module": "jarz pos",
  "name": "Meta CAPI Settings",

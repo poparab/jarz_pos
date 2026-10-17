@@ -26,7 +26,21 @@ except ImportError:  # pragma: no cover
 	_fake.db = SimpleNamespace()
 	_fake.log_error = lambda *a, **k: None
 	_fake.get_traceback = lambda *a, **k: ""
+	# The service imports these inside functions; tests patch the ones they lean on.
+	_utils = types.ModuleType("frappe.utils")
+	_utils.get_datetime = (
+		lambda v=None: v if isinstance(v, datetime.datetime) else datetime.datetime.fromisoformat(str(v))
+	)
+	_utils.now_datetime = datetime.datetime.now
+	_utils.get_system_timezone = lambda: "Africa/Cairo"
+	_utils.getdate = (
+		lambda v=None: v if isinstance(v, datetime.date) else datetime.date.fromisoformat(str(v)[:10])
+	)
+	_utils.nowdate = lambda: datetime.date.today().isoformat()
+	_utils.add_days = lambda d, n: d + datetime.timedelta(days=n)
+	_fake.utils = _utils
 	sys.modules["frappe"] = _fake
+	sys.modules["frappe.utils"] = _utils
 
 import jarz_pos
 from jarz_pos.services import meta_capi as m
@@ -427,6 +441,7 @@ class WiringTest(unittest.TestCase):
 			"attempts",
 			"fbtrace_id",
 			"last_error",
+			"source",
 		):
 			self.assertIn(name, fields)
 
@@ -447,6 +462,11 @@ class WiringTest(unittest.TestCase):
 			},
 		)
 
+	def test_event_sources_match(self):
+		field = next(f for f in self._doctype("meta_capi_event")["fields"] if f["fieldname"] == "source")
+		self.assertEqual(set(field["options"].split("\n")), {m.SOURCE_CHAT, m.SOURCE_WEBSITE})
+		self.assertEqual(field["default"], m.SOURCE_CHAT)
+
 	def test_event_invoice_is_unique(self):
 		field = next(f for f in self._doctype("meta_capi_event")["fields"] if f["fieldname"] == "invoice")
 		self.assertEqual(field.get("unique"), 1)
@@ -466,8 +486,12 @@ class WiringTest(unittest.TestCase):
 			"hold_above",
 			"excluded_customer_groups",
 			"do_not_send_phones",
+			"send_website_orders",
+			"website_start",
+			"website_url",
 		):
 			self.assertIn(name, fields)
+		self.assertEqual(fields["send_website_orders"]["default"], "0")
 		self.assertEqual(fields["access_token"]["fieldtype"], "Password")
 		self.assertEqual(fields["access_token"]["permlevel"], 1)
 		self.assertEqual(fields["enabled"]["default"], "0")
@@ -750,6 +774,307 @@ class WorkspaceCountsTest(unittest.TestCase):
 		self.assertIn("Meta Chat Orders", blocks[1]["data"]["text"])
 		names = [b["data"]["shortcut_name"] for b in blocks[2:]]
 		self.assertEqual(names, [s["label"] for s in sw.META_SHORTCUTS])
+
+
+class WebsiteKeysTest(unittest.TestCase):
+	"""Website orders: one event per Woo order, matched on phone, email, browser and click id."""
+
+	def test_event_id_is_the_woo_order(self):
+		self.assertEqual(m.website_event_id(17529), "woo-17529")
+		self.assertEqual(m.website_event_id(" 17529 "), "woo-17529")
+
+	def test_email_is_lowercased_and_placeholders_dropped(self):
+		self.assertEqual(m.normalize_email("  Sara.Ali@Gmail.COM "), "sara.ali@gmail.com")
+		for raw in (
+			"",
+			None,
+			"no-at-sign",
+			"a@b",
+			"x@placeholder.com",
+			"x@mail.placeholder.com",
+			"x@example.com",
+		):
+			self.assertIsNone(m.normalize_email(raw), raw)
+
+	def test_fbc_from_the_landing_url(self):
+		url = "https://orderjarz.com/shop/?utm_source=fb&fbclid=IwAR1abc_DEF-2&x=1"
+		self.assertEqual(m.fbc_from(url, 1760000000000), "fb.1.1760000000000.IwAR1abc_DEF-2")
+		self.assertEqual(m.fbc_from("https://orderjarz.com/?fbclid=Zz", 1), "fb.1.1.Zz")
+		self.assertIsNone(m.fbc_from("https://orderjarz.com/?utm_source=fb", 1760000000000))
+		self.assertIsNone(m.fbc_from(url, None))
+		self.assertIsNone(m.fbc_from(None, 1760000000000))
+
+	def test_user_data_hashes_keys_and_keeps_browser_fields_plain(self):
+		data = m.build_website_user_data(
+			phone=m.normalize_eg_mobile("01001234567"),
+			email="sara@gmail.com",
+			customer_id="CUST-1",
+			customer_name="Sara Ali",
+			user_agent="Mozilla/5.0 " + "x" * 600,
+			fbc="fb.1.1.Zz",
+		)
+		self.assertEqual(data["em"], [sha("sara@gmail.com")])
+		self.assertEqual(data["ph"], [sha(m.normalize_eg_mobile("01001234567"))])
+		self.assertEqual(data["fn"], [sha("sara")])
+		self.assertEqual(data["external_id"], [sha("cust-1")])
+		self.assertEqual(len(data["client_user_agent"]), 512)
+		self.assertTrue(data["client_user_agent"].startswith("Mozilla/5.0"))
+		self.assertEqual(data["fbc"], "fb.1.1.Zz")
+		self.assertNotIn("sara@gmail.com", json.dumps(data))
+
+	def test_email_only_buyer_has_no_phone_key(self):
+		data = m.build_website_user_data(
+			phone=None, email="sara@gmail.com", customer_id="C", customer_name=""
+		)
+		self.assertNotIn("ph", data)
+		self.assertNotIn("client_user_agent", data)
+		self.assertNotIn("fbc", data)
+
+	def test_website_event_carries_source_url_and_woo_order_id(self):
+		event = m.build_event(
+			event_id="woo-17529",
+			event_time=1760000000,
+			value=480,
+			user_data={},
+			action_source="website",
+			event_source_url="https://orderjarz.com/",
+			order_id="17529",
+		)
+		self.assertEqual(event["action_source"], "website")
+		self.assertEqual(event["event_source_url"], "https://orderjarz.com/")
+		self.assertEqual(event["custom_data"]["order_id"], "17529")
+		self.assertEqual(event["event_id"], "woo-17529")
+
+
+class WebsiteSwitchTest(unittest.TestCase):
+	def test_live_needs_the_tick_and_the_start_time(self):
+		self.assertFalse(m.website_live({}))
+		self.assertFalse(m.website_live({"send_website_orders": 1}))
+		self.assertFalse(m.website_live({"website_start": "2026-10-20 10:00:00"}))
+		self.assertTrue(m.website_live({"send_website_orders": 1, "website_start": "2026-10-20 10:00:00"}))
+
+	def test_settings_default_the_url_and_stay_off(self):
+		with mock.patch.object(m.frappe, "get_single", return_value={"enabled": 1}, create=True):
+			settings = m.load_settings()
+		self.assertEqual(settings["website_url"], m.DEFAULT_WEBSITE_URL)
+		self.assertFalse(m.website_live(settings))
+
+	def test_website_orders_are_not_queued_while_off(self):
+		settings = {"enabled": 1, "start_date": None, "send_website_orders": 0, "website_start": None}
+		with (
+			mock.patch.object(m, "load_settings", return_value=settings),
+			mock.patch.object(m, "_queue_since", return_value=D(2026, 10, 17)),
+			mock.patch.object(m, "_candidate_orders", return_value=[]),
+			mock.patch.object(m, "_website_candidate_orders") as web,
+			mock.patch.object(m.frappe, "db", SimpleNamespace(commit=lambda: None), create=True),
+		):
+			m.queue_delivered_orders()
+		web.assert_not_called()
+
+	def test_website_orders_are_queued_from_the_cutover_only(self):
+		settings = {
+			"enabled": 1,
+			"start_date": None,
+			"send_website_orders": 1,
+			"website_start": "2026-10-20 10:00:00",
+		}
+		with (
+			mock.patch.object(m, "load_settings", return_value=settings),
+			mock.patch.object(m, "_queue_since", return_value=D(2026, 10, 15)),
+			mock.patch.object(m, "_candidate_orders", return_value=[]),
+			mock.patch.object(m, "_website_candidate_orders", return_value=[]) as web,
+			mock.patch.object(m.frappe, "db", SimpleNamespace(commit=lambda: None), create=True),
+			mock.patch("frappe.utils.get_datetime", side_effect=lambda v: D.fromisoformat(str(v))),
+		):
+			result = m.queue_delivered_orders(backfill_days=7)
+		self.assertEqual(result["errors"], 0)
+		web.assert_called_once()
+		self.assertEqual(web.call_args[0][1], D(2026, 10, 20, 10, 0))
+
+	def test_sending_holds_website_rows_back_while_off(self):
+		settings = {
+			"enabled": 1,
+			"test_mode": 0,
+			"test_event_code": "",
+			"send_website_orders": 0,
+			"website_start": None,
+		}
+		sql = mock.Mock(return_value=[])
+		db = SimpleNamespace(sql=sql, commit=lambda: None)
+		with (
+			mock.patch.object(m, "load_settings", return_value=settings),
+			mock.patch.object(m, "_access_token", return_value="t"),
+			mock.patch.object(m.frappe, "db", db, create=True),
+		):
+			m.send_approved_events()
+		query, params = sql.call_args[0]
+		self.assertIn("e.source, '') <>", query)
+		self.assertEqual(params["website"], m.SOURCE_WEBSITE)
+		settings.update(send_website_orders=1, website_start="2026-10-20 10:00:00")
+		with (
+			mock.patch.object(m, "load_settings", return_value=settings),
+			mock.patch.object(m, "_access_token", return_value="t"),
+			mock.patch.object(m.frappe, "db", db, create=True),
+		):
+			m.send_approved_events()
+		self.assertNotIn("e.source, '') <>", sql.call_args[0][0])
+
+
+def _web_order(**over):
+	order = vars(_order(name="ACC-SINV-20", contact_mobile="", grand_total=650)).copy()
+	order.pop("creation")
+	order.update(
+		{
+			"woo_order_id": "17529",
+			"woo_phone": "01001234567",
+			"first_creation": D(2026, 10, 20, 11, 0),
+		}
+	)
+	order.update(over)
+	return SimpleNamespace(**order)
+
+
+class QueueWebsiteOneTest(unittest.TestCase):
+	def _queue(self, order, earlier=()):
+		inserted, marks = {}, []
+
+		def get_doc(values):
+			inserted.update(values)
+			return SimpleNamespace(insert=lambda **k: None)
+
+		# The earlier invoice was cancelled when the order was edited.
+		db = SimpleNamespace(get_value=mock.Mock(return_value=2))
+		with (
+			mock.patch.object(m.frappe, "get_doc", get_doc, create=True),
+			mock.patch.object(m.frappe, "get_all", mock.Mock(return_value=list(earlier)), create=True),
+			mock.patch.object(m.frappe, "db", db, create=True),
+			mock.patch.object(m, "_mark", lambda name, values: marks.append((name, values))),
+		):
+			status = m._queue_website_one(order, QUEUE_SETTINGS)
+		return status, inserted, marks
+
+	def test_delivered_order_is_approved_at_checkout_time(self):
+		status, row, _ = self._queue(_web_order())
+		self.assertEqual(status, m.STATUS_APPROVED)
+		self.assertEqual(row["source"], m.SOURCE_WEBSITE)
+		self.assertEqual(row["event_id"], "woo-17529")
+		self.assertEqual(row["event_time"], D(2026, 10, 20, 11, 0))
+		self.assertEqual(row["order_value"], 650)
+
+	def test_high_value_website_order_is_not_held(self):
+		status, _, _ = self._queue(_web_order(grand_total=9000))
+		self.assertEqual(status, m.STATUS_APPROVED)
+
+	def test_rules_still_apply(self):
+		status, row, _ = self._queue(_web_order(customer_group="B2B"))
+		self.assertEqual(status, m.STATUS_SKIPPED)
+		self.assertEqual(row["status_reason"], "Excluded customer group: B2B")
+		with mock.patch.dict(QUEUE_SETTINGS, {"blocked_phones": m.parse_phones("01001234567")}):
+			status, row, _ = self._queue(_web_order())
+		self.assertEqual(row["status_reason"], "Phone on the do-not-send list")
+
+	def test_zero_value_is_skipped(self):
+		status, row, _ = self._queue(_web_order(grand_total=0))
+		self.assertEqual((status, row["status_reason"]), (m.STATUS_SKIPPED, "Order value is zero"))
+
+	def test_edited_order_counts_once(self):
+		# The edit cancels the delivered invoice and makes another for the same Woo order.
+		earlier = [SimpleNamespace(name="EV-1", invoice="ACC-SINV-20", status=m.STATUS_SENT)]
+		status, row, _ = self._queue(_web_order(name="ACC-SINV-21"), earlier)
+		self.assertEqual(status, m.STATUS_SKIPPED)
+		self.assertEqual(row["status_reason"], "Already queued: same order as ACC-SINV-20 (Sent)")
+
+	def test_edit_before_sending_replaces_the_cancelled_row(self):
+		earlier = [SimpleNamespace(name="EV-1", invoice="ACC-SINV-20", status=m.STATUS_APPROVED)]
+		status, _, marks = self._queue(_web_order(name="ACC-SINV-20-1", amended_from="ACC-SINV-20"), earlier)
+		self.assertEqual(status, m.STATUS_APPROVED)
+		self.assertEqual(marks[0][0], "EV-1")
+
+
+def _web_inv(**over):
+	inv = vars(_inv(contact_mobile="")).copy()
+	inv.update(
+		{
+			"woo_order_id": "17529",
+			"woo_order_email": "Sara@Gmail.com",
+			"woo_order_phone_normalized": "01001234567",
+			"woo_billing_name": "Sara Ali",
+			"woo_user_agent": "Mozilla/5.0 (Linux; Android 14)",
+			"woo_session_entry": "https://orderjarz.com/?fbclid=IwAR1abc",
+			"woo_session_start": "2026-10-20 10:30:00",
+		}
+	)
+	inv.update(over)
+	return SimpleNamespace(**inv)
+
+
+class WebsiteSendTimeTest(unittest.TestCase):
+	ROW = SimpleNamespace(
+		invoice="ACC-SINV-20",
+		event_id="woo-17529",
+		event_time=D(2026, 10, 20, 11, 0),
+		order_value=650,
+		source=m.SOURCE_WEBSITE,
+	)
+
+	def _event(self, inv, customer=None, blocked=(), has_return=False):
+		customer = customer or {"mobile_no": "", m.CUSTOMER_EXCLUDE_FIELD: 0}
+		db = SimpleNamespace(
+			has_column=mock.Mock(return_value=True),
+			get_value=mock.Mock(side_effect=[inv, customer]),
+			exists=mock.Mock(return_value="RET-1" if has_return else None),
+		)
+		with (
+			mock.patch.object(m.frappe, "db", db, create=True),
+			mock.patch("frappe.utils.get_datetime", side_effect=lambda v: D.fromisoformat(str(v))),
+		):
+			return m._website_event_for_row(self.ROW, "Africa/Cairo", blocked, "https://orderjarz.com/")
+
+	def test_delivered_order_is_sent_as_a_website_purchase(self):
+		event, reason = self._event(_web_inv())
+		self.assertEqual(reason, "")
+		self.assertEqual(event["action_source"], "website")
+		self.assertEqual(event["event_id"], "woo-17529")
+		self.assertEqual(event["event_source_url"], "https://orderjarz.com/")
+		self.assertEqual(event["custom_data"], {"currency": "EGP", "value": 650.0, "order_id": "17529"})
+		self.assertEqual(event["event_time"], m.to_unix(D(2026, 10, 20, 11, 0), "Africa/Cairo"))
+		user = event["user_data"]
+		self.assertEqual(user["em"], [sha("sara@gmail.com")])
+		self.assertEqual(user["ph"], [sha(m.normalize_eg_mobile("01001234567"))])
+		landed_ms = m.to_unix(D(2026, 10, 20, 10, 30), "Africa/Cairo") * 1000
+		self.assertEqual(user["fbc"], f"fb.1.{landed_ms}.IwAR1abc")
+		self.assertEqual(user["client_user_agent"], "Mozilla/5.0 (Linux; Android 14)")
+
+	def test_cancelled_or_returned_order_is_never_sent(self):
+		event, reason = self._event(_web_inv(docstatus=2))
+		self.assertIsNone(event)
+		self.assertEqual(reason, "Invoice is cancelled")
+		_, reason = self._event(_web_inv(custom_sales_invoice_state="Returned"))
+		self.assertEqual(reason, "Order no longer delivered: Returned")
+		_, reason = self._event(_web_inv(), has_return=True)
+		self.assertEqual(reason, "A return was booked against this order")
+
+	def test_email_alone_is_enough(self):
+		event, reason = self._event(_web_inv(woo_order_phone_normalized=""))
+		self.assertEqual(reason, "")
+		self.assertNotIn("ph", event["user_data"])
+
+	def test_placeholder_email_and_no_phone_is_skipped(self):
+		event, reason = self._event(
+			_web_inv(woo_order_phone_normalized="", woo_order_email="x@placeholder.com")
+		)
+		self.assertIsNone(event)
+		self.assertEqual(reason, "No valid Egyptian mobile or email at send time")
+
+	def test_blocked_phone_and_excluded_customer_are_skipped(self):
+		_, reason = self._event(_web_inv(), blocked=m.parse_phones("01001234567"))
+		self.assertEqual(reason, "Phone on the do-not-send list")
+		_, reason = self._event(_web_inv(), customer={"mobile_no": "", m.CUSTOMER_EXCLUDE_FIELD: 1})
+		self.assertEqual(reason, "Customer excluded from Meta")
+
+	def test_no_click_id_means_no_fbc(self):
+		event, _ = self._event(_web_inv(woo_session_entry="https://orderjarz.com/", woo_session_start=""))
+		self.assertNotIn("fbc", event["user_data"])
 
 
 if __name__ == "__main__":

@@ -32,7 +32,9 @@ def execute(filters=None):
 	columns.append(
 		{"fieldname": "sent_value", "label": _("Sent Value (EGP)"), "fieldtype": "Currency", "width": 140}
 	)
-	data = daily_rows(from_date=filters.get("from_date"), to_date=filters.get("to_date"))
+	data = daily_rows(
+		from_date=filters.get("from_date"), to_date=filters.get("to_date"), source=filters.get("source")
+	)
 	return columns, data
 
 
@@ -43,5 +45,7 @@ def _skipped_view(filters):
 		{"fieldname": "order_value", "label": _("Order Value (EGP)"), "fieldtype": "Currency", "width": 150},
 		{"fieldname": "last_day", "label": _("Last Seen"), "fieldtype": "Date", "width": 110},
 	]
-	data = skipped_by_reason(from_date=filters.get("from_date"), to_date=filters.get("to_date"))
+	data = skipped_by_reason(
+		from_date=filters.get("from_date"), to_date=filters.get("to_date"), source=filters.get("source")
+	)
 	return columns, data

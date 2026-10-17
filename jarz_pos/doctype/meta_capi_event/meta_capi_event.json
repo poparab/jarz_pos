@@ -6,6 +6,7 @@
  "field_order": [
   "invoice",
   "status",
+  "source",
   "order_value",
   "event_time",
   "column_break_a",
@@ -48,6 +49,18 @@
    "read_only": 1
   },
   {
+   "fieldname": "source",
+   "fieldtype": "Select",
+   "label": "Source",
+   "options": "Chat\nWebsite",
+   "default": "Chat",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "search_index": 1,
+   "read_only": 1,
+   "description": "Chat: a chat order the team approves. Website: a website order, sent once it is delivered."
+  },
+  {
    "fieldname": "order_value",
    "fieldtype": "Currency",
    "label": "Order Value (EGP)",
@@ -79,7 +92,7 @@
    "label": "Event ID",
    "search_index": 1,
    "read_only": 1,
-   "description": "The invoice name without its amendment suffix; Meta uses it to drop duplicates."
+   "description": "Chat orders: the invoice name without its amendment suffix. Website orders: woo- plus the website order number. Meta uses it to drop duplicates, so an amended order counts once."
   },
   {
    "fieldname": "status_reason",
@@ -152,7 +165,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-10-17 12:00:00.000000",
+ "modified": "2026-10-17 20:00:00.000000",
  "modified_by": "Administrator",
  "module": "jarz pos",
  "name": "Meta CAPI Event",

@@ -1,12 +1,19 @@
-"""Delivered chat orders -> Meta Conversions API, as a standard ``Purchase``.
+"""Delivered orders -> Meta Conversions API, as a standard ``Purchase``.
 
-Staff take orders from WhatsApp / Instagram / Messenger chats and enter them in
-the POS app (``custom_order_channel = 'flutter'``). Meta never sees those sales,
-so the ads that started the chat look like they sold nothing. This module sends
-each delivered chat order to the Jarz dataset once, after a person approves it.
+Chat orders: staff take orders from WhatsApp / Instagram / Messenger chats and
+enter them in the POS app (``custom_order_channel = 'flutter'``). Meta never
+sees those sales, so the ads that started the chat look like they sold nothing.
+Each delivered chat order is sent once, after a person approves it.
 
-Website checkouts are NOT sent from here: the Facebook-for-WooCommerce plugin
-already reports them, and sending them twice would double-count revenue.
+Website orders (``Send Website Orders``, off by default): the Facebook-for-
+WooCommerce plugin reports a Purchase at checkout, so Meta counts orders that
+are later cancelled, and an edited order (cancelled and re-entered) can count
+again. Once the plugin's Purchase is switched off on the site, this module sends
+each website order instead, when it is delivered: one event per Woo order
+(``woo-<id>``, shared by every amendment), timed at checkout, valued at the
+delivered invoice, approved automatically. Only Woo orders first placed at or
+after ``Website Orders From`` are sent, so no order is reported by both. Never
+tick it while the plugin still sends Purchase: that would double-count revenue.
 
 Flow (all state lives on ``Meta CAPI Event``, one row per invoice):
 
@@ -26,7 +33,10 @@ Skip reasons read "Category: detail"; the daily report groups on the category.
 
 Privacy: nothing personal is stored on the log. The phone, name and customer id
 are read from the invoice at send time, normalised and SHA-256 hashed before
-they leave the server. Email is never sent (POS orders carry placeholder ones).
+they leave the server. Chat orders never send an email (POS orders carry
+placeholder ones); website orders send the checkout email hashed, unless it is
+a placeholder, plus the browser user agent and the Facebook click id (``fbc``)
+that Meta needs to match a website buyer, both as captured at checkout.
 
 Layout: pure functions first (tested without a site), then the scheduler jobs
 (never raise), then the whitelisted API used by the Desk buttons.
@@ -54,6 +64,13 @@ GRAPH_URL = "https://graph.facebook.com"
 DEFAULT_API_VERSION = "v23.0"
 DEFAULT_DATASET_ID = "1296894931563065"
 DEFAULT_HOLD_ABOVE = 2500.0
+DEFAULT_WEBSITE_URL = "https://orderjarz.com/"
+
+SOURCE_CHAT = "Chat"
+SOURCE_WEBSITE = "Website"
+WEBSITE_EVENT_PREFIX = "woo-"
+# Woo checkouts without an email get one of these; hashing it would match nobody.
+PLACEHOLDER_EMAIL_DOMAINS = ("placeholder.com", "example.com", "example.org", "invalid")
 
 APPROVAL_EVERY_ORDER = "Every order"
 APPROVAL_HELD_ONLY = "Held only"
@@ -97,6 +114,8 @@ HTTP_TIMEOUT = 30
 
 _AMENDMENT_SUFFIX = re.compile(r"-\d+$")
 _EG_MOBILE = re.compile(r"01[0125]\d{8}")
+_EMAIL = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
+_FBCLID = re.compile(r"[?&#]fbclid=([^&#\s]+)")
 
 
 # ---------------------------------------------------------------------------
@@ -187,6 +206,68 @@ def build_user_data(phone: str, customer_id: str, customer_name: Any) -> dict[st
 	return data
 
 
+def website_event_id(woo_order_id: Any) -> str:
+	"""One id per Woo order, so every amendment of it is the same Purchase to Meta."""
+	return WEBSITE_EVENT_PREFIX + str(woo_order_id or "").strip()
+
+
+def normalize_email(raw: Any) -> str | None:
+	"""Lowercased checkout email, or None for a blank, malformed or placeholder one."""
+	text = str(raw or "").strip().lower()
+	if not _EMAIL.fullmatch(text):
+		return None
+	domain = text.rsplit("@", 1)[1]
+	if any(domain == d or domain.endswith("." + d) for d in PLACEHOLDER_EMAIL_DOMAINS):
+		return None
+	return text
+
+
+def fbc_from(entry_url: Any, first_seen_ms: int | None) -> str | None:
+	"""Meta's ``fbc`` (``fb.1.<ms>.<fbclid>``) from the landing URL, or None.
+
+	*first_seen_ms* is when the visitor landed with the click id; the fbclid is
+	passed on unchanged, as Meta asks.
+	"""
+	match = _FBCLID.search(str(entry_url or ""))
+	if not match or not first_seen_ms:
+		return None
+	return f"fb.1.{int(first_seen_ms)}.{match.group(1)}"
+
+
+def build_website_user_data(
+	*,
+	phone: str | None,
+	email: str | None,
+	customer_id: str,
+	customer_name: Any,
+	user_agent: Any = None,
+	fbc: str | None = None,
+) -> dict[str, Any]:
+	"""Match keys for a website buyer. *phone* and *email* must already be normalised.
+
+	The user agent and ``fbc`` go unhashed, as Meta requires.
+	"""
+	first, last = split_name(customer_name)
+	data: dict[str, Any] = {
+		"country": [sha256("eg")],
+		"external_id": [sha256(str(customer_id).strip().lower())],
+	}
+	if phone:
+		data["ph"] = [sha256(phone)]
+	if email:
+		data["em"] = [sha256(email)]
+	if first:
+		data["fn"] = [sha256(first)]
+	if last:
+		data["ln"] = [sha256(last)]
+	agent = str(user_agent or "").strip()
+	if agent:
+		data["client_user_agent"] = agent[:512]
+	if fbc:
+		data["fbc"] = fbc
+	return data
+
+
 def to_unix(dt: datetime, tz_name: str) -> int:
 	"""Seconds since the epoch for a naive site-time datetime."""
 	from zoneinfo import ZoneInfo
@@ -201,21 +282,27 @@ def build_event(
 	event_id: str,
 	event_time: int,
 	value: float,
-	user_data: dict[str, list[str]],
+	user_data: dict[str, Any],
+	action_source: str = "chat",
+	event_source_url: str | None = None,
+	order_id: str | None = None,
 ) -> dict[str, Any]:
-	"""One CAPI ``Purchase`` from a chat order."""
-	return {
+	"""One CAPI ``Purchase``: a chat order, or a website order with its site URL."""
+	event = {
 		"event_name": "Purchase",
 		"event_time": int(event_time),
 		"event_id": event_id,
-		"action_source": "chat",
+		"action_source": action_source,
 		"user_data": user_data,
 		"custom_data": {
 			"currency": "EGP",
 			"value": round(float(value), 2),
-			"order_id": event_id,
+			"order_id": order_id or event_id,
 		},
 	}
+	if event_source_url:
+		event["event_source_url"] = event_source_url
+	return event
 
 
 def initial_status(
@@ -359,7 +446,16 @@ def load_settings() -> dict[str, Any]:
 		"hold_above": float(_get(doc, "hold_above", DEFAULT_HOLD_ABOVE) or 0),
 		"excluded_groups": parse_groups(_get(doc, "excluded_customer_groups", "")),
 		"blocked_phones": parse_phones(_get(doc, "do_not_send_phones", "")),
+		"send_website_orders": int(_get(doc, "send_website_orders", 0) or 0),
+		"website_start": _get(doc, "website_start"),
+		# A Single never picks up a new field's default, so the fallback lives here.
+		"website_url": str(_get(doc, "website_url", DEFAULT_WEBSITE_URL)).strip(),
 	}
+
+
+def website_live(settings: dict[str, Any]) -> bool:
+	"""Website orders are queued and sent only with the switch on and a start time set."""
+	return bool(settings.get("send_website_orders") and settings.get("website_start"))
 
 
 def _access_token(settings: dict[str, Any]) -> str | None:
@@ -446,6 +542,68 @@ def _candidate_orders(settings: dict[str, Any], since: datetime) -> list[Any]:
 	)
 
 
+def _website_since(settings: dict[str, Any], backfill_days: int | None) -> datetime:
+	"""Never before ``Website Orders From``: orders placed earlier were already
+	reported by the plugin at checkout."""
+	from frappe.utils import get_datetime
+
+	since = _queue_since(dict(settings, start_date=None), backfill_days)
+	return max(since, get_datetime(settings["website_start"]))
+
+
+def _website_candidate_orders(settings: dict[str, Any], since: datetime) -> list[Any]:
+	"""Every delivered website order first placed inside the window, with no log row yet.
+
+	A website order is a Woo order pulled in by the integration: no order
+	channel and a numeric Woo id. ``first_creation`` is when its first invoice
+	was made (the checkout); an amendment is a later invoice of the same Woo id
+	and keeps that time. The Woo fields belong to the Woo app and are read by
+	column name only.
+	"""
+	has = frappe.db.has_column
+	for column in (
+		"custom_order_channel",
+		"custom_order_purpose",
+		"custom_sales_invoice_state",
+		"woo_order_id",
+	):
+		if not has("Sales Invoice", column):
+			return []
+	partner = (
+		"IFNULL(si.custom_is_partner_order, 0)" if has("Sales Invoice", "custom_is_partner_order") else "0"
+	)
+	excluded = f"IFNULL(c.{CUSTOMER_EXCLUDE_FIELD}, 0)" if has("Customer", CUSTOMER_EXCLUDE_FIELD) else "0"
+	woo_phone = (
+		"si.woo_order_phone_normalized" if has("Sales Invoice", "woo_order_phone_normalized") else "NULL"
+	)
+	# nosemgrep: frappe-sql-format-injection -- only module constants interpolated; every value is a bound parameter
+	return frappe.db.sql(
+		f"""
+        SELECT si.name, si.amended_from, si.customer, si.customer_name, si.grand_total, si.woo_order_id,
+               (SELECT MIN(f.creation) FROM `tabSales Invoice` f
+                 WHERE f.woo_order_id = si.woo_order_id AND IFNULL(f.custom_order_channel, '') = ''
+               ) AS first_creation,
+               si.contact_mobile, {woo_phone} AS woo_phone, c.mobile_no AS customer_mobile,
+               si.custom_order_purpose, si.sales_partner, {partner} AS is_partner_order,
+               c.customer_type, c.customer_group, {excluded} AS exclude_from_meta
+        FROM `tabSales Invoice` si
+        INNER JOIN `tabCustomer` c ON c.name = si.customer
+        WHERE si.docstatus = 1
+          AND IFNULL(si.is_return, 0) = 0
+          AND IFNULL(si.custom_order_channel, '') = ''
+          AND IFNULL(si.woo_order_id, '') REGEXP '^[0-9]+$'
+          AND si.custom_sales_invoice_state = 'Delivered'
+          AND si.creation >= %(since)s
+          AND NOT EXISTS (SELECT 1 FROM `tabMeta CAPI Event` e WHERE e.invoice = si.name)
+        HAVING first_creation >= %(since)s
+        ORDER BY si.creation ASC
+        LIMIT %(limit)s
+        """,
+		{"since": since, "limit": MAX_QUEUE_PER_RUN},
+		as_dict=True,
+	)
+
+
 def _duplicate_reason(event_id: str, invoice: str) -> str | None:
 	"""Skip reason when the same order already has a row, else None.
 
@@ -495,6 +653,7 @@ def _queue_one(order: Any, settings: dict[str, Any]) -> str:
 		{
 			"doctype": EVENT_DOCTYPE,
 			"invoice": order.name,
+			"source": SOURCE_CHAT,
 			"event_id": event_id,
 			"customer": order.customer,
 			"order_value": order.grand_total,
@@ -506,8 +665,72 @@ def _queue_one(order: Any, settings: dict[str, Any]) -> str:
 	return status
 
 
+def _queue_website_one(order: Any, settings: dict[str, Any]) -> str:
+	"""Log row for a delivered website order: Approved, or Skipped with the reason.
+
+	No approval step: the plugin used to send every checkout unasked, and now
+	only the delivered ones go. Whether a phone or email is there to match on
+	is checked at send time.
+	"""
+	event_id = website_event_id(order.woo_order_id)
+	phones = order_phones(order.woo_phone, order.contact_mobile, order.customer_mobile)
+	phone = (
+		normalize_eg_mobile(order.woo_phone)
+		or normalize_eg_mobile(order.contact_mobile)
+		or normalize_eg_mobile(order.customer_mobile)
+	)
+	reason = rule_skip_reason(
+		order, phone, settings["excluded_groups"], settings.get("blocked_phones", ()), phones
+	)
+	if reason:
+		status = STATUS_SKIPPED
+	elif float(order.grand_total or 0) <= 0:
+		status, reason = STATUS_SKIPPED, "Order value is zero"
+	else:
+		status, reason = STATUS_APPROVED, ""
+	duplicate = _duplicate_reason(event_id, order.name)
+	if duplicate and status != STATUS_SKIPPED:
+		status, reason = STATUS_SKIPPED, duplicate
+	frappe.get_doc(
+		{
+			"doctype": EVENT_DOCTYPE,
+			"invoice": order.name,
+			"source": SOURCE_WEBSITE,
+			"event_id": event_id,
+			"customer": order.customer,
+			"order_value": order.grand_total,
+			"event_time": order.first_creation,
+			"status": status,
+			"status_reason": reason,
+		}
+	).insert(ignore_permissions=True)
+	return status
+
+
+def _queue_pages(fetch, queue_one, result: dict[str, Any]) -> None:
+	"""Queue every page *fetch* returns; one bad order never stops the rest."""
+	failed: set[str] = set()
+	for _round in range(MAX_QUEUE_ROUNDS):
+		orders = [o for o in fetch() if o.name not in failed]
+		for order in orders:
+			try:
+				frappe.db.savepoint("meta_capi_queue")
+				status = queue_one(order)
+				result["queued"] += 1
+				result["by_status"][status] = result["by_status"].get(status, 0) + 1
+			except Exception:
+				result["errors"] += 1
+				failed.add(order.name)
+				frappe.db.rollback(save_point="meta_capi_queue")
+				frappe.log_error(frappe.get_traceback(), f"meta_capi: queue {order.name} failed")
+		frappe.db.commit()
+		# A short page is the last one; a page of only failures would repeat forever.
+		if len(orders) < MAX_QUEUE_PER_RUN or all(o.name in failed for o in orders):
+			break
+
+
 def queue_delivered_orders(backfill_days: int | None = None) -> dict[str, Any]:
-	"""Hourly: one log row per newly delivered chat order. Never raises."""
+	"""Hourly: one log row per newly delivered chat (and website) order. Never raises."""
 	result: dict[str, Any] = {"enabled": 0, "queued": 0, "errors": 0, "by_status": {}}
 	try:
 		settings = load_settings()
@@ -515,24 +738,18 @@ def queue_delivered_orders(backfill_days: int | None = None) -> dict[str, Any]:
 		if not settings["enabled"]:  # the kill switch; backfill only moves the start date
 			return result
 		since = _queue_since(settings, backfill_days)
-		failed: set[str] = set()
-		for _round in range(MAX_QUEUE_ROUNDS):
-			orders = [o for o in _candidate_orders(settings, since) if o.name not in failed]
-			for order in orders:
-				try:
-					frappe.db.savepoint("meta_capi_queue")
-					status = _queue_one(order, settings)
-					result["queued"] += 1
-					result["by_status"][status] = result["by_status"].get(status, 0) + 1
-				except Exception:
-					result["errors"] += 1
-					failed.add(order.name)
-					frappe.db.rollback(save_point="meta_capi_queue")
-					frappe.log_error(frappe.get_traceback(), f"meta_capi: queue {order.name} failed")
-			frappe.db.commit()
-			# A short page is the last one; a page of only failures would repeat forever.
-			if len(orders) < MAX_QUEUE_PER_RUN or all(o.name in failed for o in orders):
-				break
+		_queue_pages(
+			lambda: _candidate_orders(settings, since),
+			lambda order: _queue_one(order, settings),
+			result,
+		)
+		if website_live(settings):
+			web_since = _website_since(settings, backfill_days)
+			_queue_pages(
+				lambda: _website_candidate_orders(settings, web_since),
+				lambda order: _queue_website_one(order, settings),
+				result,
+			)
 	except Exception:
 		result["errors"] += 1
 		try:
@@ -611,6 +828,77 @@ def _event_for_row(
 	return event, ""
 
 
+# Woo app fields read off the invoice for a website buyer's match keys.
+WEBSITE_INVOICE_FIELDS = (
+	"woo_order_id",
+	"woo_order_email",
+	"woo_order_phone_normalized",
+	"woo_billing_name",
+	"woo_user_agent",
+	"woo_session_entry",
+	"woo_session_start",
+)
+
+
+def _website_event_for_row(
+	row: Any, tz_name: str, blocked_phones: Iterable[str] = (), website_url: str = DEFAULT_WEBSITE_URL
+) -> tuple[dict[str, Any] | None, str]:
+	"""(event, "") for a website log row, rebuilt from the invoice, or (None, reason)."""
+	fields = [
+		"customer",
+		"customer_name",
+		"contact_mobile",
+		"docstatus",
+		"is_return",
+		"custom_sales_invoice_state",
+	]
+	fields += [f for f in WEBSITE_INVOICE_FIELDS if frappe.db.has_column("Sales Invoice", f)]
+	inv = frappe.db.get_value("Sales Invoice", row.invoice, fields, as_dict=True)
+	has_return = bool(
+		inv
+		and frappe.db.exists("Sales Invoice", {"return_against": row.invoice, "is_return": 1, "docstatus": 1})
+	)
+	reason = not_sendable_reason(inv, has_return)
+	if reason:
+		return None, reason
+	customer = frappe.db.get_value(
+		"Customer", inv.customer, ["mobile_no", CUSTOMER_EXCLUDE_FIELD], as_dict=True
+	)
+	if int(_get(customer, CUSTOMER_EXCLUDE_FIELD, 0) or 0):
+		return None, "Customer excluded from Meta"
+	raw_phones = (_get(inv, "woo_order_phone_normalized"), inv.contact_mobile, _get(customer, "mobile_no"))
+	if order_phones(*raw_phones) & set(blocked_phones):
+		return None, "Phone on the do-not-send list"
+	phone = next((p for p in (normalize_eg_mobile(r) for r in raw_phones) if p), None)
+	email = normalize_email(_get(inv, "woo_order_email"))
+	if not phone and not email:
+		return None, "No valid Egyptian mobile or email at send time"
+	fbc = None
+	landed = _get(inv, "woo_session_start")
+	if landed:
+		from frappe.utils import get_datetime
+
+		fbc = fbc_from(_get(inv, "woo_session_entry"), to_unix(get_datetime(landed), tz_name) * 1000)
+	user_data = build_website_user_data(
+		phone=phone,
+		email=email,
+		customer_id=inv.customer,
+		customer_name=_get(inv, "woo_billing_name") or inv.customer_name,
+		user_agent=_get(inv, "woo_user_agent"),
+		fbc=fbc,
+	)
+	event = build_event(
+		event_id=row.event_id,
+		event_time=to_unix(row.event_time, tz_name),
+		value=row.order_value,
+		user_data=user_data,
+		action_source="website",
+		event_source_url=website_url or DEFAULT_WEBSITE_URL,
+		order_id=str(_get(inv, "woo_order_id") or row.event_id),
+	)
+	return event, ""
+
+
 def _mark(name: str, values: dict[str, Any]) -> None:
 	frappe.db.set_value(EVENT_DOCTYPE, name, values, update_modified=True)
 
@@ -648,13 +936,16 @@ def send_approved_events() -> dict[str, Any]:
 			return result
 
 		test_filter = "AND e.test_sent_at IS NULL" if settings["test_mode"] else ""
-		# nosemgrep: frappe-sql-format-injection -- only a fixed clause interpolated; every value is a bound parameter
+		# Unticking Send Website Orders holds website rows back at once, queued or not.
+		source_filter = "" if website_live(settings) else "AND IFNULL(e.source, '') <> %(website)s"
+		# nosemgrep: frappe-sql-format-injection -- only fixed clauses interpolated; every value is a bound parameter
 		rows = frappe.db.sql(
 			f"""
-            SELECT e.name, e.invoice, e.event_id, e.event_time, e.order_value, e.attempts
+            SELECT e.name, e.invoice, e.source, e.event_id, e.event_time, e.order_value, e.attempts
             FROM `tabMeta CAPI Event` e
             WHERE (e.status = %(approved)s OR (e.status = %(failed)s AND IFNULL(e.attempts, 0) < %(max)s))
               {test_filter}
+              {source_filter}
             ORDER BY e.event_time ASC
             LIMIT %(limit)s
             """,
@@ -663,6 +954,7 @@ def send_approved_events() -> dict[str, Any]:
 				"failed": STATUS_FAILED,
 				"max": MAX_ATTEMPTS,
 				"limit": MAX_SEND_PER_RUN,
+				"website": SOURCE_WEBSITE,
 			},
 			as_dict=True,
 		)
@@ -675,7 +967,11 @@ def send_approved_events() -> dict[str, Any]:
 				_mark(row.name, {"status": STATUS_EXPIRED, "status_reason": "Older than Meta's 7-day limit"})
 				result["expired"] += 1
 				continue
-			event, reason = _event_for_row(row, tz_name, settings.get("blocked_phones", ()))
+			blocked = settings.get("blocked_phones", ())
+			if _get(row, "source") == SOURCE_WEBSITE:
+				event, reason = _website_event_for_row(row, tz_name, blocked, settings.get("website_url"))
+			else:
+				event, reason = _event_for_row(row, tz_name, blocked)
 			if not event:
 				_mark(row.name, {"status": STATUS_SKIPPED, "status_reason": reason})
 				result["skipped"] += 1
@@ -906,13 +1202,18 @@ def summary(days: int = 14) -> list[dict[str, Any]]:
 	return daily_rows(int(days or 14))
 
 
-def daily_rows(days: int = 14, from_date: Any = None, to_date: Any = None) -> list[dict[str, Any]]:
+def daily_rows(
+	days: int = 14, from_date: Any = None, to_date: Any = None, source: str | None = None
+) -> list[dict[str, Any]]:
 	from frappe.utils import add_days, getdate, nowdate
 
 	to_date = getdate(to_date or nowdate())
 	from_date = getdate(from_date or add_days(to_date, -(days - 1)))
+	# Rows from before the Source field are chat orders.
+	source_filter = "AND IFNULL(NULLIF(source, ''), 'Chat') = %(source)s" if source else ""
+	# nosemgrep: frappe-sql-format-injection -- only a fixed clause interpolated; every value is a bound parameter
 	return frappe.db.sql(
-		"""
+		f"""
         SELECT DATE(event_time) AS day,
                COUNT(*) AS orders,
                SUM(status = 'Pending Approval') AS pending,
@@ -926,30 +1227,36 @@ def daily_rows(days: int = 14, from_date: Any = None, to_date: Any = None) -> li
                SUM(IF(status = 'Sent', order_value, 0)) AS sent_value
         FROM `tabMeta CAPI Event`
         WHERE DATE(event_time) BETWEEN %(from_date)s AND %(to_date)s
+          {source_filter}
         GROUP BY DATE(event_time)
         ORDER BY day DESC
         """,
-		{"from_date": from_date, "to_date": to_date},
+		{"from_date": from_date, "to_date": to_date, "source": source},
 		as_dict=True,
 	)
 
 
-def skipped_by_reason(from_date: Any = None, to_date: Any = None) -> list[dict[str, Any]]:
+def skipped_by_reason(
+	from_date: Any = None, to_date: Any = None, source: str | None = None
+) -> list[dict[str, Any]]:
 	"""Skipped rows in the window, grouped by the reason's category, largest first."""
 	from frappe.utils import add_days, getdate, nowdate
 
 	to_date = getdate(to_date or nowdate())
 	from_date = getdate(from_date or add_days(to_date, -13))
+	source_filter = "AND IFNULL(NULLIF(source, ''), 'Chat') = %(source)s" if source else ""
+	# nosemgrep: frappe-sql-format-injection -- only a fixed clause interpolated; every value is a bound parameter
 	rows = frappe.db.sql(
-		"""
+		f"""
         SELECT status_reason, COUNT(*) AS orders, SUM(order_value) AS order_value,
                MAX(DATE(event_time)) AS last_day
         FROM `tabMeta CAPI Event`
         WHERE status = %(skipped)s
           AND DATE(event_time) BETWEEN %(from_date)s AND %(to_date)s
+          {source_filter}
         GROUP BY status_reason
         """,
-		{"skipped": STATUS_SKIPPED, "from_date": from_date, "to_date": to_date},
+		{"skipped": STATUS_SKIPPED, "from_date": from_date, "to_date": to_date, "source": source},
 		as_dict=True,
 	)
 	grouped: dict[str, dict[str, Any]] = {}

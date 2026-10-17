@@ -21,5 +21,11 @@ frappe.query_reports["Meta CAPI Daily"] = {
 			options: ["By day", "Skipped by reason"],
 			default: "By day",
 		},
+		{
+			fieldname: "source",
+			label: __("Source"),
+			fieldtype: "Select",
+			options: ["", "Chat", "Website"],
+		},
 	],
 };
