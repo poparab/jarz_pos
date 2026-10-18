@@ -25,11 +25,15 @@ def d(
 	returns_value=0.0,
 	discount=0.0,
 	source="pos",
+	branch=None,
+	late=0,
 ):
-	"""A ``_daily_rows`` row (after the entry renames ``sale_source`` to ``source``)."""
+	"""A ``_daily_rows`` row, after the entry renames ``sale_source`` / ``branch_label`` / ``late_flag``."""
 	return {
 		"purpose": purpose,
 		"source": source,
+		"branch": branch,
+		"late": late,
 		"posting_date": day,
 		"net": net,
 		"orders": orders,
@@ -41,7 +45,7 @@ def d(
 
 
 def october_range_rows():
-	"""Range 2026-10-01..03 plus its previous window 2026-09-28..30."""
+	"""Range 2026-10-01..03 plus its comparison, the same weekdays a week earlier (09-24..26)."""
 	return [
 		d("Standard", date(2026, 10, 1), 1000, orders=5),
 		# A credit note: negative net, no order, counted as a return.
@@ -49,10 +53,11 @@ def october_range_rows():
 		d("B2B Supply", date(2026, 10, 2), 500, orders=2, discount=20, source="b2b"),
 		d("Employee", date(2026, 10, 2), 50, orders=1, source="staff"),
 		d("Sample - Courier", date(2026, 10, 3), 0, orders=1, source="samples"),
-		# previous window
-		d("Standard", date(2026, 9, 29), 725, orders=3),
+		# comparison window
+		d("Standard", date(2026, 9, 25), 725, orders=3),
 		# outside both windows
 		d("Standard", date(2026, 9, 27), 9999, orders=9),
+		d("Standard", date(2026, 9, 23), 9999, orders=9),
 	]
 
 
@@ -64,6 +69,8 @@ def summary(rows=None, fd=date(2026, 10, 1), td=date(2026, 10, 3), **kw):
 		shipping_rows=kw.get("shipping_rows", [{"purpose": "Standard", "posting_date": fd, "amount": 60}]),
 		cancelled=kw.get("cancelled", {"cancelled": 2, "cancelled_value": 123.4567}),
 		customers=kw.get("customers", {"customers": 7, "new_customers": 3}),
+		today=kw.get("today"),
+		cutoff=kw.get("cutoff"),
 	)
 
 
@@ -115,6 +122,23 @@ class TestWindows(unittest.TestCase):
 		)
 		self.assertEqual(
 			rd.previous_window(date(2026, 3, 1), date(2026, 3, 31)), (date(2026, 1, 29), date(2026, 2, 28))
+		)
+
+	def test_compare_window_is_like_for_like(self):
+		# A day or a few days: the same weekdays one week earlier.
+		self.assertEqual(
+			rd.compare_window(date(2026, 10, 18), date(2026, 10, 18)),
+			(date(2026, 10, 11), date(2026, 10, 11)),
+		)
+		self.assertEqual(
+			rd.compare_window(date(2026, 10, 13), date(2026, 10, 18)), (date(2026, 10, 6), date(2026, 10, 11))
+		)
+		# A week or more: the same-length window just before it.
+		self.assertEqual(
+			rd.compare_window(date(2026, 10, 12), date(2026, 10, 18)), (date(2026, 10, 5), date(2026, 10, 11))
+		)
+		self.assertEqual(
+			rd.compare_window(date(2026, 10, 1), date(2026, 10, 18)), (date(2026, 9, 13), date(2026, 9, 30))
 		)
 
 	def test_merge_windows(self):
@@ -223,6 +247,19 @@ class TestSummary(unittest.TestCase):
 		self.assertEqual(s["best_day"], {"date": "2026-10-03", "net_sales": 300.0})
 		self.assertEqual(s["worst_day"], {"date": "2026-10-02", "net_sales": 0.0})
 
+	def test_today_in_progress_is_not_the_worst_day(self):
+		rows = [
+			d("Standard", date(2026, 10, 1), 100),
+			d("Standard", date(2026, 10, 2), 300),
+			d("Standard", date(2026, 10, 3), 20),
+		]
+		s = summary(rows, today=date(2026, 10, 3))
+		self.assertEqual(s["worst_day"], {"date": "2026-10-01", "net_sales": 100.0})
+		self.assertEqual(s["net_sales"], 420.0)
+		# A one-day range keeps its only day.
+		s = summary(rows, fd=date(2026, 10, 3), today=date(2026, 10, 3))
+		self.assertEqual(s["worst_day"]["date"], "2026-10-03")
+
 	def test_ties_go_to_the_earliest_day(self):
 		rows = [d("Standard", date(2026, 10, 1), 100), d("Standard", date(2026, 10, 2), 100)]
 		s = summary(rows, td=date(2026, 10, 2))
@@ -231,13 +268,30 @@ class TestSummary(unittest.TestCase):
 
 	def test_previous_window(self):
 		p = summary()["previous"]
-		self.assertEqual((p["date_from"], p["date_to"]), ("2026-09-28", "2026-09-30"))
+		self.assertEqual((p["date_from"], p["date_to"]), ("2026-09-24", "2026-09-26"))
 		self.assertEqual((p["net_sales"], p["b2c"], p["b2b"], p["orders"]), (725.0, 725.0, 0.0, 3))
 		self.assertEqual(p["change_pct"], 100.0)
 		self.assertEqual(p["b2c_change_pct"], 24.1)
 		# 0 base: no percentage, not +inf and not 100%
 		self.assertIsNone(p["b2b_change_pct"])
 		self.assertEqual(p["orders_change_pct"], 200.0)
+		self.assertEqual((p["aov"], p["aov_change_pct"]), (241.67, -28.7))
+		self.assertEqual(p["discount_total"], 0.0)
+		self.assertIsNone(p["cut_at"])
+
+	def test_a_range_ending_today_compares_up_to_now(self):
+		today = date(2026, 10, 18)
+		rows = [
+			d("Standard", today, 400, orders=2),
+			d("Standard", date(2026, 10, 11), 300, orders=3),
+			d("Standard", date(2026, 10, 11), 500, orders=4, late=1),  # after 14:05 last week
+		]
+		p = summary(rows, fd=today, td=today, today=today, cutoff="14:05:00")["previous"]
+		self.assertEqual((p["net_sales"], p["orders"], p["cut_at"]), (300.0, 3, "14:05"))
+		self.assertEqual(p["change_pct"], 33.3)
+		# A range that ended before today compares whole days.
+		p = summary(rows, fd=today, td=today, today=date(2026, 10, 19), cutoff="14:05:00")["previous"]
+		self.assertEqual((p["net_sales"], p["cut_at"]), (800.0, None))
 
 	def test_pct_change_null_when_previous_is_empty(self):
 		rows = [d("Standard", date(2026, 10, 1), 100)]
@@ -284,8 +338,31 @@ class TestSnapshot(unittest.TestCase):
 				"change_pct": 100.0,
 				"compare_from": "2026-10-11",
 				"compare_to": "2026-10-11",
+				"compare_aov": 90.0,
+				"orders_change_pct": 33.3,
+				"aov_change_pct": 50.0,
+				"compare_cut_at": None,
 			},
 		)
+
+	def test_cards_ending_today_are_cut_at_the_time(self):
+		rows = [
+			*snapshot_rows(),
+			d("Standard", date(2026, 10, 11), 900, orders=2, late=1),
+			d("Standard", date(2026, 10, 10), 50, orders=1, late=1),
+		]
+		snap = rd.build_snapshot(rows, date(2026, 10, 18), cutoff="14:05:00")
+		t = snap["today"]
+		self.assertEqual(
+			(t["compare_net_sales"], t["compare_orders"], t["compare_cut_at"]), (270.0, 3, "14:05")
+		)
+		# Yesterday is a whole day, so last week's whole day is the comparison.
+		y = snap["yesterday"]
+		self.assertEqual((y["compare_net_sales"], y["compare_cut_at"]), (50.0, None))
+		# Last 7 days ends today: only its last comparison day (10-11) is cut.
+		w = snap["last_7_days"]
+		self.assertEqual((w["compare_net_sales"], w["compare_cut_at"]), (380.0, "14:05"))
+		self.assertEqual(snap["month_to_date"]["compare_cut_at"], "14:05")
 
 	def test_a_quiet_yesterday(self):
 		y = rd.build_snapshot(snapshot_rows(), date(2026, 10, 18))["yesterday"]
@@ -382,6 +459,39 @@ class TestBySource(unittest.TestCase):
 		self.assertEqual(out[0], {"source": "pos", "net_sales": 100.0, "orders": 1, "share_pct": 50.0})
 		self.assertEqual(out[-1]["share_pct"], 0.0)
 
+	def test_compare_adds_change_and_keeps_lost_sources(self):
+		day, prev = date(2026, 10, 18), date(2026, 10, 11)
+		rows = [
+			d("Standard", day, 150, source="pos"),
+			d("Standard", prev, 100, source="pos"),
+			d("Standard", prev, 800, source="talabat"),
+			d("Standard", prev, 0, orders=1, source="woo"),
+		]
+		compare = rd.totals_by(rows, rd._source_of, prev, prev)
+		out = rd.build_by_source(rows, day, day, compare)
+		self.assertEqual(
+			out,
+			[
+				{
+					"source": "pos",
+					"net_sales": 150.0,
+					"orders": 1,
+					"share_pct": 100.0,
+					"compare_net_sales": 100.0,
+					"change_pct": 50.0,
+				},
+				# Talabat sold nothing today: kept at 0 so the drop is visible.
+				{
+					"source": "talabat",
+					"net_sales": 0.0,
+					"orders": 0,
+					"share_pct": 0.0,
+					"compare_net_sales": 800.0,
+					"change_pct": -100.0,
+				},
+			],
+		)
+
 
 class TestBreakdowns(unittest.TestCase):
 	def test_by_payment(self):
@@ -425,6 +535,33 @@ class TestBreakdowns(unittest.TestCase):
 		)
 		self.assertEqual(out[0]["share_pct"], 56.6)
 		self.assertEqual((out[2]["b2c"], out[2]["b2b"], out[2]["share_pct"]), (0.0, 0.0, 0.9))
+
+	def test_by_branch_compare(self):
+		dims = [
+			{"branch": "Dokki", "purpose": "Standard", "net": 300, "orders": 3},
+			{"branch": "Dokki", "purpose": "B2B Supply", "net": 700, "orders": 1},
+		]
+		prev = date(2026, 10, 11)
+		compare = rd.totals_by(
+			[
+				d("Standard", prev, 600, branch="Dokki"),
+				d("Standard", prev, 250, branch="Zamalek"),
+				d("Employee", prev, 40),
+			],
+			rd._branch_of,
+			prev,
+			prev,
+		)
+		out = {r["branch"]: r for r in rd.build_by_branch(dims, compare)}
+		keys = ("compare_net_sales", "change_pct", "compare_b2c", "b2c_change_pct")
+		self.assertEqual(
+			{k: out["Dokki"][k] for k in keys},
+			{"compare_net_sales": 600.0, "change_pct": 66.7, "compare_b2c": 600.0, "b2c_change_pct": -50.0},
+		)
+		# Zamalek sold only last week; staff sales count in net but not in B2C.
+		self.assertEqual((out["Zamalek"]["net_sales"], out["Zamalek"]["b2c_change_pct"]), (0.0, -100.0))
+		nb = out[fr.NO_BRANCH_LABEL]
+		self.assertEqual((nb["compare_net_sales"], nb["compare_b2c"]), (40.0, 0.0))
 
 	def test_by_hour_is_always_24_rows(self):
 		self.assertEqual([r["hour"] for r in rd.build_by_hour([])], list(range(24)))
@@ -471,6 +608,90 @@ class TestBreakdowns(unittest.TestCase):
 		self.assertEqual(out[1]["customer_name"], "Cafe One")
 
 
+class TestAttention(unittest.TestCase):
+	def _summary(self, **kw):
+		base = {
+			"net_sales": 5000.0,
+			"cancelled": 0,
+			"cancelled_value": 0.0,
+			"returns": 0,
+			"returns_value": 0.0,
+			"discount_total": 0.0,
+			"previous": {"net_sales": 5000.0, "discount_total": 0.0},
+		}
+		base.update(kw)
+		return base
+
+	def test_nothing_off_is_an_empty_list(self):
+		self.assertEqual(rd.build_attention(self._summary(), [], []), [])
+
+	def test_kinds_in_order(self):
+		s = self._summary(
+			cancelled=2, cancelled_value=310.456, returns=1, returns_value=80.0, discount_total=600.0
+		)
+		by_source = [
+			{"source": "talabat", "net_sales": 200.0, "compare_net_sales": 1000.0, "change_pct": -80.0},
+			{"source": "woo", "net_sales": 700.0, "compare_net_sales": 1000.0, "change_pct": -30.0},
+			# b2b is lumpy: never a drop
+			{"source": "b2b", "net_sales": 0.0, "compare_net_sales": 5000.0, "change_pct": -100.0},
+			# below the base: not worth a flag
+			{"source": "partner", "net_sales": 0.0, "compare_net_sales": 400.0, "change_pct": -100.0},
+			# a small dip
+			{"source": "pos", "net_sales": 900.0, "compare_net_sales": 1000.0, "change_pct": -10.0},
+		]
+		by_branch = [
+			{"branch": "Dokki", "b2c": 400.0, "compare_b2c": 1000.0, "b2c_change_pct": -60.0},
+			{"branch": "Nasr City", "b2c": 1000.0, "compare_b2c": 1000.0, "b2c_change_pct": 0.0},
+		]
+		out = rd.build_attention(s, by_source, by_branch)
+		self.assertEqual(
+			[(a["kind"], a.get("name"), a["severity"]) for a in out],
+			[
+				("cancelled", None, "medium"),
+				("returns", None, "medium"),
+				("branch_drop", "Dokki", "high"),
+				("source_drop", "talabat", "high"),
+				("source_drop", "woo", "medium"),
+				("discount_high", None, "medium"),
+			],
+		)
+		self.assertEqual(out[0], {"kind": "cancelled", "severity": "medium", "count": 2, "value": 310.46})
+		self.assertEqual(
+			out[2],
+			{
+				"kind": "branch_drop",
+				"severity": "high",
+				"name": "Dokki",
+				"net_sales": 400.0,
+				"compare_net_sales": 1000.0,
+				"change_pct": -60.0,
+			},
+		)
+		self.assertEqual(
+			out[-1],
+			{
+				"kind": "discount_high",
+				"severity": "medium",
+				"value": 600.0,
+				"discount_pct": 10.7,
+				"compare_discount_pct": 0.0,
+			},
+		)
+
+	def test_discount_is_flagged_only_when_unusual(self):
+		# 10.7% vs 9.1% last week: not 1.5x.
+		s = self._summary(discount_total=600.0, previous={"net_sales": 5000.0, "discount_total": 500.0})
+		self.assertEqual(rd.build_attention(s, [], []), [])
+		# Below the floor.
+		s = self._summary(net_sales=1000.0, discount_total=200.0)
+		self.assertEqual(rd.build_attention(s, [], []), [])
+		# 1.5x but under 2 points: 3.0% vs 1.96%.
+		s = self._summary(
+			net_sales=9700.0, discount_total=300.0, previous={"net_sales": 9800.0, "discount_total": 196.0}
+		)
+		self.assertEqual(rd.build_attention(s, [], []), [])
+
+
 class TestDashboardShape(unittest.TestCase):
 	def test_top_level_keys_in_contract_order(self):
 		today = date(2026, 10, 18)
@@ -496,6 +717,7 @@ class TestDashboardShape(unittest.TestCase):
 				"filters",
 				"snapshot",
 				"summary",
+				"attention",
 				"granularity",
 				"trend",
 				"by_source",
@@ -516,6 +738,8 @@ class TestDashboardShape(unittest.TestCase):
 		self.assertEqual(payload["summary"]["net_sales"], payload["snapshot"]["today"]["net_sales"])
 		self.assertEqual(payload["granularity"], "day")
 		self.assertEqual(len(payload["trend"]), 1)
+		self.assertEqual(payload["attention"], [])
+		self.assertEqual(payload["by_source"][0]["compare_net_sales"], 270.0)
 
 
 # ── whitelisted entry ─────────────────────────────────────────────────────
@@ -596,9 +820,13 @@ class TestEndpoint(unittest.TestCase):
 			{"date_from": "2026-10-18", "date_to": "2026-10-18", "branch": None},
 		)
 		self.assertEqual(out["generated_at"], "2026-10-18 14:05:00")
-		self.assertEqual(out["summary"]["previous"]["date_from"], "2026-10-17")
-		# The snapshot span (2026-09-01..) already holds today and yesterday.
-		m["_daily_rows"].assert_called_once_with(date(2026, 9, 1), date(2026, 10, 18), "J", None)
+		# Today compares with the same weekday last week, up to the same time.
+		self.assertEqual(out["summary"]["previous"]["date_from"], "2026-10-11")
+		self.assertEqual(out["summary"]["previous"]["cut_at"], "14:05")
+		# The snapshot span (2026-09-01..) already holds today and last week.
+		m["_daily_rows"].assert_called_once_with(
+			date(2026, 9, 1), date(2026, 10, 18), "J", None, cutoff="14:05:00"
+		)
 		m["_shipping_rows"].assert_called_once_with(date(2026, 10, 18), date(2026, 10, 18), "J", SHIP, None)
 		self.assertEqual(len(out["by_hour"]), 24)
 		self.assertEqual(out["fulfilment"], {"delivery_orders": 0, "pickup_orders": 0})
@@ -615,6 +843,7 @@ class TestEndpoint(unittest.TestCase):
 				(date(2026, 9, 1), date(2026, 10, 18), "J", "Dokki"),
 			],
 		)
+		self.assertEqual([c.kwargs for c in m["_daily_rows"].call_args_list], [{"cutoff": "14:05:00"}] * 2)
 		m["validate_branch"].assert_called_once_with("Dokki")
 
 	def test_daily_rows_feed_the_payload(self):
@@ -623,7 +852,9 @@ class TestEndpoint(unittest.TestCase):
 			{
 				"purpose": "B2B Supply",
 				"sale_source": "b2b",
+				"branch_label": "Dokki",
 				"posting_date": date(2026, 10, 18),
+				"late_flag": 0,
 				"net": 400,
 				"orders": 2,
 				"order_net": 400,
@@ -639,8 +870,18 @@ class TestEndpoint(unittest.TestCase):
 		self.assertEqual(out["snapshot"]["today"]["b2b_orders"], 2)
 		self.assertEqual(
 			out["by_source"],
-			[{"source": "b2b", "net_sales": 400.0, "orders": 2, "share_pct": 100.0}],
+			[
+				{
+					"source": "b2b",
+					"net_sales": 400.0,
+					"orders": 2,
+					"share_pct": 100.0,
+					"compare_net_sales": 0.0,
+					"change_pct": None,
+				}
+			],
 		)
+		self.assertEqual(out["attention"], [])
 
 
 class TestQueries(unittest.TestCase):
@@ -681,6 +922,9 @@ class TestQueries(unittest.TestCase):
 		self.assertIn("THEN si.base_discount_amount + IFNULL((", daily)
 		self.assertIn("SUM(GREATEST(sii.discount_amount, 0) * sii.qty)", daily)
 		self.assertIn("WHERE sii.parent = si.name", daily)
+		# The cut-off is a bound time, so last week's day can be cut at "now".
+		self.assertIn("CASE WHEN si.posting_time > %(cutoff)s THEN 1 ELSE 0 END AS late_flag", daily)
+		self.assertEqual(seen[0][1]["cutoff"], "23:59:59")
 		self.assertIn("si.docstatus = 2", cancelled)
 		self.assertIn("!= 'Amended'", cancelled)
 		# The hour comes from SQL: a Frappe Time value arrives as a timedelta.

@@ -16,6 +16,17 @@ The numbers are the Profit & Loss report's invoice basis, so the two agree:
 
 ``branch`` (a POS Profile) applies to every section, the snapshot included.
 
+Comparisons are like-for-like. A range shorter than a week compares with the
+same weekdays one week earlier, a longer one with the same-length window just
+before it; when the range ends today, the comparison's last day is cut at the
+current time ("today so far" vs "the same day last week up to now"). The
+``attention`` list names only what needs a look: cancellations, returns, a
+branch's B2C or a source's sales well down on the comparison, unusual
+discounting.
+
+``trend``, ``top_products`` and ``top_b2b_customers`` are no longer shown by
+the daily-first layout; they stay in the payload for app builds up to 1.0.0+659.
+
 The fetchers are thin set-based SQL; every ``build_*`` function is pure (rows
 in, payload out) so it can be tested without a site. Money is rounded with
 Python ``round`` (``ops_reports._r``): ``flt(x, 2)`` goes through the precision
@@ -69,6 +80,21 @@ SNAPSHOT_KEYS: tuple[str, ...] = ("today", "yesterday", "last_7_days", "month_to
 
 UNSPECIFIED_METHOD = "Unspecified"
 
+#: ``attention``: a branch (B2C) or a source is flagged at this % change or worse,
+#: when its comparison had at least ``DROP_MIN_BASE`` of sales; "high" at ``DROP_HIGH_PCT``.
+DROP_PCT = -25.0
+DROP_HIGH_PCT = -50.0
+DROP_MIN_BASE = 500.0
+
+#: Sources that never raise a drop: B2B orders are lumpy, staff and samples are not sales.
+NO_DROP_SOURCES: frozenset[str] = frozenset({"b2b", "staff", "samples"})
+
+#: Discounts are flagged at ``DISCOUNT_MIN`` or more when their share of gross sales is
+#: at least ``DISCOUNT_RATIO`` x the comparison's and ``DISCOUNT_MIN_POINTS`` higher.
+DISCOUNT_MIN = 300.0
+DISCOUNT_RATIO = 1.5
+DISCOUNT_MIN_POINTS = 2.0
+
 
 # ── access / dates ────────────────────────────────────────────────────────
 
@@ -111,6 +137,17 @@ def previous_window(fd: date, td: date) -> tuple[date, date]:
 	days = (td - fd).days + 1
 	ptd = fd - timedelta(days=1)
 	return ptd - timedelta(days=days - 1), ptd
+
+
+def compare_window(fd: date, td: date) -> tuple[date, date]:
+	"""The like-for-like comparison of ``fd .. td``.
+
+	Under 7 days: the same weekdays one week earlier (a Friday against the last
+	Friday, not against Thursday). 7 days or more: ``previous_window``.
+	"""
+	if (td - fd).days + 1 < 7:
+		return fd - timedelta(days=7), td - timedelta(days=7)
+	return previous_window(fd, td)
 
 
 def snapshot_windows(today: date) -> dict[str, tuple[date, date, date, date]]:
@@ -203,15 +240,27 @@ def _blank_totals() -> dict[str, Any]:
 	}
 
 
-def aggregate(rows: Iterable[dict[str, Any]], fd: date, td: date) -> dict[str, Any]:
+def _in_window(r: dict[str, Any], fd: date, td: date, cut_day: date | None) -> bool:
+	"""Row inside ``fd .. td``; on ``cut_day`` only rows posted up to the cut-off."""
+	day = _day(r.get("posting_date"))
+	if not fd <= day <= td:
+		return False
+	return not (cut_day is not None and day == cut_day and int(r.get("late") or 0))
+
+
+def aggregate(
+	rows: Iterable[dict[str, Any]], fd: date, td: date, cut_day: date | None = None
+) -> dict[str, Any]:
 	"""Sum the daily invoice rows that fall inside ``fd .. td`` (pure).
 
 	Rows: ``purpose, posting_date, net, orders, order_net, returns,
-	returns_value, discount`` (``source`` is ignored here).
+	returns_value, discount`` and optionally ``late`` (posted after the cut-off
+	time); ``source`` and ``branch`` are ignored here. On ``cut_day`` the late
+	rows are left out.
 	"""
 	acc = _blank_totals()
 	for r in rows or []:
-		if not fd <= _day(r.get("posting_date")) <= td:
+		if not _in_window(r, fd, td, cut_day):
 			continue
 		c = channel_for_purpose(r.get("purpose"))
 		net = _f(r.get("net"))
@@ -230,6 +279,15 @@ def aggregate(rows: Iterable[dict[str, Any]], fd: date, td: date) -> dict[str, A
 	return acc
 
 
+def cut_for(window_to: date, compare_to: date, today: date | None, cutoff: str | None) -> date | None:
+	"""The comparison day to cut at ``cutoff`` (only when the window ends today)."""
+	return compare_to if cutoff and window_to == today else None
+
+
+def _hhmm(cutoff: str | None) -> str | None:
+	return cutoff[:5] if cutoff else None
+
+
 def _other(values: dict[str, Any]) -> Any:
 	return values[CHANNEL_STAFF] + values[CHANNEL_SAMPLES]
 
@@ -237,15 +295,21 @@ def _other(values: dict[str, Any]) -> Any:
 # ── builders (pure) ───────────────────────────────────────────────────────
 
 
-def build_snapshot(daily_rows: list[dict[str, Any]], today: date) -> dict[str, dict[str, Any]]:
+def build_snapshot(
+	daily_rows: list[dict[str, Any]], today: date, cutoff: str | None = None
+) -> dict[str, dict[str, Any]]:
+	"""The four cards; a card ending today compares up to ``cutoff`` (``HH:MM:SS``)."""
 	out: dict[str, dict[str, Any]] = {}
 	windows = snapshot_windows(today)
 	for key in SNAPSHOT_KEYS:
 		f, t, cf, ct = windows[key]
+		cut_day = cut_for(t, ct, today, cutoff)
 		cur = aggregate(daily_rows, f, t)
-		cmp = aggregate(daily_rows, cf, ct)
+		cmp = aggregate(daily_rows, cf, ct, cut_day)
 		net = _r(cur["net"])
 		compare_net = _r(cmp["net"])
+		cur_aov = aov(cur["order_net"], cur["orders"])
+		cmp_aov = aov(cmp["order_net"], cmp["orders"])
 		out[key] = {
 			"label_from": f.isoformat(),
 			"label_to": t.isoformat(),
@@ -256,12 +320,16 @@ def build_snapshot(daily_rows: list[dict[str, Any]], today: date) -> dict[str, d
 			"orders": int(cur["orders"]),
 			"b2c_orders": int(cur["channel_orders"][CHANNEL_B2C]),
 			"b2b_orders": int(cur["channel_orders"][CHANNEL_B2B]),
-			"aov": aov(cur["order_net"], cur["orders"]),
+			"aov": cur_aov,
 			"compare_net_sales": compare_net,
 			"compare_orders": int(cmp["orders"]),
 			"change_pct": pct_change(net, compare_net),
 			"compare_from": cf.isoformat(),
 			"compare_to": ct.isoformat(),
+			"compare_aov": cmp_aov,
+			"orders_change_pct": pct_change(cur["orders"], cmp["orders"]),
+			"aov_change_pct": pct_change(cur_aov, cmp_aov) if cur_aov is not None else None,
+			"compare_cut_at": _hhmm(cutoff) if cut_day else None,
 		}
 	return out
 
@@ -311,22 +379,29 @@ def build_summary(
 	shipping_rows: list[dict[str, Any]],
 	cancelled: dict[str, Any],
 	customers: dict[str, Any],
+	today: date | None = None,
+	cutoff: str | None = None,
 ) -> dict[str, Any]:
 	cur = aggregate(daily_rows, fd, td)
-	pfd, ptd = previous_window(fd, td)
-	prev = aggregate(daily_rows, pfd, ptd)
+	pfd, ptd = compare_window(fd, td)
+	cut_day = cut_for(td, ptd, today, cutoff)
+	prev = aggregate(daily_rows, pfd, ptd, cut_day)
 
 	net = _r(cur["net"])
 	b2c = _r(cur["channel_net"][CHANNEL_B2C])
 	b2b = _r(cur["channel_net"][CHANNEL_B2B])
 	shipping_income = _r(sum(_f(r.get("amount")) for r in shipping_rows or []))
 	days = (td - fd).days + 1
-	best, worst = best_and_worst_day(daily_rows, fd, td)
+	# Today is still in progress: it would always be the "worst day" of a range ending today.
+	last_whole_day = td - timedelta(days=1) if today == td and fd < td else td
+	best, worst = best_and_worst_day(daily_rows, fd, last_whole_day)
 
 	prev_net = _r(prev["net"])
 	prev_b2c = _r(prev["channel_net"][CHANNEL_B2C])
 	prev_b2b = _r(prev["channel_net"][CHANNEL_B2B])
 	prev_orders = int(prev["orders"])
+	cur_aov = aov(cur["order_net"], cur["orders"])
+	prev_aov = aov(prev["order_net"], prev["orders"])
 
 	return {
 		"net_sales": net,
@@ -340,7 +415,7 @@ def build_summary(
 		"b2c_orders": int(cur["channel_orders"][CHANNEL_B2C]),
 		"b2b_orders": int(cur["channel_orders"][CHANNEL_B2B]),
 		"other_orders": int(_other(cur["channel_orders"])),
-		"aov": aov(cur["order_net"], cur["orders"]),
+		"aov": cur_aov,
 		"b2c_aov": aov(cur["channel_order_net"][CHANNEL_B2C], cur["channel_orders"][CHANNEL_B2C]),
 		"b2b_aov": aov(cur["channel_order_net"][CHANNEL_B2B], cur["channel_orders"][CHANNEL_B2B]),
 		"b2b_share_pct": share_pct(b2b, net),
@@ -367,6 +442,10 @@ def build_summary(
 			"b2c_change_pct": pct_change(b2c, prev_b2c),
 			"b2b_change_pct": pct_change(b2b, prev_b2b),
 			"orders_change_pct": pct_change(cur["orders"], prev_orders),
+			"aov": prev_aov,
+			"aov_change_pct": pct_change(cur_aov, prev_aov) if cur_aov is not None else None,
+			"discount_total": _r(prev["discount"]),
+			"cut_at": _hhmm(cutoff) if cut_day else None,
 		},
 	}
 
@@ -407,35 +486,71 @@ def build_trend(
 	]
 
 
-def build_by_source(daily_rows: list[dict[str, Any]], fd: date, td: date) -> list[dict[str, Any]]:
+def _source_of(r: dict[str, Any]) -> str:
+	return (r.get("source") or "pos").strip().lower()
+
+
+def _branch_of(r: dict[str, Any]) -> str:
+	return r.get("branch") or NO_BRANCH_LABEL
+
+
+def totals_by(
+	daily_rows: list[dict[str, Any]], key, fd: date, td: date, cut_day: date | None = None
+) -> dict[str, dict[str, float]]:
+	"""``{key(row): {"net", "b2c"}}`` over the window (pure)."""
+	acc: dict[str, dict[str, float]] = {}
+	for r in daily_rows or []:
+		if not _in_window(r, fd, td, cut_day):
+			continue
+		a = acc.setdefault(key(r), {"net": 0.0, "b2c": 0.0})
+		net = _f(r.get("net"))
+		a["net"] += net
+		if channel_for_purpose(r.get("purpose")) == CHANNEL_B2C:
+			a["b2c"] += net
+	return acc
+
+
+def build_by_source(
+	daily_rows: list[dict[str, Any]],
+	fd: date,
+	td: date,
+	compare: dict[str, dict[str, float]] | None = None,
+) -> list[dict[str, Any]]:
 	"""Net sales and orders per ``_channel_sql`` source, in contract order (pure).
 
 	Rows with neither orders nor net sales are dropped; ``share_pct`` is of the
-	range's net sales (the sum of every source).
+	range's net sales (the sum of every source). With ``compare`` (``totals_by``
+	over the comparison window) each row also carries ``compare_net_sales`` and
+	``change_pct``, and a source that sold only in the comparison is kept at 0.
 	"""
 	acc: dict[str, dict[str, Any]] = {}
 	for r in daily_rows or []:
 		if not fd <= _day(r.get("posting_date")) <= td:
 			continue
-		s = (r.get("source") or "pos").strip().lower()
-		a = acc.setdefault(s, {"net_sales": 0.0, "orders": 0})
+		a = acc.setdefault(_source_of(r), {"net_sales": 0.0, "orders": 0})
 		a["net_sales"] += _f(r.get("net"))
 		a["orders"] += int(r.get("orders") or 0)
 	total = sum(a["net_sales"] for a in acc.values())
-	order = list(SOURCE_ORDER) + sorted(s for s in acc if s not in SOURCE_ORDER)
+	names = set(acc) | {s for s, c in (compare or {}).items() if _r(c["net"])}
+	order = list(SOURCE_ORDER) + sorted(s for s in names if s not in SOURCE_ORDER)
 	out = []
 	for s in order:
-		a = acc.get(s)
-		if not a or not (a["orders"] or _r(a["net_sales"])):
+		a = acc.get(s) or {"net_sales": 0.0, "orders": 0}
+		c = (compare or {}).get(s)
+		has_compare = bool(c and _r(c["net"]))
+		if not (a["orders"] or _r(a["net_sales"]) or has_compare):
 			continue
-		out.append(
-			{
-				"source": s,
-				"net_sales": _r(a["net_sales"]),
-				"orders": int(a["orders"]),
-				"share_pct": share_pct(a["net_sales"], total),
-			}
-		)
+		row = {
+			"source": s,
+			"net_sales": _r(a["net_sales"]),
+			"orders": int(a["orders"]),
+			"share_pct": share_pct(a["net_sales"], total),
+		}
+		if compare is not None:
+			prev = _r(c["net"]) if c else 0.0
+			row["compare_net_sales"] = prev
+			row["change_pct"] = pct_change(a["net_sales"], prev)
+		out.append(row)
 	return out
 
 
@@ -465,9 +580,20 @@ def build_by_payment(dim_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 	return rows
 
 
-def build_by_branch(dim_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-	"""Net sales (returns netted) per POS Profile, biggest first (pure)."""
+def build_by_branch(
+	dim_rows: list[dict[str, Any]], compare: dict[str, dict[str, float]] | None = None
+) -> list[dict[str, Any]]:
+	"""Net sales (returns netted) per POS Profile, biggest first (pure).
+
+	With ``compare`` (``totals_by`` branch over the comparison window) each row
+	also carries ``compare_net_sales`` / ``change_pct`` and the B2C pair
+	``compare_b2c`` / ``b2c_change_pct``; a branch that sold only in the
+	comparison is kept at 0.
+	"""
 	acc: dict[str, dict[str, Any]] = {}
+	for name, c in (compare or {}).items():
+		if _r(c["net"]):
+			acc.setdefault(name, {"net_sales": 0.0, CHANNEL_B2C: 0.0, CHANNEL_B2B: 0.0, "orders": 0})
 	for r in dim_rows or []:
 		name = r.get("branch") or NO_BRANCH_LABEL
 		a = acc.setdefault(name, {"net_sales": 0.0, CHANNEL_B2C: 0.0, CHANNEL_B2B: 0.0, "orders": 0})
@@ -478,8 +604,12 @@ def build_by_branch(dim_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 		if c in (CHANNEL_B2C, CHANNEL_B2B):
 			a[c] += net
 	total = sum(a["net_sales"] for a in acc.values())
-	rows = [
-		{
+	rows = []
+	for name, a in acc.items():
+		c = (compare or {}).get(name)
+		if not (a["orders"] or _r(a["net_sales"]) or (c and _r(c["net"]))):
+			continue
+		row = {
 			"branch": name,
 			"net_sales": _r(a["net_sales"]),
 			"b2c": _r(a[CHANNEL_B2C]),
@@ -487,9 +617,13 @@ def build_by_branch(dim_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 			"orders": int(a["orders"]),
 			"share_pct": share_pct(a["net_sales"], total),
 		}
-		for name, a in acc.items()
-		if a["orders"] or _r(a["net_sales"])
-	]
+		if compare is not None:
+			prev, prev_b2c = (_r(c["net"]), _r(c["b2c"])) if c else (0.0, 0.0)
+			row["compare_net_sales"] = prev
+			row["change_pct"] = pct_change(a["net_sales"], prev)
+			row["compare_b2c"] = prev_b2c
+			row["b2c_change_pct"] = pct_change(a[CHANNEL_B2C], prev_b2c)
+		rows.append(row)
 	rows.sort(key=lambda x: (-x["net_sales"], x["branch"]))
 	return rows
 
@@ -524,6 +658,92 @@ def build_fulfilment(dim_rows: list[dict[str, Any]]) -> dict[str, int]:
 		else:
 			delivery += orders
 	return {"delivery_orders": delivery, "pickup_orders": pickup}
+
+
+def _drop(change_pct: float | None, base: float) -> str | None:
+	"""``"high"`` / ``"medium"`` for a flagged drop, else ``None``."""
+	if change_pct is None or base < DROP_MIN_BASE or change_pct > DROP_PCT:
+		return None
+	return "high" if change_pct <= DROP_HIGH_PCT else "medium"
+
+
+def discount_pct(discount: Any, net: Any) -> float | None:
+	"""Discount as a % of gross (net + discount); ``None`` with no sales."""
+	return share_pct(discount, _f(net) + _f(discount))
+
+
+def build_attention(
+	summary: dict[str, Any], by_source: list[dict[str, Any]], by_branch: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+	"""What needs a look in the range, most actionable first (pure).
+
+	Kinds: ``cancelled`` / ``returns`` (count, value); ``branch_drop`` (a
+	branch's B2C sales vs the comparison); ``source_drop``; ``discount_high``.
+	Clients phrase each kind themselves.
+	"""
+	out: list[dict[str, Any]] = []
+	for kind in ("cancelled", "returns"):
+		if summary.get(kind):
+			out.append(
+				{
+					"kind": kind,
+					"severity": "medium",
+					"count": int(summary[kind]),
+					"value": _r(summary.get(f"{kind}_value")),
+				}
+			)
+	drops = []
+	for b in by_branch or []:
+		sev = _drop(b.get("b2c_change_pct"), _f(b.get("compare_b2c")))
+		if sev:
+			drops.append(
+				{
+					"kind": "branch_drop",
+					"severity": sev,
+					"name": b["branch"],
+					"net_sales": _r(b.get("b2c")),
+					"compare_net_sales": _r(b.get("compare_b2c")),
+					"change_pct": b["b2c_change_pct"],
+				}
+			)
+	for s in by_source or []:
+		if s["source"] in NO_DROP_SOURCES:
+			continue
+		sev = _drop(s.get("change_pct"), _f(s.get("compare_net_sales")))
+		if sev:
+			drops.append(
+				{
+					"kind": "source_drop",
+					"severity": sev,
+					"name": s["source"],
+					"net_sales": _r(s.get("net_sales")),
+					"compare_net_sales": _r(s.get("compare_net_sales")),
+					"change_pct": s["change_pct"],
+				}
+			)
+	drops.sort(key=lambda x: (x["kind"] != "branch_drop", x["change_pct"], x["name"]))
+	out.extend(drops)
+
+	prev = summary.get("previous") or {}
+	disc = _f(summary.get("discount_total"))
+	cur_pct = discount_pct(disc, summary.get("net_sales"))
+	prev_pct = discount_pct(prev.get("discount_total"), prev.get("net_sales")) or 0.0
+	if (
+		disc >= DISCOUNT_MIN
+		and cur_pct is not None
+		and cur_pct >= prev_pct * DISCOUNT_RATIO
+		and cur_pct - prev_pct >= DISCOUNT_MIN_POINTS
+	):
+		out.append(
+			{
+				"kind": "discount_high",
+				"severity": "medium",
+				"value": _r(disc),
+				"discount_pct": cur_pct,
+				"compare_discount_pct": prev_pct,
+			}
+		)
+	return out
 
 
 def build_top_products(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -572,31 +792,42 @@ def build_dashboard(
 	product_rows: list[dict[str, Any]],
 	b2b_customer_rows: list[dict[str, Any]],
 	customers: dict[str, Any],
+	cutoff: str | None = None,
 ) -> dict[str, Any]:
 	"""Assemble the payload (pure).
 
-	``daily_rows`` must cover the snapshot span and ``previous_window(fd, td)``
-	.. ``td``; every other row set covers ``fd .. td`` only.
+	``daily_rows`` must cover the snapshot span and ``compare_window(fd, td)``
+	.. ``td``; every other row set covers ``fd .. td`` only. ``cutoff``
+	(``HH:MM:SS``, the time of the request) cuts the comparison of anything
+	ending today; the rows' ``late`` flag is relative to it.
 	"""
 	granularity = granularity_for(fd, td)
+	cfd, ctd = compare_window(fd, td)
+	cut_day = cut_for(td, ctd, today, cutoff)
+	summary = build_summary(
+		daily_rows=daily_rows,
+		fd=fd,
+		td=td,
+		shipping_rows=shipping_rows,
+		cancelled=cancelled,
+		customers=customers,
+		today=today,
+		cutoff=cutoff,
+	)
+	by_source = build_by_source(daily_rows, fd, td, totals_by(daily_rows, _source_of, cfd, ctd, cut_day))
+	by_branch = build_by_branch(dim_rows, totals_by(daily_rows, _branch_of, cfd, ctd, cut_day))
 	return {
 		"generated_at": generated_at,
 		"today": today.isoformat(),
 		"filters": {"date_from": fd.isoformat(), "date_to": td.isoformat(), "branch": branch or None},
-		"snapshot": build_snapshot(daily_rows, today),
-		"summary": build_summary(
-			daily_rows=daily_rows,
-			fd=fd,
-			td=td,
-			shipping_rows=shipping_rows,
-			cancelled=cancelled,
-			customers=customers,
-		),
+		"snapshot": build_snapshot(daily_rows, today, cutoff),
+		"summary": summary,
+		"attention": build_attention(summary, by_source, by_branch),
 		"granularity": granularity,
 		"trend": build_trend(daily_rows, fd, td, granularity),
-		"by_source": build_by_source(daily_rows, fd, td),
+		"by_source": by_source,
 		"by_payment": build_by_payment(dim_rows),
-		"by_branch": build_by_branch(dim_rows),
+		"by_branch": by_branch,
 		"by_hour": build_by_hour(dim_rows),
 		"fulfilment": build_fulfilment(dim_rows),
 		"top_products": build_top_products(product_rows),
@@ -619,8 +850,13 @@ def _params(fd: date, td: date, company: str | None, branch: str | None, **extra
 	return params
 
 
-def _daily_rows(fd: date, td: date, company: str | None, branch: str | None) -> list[dict[str, Any]]:
-	"""Per (order purpose, source, day): net (returns netted), orders, returns, discount.
+def _daily_rows(
+	fd: date, td: date, company: str | None, branch: str | None, cutoff: str = "23:59:59"
+) -> list[dict[str, Any]]:
+	"""Per (purpose, source, branch, day, late): net (returns netted), orders, returns, discount.
+
+	``late`` = posted after ``cutoff`` (``HH:MM:SS``), so a comparison day can be
+	cut at the time of the request without another query.
 
 	Discount = invoice-wide ``base_discount_amount`` plus every line's
 	``discount_amount * qty`` (price list minus selling rate). Promo codes and
@@ -633,7 +869,9 @@ def _daily_rows(fd: date, td: date, company: str | None, branch: str | None) -> 
 		f"""
         SELECT si.custom_order_purpose AS purpose,
                {source} AS sale_source,
+               COALESCE(NULLIF(si.pos_profile, ''), %(nb)s) AS branch_label,
                si.posting_date AS posting_date,
+               CASE WHEN si.posting_time > %(cutoff)s THEN 1 ELSE 0 END AS late_flag,
                SUM(si.base_net_total) AS net,
                SUM(CASE WHEN si.is_return = 0 THEN 1 ELSE 0 END) AS orders,
                SUM(CASE WHEN si.is_return = 0 THEN si.base_net_total ELSE 0 END) AS order_net,
@@ -650,9 +888,9 @@ def _daily_rows(fd: date, td: date, company: str | None, branch: str | None) -> 
         WHERE si.docstatus = 1
           AND si.posting_date BETWEEN %(fd)s AND %(td)s
           {cond}
-        GROUP BY si.custom_order_purpose, sale_source, si.posting_date
+        GROUP BY si.custom_order_purpose, sale_source, branch_label, si.posting_date, late_flag
         """,
-		_params(fd, td, company, branch),
+		_params(fd, td, company, branch, nb=NO_BRANCH_LABEL, cutoff=cutoff),
 		as_dict=True,
 	)
 
@@ -830,14 +1068,19 @@ def get_revenue_dashboard(
 	company = _default_company()
 	shipping_account, _freight = _accounts(company)
 
+	now = now_datetime()
+	cutoff = now.strftime("%H:%M:%S")
+
 	# One daily query covers the snapshot span and the selected range with its
-	# previous window; it only splits in two when those windows are disjoint.
-	pfd, _ptd = previous_window(fd, td)
+	# comparison window; it only splits in two when those windows are disjoint.
+	cfd, _ctd = compare_window(fd, td)
 	daily_rows: list[dict[str, Any]] = []
-	for start, end in merge_windows([snapshot_span(today), (pfd, td)]):
-		daily_rows.extend(_daily_rows(start, end, company, branch) or [])
+	for start, end in merge_windows([snapshot_span(today), (cfd, td)]):
+		daily_rows.extend(_daily_rows(start, end, company, branch, cutoff=cutoff) or [])
 	for r in daily_rows:
 		r["source"] = r.get("sale_source")
+		r["branch"] = r.get("branch_label")
+		r["late"] = r.get("late_flag")
 
 	dim_rows = [
 		{
@@ -858,7 +1101,7 @@ def get_revenue_dashboard(
 		fd=fd,
 		td=td,
 		branch=branch,
-		generated_at=now_datetime().strftime("%Y-%m-%d %H:%M:%S"),
+		generated_at=now.strftime("%Y-%m-%d %H:%M:%S"),
 		daily_rows=daily_rows,
 		shipping_rows=_shipping_rows(fd, td, company, shipping_account, branch) or [],
 		cancelled=_cancelled(fd, td, company, branch),
@@ -866,4 +1109,5 @@ def get_revenue_dashboard(
 		product_rows=_product_rows(fd, td, company, branch) or [],
 		b2b_customer_rows=_b2b_customer_rows(fd, td, company, branch) or [],
 		customers=_customer_counts(fd, td, company, branch),
+		cutoff=cutoff,
 	)
