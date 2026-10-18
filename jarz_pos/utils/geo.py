@@ -459,6 +459,42 @@ def is_short_maps_link(url: object) -> bool:
 	return host in SHORT_LINK_HOSTS or host.endswith(".app.goo.gl")
 
 
+#: A place's feature id inside a Maps ``data=`` blob (``!1s0x<hex>:0x<hex>``).
+_PLACE_FEATURE_ID_RE = re.compile(r"!1s0x[0-9a-f]+:0x[0-9a-f]+", re.IGNORECASE)
+
+
+def is_place_only_link(url: object) -> bool:
+	"""True when *url* names a Google Maps **place** but carries no coordinates.
+
+	Sharing a shop or landmark from Maps (rather than a dropped pin) produces a
+	``/maps/place/<name>/data=...!1s0x..:0x..`` URL, or ``?q=<name>&ftid=``, or
+	``?cid=``. Those identify the place by Google's own id, which only the
+	Places API can turn into a point. Callers use this to tell staff to share a
+	dropped pin instead of reporting a generic "no coordinates".
+
+	Only meaningful after :func:`parse_maps_link` has returned ``None``: a place
+	URL that also carries ``!3d``/``!4d`` or ``@lat,lng`` is parseable and is
+	not a place-only link.
+	"""
+	text = str(url or "").strip()
+	if not text:
+		return False
+	try:
+		parts = urlparse(text)
+	except Exception:
+		return False
+	host = (parts.hostname or "").lower()
+	if host not in MAPS_LINK_HOSTS:
+		return False
+	path = unquote(parts.path or "")
+	if "/maps/place/" in path or "/maps/search/" in path:
+		return True
+	if _PLACE_FEATURE_ID_RE.search(path):
+		return True
+	query = parse_qs(parts.query or "")
+	return bool(query.get("cid") or query.get("ftid"))
+
+
 def parse_maps_link(url: object) -> tuple[float, float, str] | None:
 	"""Extract ``(lat, lng, precision)`` from a Maps URL, or ``None``.
 

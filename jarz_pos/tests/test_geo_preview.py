@@ -359,6 +359,77 @@ class TestLinkWritesStayInEgypt(unittest.TestCase):
 		self.assertAlmostEqual(write.call_args.kwargs["latitude"], 30.0444, places=4)
 
 
+class TestPlaceLinkHasNoPin(unittest.TestCase):
+	"""A shop shared from Maps names a place, not a point; staff must be told so.
+
+	The shape below is what a real ``maps.app.goo.gl/...?g_st=ac`` place share
+	expanded to on 2026-10-18: a name and a feature id, no coordinates.
+	"""
+
+	PLACE = (
+		"https://www.google.com/maps/place/Some+Cafe/data=!4m2!3m1!1s0x14583fa60b21beeb:0x79dfb296e8423bba"
+		"?utm_source=mstt_1&entry=gps&g_ep=CAESBzI1LjQxLjQ"
+	)
+	SHORT = "https://maps.app.goo.gl/tdjgBvin5QKk8LKz7?g_st=ac"
+
+	def setUp(self):
+		from jarz_pos.services import geo_resolution
+
+		self.service = geo_resolution
+
+	def test_place_shapes_are_recognised(self):
+		for url in (
+			self.PLACE,
+			"https://www.google.com/maps/search/Some+Cafe+Nasr+City",
+			"https://maps.google.com/?q=Some+Cafe&ftid=0x14583fa60b21beeb:0x79dfb296e8423bba",
+			"https://maps.google.com/?cid=8781123456789012345",
+		):
+			with self.subTest(url=url):
+				self.assertTrue(geo.is_place_only_link(url))
+
+	def test_non_place_links_are_not_place_links(self):
+		for url in ("", "https://example.com/maps/place/X", "https://maps.app.goo.gl/aBcDeF123", "30.0444, 31.2357"):
+			with self.subTest(url=url):
+				self.assertFalse(geo.is_place_only_link(url))
+
+	def test_place_url_with_a_pin_still_resolves(self):
+		parsed = geo.parse_maps_link("https://www.google.com/maps/place/Jarz/data=!3d30.05!4d31.24")
+		self.assertIsNotNone(parsed)
+
+	def test_long_place_link_preview_says_place(self):
+		result = self.service.preview_link(self.PLACE, user="pos@jarz")
+		self.assertFalse(result["resolved"])
+		self.assertEqual(result["reason"], self.service.PLACE_LINK_NO_PIN)
+
+	def test_short_place_link_preview_says_place_after_expansion(self):
+		cache = _FakeCache()
+		with (
+			patch.object(self.service.frappe, "cache", return_value=cache),
+			patch.object(self.service.frappe, "enqueue"),
+			patch.object(self.service.frappe, "generate_hash", return_value="b" * 32),
+		):
+			token = self.service.preview_link(self.SHORT, user="pos@jarz")["request_id"]
+			with patch.object(self.service.geo, "expand_short_link", return_value=self.PLACE):
+				self.service.preview_short_link_job(token, self.SHORT, "pos@jarz")
+			done = self.service.preview_link(request_id=token, user="pos@jarz")
+		self.assertFalse(done["resolved"])
+		self.assertTrue(done["short_link"])
+		self.assertEqual(done["reason"], self.service.PLACE_LINK_NO_PIN)
+		self.assertEqual(done["expanded_url"], self.PLACE)
+
+	def test_resolve_paths_say_place_without_writing(self):
+		with patch.object(self.service, "set_address_pin", side_effect=AssertionError("must not write")):
+			direct = self.service.resolve_address_from_link("ADDR-1", self.PLACE)
+			with patch.object(self.service.geo, "expand_short_link", return_value=self.PLACE):
+				job = self.service.resolve_short_link_job("ADDR-1", self.SHORT)
+		self.assertEqual(direct["reason"], self.service.PLACE_LINK_NO_PIN)
+		self.assertEqual(job["reason"], self.service.PLACE_LINK_NO_PIN)
+
+	def test_unrecognisable_long_link_keeps_the_generic_reason(self):
+		result = self.service.preview_link("https://www.google.com/maps/@", user="pos@jarz")
+		self.assertEqual(result["reason"], "no_coordinates_in_link")
+
+
 class _ReferenceTestBase(unittest.TestCase):
 	"""Shared setup: a clean reference cache and controllable Territory / POS Profile points."""
 

@@ -650,7 +650,7 @@ def resolve_address_from_link(
 		return {
 			"success": True,
 			"accepted": False,
-			"reason": "no_coordinates_in_link",
+			"reason": _no_point_reason(link, "no_coordinates_in_link"),
 			"address": name,
 			"url": link,
 		}
@@ -730,7 +730,7 @@ def resolve_short_link_job(address_name: str, url: str, source: str = geo.SOURCE
 		return {
 			"success": True,
 			"accepted": False,
-			"reason": "no_coordinates_in_expanded_link",
+			"reason": _no_point_reason(expanded, "no_coordinates_in_expanded_link"),
 			"expanded_url": expanded,
 		}
 
@@ -874,6 +874,17 @@ def _preview_resolved(link: str, parsed: Any, *, short_link: bool = False) -> di
 	return resolved
 
 
+#: Reason returned when a link names a Maps place (a shop shared from Maps)
+#: but carries no point. Distinct from the generic "no coordinates" so the
+#: client can tell staff to share a dropped pin instead.
+PLACE_LINK_NO_PIN = "place_link_no_pin"
+
+
+def _no_point_reason(url: str, default: str) -> str:
+	"""The reason to report for a Maps URL that did not parse to a point."""
+	return PLACE_LINK_NO_PIN if geo.is_place_only_link(url) else default
+
+
 def _preview_unresolved(link: str, reason: str, *, short_link: bool) -> dict[str, Any]:
 	return {
 		"success": True,
@@ -942,7 +953,7 @@ def preview_link(link: object = None, *, request_id: object = None, user: str = 
 		return _preview_resolved(text, parsed)
 
 	if not geo.is_short_maps_link(text):
-		return _preview_unresolved(text, "no_coordinates_in_link", short_link=False)
+		return _preview_unresolved(text, _no_point_reason(text, "no_coordinates_in_link"), short_link=False)
 
 	if not _consume_preview_budget(owner):
 		return _preview_unresolved(text, "rate_limited", short_link=True)
@@ -1000,7 +1011,9 @@ def preview_short_link_job(request_id: str, url: str, user: str = "") -> dict[st
 		if parsed:
 			result = _preview_resolved(link, parsed, short_link=True)
 		else:
-			result = _preview_unresolved(link, "no_coordinates_in_expanded_link", short_link=True)
+			result = _preview_unresolved(
+				link, _no_point_reason(expanded, "no_coordinates_in_expanded_link"), short_link=True
+			)
 		result["expanded_url"] = expanded
 
 	_preview_cache_set(key, {**ticket, "result": result})

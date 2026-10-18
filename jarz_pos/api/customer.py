@@ -63,9 +63,10 @@ def _apply_address_geo(
 	  that is the pin. The link is parsed server-side only when coordinates are
 	  absent, which also makes the endpoint correct for any caller that never ran
 	  the preview.
-	* **``address_line2`` is never touched.** It carries the legacy
-	  ``"Location: <url>"`` text and sits in both the WooCommerce address-dedup
-	  signature and the Woo outbound-push trigger set. Rewriting it forks
+	* **``address_line2`` is never touched.** Older POS-created rows may still
+	  carry ``"Location: <url>"`` there, and the line sits in both the
+	  WooCommerce address-dedup signature and the Woo outbound-push trigger set.
+	  Rewriting it as a side effect of a pin save forks
 	  duplicate Addresses and fans a customer+invoice sync out to WooCommerce per
 	  record.
 
@@ -1317,20 +1318,19 @@ def create_customer(
 			if frappe.db.has_column("Address", "mobile_no"):
 				address_payload["mobile_no"] = mobile_no
 
+			# The location link is NOT copied into address_line2. It used to be
+			# ("Location: <url>"), and outbound sync pushed that text verbatim into
+			# WooCommerce address_2, where the store showed a URL as part of the
+			# street address. The pin lives in the structured geo fields below.
 			address_doc = frappe.get_doc(address_payload)
-
-			if location_link:
-				address_doc.address_line2 = f"Location: {location_link}"
 
 			frappe.logger().info("Creating address")
 			address_doc.insert(ignore_permissions=True)
 			frappe.logger().info(f"Address created successfully: {address_doc.name}")
 
 		# Door pin (COURIER_CONTRACTS §10a). Placed after the whole address block so
-		# it covers both the reuse and the create branch. address_line2 above keeps
-		# its legacy "Location: <url>" text untouched — that string is part of the
-		# WooCommerce dedup signature, and the structured fields written here are
-		# the real store from now on.
+		# it covers both the reuse and the create branch. The structured fields
+		# written here are the only store for the pin.
 		geo_result = _apply_address_geo(
 			address_doc.name,
 			location_link=location_link,
