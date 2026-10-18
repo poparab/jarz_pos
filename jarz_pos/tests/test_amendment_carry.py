@@ -78,6 +78,24 @@ class TestSourceLineRateOverrides(unittest.TestCase):
 		)
 		self.assertEqual(carry_mod.source_line_rate_overrides(src), {"LOTUS-L": 0.0})
 
+	def test_bundle_code_row_is_not_a_plain_line(self):
+		src = _free_cakes_source(items=[_row("BOX", bundle_code="BX-1"), _row("LOTUS-L")])
+		self.assertEqual(carry_mod.source_line_rate_overrides(src), {"LOTUS-L": 0.0})
+
+	def test_charged_row_without_a_list_price_is_not_carried_as_free(self):
+		charged = _row("LOTUS-L")
+		charged["rate"] = 140.0
+		src = _free_cakes_source(items=[charged, _row("TIRAMISU-L")])
+		self.assertEqual(carry_mod.source_line_rate_overrides(src), {"TIRAMISU-L": 0.0})
+
+	def test_woo_customer_note_cannot_fake_the_marker(self):
+		src = _free_cakes_source(custom_pos_audit_markers="", woo_order_id=19041, remarks="[CUSTOM LINE PRICING]")
+		self.assertEqual(carry_mod.source_line_rate_overrides(src), {})
+
+	def test_remarks_ignored_once_the_markers_field_is_in_use(self):
+		src = _free_cakes_source(custom_pos_audit_markers="[PICKUP]", remarks="[CUSTOM LINE PRICING]")
+		self.assertEqual(carry_mod.source_line_rate_overrides(src), {})
+
 
 class TestApplySourceLinePricing(unittest.TestCase):
 	def test_kept_lines_get_the_source_price(self):
@@ -107,6 +125,27 @@ class TestApplySourceLinePricing(unittest.TestCase):
 
 		cart = [{"item_code": "LOTUS-L", "qty": 1}]
 		self.assertEqual(carry_mod.apply_source_line_pricing(cart, {"LOTUS-L": 0.0}, boom), ["LOTUS-L"])
+
+	def test_only_the_source_quantity_inherits_the_price(self):
+		cart = [{"item_code": "LOTUS-L", "qty": 3}]
+		changed = carry_mod.apply_source_line_pricing(cart, {"LOTUS-L": 0.0}, lambda code: 160.0, {"LOTUS-L": 1})
+		self.assertEqual(changed, ["LOTUS-L"])
+		self.assertEqual(len(cart), 2, "the extra units are split onto their own line")
+		self.assertEqual((cart[0]["qty"], cart[0]["custom_rate_override"]), (1, 0.0))
+		self.assertEqual(cart[1]["qty"], 2)
+		self.assertNotIn("custom_rate_override", cart[1], "extra units are priced from the list")
+
+	def test_quantity_budget_spans_rows(self):
+		cart = [{"item_code": "LOTUS-L", "qty": 2}, {"item_code": "LOTUS-L", "qty": 1}]
+		carry_mod.apply_source_line_pricing(cart, {"LOTUS-L": 0.0}, lambda code: 160.0, {"LOTUS-L": 2})
+		self.assertEqual(cart[0]["custom_rate_override"], 0.0)
+		self.assertNotIn("custom_rate_override", cart[1])
+
+	def test_quantity_key_is_kept(self):
+		cart = [{"item_code": "LOTUS-L", "quantity": 2}]
+		carry_mod.apply_source_line_pricing(cart, {"LOTUS-L": 0.0}, lambda code: 160.0, {"LOTUS-L": 1})
+		self.assertEqual([r["quantity"] for r in cart], [1, 1])
+		self.assertNotIn("qty", cart[1])
 
 
 class TestTrustedCarry(unittest.TestCase):
@@ -240,7 +279,7 @@ class TestBuildAmendmentCarry(unittest.TestCase):
 class TestAmendmentJobCarriesSourcePricing(unittest.TestCase):
 	"""The job itself: the 19041 cart must reach creation with the free prices kept."""
 
-	def _run(self, source, cart, **job_kwargs):
+	def _run(self, source, cart, *, expect_creation=True, price_list_resolved=None, **job_kwargs):
 		creation = MagicMock(return_value={"invoice_name": _SOURCE + "-1"})
 		mock_frappe = _mock_manager_frappe()
 		with (
@@ -259,17 +298,24 @@ class TestAmendmentJobCarriesSourcePricing(unittest.TestCase):
 			patch("jarz_pos.api.manager._build_invoice_amendment_response", return_value={"success": True}),
 			patch("jarz_pos.api.manager._temporary_invoice_creation_form_context", MagicMock()),
 			patch("jarz_pos.services.invoice_creation._resolve_item_rate", return_value=160.0),
+			patch(
+				"jarz_pos.api.manager._resolve_amendment_price_list",
+				return_value=price_list_resolved or source.get("selling_price_list"),
+			),
 		):
 			from jarz_pos.api.manager import _run_invoice_amendment_job
 
-			_run_invoice_amendment_job(
+			result = _run_invoice_amendment_job(
 				invoice_id=source.name,
 				request_id="test-req-carry",
 				cart_json=json.dumps(cart),
 				pos_profile_name=_PROFILE,
 				**job_kwargs,
 			)
-		self.assertTrue(creation.called, "the job never reached invoice creation")
+		if not expect_creation:
+			self.assertFalse(creation.called)
+			return result
+		self.assertTrue(creation.called, f"the job never reached invoice creation: {result}")
 		return creation
 
 	def _source(self, **overrides):
@@ -297,6 +343,31 @@ class TestAmendmentJobCarriesSourcePricing(unittest.TestCase):
 	def test_no_codes_passes_none(self):
 		creation = self._run(self._source(), [{"item_code": "PISTACHIO-L", "qty": 1, "rate": 160}])
 		self.assertIsNone(creation.call_args.kwargs["promo_codes"])
+
+	def test_extra_units_are_not_given_away(self):
+		creation = self._run(self._source(), [{"item_code": "PISTACHIO-L", "qty": 3}])
+		sent = json.loads(creation.call_args.args[0])
+		self.assertEqual([(r["qty"], r.get("custom_rate_override")) for r in sent], [(1, 0.0), (2, None)])
+
+	def test_a_newly_chosen_price_list_is_not_overruled(self):
+		creation = self._run(self._source(), [{"item_code": "PISTACHIO-L", "qty": 1}], price_list_resolved="B2B Selling")
+		self.assertNotIn("custom_rate_override", json.loads(creation.call_args.args[0])[0])
+
+	def test_free_order_with_paid_shipping_is_not_suspicious(self):
+		# Lines free, EGP 50 shipping: the carried lines are worth 0 but nothing was lost.
+		self._run(self._source(grand_total=50.0), [{"item_code": "PISTACHIO-L", "qty": 1}])
+
+	def test_manager_can_bring_a_mis_priced_replacement_back_down(self):
+		# The 19041 repair: 18933-1 at 800 amended back to every line free.
+		src = self._source(name=_SOURCE + "-1", custom_pos_audit_markers="", grand_total=800.0)
+		cart = [{"item_code": code, "qty": 1, "rate": 0, "custom_rate_override": 0} for code in "ABCDE"]
+		creation = self._run(src, cart)
+		self.assertEqual([r["custom_rate_override"] for r in json.loads(creation.call_args.args[0])], [0] * 5)
+
+	def test_a_cart_that_lost_lines_is_still_refused(self):
+		src = self._source(custom_pos_audit_markers="", grand_total=800.0)
+		result = self._run(src, [{"item_code": "PISTACHIO-L", "qty": 1}], expect_creation=False)
+		self.assertEqual(result.get("amendment_block_code"), "suspicious_diff")
 
 
 if __name__ == "__main__":

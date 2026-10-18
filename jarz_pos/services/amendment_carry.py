@@ -52,17 +52,25 @@ def _is_plain_row(row: Any) -> bool:
 	for fieldname in ("is_bundle_parent", "is_bundle_child", "is_free_item"):
 		if _get(row, fieldname):
 			return False
-	if str(_get(row, "parent_bundle") or "").strip():
-		return False
+	for fieldname in ("parent_bundle", "bundle_code"):
+		if str(_get(row, fieldname) or "").strip():
+			return False
 	return bool(str(_get(row, "item_code") or "").strip())
 
 
 def source_has_marker(source: Any, marker: str) -> bool:
-	"""True when the source's audit markers (or legacy remarks copy) carry ``marker``."""
-	for fieldname in (POS_AUDIT_MARKERS_FIELD, "remarks"):
-		if marker in str(_get(source, fieldname) or ""):
-			return True
-	return False
+	"""True when the source's audit markers carry ``marker``.
+
+	``remarks`` is read only for a legacy POS invoice written before the markers
+	field existed. On a Woo order it is the customer's own note, so a customer who
+	typed a marker into it would otherwise turn an amendment's re-pricing off.
+	"""
+	markers = str(_get(source, POS_AUDIT_MARKERS_FIELD) or "")
+	if markers.strip():
+		return marker in markers
+	if _get(source, "woo_order_id"):
+		return False
+	return marker in str(_get(source, "remarks") or "")
 
 
 def source_line_rate_overrides(source: Any) -> dict[str, float]:
@@ -82,6 +90,9 @@ def source_line_rate_overrides(source: Any) -> dict[str, float]:
 			continue
 		code = str(_get(row, "item_code")).strip()
 		rate = flt(_get(row, "price_list_rate"))
+		if rate <= 0 and flt(_get(row, "rate")) > 0:
+			# No list price but a charged rate: not a free line, so not carried as one.
+			continue
 		if code in rates and abs(rates[code] - rate) > _RATE_TOLERANCE:
 			conflicting.add(code)
 		rates.setdefault(code, rate)
@@ -137,26 +148,37 @@ def build_amendment_carry(source: Any, *, zero_shipping: bool) -> dict[str, Any]
 	}
 
 
+def _row_qty_key(row: dict) -> str:
+	return "quantity" if "quantity" in row and "qty" not in row else "qty"
+
+
 def apply_source_line_pricing(
 	cart: Any,
 	line_rates: dict[str, float],
 	resolve_rate: Callable[[str], float | None],
+	source_qty: dict[str, float] | None = None,
 ) -> list[str]:
 	"""Give each kept plain line the source's custom price; return the codes changed.
 
 	A row that already sends its own ``custom_rate_override`` is the operator's
 	choice for THIS edit and is never touched. A row whose source price equals what
-	the list resolves to today needs no override. Mutates ``cart`` in place.
+	the list resolves to today needs no override. Only the source's quantity of an
+	item inherits its price: raising a free line from 1 to 3 splits it into 1 unit at
+	the source price and 2 at list, so the extra units are neither given away
+	silently nor sent to the manager gate as a "custom price". Mutates ``cart``.
 	"""
 	carried: list[str] = []
 	if not isinstance(cart, list) or not line_rates:
 		return carried
+	budget = dict(source_qty) if source_qty is not None else None
+	out: list[Any] = []
 	for row in cart:
+		out.append(row)
 		if not isinstance(row, dict) or row.get("is_bundle"):
 			continue
+		code = str(row.get("item_code") or "").strip()
 		if row.get("custom_rate_override") not in (None, ""):
 			continue
-		code = str(row.get("item_code") or "").strip()
 		if code not in line_rates:
 			continue
 		override = flt(line_rates[code])
@@ -166,8 +188,23 @@ def apply_source_line_pricing(
 			current = None
 		if current is not None and abs(flt(current) - override) <= _RATE_TOLERANCE:
 			continue
+		if budget is not None:
+			qty_key = _row_qty_key(row)
+			qty = flt(row.get(qty_key) or 1)
+			remaining = flt(budget.get(code))
+			if remaining <= 1e-9:
+				continue
+			if qty > remaining + 1e-9:
+				extra = dict(row)
+				extra[qty_key] = round(qty - remaining, 6)
+				row[qty_key] = remaining
+				out.append(extra)
+				qty = remaining
+			budget[code] = remaining - qty
 		row["custom_rate_override"] = override
-		carried.append(code)
+		if code not in carried:
+			carried.append(code)
+	cart[:] = out
 	return carried
 
 

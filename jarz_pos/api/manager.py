@@ -2794,16 +2794,30 @@ def _run_invoice_amendment_job(
 		zero_shipping=bool(effective_suppress_shipping_income)
 		or (effective_custom_delivery_income is not None and flt(effective_custom_delivery_income) <= 0),
 	)
+	# A replacement priced from a different list than the source (the operator picked
+	# a new one) is re-priced from that list: pinning every line to the old price
+	# would quietly overrule the choice.
+	_source_price_list = source_invoice.get("selling_price_list") or None
+	_price_list_changed = bool(effective_price_list) and effective_price_list != _source_price_list
 	carried_line_codes: list[str] = []
-	if keep_source_line_pricing is None or _is_truthy_flag(keep_source_line_pricing):
+	if not _price_list_changed and (
+		keep_source_line_pricing is None or _is_truthy_flag(keep_source_line_pricing)
+	):
 		carried_line_codes = _apply_source_line_pricing(
 			parsed_cart,
 			amendment_carry.get("line_rates") or {},
 			lambda code: _amend_resolve_item_rate(code, _amend_price_list, customer=effective_customer_name),
+			source_qty=amendment_carry.get("source_qty") or {},
 		)
 		if carried_line_codes:
 			cart_json = json.dumps(parsed_cart)
 
+	# The guard catches a cart that LOST lines or quantity (a lossy client rebuild),
+	# not a pricing decision: a custom price is policed by the manager pricing gate in
+	# invoice creation. So an overridden line is valued at its list price here --
+	# otherwise every amendment of a free or heavily discounted order (order 19041:
+	# six free cakes) would be refused as "suspicious", and a manager could never
+	# bring a mis-priced replacement back down.
 	submitted_total = 0.0
 	if isinstance(parsed_cart, list):
 		for row in parsed_cart:
@@ -2812,12 +2826,10 @@ def _run_invoice_amendment_job(
 				row_qty = float(row.get("qty") or row.get("quantity") or 1)
 				has_override = row.get("custom_rate_override") not in (None, "") and not row.get("is_bundle")
 				if has_override:
-					# The invoice engine prices this line at the override, whatever rate the
-					# client echoed alongside it.
-					row_rate = float(row.get("custom_rate_override") or 0)
+					row_rate = 0.0
 				# Only resolve for plain rows; bundle rows keep their existing best-effort
 				# rate (bundle pricing is not a single price-list lookup).
-				if row_rate <= 0 and not row.get("is_bundle") and not has_override:
+				if row_rate <= 0 and not row.get("is_bundle"):
 					_code = str(row.get("item_code") or "").strip()
 					if _code:
 						try:
@@ -3332,6 +3344,9 @@ def submit_invoice_amendment(
 	)
 
 	if not cart_json:
+		# A server-rebuilt cart carries no line prices of its own, whatever flag the
+		# client sent, so the job must inject the source's.
+		keep_source_line_pricing = None
 		try:
 			cart_json = json.dumps(build_amendment_cart_from_invoice(source_invoice))
 		except Exception as rebuild_error:
