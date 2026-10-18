@@ -142,9 +142,17 @@ def previous_window(fd: date, td: date) -> tuple[date, date]:
 def compare_window(fd: date, td: date) -> tuple[date, date]:
 	"""The like-for-like comparison of ``fd .. td``.
 
-	Under 7 days: the same weekdays one week earlier (a Friday against the last
-	Friday, not against Thursday). 7 days or more: ``previous_window``.
+	A range from the 1st of a month to a later day of that month: the same days
+	of the previous month, as the Month to date card does (so tapping that card
+	never flips its arrow). Otherwise, under 7 days: the same weekdays one week
+	earlier (a Friday against the last Friday, not against Thursday). 7 days or
+	more: ``previous_window``.
 	"""
+	if fd.day == 1 and fd < td and (fd.year, fd.month) == (td.year, td.month):
+		prev_last = fd - timedelta(days=1)
+		prev_first = date(prev_last.year, prev_last.month, 1)
+		last_day = calendar.monthrange(prev_first.year, prev_first.month)[1]
+		return prev_first, date(prev_first.year, prev_first.month, min(td.day, last_day))
 	if (td - fd).days + 1 < 7:
 		return fd - timedelta(days=7), td - timedelta(days=7)
 	return previous_window(fd, td)

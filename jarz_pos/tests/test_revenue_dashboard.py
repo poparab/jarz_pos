@@ -45,7 +45,7 @@ def d(
 
 
 def october_range_rows():
-	"""Range 2026-10-01..03 plus its comparison, the same weekdays a week earlier (09-24..26)."""
+	"""Range 2026-10-01..03 plus its comparison: it starts on the 1st, so the same days of September (09-01..03)."""
 	return [
 		d("Standard", date(2026, 10, 1), 1000, orders=5),
 		# A credit note: negative net, no order, counted as a return.
@@ -54,10 +54,10 @@ def october_range_rows():
 		d("Employee", date(2026, 10, 2), 50, orders=1, source="staff"),
 		d("Sample - Courier", date(2026, 10, 3), 0, orders=1, source="samples"),
 		# comparison window
-		d("Standard", date(2026, 9, 25), 725, orders=3),
+		d("Standard", date(2026, 9, 2), 725, orders=3),
 		# outside both windows
-		d("Standard", date(2026, 9, 27), 9999, orders=9),
-		d("Standard", date(2026, 9, 23), 9999, orders=9),
+		d("Standard", date(2026, 9, 4), 9999, orders=9),
+		d("Standard", date(2026, 8, 31), 9999, orders=9),
 	]
 
 
@@ -138,7 +138,29 @@ class TestWindows(unittest.TestCase):
 			rd.compare_window(date(2026, 10, 12), date(2026, 10, 18)), (date(2026, 10, 5), date(2026, 10, 11))
 		)
 		self.assertEqual(
-			rd.compare_window(date(2026, 10, 1), date(2026, 10, 18)), (date(2026, 9, 13), date(2026, 9, 30))
+			rd.compare_window(date(2026, 9, 2), date(2026, 9, 19)), (date(2026, 8, 15), date(2026, 9, 1))
+		)
+
+	def test_month_to_date_range_matches_the_month_to_date_card(self):
+		# 1st .. a later day of the month: the same days of the previous month,
+		# exactly as the Month to date card compares, so tapping it keeps its arrow.
+		today = date(2026, 10, 18)
+		card = rd.snapshot_windows(today)["month_to_date"]
+		self.assertEqual(rd.compare_window(card[0], card[1]), (card[2], card[3]))
+		self.assertEqual(
+			rd.compare_window(date(2026, 10, 1), date(2026, 10, 3)), (date(2026, 9, 1), date(2026, 9, 3))
+		)
+		# Clamped to the shorter previous month.
+		self.assertEqual(
+			rd.compare_window(date(2026, 3, 1), date(2026, 3, 31)), (date(2026, 2, 1), date(2026, 2, 28))
+		)
+		# January compares with December of the previous year.
+		self.assertEqual(
+			rd.compare_window(date(2027, 1, 1), date(2027, 1, 5)), (date(2026, 12, 1), date(2026, 12, 5))
+		)
+		# A single day on the 1st stays a day: same weekday a week earlier.
+		self.assertEqual(
+			rd.compare_window(date(2026, 10, 1), date(2026, 10, 1)), (date(2026, 9, 24), date(2026, 9, 24))
 		)
 
 	def test_merge_windows(self):
@@ -268,7 +290,7 @@ class TestSummary(unittest.TestCase):
 
 	def test_previous_window(self):
 		p = summary()["previous"]
-		self.assertEqual((p["date_from"], p["date_to"]), ("2026-09-24", "2026-09-26"))
+		self.assertEqual((p["date_from"], p["date_to"]), ("2026-09-01", "2026-09-03"))
 		self.assertEqual((p["net_sales"], p["b2c"], p["b2b"], p["orders"]), (725.0, 725.0, 0.0, 3))
 		self.assertEqual(p["change_pct"], 100.0)
 		self.assertEqual(p["b2c_change_pct"], 24.1)
