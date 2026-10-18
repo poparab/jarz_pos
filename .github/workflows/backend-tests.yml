@@ -598,6 +598,8 @@ jobs:
             # source-scans shipping_analytics for the territory-rate fallback
             # that overstated September 2026 delivery income by 82%.
             test_api_financial_report
+            # Revenue dashboard (snapshot cards, B2B/B2C split, comparisons): pure builders + entry gate.
+            test_revenue_dashboard
             # Query shapes fixed by the 2026-09-27 audit of every Reports number:
             # product revenue net of invoice discounts, stock value from the
             # ledger, B2B clients = whoever places B2B Supply orders.
