@@ -772,6 +772,10 @@ jobs:
             # Past-chat import: WhatsApp history/contacts parsing, Page thread
             # mapping, imported rows never push/reopen/realtime, backfill paging.
             test_chat_history
+            # The roles payload the mobile app routes on, incl. manager_home
+            # (feature manager-home-bar): always a bool, follows the User
+            # field, False on a site that has not migrated it yet.
+            test_api_user
           )
           rc=0
           for m in "${MODULES[@]}"; do

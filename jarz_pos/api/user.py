@@ -28,6 +28,12 @@ def get_current_user_roles():
 	# Read shift requirement from User doctype
 	require_pos_shift = bool(int(frappe.db.get_value("User", user, "custom_require_pos_shift") or 0))
 
+	# Mobile app: land on the revenue dashboard with the manager bottom bar.
+	# Guarded so a site that has not migrated the field yet still answers.
+	manager_home = False
+	if frappe.get_meta("User").has_field("custom_manager_home"):
+		manager_home = bool(int(frappe.db.get_value("User", user, "custom_manager_home") or 0))
+
 	role_set = set(roles or [])
 	is_b2b_sales_rep = "B2B Sales Rep" in role_set
 	is_manager = bool(
@@ -51,4 +57,5 @@ def get_current_user_roles():
 		"employee_name": employee.get("employee_name") if employee else None,
 		"branch": employee.get("branch") if employee else None,
 		"require_pos_shift": require_pos_shift,
+		"manager_home": manager_home,
 	}
