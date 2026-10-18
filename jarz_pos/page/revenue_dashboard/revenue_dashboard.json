@@ -1,0 +1,22 @@
+{
+ "content": null,
+ "docstatus": 0,
+ "doctype": "Page",
+ "idx": 0,
+ "module": "jarz pos",
+ "name": "revenue-dashboard",
+ "page_name": "revenue-dashboard",
+ "roles": [
+  {
+   "role": "JARZ Manager"
+  },
+  {
+   "role": "Administrator"
+  }
+ ],
+ "script": null,
+ "standard": "Yes",
+ "style": null,
+ "system_page": 0,
+ "title": "Revenue Dashboard"
+}

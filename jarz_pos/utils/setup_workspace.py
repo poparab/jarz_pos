@@ -69,6 +69,13 @@ WORKSPACE_SEQUENCE = 1
 # Tiles across the top of the page. ``type`` is DocType | Page | Report.
 SHORTCUTS = [
 	{
+		"label": "Revenue Dashboard",
+		"type": "Page",
+		"link_to": "revenue-dashboard",
+		"color": "#2980B9",
+		"icon": "bar-chart",
+	},
+	{
 		"label": "Executive Overview",
 		"type": "Page",
 		"link_to": "executive-analytics",
@@ -204,6 +211,7 @@ CARDS = [
 	{
 		"label": "Dashboards",
 		"links": [
+			{"label": "Revenue Dashboard", "link_type": "Page", "link_to": "revenue-dashboard"},
 			{"label": "Executive Overview", "link_type": "Page", "link_to": "executive-analytics"},
 			{"label": "Product Analytics", "link_type": "Page", "link_to": "product-analytics"},
 			{"label": "Shipping Analytics", "link_type": "Page", "link_to": "shipping-analytics"},
@@ -347,6 +355,7 @@ SIDEBAR_SECTIONS = [
 	{
 		"label": "Dashboards",
 		"links": [
+			{"label": "Revenue Dashboard", "link_type": "Page", "link_to": "revenue-dashboard"},
 			{"label": "Executive Overview", "link_type": "Page", "link_to": "executive-analytics"},
 			{"label": "Product Analytics", "link_type": "Page", "link_to": "product-analytics"},
 			{"label": "Shipping Analytics", "link_type": "Page", "link_to": "shipping-analytics"},
@@ -463,6 +472,7 @@ SIDEBAR_SECTIONS = [
 HOME_WORKSPACE = "Home"
 HOME_ENTRY_LABEL = "Jarz POS"
 HOME_CARD_LINKS = [
+	{"label": "Revenue Dashboard", "link_type": "Page", "link_to": "revenue-dashboard"},
 	{"label": "Executive Overview", "link_type": "Page", "link_to": "executive-analytics"},
 	{"label": "B2B Sales & Clients", "link_type": "Page", "link_to": "b2b-analytics"},
 	{"label": "Recurring Expenses", "link_type": "Page", "link_to": "recurring-expenses"},
