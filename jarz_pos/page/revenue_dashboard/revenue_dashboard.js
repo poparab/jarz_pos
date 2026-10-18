@@ -242,9 +242,14 @@ class RevenueDashboard {
 			.call({
 				method: "jarz_pos.api.revenue_dashboard.get_revenue_dashboard",
 				args: { date_from: this.from_date, date_to: this.to_date, branch: this.branch },
+				// Frappe already shows the server's message; this only clears "Loading…".
+				error: () => {
+					if (seq === this._seq) this._render_failed();
+				},
 			})
 			.then((r) => {
-				if (seq !== this._seq || !r.message) return;
+				if (seq !== this._seq) return;
+				if (!r || !r.message) return this._render_failed();
 				let d = r.message;
 				this._render_snapshot(d.snapshot || {});
 				this._render_summary(d.summary || {}, d.filters || {});
@@ -258,6 +263,12 @@ class RevenueDashboard {
 				this._render_b2b(d.top_b2b_customers || []);
 				$("#rd-updated").text(__("Updated {0}", [d.generated_at || ""]));
 			});
+	}
+
+	_render_failed() {
+		$("#rd-kpis").html(
+			`<div class="rd-loading">${__("Could not load the dashboard. Check the filters and try again.")}</div>`
+		);
 	}
 
 	// ── Renderers ────────────────────────────────────────────────────────────
