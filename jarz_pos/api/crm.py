@@ -367,6 +367,125 @@ def get_b2b_pipeline():
 	return {"stages": stages, "columns": columns}
 
 
+# ---------------------------------------------------------------------------
+# Active accounts (the B2B home screen)
+# ---------------------------------------------------------------------------
+def _active_cards():
+	"""Pipeline cards at the Active stage, with the contact bits the list shows.
+
+	Same exclusions as the board (not-suitable, merged-away), so an account is on
+	this list exactly when it sits in the board's Active column.
+	"""
+	from jarz_pos.services.b2b_active_accounts import ACTIVE_STAGE
+
+	cards = []
+	if _doctype_exists("Lead") and _has_field("Lead", "custom_b2b_stage"):
+		fields = ["name", "owner", "modified"]
+		for f in ("lead_name", "company_name", "customer", "mobile_no", "territory"):
+			if _has_field("Lead", f):
+				fields.append(f)
+		filters = {"custom_b2b_stage": ACTIVE_STAGE}
+		if _has_field("Lead", "custom_not_suitable"):
+			filters["custom_not_suitable"] = 0
+		if _has_field("Lead", "custom_merged_into"):
+			filters["custom_merged_into"] = ["is", "not set"]
+		leads = frappe.get_all("Lead", filters=filters, fields=fields, limit_page_length=0) or []
+		customers = _lead_customer_map(leads)
+		for row in leads:
+			cards.append(
+				{
+					"doctype": "Lead",
+					"name": row.get("name"),
+					"title": row.get("lead_name") or row.get("company_name") or row.get("name"),
+					"owner": row.get("owner"),
+					"customer": customers.get(row.get("name")),
+					"mobile_no": row.get("mobile_no"),
+					"territory": row.get("territory"),
+				}
+			)
+
+	if _doctype_exists("Opportunity") and _has_field("Opportunity", "custom_b2b_stage"):
+		fields = ["name", "owner"]
+		for f in ("party_name", "customer_name", "opportunity_from", "contact_mobile", "territory"):
+			if _has_field("Opportunity", f):
+				fields.append(f)
+		opps = (
+			frappe.get_all(
+				"Opportunity",
+				filters={"custom_b2b_stage": ACTIVE_STAGE},
+				fields=fields,
+				limit_page_length=0,
+			)
+			or []
+		)
+		for row in opps:
+			cards.append(
+				{
+					"doctype": "Opportunity",
+					"name": row.get("name"),
+					"title": row.get("customer_name") or row.get("party_name") or row.get("name"),
+					"owner": row.get("owner"),
+					"customer": _resolve_opportunity_customer(row, strict=False),
+					"mobile_no": row.get("contact_mobile"),
+					"territory": row.get("territory"),
+				}
+			)
+	return cards
+
+
+@frappe.whitelist()
+def get_active_accounts(period_days=None):
+	"""Every Active B2B account with its key numbers -- the B2B mode home list.
+
+	Shape:
+	    {
+	        "today": "YYYY-MM-DD",
+	        "period_days": int,
+	        "period_start": "YYYY-MM-DD",
+	        "summary": {accounts, period_orders, period_billed, prev_period_billed,
+	                    period_change_pct, outstanding, reorder_due, needs_attention},
+	        "accounts": [ <row>, ... ]   # see b2b_active_accounts.build_row
+	    }
+	"""
+	_ensure_b2b_access()
+
+	from jarz_pos.services import b2b_active_accounts as active
+
+	days = active.clamp_period_days(period_days or active.DEFAULT_PERIOD_DAYS)
+	today = frappe.utils.getdate(_today())
+	period_start, prev_start = active.period_bounds(today, days)
+
+	cards = _active_cards()
+	# Same journey + label enrichment as the board, so a card reads the same
+	# in both places.
+	columns = {active.ACTIVE_STAGE: cards}
+	_attach_journey_summaries(columns)
+	_attach_label_alerts(columns)
+
+	customer_names = [c["customer"] for c in cards if c.get("customer")]
+	details = active.customer_details(customer_names)
+	stats = active.invoice_stats(customer_names, period_start, prev_start)
+
+	rows = []
+	for card in cards:
+		customer = card.get("customer")
+		detail = details.get(customer) or {}
+		if customer:
+			card["customer_name"] = detail.get("customer_name") or customer
+			card["territory"] = detail.get("territory") or card.get("territory")
+			card["mobile_no"] = card.get("mobile_no") or detail.get("mobile_no")
+		rows.append(active.build_row(card, stats.get(customer), detail, today))
+	rows = active.sort_rows(rows)
+
+	return {
+		"today": str(today),
+		"period_days": days,
+		"period_start": str(period_start),
+		"summary": active.build_summary(rows),
+		"accounts": rows,
+	}
+
+
 def _journey_card_defaults():
 	"""The journey keys every card carries, whether or not it has notes."""
 	return {

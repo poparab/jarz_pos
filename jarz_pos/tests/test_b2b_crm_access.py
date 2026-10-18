@@ -80,6 +80,11 @@ class TestEndpointAccessGuards(unittest.TestCase):
 			with self.assertRaises(Exception):
 				crm.get_b2b_pipeline()
 
+	def test_get_active_accounts_guarded(self):
+		with self._guarded_non_b2b():
+			with self.assertRaises(Exception):
+				crm.get_active_accounts()
+
 	def test_get_account_guarded(self):
 		with self._guarded_non_b2b():
 			with self.assertRaises(Exception):
