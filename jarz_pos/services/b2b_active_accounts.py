@@ -5,10 +5,11 @@ row is an Active Lead/Opportunity card resolved to its Customer, carrying the
 handful of figures a rep or manager wants at a glance: what the account bought
 recently, when it last ordered, whether it is due to reorder, and what it owes.
 
-Everything money-related is read from submitted Sales Invoices of the linked
-Customer in ONE grouped query, so the screen costs the same for 10 accounts or
-100. Returns (credit notes) are netted into the billed figures but never
-counted as orders. The reorder forecast comes from the Customer fields kept
+Everything money-related is read from submitted "B2B Supply" Sales Invoices
+of the linked Customer in ONE grouped query, so the screen costs the same for
+10 accounts or 100. Retail and sample invoices are left out, matching the
+B2B analytics. Returns (credit notes) are netted into the billed figures but
+never counted as orders. The reorder forecast comes from the Customer fields kept
 by ``crm.reorder_forecast`` and is shown as-is, never recomputed here.
 
 The pure helpers (``period_bounds``, ``build_row``, ``build_summary``) take
@@ -23,6 +24,8 @@ from typing import Any
 import frappe
 
 ACTIVE_STAGE = "Active"
+#: Sales Invoice.custom_order_purpose of a B2B sale (same as b2b_analytics).
+B2B_PURPOSE = "B2B Supply"
 DEFAULT_PERIOD_DAYS = 30
 MAX_PERIOD_DAYS = 365
 
@@ -174,9 +177,32 @@ def build_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
 		"prev_period_billed": _round(prev_period_billed),
 		"period_change_pct": change_pct(period_billed, prev_period_billed),
 		"outstanding": _round(sum(_num(r.get("outstanding")) for r in rows)),
-		"reorder_due": sum(1 for r in rows if r.get("reorder_status") == "overdue"),
+		# Overdue or due within DUE_SOON_DAYS: the same set the app's filter lists.
+		"reorder_due": sum(1 for r in rows if r.get("reorder_status") in ("overdue", "due_soon")),
 		"needs_attention": sum(1 for r in rows if r.get("alerts")),
 	}
+
+
+def dedupe_cards(cards: list[dict[str, Any]]) -> list[dict[str, Any]]:
+	"""One card per Customer, so two Active cards on one account never count twice.
+
+	When a Lead and an Opportunity both resolve to the same Customer, the
+	Opportunity is kept (it is the later step of the same account); otherwise
+	the first card wins. Cards with no Customer are all kept (pure).
+	"""
+	kept: dict[str, int] = {}
+	out: list[dict[str, Any]] = []
+	for card in cards:
+		customer = card.get("customer")
+		if not customer:
+			out.append(card)
+			continue
+		if customer not in kept:
+			kept[customer] = len(out)
+			out.append(card)
+		elif card.get("doctype") == "Opportunity" and out[kept[customer]].get("doctype") != "Opportunity":
+			out[kept[customer]] = card
+	return out
 
 
 def sort_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -191,13 +217,18 @@ def sort_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 	)
 
 
-def invoice_stats(customers: list[str], period_start: date, prev_start: date) -> dict[str, dict]:
-	"""Per-customer invoice figures in one grouped query over submitted invoices."""
+def invoice_stats(
+	customers: list[str], period_start: date, prev_start: date, today: date | None = None
+) -> dict[str, dict]:
+	"""Per-customer figures in one grouped query over submitted B2B invoices."""
 	customers = sorted({c for c in customers if c})
 	if not customers:
 		return {}
+	purpose_clause = ""
+	if frappe.get_meta("Sales Invoice").has_field("custom_order_purpose"):
+		purpose_clause = "AND custom_order_purpose = %(purpose)s"
 	rows = frappe.db.sql(
-		"""
+		f"""
 		SELECT
 			customer,
 			SUM(CASE WHEN is_return = 0 THEN 1 ELSE 0 END) AS orders,
@@ -213,10 +244,17 @@ def invoice_stats(customers: list[str], period_start: date, prev_start: date) ->
 			SUM(outstanding_amount) AS outstanding,
 			MIN(CASE WHEN outstanding_amount > 0 THEN posting_date END) AS oldest_unpaid_date
 		FROM `tabSales Invoice`
-		WHERE docstatus = 1 AND customer IN %(customers)s
+		WHERE docstatus = 1 AND customer IN %(customers)s AND posting_date <= %(today)s
+			{purpose_clause}
 		GROUP BY customer
 		""",
-		{"customers": tuple(customers), "period_start": period_start, "prev_start": prev_start},
+		{
+			"customers": tuple(customers),
+			"period_start": period_start,
+			"prev_start": prev_start,
+			"purpose": B2B_PURPOSE,
+			"today": today or date.today(),
+		},
 		as_dict=True,
 	)
 	return {r["customer"]: r for r in rows or []}

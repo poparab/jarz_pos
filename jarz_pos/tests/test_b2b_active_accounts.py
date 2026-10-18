@@ -89,6 +89,10 @@ class TestSummaryAndSort(unittest.TestCase):
 		self.assertEqual(s["reorder_due"], 1)
 		self.assertEqual(s["needs_attention"], 1)
 
+	def test_reorder_due_counts_due_soon_like_the_app_filter(self):
+		rows = [{"reorder_status": "overdue"}, {"reorder_status": "due_soon"}, {"reorder_status": "ok"}, {}]
+		self.assertEqual(active.build_summary(rows)["reorder_due"], 2)
+
 	def test_sort_recent_buyers_first(self):
 		rows = [
 			{"title": "b", "period_billed": 0, "billed": 900},
@@ -96,6 +100,39 @@ class TestSummaryAndSort(unittest.TestCase):
 			{"title": "c", "period_billed": 0, "billed": 900},
 		]
 		self.assertEqual([r["title"] for r in active.sort_rows(rows)], ["a", "b", "c"])
+
+
+class TestDedupeCards(unittest.TestCase):
+	def test_lead_and_opportunity_on_one_customer_keep_opportunity(self):
+		cards = [
+			{"doctype": "Lead", "name": "L-1", "customer": "C-1"},
+			{"doctype": "Lead", "name": "L-2", "customer": None},
+			{"doctype": "Opportunity", "name": "O-1", "customer": "C-1"},
+			{"doctype": "Lead", "name": "L-3", "customer": None},
+		]
+		out = active.dedupe_cards(cards)
+		self.assertEqual([c["name"] for c in out], ["O-1", "L-2", "L-3"])
+
+	def test_two_leads_on_one_customer_keep_first(self):
+		cards = [
+			{"doctype": "Lead", "name": "L-1", "customer": "C-1"},
+			{"doctype": "Lead", "name": "L-2", "customer": "C-1"},
+		]
+		self.assertEqual([c["name"] for c in active.dedupe_cards(cards)], ["L-1"])
+
+	def test_summary_counts_a_shared_customer_once(self):
+		cards = active.dedupe_cards(
+			[
+				{"doctype": "Lead", "name": "L-1", "customer": "C-1"},
+				{"doctype": "Opportunity", "name": "O-1", "customer": "C-1"},
+			]
+		)
+		stats = {"period_billed": 500, "outstanding": 200}
+		rows = [active.build_row(c, stats, None, date(2026, 10, 18)) for c in cards]
+		summary = active.build_summary(rows)
+		self.assertEqual(summary["accounts"], 1)
+		self.assertEqual(summary["period_billed"], 500)
+		self.assertEqual(summary["outstanding"], 200)
 
 
 if __name__ == "__main__":

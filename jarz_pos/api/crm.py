@@ -455,7 +455,7 @@ def get_active_accounts(period_days=None):
 	today = frappe.utils.getdate(_today())
 	period_start, prev_start = active.period_bounds(today, days)
 
-	cards = _active_cards()
+	cards = active.dedupe_cards(_active_cards())
 	# Same journey + label enrichment as the board, so a card reads the same
 	# in both places.
 	columns = {active.ACTIVE_STAGE: cards}
@@ -464,7 +464,7 @@ def get_active_accounts(period_days=None):
 
 	customer_names = [c["customer"] for c in cards if c.get("customer")]
 	details = active.customer_details(customer_names)
-	stats = active.invoice_stats(customer_names, period_start, prev_start)
+	stats = active.invoice_stats(customer_names, period_start, prev_start, today)
 
 	rows = []
 	for card in cards:
