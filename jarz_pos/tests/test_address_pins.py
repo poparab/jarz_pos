@@ -117,6 +117,40 @@ class TestPinFieldsFromAddress(unittest.TestCase):
 		self.assertEqual(out["geo_source"], "")
 		self.assertEqual(out["geo_confidence"], 0)
 
+	def test_unpinned_place_link_comes_from_the_pasted_link_column(self):
+		# A shared place has no coordinates, so no pin was written; the raw
+		# link is the courier's only way there, and line2 no longer holds it.
+		place = "https://maps.app.goo.gl/tdjgBvin5QKk8LKz7?g_st=ac"
+		out = address_pins.pin_fields_from_address(
+			{
+				"custom_latitude": None,
+				"custom_longitude": None,
+				"address_line2": "",
+				"custom_location_link": place,
+			}
+		)
+		self.assertFalse(out["has_location_pin"])
+		self.assertEqual(out["location_link"], place)
+
+	def test_pasted_link_wins_over_legacy_line2(self):
+		out = address_pins.pin_fields_from_address(
+			{
+				"address_line2": "Location: https://maps.app.goo.gl/Old",
+				"custom_location_link": "https://maps.app.goo.gl/New",
+			}
+		)
+		self.assertEqual(out["location_link"], "https://maps.app.goo.gl/New")
+
+	def test_pin_still_beats_the_pasted_link(self):
+		out = address_pins.pin_fields_from_address(
+			{
+				"custom_latitude": 30.05,
+				"custom_longitude": 31.24,
+				"custom_location_link": "https://maps.app.goo.gl/X",
+			}
+		)
+		self.assertTrue(out["location_link"].startswith("https://www.google.com/maps/search/"))
+
 	def test_zero_zero_is_not_a_pin(self):
 		out = address_pins.pin_fields_from_address(
 			{"custom_latitude": 0, "custom_longitude": 0, "address_line2": "Flat 4"}

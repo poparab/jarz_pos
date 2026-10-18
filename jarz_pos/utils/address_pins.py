@@ -41,9 +41,9 @@ from jarz_pos.utils.geo import (
 	SOURCE_MANUAL_OVERRIDE,
 	SOURCE_POS_LINK,
 	distance_m_or_none,
-	extract_location_link,
 	is_valid_coordinate,
 	maps_link_for,
+	stored_location_link,
 )
 
 #: Address column stamped by ``geo_resolution.set_address_pin`` on every accepted
@@ -51,6 +51,10 @@ from jarz_pos.utils.geo import (
 #: internal key that :func:`invoice_pin_override` strips before the payload leaves.
 GEO_UPDATED_COLUMN = "custom_geo_updated_on"
 _UPDATED_KEY = "_geo_updated_on"
+
+#: Address column holding the raw Maps link POS staff pasted (written by
+#: ``api.customer._store_location_link``). Never pushed to WooCommerce.
+LOCATION_LINK_COLUMN = "custom_location_link"
 
 #: Optional Address columns carrying the pin. Selected only when present.
 GEO_COLUMNS = (
@@ -62,6 +66,8 @@ GEO_COLUMNS = (
 	# the geo writer uses ``update_modified=False``). Optional like the rest, so
 	# a site that has not migrated it keeps the previous behaviour.
 	GEO_UPDATED_COLUMN,
+	# The raw Maps link POS staff pasted. The card's link when there is no pin.
+	LOCATION_LINK_COLUMN,
 )
 
 #: Optional Sales Invoice columns carrying THIS order's pin snapshot. The
@@ -140,7 +146,8 @@ def pin_fields_from_address(row: dict[str, Any] | None) -> dict[str, Any]:
 	coordinates present?" can never show "Pinned" for a placeholder.
 
 	``location_link`` prefers the stored pin; otherwise it falls back to the
-	legacy pasted link in ``address_line2`` (``"Location: <url>"``).
+	raw pasted link (``custom_location_link``), then to the legacy one in
+	``address_line2`` (``"Location: <url>"``).
 	"""
 	out = empty_pin_fields()
 	if not row:
@@ -155,7 +162,9 @@ def pin_fields_from_address(row: dict[str, Any] | None) -> dict[str, Any]:
 			out["has_location_pin"] = True
 			out["location_link"] = maps_link_for(lat, lng)
 		else:
-			out["location_link"] = extract_location_link(row.get("address_line2"))
+			out["location_link"] = stored_location_link(
+				row.get(LOCATION_LINK_COLUMN), row.get("address_line2")
+			)
 		out["geo_source"] = str(row.get("custom_geo_source") or "").strip()
 		out["geo_confidence"] = _safe_int(row.get("custom_geo_confidence"))
 		written = row.get(GEO_UPDATED_COLUMN)

@@ -96,6 +96,9 @@ def get_address_pin(address: str) -> dict[str, Any]:
 			return {"success": False, "error": _("Address {0} not found").format(name)}
 
 		line2 = frappe.db.get_value("Address", name, "address_line2") or ""
+		pasted = ""
+		if frappe.get_meta("Address").has_field("custom_location_link"):
+			pasted = frappe.db.get_value("Address", name, "custom_location_link") or ""
 		return {
 			"success": True,
 			"address": name,
@@ -105,9 +108,9 @@ def get_address_pin(address: str) -> dict[str, Any]:
 			"confidence": current.get("custom_geo_confidence") or 0,
 			"accuracy_m": current.get("custom_geo_accuracy_m"),
 			"verified_on": current.get("custom_geo_verified_on"),
-			# Read-only echo. The legacy corpus of pasted links lives here and
-			# the client may want to show it; nothing in this app rewrites it.
-			"stored_link": _geo.extract_location_link(line2),
+			# Read-only echo: the raw link POS staff pasted, else the legacy
+			# "Location: <url>" in address_line2 (nothing here rewrites that).
+			"stored_link": _geo.stored_location_link(pasted, line2),
 			"ladder": _geo.CONFIDENCE_RANK,
 		}
 	except frappe.PermissionError:

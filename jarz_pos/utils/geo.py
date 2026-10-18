@@ -681,6 +681,16 @@ def extract_location_link(text: object) -> str:
 	return match.group(0).rstrip(".,;)") if match else ""
 
 
+def stored_location_link(location_link: object, address_line2: object = None) -> str:
+	"""The Maps link kept on an Address, for when it has no usable pin.
+
+	``custom_location_link`` (the raw link POS staff pasted) wins; older rows
+	only have the legacy ``"Location: <url>"`` text in ``address_line2``.
+	Reads only.
+	"""
+	return extract_location_link(location_link) or extract_location_link(address_line2)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Distance
 # ─────────────────────────────────────────────────────────────────────────────

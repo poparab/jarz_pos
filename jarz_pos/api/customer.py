@@ -69,6 +69,11 @@ def _apply_address_geo(
 	  Rewriting it as a side effect of a pin save forks
 	  duplicate Addresses and fans a customer+invoice sync out to WooCommerce per
 	  record.
+	* **The pasted link is kept as-is** in ``custom_location_link``, whatever
+	  the geo write decides. A shared place (or a short link whose background
+	  resolve fails) yields no pin, and that link is then the courier's only
+	  way to the door. The column is in no Woo field list, so it is never
+	  pushed and never part of the dedup signature.
 
 	Returns a result dict which the caller MUST surface in its response. A geo
 	failure must never abort saving the address — the address is the primary
@@ -85,11 +90,18 @@ def _apply_address_geo(
 	if not name or (not has_coords and not link):
 		return {"applied": False, "reason": "no_geo_supplied"}
 
+	link_stored = _store_location_link(name, link) if link else False
+
 	if not geo_utils.normalize_source(source):
 		# An unrecognised label cannot be ranked, so the ladder cannot protect
 		# what it writes. Refuse loudly in the payload rather than silently
 		# storing an unrankable pin.
-		return {"applied": False, "reason": "unknown_geo_source", "geo_source": source}
+		return {
+			"applied": False,
+			"reason": "unknown_geo_source",
+			"geo_source": source,
+			"link_stored": link_stored,
+		}
 
 	# Both callers are POS endpoints: an explicit staff edit of the pin may
 	# replace a customer's own pin (never a courier/manual one), see
@@ -110,13 +122,37 @@ def _apply_address_geo(
 				name, link, source=source, staff_correction=staff_edit
 			)
 
-		return {"applied": bool(result.get("accepted")), **result}
+		return {"applied": bool(result.get("accepted")), **result, "link_stored": link_stored}
 	except frappe.PermissionError:
 		raise
 	except Exception as exc:
 		# Loud, but non-fatal: the address itself saved fine.
 		frappe.log_error(frappe.get_traceback(), f"_apply_address_geo failed for {name}")
-		return {"applied": False, "reason": "error", "error": str(exc)}
+		return {"applied": False, "reason": "error", "error": str(exc), "link_stored": link_stored}
+
+
+LOCATION_LINK_FIELD = "custom_location_link"
+
+
+def _store_location_link(address_name: str, link: str) -> bool:
+	"""Keep the raw pasted Maps link on the Address. Never raises.
+
+	``db.set_value`` on purpose: it runs no doc events, so the Woo outbound
+	hooks never see this write, and ``update_modified=False`` leaves the
+	Address timestamp alone. Meta-guarded so a site that has not migrated the
+	column still saves addresses.
+	"""
+	try:
+		if not frappe.get_meta("Address").has_field(LOCATION_LINK_FIELD):
+			return False
+		frappe.db.set_value("Address", address_name, LOCATION_LINK_FIELD, link, update_modified=False)
+		return True
+	except Exception:
+		try:
+			frappe.log_error(frappe.get_traceback(), f"storing location link failed for {address_name}")
+		except Exception:
+			pass
+		return False
 
 
 # ---------------------------------------------------------------------------
@@ -1321,7 +1357,8 @@ def create_customer(
 			# The location link is NOT copied into address_line2. It used to be
 			# ("Location: <url>"), and outbound sync pushed that text verbatim into
 			# WooCommerce address_2, where the store showed a URL as part of the
-			# street address. The pin lives in the structured geo fields below.
+			# street address. The pin lives in the structured geo fields below and
+			# the raw link in custom_location_link (never pushed to Woo).
 			address_doc = frappe.get_doc(address_payload)
 
 			frappe.logger().info("Creating address")
@@ -1330,7 +1367,7 @@ def create_customer(
 
 		# Door pin (COURIER_CONTRACTS §10a). Placed after the whole address block so
 		# it covers both the reuse and the create branch. The structured fields
-		# written here are the only store for the pin.
+		# written here are the only store for the pin; the raw link is kept too.
 		geo_result = _apply_address_geo(
 			address_doc.name,
 			location_link=location_link,

@@ -92,6 +92,28 @@ class TestCreateCustomerLinksExistingAddress(unittest.TestCase):
 			"45 Brand New Street",
 		)
 
+	def test_location_link_stays_out_of_address_line2(self):
+		"""line2 is pushed verbatim to WooCommerce address_2; the link must not land there.
+
+		A full place URL carries no coordinates and needs no network, so no pin
+		is written: the raw link column is then the courier's only way there.
+		"""
+		territory = _non_group_territory()
+		place = "https://www.google.com/maps/place/Some+Shop/data=!4m2!3m1!1s0x1458:0x2a3b"
+
+		result = create_customer(
+			customer_name="_TEST Place Link Customer",
+			mobile_no="0100999003",
+			customer_primary_address="9 Pin Street",
+			territory_id=territory,
+			location_link=place,
+		)
+
+		primary = result["customer_primary_address"]
+		self.assertFalse(frappe.db.get_value("Address", primary, "address_line2"))
+		if frappe.get_meta("Address").has_field("custom_location_link"):
+			self.assertEqual(frappe.db.get_value("Address", primary, "custom_location_link"), place)
+
 
 if __name__ == "__main__":
 	unittest.main()
