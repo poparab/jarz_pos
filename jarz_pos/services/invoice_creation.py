@@ -12,6 +12,7 @@ from datetime import timedelta
 import frappe
 
 from jarz_pos.constants import PAYMENT_MODES, ROLES
+from jarz_pos.services import amendment_carry as _amendment_carry_mod
 from jarz_pos.services import branch_fulfilment as _branch_fulfilment
 from jarz_pos.services import commercial_policy as _commercial_policy
 from jarz_pos.services import customer_deals as _customer_deals
@@ -900,8 +901,13 @@ def _resolve_effective_price_list(
 			sales_partner=sales_partner,
 		)
 
+	# Pricing an amendment inherits from its (manager-approved) source is not a new
+	# pricing decision; only what the edit changes is gated. Outside the amendment job
+	# trusted_carry() is None and the cart is checked as sent.
 	if _pricing_action_requires_manager(
-		cart_items,
+		_amendment_carry_mod.strip_carried_pricing_for_gate(
+			cart_items, _amendment_carry_mod.trusted_carry(amended_from)
+		),
 		requested_price_list=requested,
 		default_price_list=default_price_list,
 		suppress_shipping_income=suppress_shipping_income,
@@ -2347,6 +2353,12 @@ def create_pos_invoice(
 			_append_audit_marker(invoice_doc, "[ZERO SHIPPING OVERRIDE]")
 		if any(_pricing_field_provided(item.get("custom_rate_override")) for item in processed_items):
 			_append_audit_marker(invoice_doc, "[CUSTOM LINE PRICING]")
+		_amendment_carry = _amendment_carry_mod.trusted_carry(amended_from)
+		if _amendment_carry and _amendment_carry.get("zero_shipping_marker"):
+			# The source was zero-shipping by manager override and the replacement still
+			# charges none; keep the audit trail even when the money was carried as a
+			# pinned 0 delivery income rather than through the suppress flags.
+			_append_audit_marker(invoice_doc, "[ZERO SHIPPING OVERRIDE]")
 		if any(
 			(
 				_pricing_field_provided(item.get("discount_amount"))
@@ -2774,6 +2786,24 @@ def create_pos_invoice(
 				)
 		except Exception as _promo_apply_err:
 			print(f"   ⚠️ Promo-code application failed: {_promo_apply_err}")
+
+		# STEP 7.7: Amendment -- keep the source's header discount when re-evaluating
+		# its codes cannot reproduce it (Woo coupon, expired window, Woo non-coupon
+		# discount with no code). No-op outside the amendment job.
+		try:
+			_carried_discount = _amendment_carry_mod.apply_header_discount_carry(
+				invoice_doc,
+				_amendment_carry_mod.trusted_carry(amended_from),
+				promo_eval,
+				promo_codes_list,
+			)
+			if _carried_discount > 0:
+				_append_audit_marker(
+					invoice_doc, f"{_amendment_carry_mod.DISCOUNT_CARRIED_MARKER} {_carried_discount:.2f}"
+				)
+				print(f"   🧾 Amendment header discount carried: {_carried_discount:.2f}")
+		except Exception as _carry_err:
+			print(f"   ⚠️ Amendment discount carry failed: {_carry_err}")
 
 		# STEP 8: Validate and Calculate Document
 		print("\n8️⃣ DOCUMENT VALIDATION:")

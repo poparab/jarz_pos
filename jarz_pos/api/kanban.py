@@ -3478,6 +3478,14 @@ def get_invoice_details(invoice_id: str) -> dict[str, Any]:
 		except Exception:
 			data["latest_note"] = None
 		data.update(get_invoice_amendment_eligibility(invoice))
+		# {item_code: unit price} for manager-approved custom line prices, so the POS
+		# edit cart opens with them instead of re-pricing kept lines at list (order 19041).
+		try:
+			from jarz_pos.services.amendment_carry import source_line_rate_overrides
+
+			data["amendment_line_rates"] = source_line_rate_overrides(invoice)
+		except Exception:
+			data["amendment_line_rates"] = {}
 		data.update(get_invoice_cancellation_eligibility(invoice))
 		try:
 			from jarz_pos.services.invoice_return import get_invoice_return_eligibility

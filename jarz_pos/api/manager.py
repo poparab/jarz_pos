@@ -99,6 +99,8 @@ except Exception:  # pragma: no cover - defensive, mirrors the import above
 
 
 from jarz_pos.services.amendment_cart import build_amendment_cart_from_invoice
+from jarz_pos.services.amendment_carry import apply_source_line_pricing as _apply_source_line_pricing
+from jarz_pos.services.amendment_carry import build_amendment_carry as _build_amendment_carry
 from jarz_pos.services.state_log import record_state_change
 from jarz_pos.utils.access_control import (
 	ensure_profile_scoped_invoice_access as _shared_ensure_profile_scoped_invoice_access,
@@ -2489,6 +2491,7 @@ def _run_invoice_amendment_job(
 	price_list: str | None = None,
 	employee_payment: str | None = None,
 	delivery_slot_explicit: bool | int | str | None = None,
+	keep_source_line_pricing: bool | int | str | None = None,
 ) -> dict[str, Any]:
 	"""Queueable job that supersedes a submitted invoice and recreates it from the POS payload."""
 	if _create_amendment_invoice is None:
@@ -2777,15 +2780,44 @@ def _run_invoice_amendment_job(
 	# carried-over B2B override is not measured against retail rates (which would make
 	# the rebuilt cart look ~40% cheaper than the source and falsely trip the guard).
 	_amend_price_list = effective_price_list or source_invoice.get("selling_price_list") or None
+
+	# Carry what the source had on top of the price list (order 19041): its custom
+	# line prices, promo codes / header discount and zero-shipping marker. Line prices
+	# go into the cart itself -- before the guard below, so it measures the real cart --
+	# for every kept line that does not already send its own override. Older apps send
+	# none, so this is what protects them. ``keep_source_line_pricing=0`` is a newer
+	# app saying it carried the prices itself and any line without one was reset on
+	# purpose.
+	amendment_carry = _build_amendment_carry(
+		source_invoice,
+		# None = re-derive from the territory, i.e. NOT pinned to zero.
+		zero_shipping=bool(effective_suppress_shipping_income)
+		or (effective_custom_delivery_income is not None and flt(effective_custom_delivery_income) <= 0),
+	)
+	carried_line_codes: list[str] = []
+	if keep_source_line_pricing is None or _is_truthy_flag(keep_source_line_pricing):
+		carried_line_codes = _apply_source_line_pricing(
+			parsed_cart,
+			amendment_carry.get("line_rates") or {},
+			lambda code: _amend_resolve_item_rate(code, _amend_price_list, customer=effective_customer_name),
+		)
+		if carried_line_codes:
+			cart_json = json.dumps(parsed_cart)
+
 	submitted_total = 0.0
 	if isinstance(parsed_cart, list):
 		for row in parsed_cart:
 			if isinstance(row, dict):
 				row_rate = float(row.get("rate") or row.get("price") or 0)
 				row_qty = float(row.get("qty") or row.get("quantity") or 1)
+				has_override = row.get("custom_rate_override") not in (None, "") and not row.get("is_bundle")
+				if has_override:
+					# The invoice engine prices this line at the override, whatever rate the
+					# client echoed alongside it.
+					row_rate = float(row.get("custom_rate_override") or 0)
 				# Only resolve for plain rows; bundle rows keep their existing best-effort
 				# rate (bundle pricing is not a single price-list lookup).
-				if row_rate <= 0 and not row.get("is_bundle"):
+				if row_rate <= 0 and not row.get("is_bundle") and not has_override:
 					_code = str(row.get("item_code") or "").strip()
 					if _code:
 						try:
@@ -2952,6 +2984,9 @@ def _run_invoice_amendment_job(
 			# Lets invoice creation trust amended_from for customer-deal dating;
 			# a direct create_pos_invoice call never carries this flag.
 			frappe.flags.jarz_amendment_source = invoice_id
+			# Read by invoice creation only via amendment_carry.trusted_carry(), which
+			# also requires jarz_amendment_source to name the same source.
+			frappe.flags.jarz_amendment_carry = amendment_carry
 			try:
 				creation_result = _create_amendment_invoice(
 					cart_json,
@@ -2977,9 +3012,15 @@ def _run_invoice_amendment_job(
 					commercial_policy=effective_commercial_policy,
 					policy_reason=effective_policy_reason,
 					employee_payment=effective_employee_payment,
+					# The source's codes are re-evaluated against the edited cart; never
+					# passing them is how every amendment dropped its promo discount.
+					promo_codes=json.dumps(amendment_carry["promo_codes"])
+					if amendment_carry.get("promo_codes")
+					else None,
 				)
 			finally:
 				frappe.flags.jarz_amendment_source = None
+				frappe.flags.jarz_amendment_carry = None
 
 		replacement_invoice_name = creation_result.get("invoice_name") or creation_result.get("name") or ""
 		if not replacement_invoice_name:
@@ -3243,6 +3284,7 @@ def submit_invoice_amendment(
 	price_list: str | None = None,
 	employee_payment: str | None = None,
 	delivery_slot_explicit: bool | int | str | None = None,
+	keep_source_line_pricing: bool | int | str | None = None,
 ) -> dict[str, Any]:
 	"""Supersede a submitted invoice and recreate it from the edited POS cart payload.
 
@@ -3268,6 +3310,12 @@ def submit_invoice_amendment(
 	The parameter has to exist in THIS signature — Frappe silently discards whitelisted
 	kwargs that the function does not declare, which is how the client's ``price_list``
 	was being dropped and every amended B2B order re-priced at retail.
+
+	``keep_source_line_pricing``: omitted (older apps) or ``1`` → every kept line that
+	sends no ``custom_rate_override`` inherits the source's custom price. ``0`` → the
+	app carried the prices itself, and a line without one was reset to list on purpose.
+	The source's promo codes, header discount and zero-shipping marker are carried
+	either way (see ``services/amendment_carry.py``).
 	"""
 	invoice_id = (invoice_id or "").strip()
 	if not invoice_id:
@@ -3384,6 +3432,7 @@ def submit_invoice_amendment(
 		price_list=price_list,
 		employee_payment=employee_payment,
 		delivery_slot_explicit=delivery_slot_explicit,
+		keep_source_line_pricing=keep_source_line_pricing,
 	)
 
 

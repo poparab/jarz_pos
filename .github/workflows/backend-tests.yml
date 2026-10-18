@@ -271,6 +271,13 @@ jobs:
             # onto the replacement. Also pins that every OTHER caller -- the
             # before_cancel guard included -- still refuses.
             test_amendment_shipping_request
+            # Pricing survival across an amendment (Woo 19041 /
+            # ACC-SINV-2026-18933). Six manager-approved free cakes came back at
+            # the 160 EGP list price: no caller carried `custom_rate_override`,
+            # the job never passed the source's `promo_codes` (so promo / Woo
+            # coupon discounts vanished too), and the zero-shipping marker was
+            # lost. The job now carries all three from the cancelled source.
+            test_amendment_carry
             # Amendment hardening (idempotency keys, locks, rollback). The
             # amendment path replays the source invoice's shipping_address_name
             # verbatim, so an over-strict address guard makes an order
