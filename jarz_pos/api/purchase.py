@@ -320,7 +320,7 @@ def search_items(
 	uom_map = _get_item_uoms_bulk(codes)
 	price_map = _get_item_prices_bulk(codes)
 	on_hand = _on_hand_bulk(codes)
-	last_paid = _last_paid_bulk(codes)
+	last_paid = last_paid_details_bulk(codes)
 	tax_map = _item_tax_templates_bulk(codes)
 
 	for it in items:
@@ -328,7 +328,13 @@ def search_items(
 		it["uoms"] = uom_map.get(code) or [{"uom": it["stock_uom"], "conversion_factor": 1}]
 		it["prices"] = price_map.get(code, [])
 		it["on_hand_qty"] = on_hand.get(code, 0.0)
-		it["last_purchase_rate"] = last_paid.get(code, 0.0)
+		# Per stock unit, so the app can price any unit as rate × factor. The
+		# last line's own unit and price ride along so a new line can start in
+		# the unit the item is actually bought in.
+		paid = last_paid.get(code) or {}
+		it["last_purchase_rate"] = paid.get("rate", 0.0)
+		it["last_purchase_uom"] = paid.get("uom")
+		it["last_purchase_uom_rate"] = paid.get("uom_rate", 0.0)
 		# Pre-fills the line's VAT so the buyer only overrides the exceptions:
 		# the item's own template, else the configured site default.
 		it["item_tax_template"] = tax_map.get(code)
@@ -475,23 +481,59 @@ def _on_hand_bulk(item_codes: list[str]) -> dict[str, float]:
 	return totals
 
 
-def _last_paid_bulk(item_codes: list[str]) -> dict[str, float]:
-	"""Rate last actually paid, from submitted invoice lines.
+def last_paid_details_bulk(item_codes) -> dict[str, dict[str, Any]]:
+	"""The last purchase actually paid for each item, normalised to the stock unit.
 
-	Deliberately not ``Item.last_purchase_rate``: that field is also written by
-	Purchase Orders, so it can show a price that was quoted but never paid.
+	Returns ``{item_code: {"rate", "uom", "uom_rate", "conversion_factor"}}``:
+	``rate`` is per stock unit; ``uom``/``uom_rate`` are the unit and price of
+	that last line as the supplier billed it.
+
+	The raw invoice ``rate`` is in the line's own unit. Production, 2026-10-19:
+	butter was last bought as "Carton 10 Kg" at 5500, and that 5500 was offered
+	as the price of one Kg — a request for 20 Kg priced at 110,000 instead of
+	11,000, which no custody could cover, so the purchase could not be
+	submitted.
+
+	Latest by posting date/time (a backdated invoice is not the newest price),
+	returns excluded (their rate is a refund, not a price), zero-rate lines
+	skipped. Deliberately not ``Item.last_purchase_rate``: that field is also
+	written by Purchase Orders, so it can show a price quoted but never paid.
 	"""
-	if not item_codes:
+	codes = [c for c in (item_codes or []) if c]
+	if not codes:
 		return {}
-	latest: dict[str, float] = {}
-	for row in frappe.get_all(
-		"Purchase Invoice Item",
-		filters={"item_code": ["in", item_codes], "docstatus": 1},
-		fields=["item_code", "rate", "creation"],
-		order_by="creation desc",
-		limit_page_length=0,
-	):
-		latest.setdefault(row["item_code"], float(row.get("rate") or 0))
+	rows = frappe.db.sql(
+		"""
+		select pii.item_code, pii.uom, pii.rate, pii.conversion_factor, pii.stock_uom_rate
+		from `tabPurchase Invoice Item` pii
+		inner join `tabPurchase Invoice` pi on pi.name = pii.parent
+		where pi.docstatus = 1
+			and ifnull(pi.is_return, 0) = 0
+			and pii.item_code in %(codes)s
+			and pii.rate > 0
+		order by pi.posting_date desc, pi.posting_time desc, pi.creation desc, pii.idx asc
+		""",
+		{"codes": tuple(codes)},
+		as_dict=True,
+	)
+	latest: dict[str, dict[str, Any]] = {}
+	for row in rows:
+		code = row.get("item_code")
+		if code in latest:
+			continue
+		uom_rate = float(row.get("rate") or 0)
+		conversion = float(row.get("conversion_factor") or 0)
+		if conversion > 0:
+			stock_rate = uom_rate / conversion
+		else:
+			stock_rate = float(row.get("stock_uom_rate") or 0) or uom_rate
+			conversion = 1.0
+		latest[code] = {
+			"rate": round(stock_rate, 6),
+			"uom": row.get("uom"),
+			"uom_rate": uom_rate,
+			"conversion_factor": conversion,
+		}
 	return latest
 
 

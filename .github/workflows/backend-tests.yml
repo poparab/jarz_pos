@@ -422,6 +422,10 @@ jobs:
             # the Item is refused by name. The old fallback booked it 1:1 — the
             # same twelfth-of-the-stock, 12x-valuation error, with no warning.
             test_purchase_uom_conversion
+            # Last paid price per STOCK unit. A carton bought at 5500 for 10 Kg
+            # was offered as 5500 per Kg, so a purchase from item requests
+            # totalled ~8x too much and no custody could pay it (2026-10-19).
+            test_purchase_last_paid
             # The POS stock-update suppression hook. Its field read used to
             # throw on a class-level descriptor and get swallowed, silently
             # disabling the guard that stops stock being booked twice.

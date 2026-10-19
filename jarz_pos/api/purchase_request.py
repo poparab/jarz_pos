@@ -686,19 +686,36 @@ def get_open_request_lines(company: str | None = None) -> dict[str, Any]:
 
 	item_codes = list(grouped)
 	on_hand = _on_hand_by_item(item_codes)
-	last_rates = _last_purchase_rate_by_item(item_codes)
 	# So a line bought straight off the requests list carries the same VAT it
 	# would have carried had the buyer searched for the item by hand: the Item
 	# master's own template, else the site default from Jarz POS Settings.
 	# Company-scoped, so a default belonging to another company is not offered.
-	from jarz_pos.api.purchase import _item_tax_templates_bulk
+	from jarz_pos.api.purchase import (
+		_get_item_uoms_bulk,
+		_item_tax_templates_bulk,
+		last_paid_details_bulk,
+	)
 
+	last_paid = last_paid_details_bulk(item_codes)
 	tax_templates = _item_tax_templates_bulk(item_codes, company=resolved_company)
+	# Every unit the item can be bought in, not just the stock unit: a request
+	# raised in Box had to be bought in Kg because the line offered nothing else.
+	uom_map = _get_item_uoms_bulk(item_codes)
 
 	lines = []
 	for item_code, bucket in grouped.items():
 		bucket["on_hand_qty"] = on_hand.get(item_code, 0.0)
-		bucket["last_purchase_rate"] = last_rates.get(item_code, 0.0)
+		# Per stock unit — the unit the demand is expressed in. The raw invoice
+		# rate is per *billed* unit (a 10 Kg carton), and pricing a Kg at the
+		# carton price inflated the cart past every custody balance, which is
+		# what made a purchase from requests impossible to submit.
+		paid = last_paid.get(item_code) or {}
+		bucket["last_purchase_rate"] = paid.get("rate", 0.0)
+		bucket["last_purchase_uom"] = paid.get("uom")
+		bucket["last_purchase_uom_rate"] = paid.get("uom_rate", 0.0)
+		bucket["uoms"] = uom_map.get(item_code) or [
+			{"uom": bucket.get("stock_uom"), "conversion_factor": 1}
+		]
 		bucket["item_tax_template"] = tax_templates.get(item_code)
 		# Sort the per-branch breakdown by urgency so the tap-to-expand view
 		# leads with whoever needs it soonest.
@@ -859,28 +876,6 @@ def _on_hand_by_item(item_codes: Sequence[str]) -> dict[str, float]:
 	):
 		totals[row["item_code"]] = totals.get(row["item_code"], 0.0) + flt(row.get("actual_qty") or 0)
 	return totals
-
-
-def _last_purchase_rate_by_item(item_codes: Sequence[str]) -> dict[str, float]:
-	"""Most recent rate actually paid, per item.
-
-	Read from submitted Purchase Invoice lines rather than
-	``Item.last_purchase_rate``, which is also written by Purchase Orders and so
-	can reflect a price that was quoted but never paid.
-	"""
-	if not item_codes:
-		return {}
-	rows = frappe.get_all(
-		"Purchase Invoice Item",
-		filters={"item_code": ["in", list(item_codes)], "docstatus": 1},
-		fields=["item_code", "rate", "creation"],
-		order_by="creation desc",
-		limit_page_length=0,
-	)
-	latest: dict[str, float] = {}
-	for row in rows:
-		latest.setdefault(row["item_code"], flt(row.get("rate") or 0))
-	return latest
 
 
 def _user_label(user: str) -> str:
