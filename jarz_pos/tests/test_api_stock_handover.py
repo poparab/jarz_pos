@@ -24,6 +24,18 @@ FACTORY = "Finished Goods - J"
 DOKKI = "Dokki - J"
 ZAMALEK = "Zamalek - J"
 
+# now_datetime() reads System Settings through frappe.client_cache / frappe.db, which several
+# tests mock wholesale; on a cold timezone cache (bench run-tests) that mock answers instead.
+_NOW_PATCH = patch.object(svc, "_now", return_value=datetime(2026, 10, 20, 12, 0, 0))
+
+
+def setUpModule():
+	_NOW_PATCH.start()
+
+
+def tearDownModule():
+	_NOW_PATCH.stop()
+
 
 class NegativeStockError(frappe.ValidationError):
 	"""Same class name as ERPNext's, which is what the service looks for."""
