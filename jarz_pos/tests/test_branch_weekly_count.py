@@ -958,6 +958,23 @@ class TestBranchCountNotifications(unittest.TestCase):
 		row.update(overrides)
 		return row
 
+	def _patch_count_row(self, row):
+		"""Serve `row` for the Branch Weekly Count lookup only.
+
+		A blanket get_value mock also answers frappe's own lookups: under
+		`bench run-tests` the system time zone cache is cold, so now_datetime()
+		reads System Settings through get_value, gets the count row back and
+		raises. Every other doctype goes to the real (or stubbed) get_value.
+		"""
+		original = getattr(notifications.frappe.db, "get_value", None)
+
+		def get_value(doctype, *args, **kwargs):
+			if doctype == "Branch Weekly Count":
+				return row
+			return original(doctype, *args, **kwargs) if original else None
+
+		return patch.object(notifications.frappe.db, "get_value", side_effect=get_value, create=True)
+
 	def test_both_types_use_the_approvals_channel(self):
 		self.assertIn("branch_count_approval", notifications.APPROVAL_NOTIFICATION_TYPES)
 		self.assertIn("branch_count_rejected", notifications.APPROVAL_NOTIFICATION_TYPES)
@@ -967,7 +984,7 @@ class TestBranchCountNotifications(unittest.TestCase):
 		recipients = MagicMock(return_value=["boss@jarz.test"])
 		with (
 			patch.object(notifications, "outbound_alerts_suppressed", return_value=False),
-			patch.object(notifications.frappe.db, "get_value", return_value=self._row(), create=True),
+			self._patch_count_row(self._row()),
 			patch.object(notifications, "_branch_count_approver_recipients", recipients),
 			patch.object(notifications, "_send_branch_count_push", send),
 		):
@@ -1019,12 +1036,7 @@ class TestBranchCountNotifications(unittest.TestCase):
 		send = MagicMock(return_value={"ok": True, "status": "sent"})
 		with (
 			patch.object(notifications, "outbound_alerts_suppressed", return_value=False),
-			patch.object(
-				notifications.frappe.db,
-				"get_value",
-				return_value=self._row(status=STATUS.REJECTED),
-				create=True,
-			),
+			self._patch_count_row(self._row(status=STATUS.REJECTED)),
 			patch.object(notifications, "_send_branch_count_push", send),
 		):
 			notifications.notify_branch_count_rejected("BWC-1")

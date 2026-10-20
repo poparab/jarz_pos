@@ -786,6 +786,11 @@ jobs:
             # Entry (or stays Pending naming the shortage), reject/cancel
             # rules, shift-bound branch sides, branch transfers go pending.
             test_api_stock_handover
+            # Branch Weekly Count: the sheet lists every stock item in the
+            # branch, a submit must count all of them, the counter never sees
+            # system qty, a line manager posts at once while staff wait for
+            # approval, approve posts at counted_at, reject needs a reason.
+            test_branch_weekly_count
           )
           rc=0
           for m in "${MODULES[@]}"; do
