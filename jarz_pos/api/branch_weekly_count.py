@@ -49,6 +49,10 @@ from jarz_pos.utils.courier_visibility import (
 
 DOCTYPE = "Branch Weekly Count"
 
+_SETTINGS = "Jarz POS Settings"
+_APPROVER_TABLE = "Jarz Weekly Count Approver"
+_APPROVER_FIELD = "weekly_count_approvers"
+
 #: Week boundary: Python's ``date.weekday()`` is Monday=0 ... Saturday=5, Sunday=6.
 _SATURDAY = 5
 
@@ -138,17 +142,58 @@ def _approver_roles() -> set[str]:
 	return set(ROLES.LINE_MANAGER_TIER) | set(ROLES.STOCK) | set(ROLES.ADMIN)
 
 
+def listed_count_approvers() -> set[str] | None:
+	"""The enabled users on Jarz POS Settings -> Weekly Count Approvers.
+
+	``None`` when the list is empty (or the table is not migrated yet): approval
+	then falls back to the roles in ``_approver_roles``. Once anyone is listed,
+	the list alone decides, whatever roles other people hold.
+	"""
+	try:
+		users = frappe.get_all(
+			_APPROVER_TABLE,
+			filters={"parenttype": _SETTINGS, "parentfield": _APPROVER_FIELD},
+			pluck="user",
+		)
+		users = [u for u in users or [] if u]
+		if not users:
+			return None
+		return set(frappe.get_all("User", filters={"name": ["in", users], "enabled": 1}, pluck="name") or [])
+	except Exception:
+		try:
+			frappe.log_error(frappe.get_traceback(), "branch_count_approver_list_failed", defer_insert=True)
+		except Exception:
+			pass
+		return None
+
+
 def is_count_approver(user: str | None = None) -> bool:
-	"""Administrator, or anyone holding a line-manager-tier, stock or admin role."""
+	"""Administrator, or a listed approver (or, with no list, a line-manager-tier, stock or admin role)."""
 	user = user or frappe.session.user
 	if user == ROLES.ADMINISTRATOR:
 		return True
+	listed = listed_count_approvers()
+	if listed is not None:
+		return user in listed
 	return bool(set(frappe.get_roles(user) or []) & _approver_roles())
+
+
+def count_scope(user: str | None = None) -> list[str]:
+	"""Branches the caller may count, see and decide on.
+
+	A listed approver covers every enabled branch; anyone else keeps the usual
+	POS Profile scope.
+	"""
+	user = user or frappe.session.user
+	listed = listed_count_approvers()
+	if listed and user in listed:
+		return list(frappe.get_all("POS Profile", filters={"disabled": 0}, pluck="name") or [])
+	return get_allowed_pos_profiles_for_user(user)
 
 
 def count_pending_in_scope(user: str | None = None) -> int:
 	"""Pending Approval counts in the caller's branch scope (an empty scope is zero, never all)."""
-	scope = get_allowed_pos_profiles_for_user(user)
+	scope = count_scope(user)
 	if not scope:
 		return 0
 	return int(
@@ -197,7 +242,7 @@ def _member_profiles(user: str, profiles: list[str]) -> set[str]:
 	"""Which of *profiles* the user is actually a POS Profile User of."""
 	if not profiles:
 		return set()
-	if not user_has_global_profile_access(user):
+	if not user_has_global_profile_access(user) and user not in (listed_count_approvers() or ()):
 		# Their allowed list *is* their memberships.
 		return set(profiles)
 	return set(
@@ -290,7 +335,7 @@ def _count_summary(count: dict[str, Any] | None) -> dict[str, Any] | None:
 def _require_branch(pos_profile: str, user: str | None = None) -> dict[str, Any]:
 	"""The POS Profile row (name, warehouse, company) if the caller may use it, else a refusal."""
 	profile = str(pos_profile or "").strip()
-	if not profile or profile not in set(get_allowed_pos_profiles_for_user(user)):
+	if not profile or profile not in set(count_scope(user)):
 		_refuse("no_access", _("You are not allowed to count for this branch"), frappe.PermissionError)
 	row = frappe.db.get_value("POS Profile", profile, ["name", "warehouse", "company"], as_dict=True)
 	if not row or not row.get("warehouse"):
@@ -385,7 +430,7 @@ def get_weekly_count_status() -> dict[str, Any]:
 	week_start, due_date = _week_bounds(today)
 
 	approver = is_count_approver(user)
-	rows = _branch_rows(get_allowed_pos_profiles_for_user(user))
+	rows = _branch_rows(count_scope(user))
 	names = [r["name"] for r in rows]
 	members = _member_profiles(user, names)
 	this_week = _latest_counts(names, week_start)
@@ -459,7 +504,7 @@ def list_weekly_counts(status: str | None = None, pos_profile: str | None = None
 	"""Counts in the caller's branch scope, newest first (a non-approver sees only their own)."""
 	user = frappe.session.user
 	approver = is_count_approver(user)
-	scope = get_allowed_pos_profiles_for_user(user)
+	scope = count_scope(user)
 	if pos_profile:
 		scope = [p for p in scope if p == pos_profile]
 	if not scope:
@@ -490,7 +535,7 @@ def _load_visible_count(name: str, approver: bool, user: str):
 	if not name or not frappe.db.exists(DOCTYPE, name):
 		_refuse("not_found", _("Count not found"), frappe.DoesNotExistError)
 	doc = frappe.get_doc(DOCTYPE, name)
-	scope = set(get_allowed_pos_profiles_for_user(user))
+	scope = set(count_scope(user))
 	visible = doc.pos_profile in scope and (approver or doc.counted_by == user)
 	if not visible:
 		_refuse("no_access", _("You are not allowed to view this count"), frappe.PermissionError)
@@ -533,7 +578,7 @@ def get_weekly_count(name: str) -> dict[str, Any]:
 		approver
 		and doc.status == STATUS.PENDING_APPROVAL
 		and doc.counted_by != user
-		and doc.pos_profile in set(get_allowed_pos_profiles_for_user(user))
+		and doc.pos_profile in set(count_scope(user))
 	)
 	result["lines"] = lines
 	return result
@@ -614,8 +659,8 @@ def _enqueue_push(method: str, count_name: str, context: str) -> bool:
 def submit_weekly_count(pos_profile: str, lines: Any, client_request_id: str | None = None) -> dict[str, Any]:
 	"""Record this week's count for a branch.
 
-	A line manager or above posts immediately (auto-approved); anyone else
-	leaves it ``Pending Approval`` and the branch's approvers are pushed.
+	An approver (see ``is_count_approver``) posts immediately (auto-approved);
+	anyone else leaves it ``Pending Approval`` and the approvers are pushed.
 	"""
 	user = frappe.session.user
 	branch = _require_branch(pos_profile, user)
@@ -747,11 +792,11 @@ def submit_weekly_count(pos_profile: str, lines: Any, client_request_id: str | N
 def _load_pending_for_decision(name: str, user: str):
 	"""Row-locked count the caller may decide on, else a refusal."""
 	if not is_count_approver(user):
-		_refuse("no_access", _("Only a line manager or above can decide on a count"), frappe.PermissionError)
+		_refuse("no_access", _("Only a weekly count approver can decide on a count"), frappe.PermissionError)
 	if not name or not frappe.db.exists(DOCTYPE, name):
 		_refuse("not_found", _("Count not found"), frappe.DoesNotExistError)
 	doc = frappe.get_doc(DOCTYPE, name, for_update=True)
-	if doc.pos_profile not in set(get_allowed_pos_profiles_for_user(user)):
+	if doc.pos_profile not in set(count_scope(user)):
 		_refuse("no_access", _("You do not have access to this branch"), frappe.PermissionError)
 	if doc.status != STATUS.PENDING_APPROVAL:
 		_refuse("not_pending", _("This count is not waiting for approval"))
@@ -797,7 +842,7 @@ def reject_weekly_count(name: str, reason: str) -> dict[str, Any]:
 	"""Send a pending count back: the branch stays due and the counter is told to recount."""
 	user = frappe.session.user
 	if not is_count_approver(user):
-		_refuse("no_access", _("Only a line manager or above can decide on a count"), frappe.PermissionError)
+		_refuse("no_access", _("Only a weekly count approver can decide on a count"), frappe.PermissionError)
 	reason = str(reason or "").strip()
 	if not reason:
 		_refuse("reason_required", _("Say why the count is rejected"))

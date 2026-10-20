@@ -223,6 +223,7 @@ class _Base(unittest.TestCase):
 		self.patch(bwc, "_now", return_value=self.now)
 		self.patch(bwc.frappe, "session", new=SimpleNamespace(user=self.user), create=True)
 		self.patch(bwc, "is_count_approver", side_effect=lambda user=None: self.approver)
+		self.patch(bwc, "listed_count_approvers", return_value=None)
 		self.patch(bwc, "get_allowed_pos_profiles_for_user", return_value=["Dokki"])
 		self.patch(bwc, "_full_name", side_effect=lambda user: f"Name of {user}")
 		self.patch(bwc, "_reconcile_counts", new=self.reconcile)
@@ -883,6 +884,9 @@ class TestReads(_Base):
 class TestApprover(_Base):
 	def test_roles_that_approve(self):
 		self.stack.close()  # undo the is_count_approver stub from _Base.setUp
+		no_list = patch.object(bwc, "listed_count_approvers", return_value=None)
+		no_list.start()
+		self.addCleanup(no_list.stop)
 		for role in (
 			ROLES.JARZ_LINE_MANAGER,
 			ROLES.JARZ_LINE_MANAGER_ALT,
@@ -894,6 +898,59 @@ class TestApprover(_Base):
 		with patch.object(bwc.frappe, "get_roles", return_value=["Sales User"], create=True):
 			self.assertFalse(bwc.is_count_approver("someone@jarz.test"))
 		self.assertTrue(bwc.is_count_approver("Administrator"))
+
+	def test_the_list_alone_decides_once_anyone_is_on_it(self):
+		self.stack.close()
+		listed = {"kareem@jarz.test", "reem@jarz.test"}
+		with (
+			patch.object(bwc, "listed_count_approvers", return_value=listed),
+			patch.object(bwc.frappe, "get_roles", return_value=[ROLES.JARZ_LINE_MANAGER], create=True),
+		):
+			self.assertTrue(bwc.is_count_approver("kareem@jarz.test"))
+			self.assertFalse(bwc.is_count_approver("belal@jarz.test"))  # line manager, not listed
+			self.assertTrue(bwc.is_count_approver("Administrator"))
+
+	def test_a_list_of_only_disabled_users_approves_nobody(self):
+		self.stack.close()
+		with patch.object(bwc, "listed_count_approvers", return_value=set()):
+			self.assertFalse(bwc.is_count_approver("someone@jarz.test"))
+
+	def test_listed_approvers_reads_the_settings_table_and_drops_disabled_users(self):
+		def get_all(doctype, **kwargs):
+			if doctype == "Jarz Weekly Count Approver":
+				self.assertEqual(
+					kwargs["filters"],
+					{"parenttype": "Jarz POS Settings", "parentfield": "weekly_count_approvers"},
+				)
+				return ["kareem@jarz.test", "gone@jarz.test"]
+			if doctype == "User":
+				return ["kareem@jarz.test"]
+			return []
+
+		self.stack.close()
+		with patch.object(bwc.frappe, "get_all", side_effect=get_all, create=True):
+			self.assertEqual(bwc.listed_count_approvers(), {"kareem@jarz.test"})
+
+	def test_an_empty_or_unmigrated_list_falls_back_to_roles(self):
+		self.stack.close()
+		with patch.object(bwc.frappe, "get_all", return_value=[], create=True):
+			self.assertIsNone(bwc.listed_count_approvers())
+		with patch.object(bwc.frappe, "get_all", side_effect=RuntimeError("no table"), create=True):
+			self.assertIsNone(bwc.listed_count_approvers())
+
+	def test_a_listed_approver_covers_every_enabled_branch(self):
+		self.patch(bwc, "listed_count_approvers", return_value={"kareem@jarz.test"})
+		get_all = self.patch(bwc.frappe, "get_all", return_value=["Dokki", "Nasr city", "Zayed"], create=True)
+		self.assertEqual(bwc.count_scope("kareem@jarz.test"), ["Dokki", "Nasr city", "Zayed"])
+		get_all.assert_called_once_with("POS Profile", filters={"disabled": 0}, pluck="name")
+		self.assertEqual(bwc.count_scope("staff@jarz.test"), ["Dokki"])
+
+	def test_a_listed_approver_is_a_member_only_of_their_own_branches(self):
+		self.patch(bwc, "listed_count_approvers", return_value={"kareem@jarz.test"})
+		self.patch(bwc, "user_has_global_profile_access", return_value=False)
+		self.patch(bwc.frappe, "get_all", return_value=["Dokki"], create=True)
+		self.assertEqual(bwc._member_profiles("kareem@jarz.test", ["Dokki", "Zayed"]), {"Dokki"})
+		self.assertEqual(bwc._member_profiles("staff@jarz.test", ["Dokki", "Zayed"]), {"Dokki", "Zayed"})
 
 	def test_pending_count_with_no_branch_is_zero_not_all(self):
 		count = self.patch(bwc.frappe.db, "count", return_value=99, create=True)
@@ -1096,11 +1153,24 @@ class TestBranchCountNotifications(unittest.TestCase):
 			"staff@jarz.test",
 		]
 		with (
+			patch.object(bwc, "listed_count_approvers", return_value=None),
 			patch.object(notifications, "_get_users_with_roles", return_value=holders),
 			patch.object(notifications.frappe, "get_all", side_effect=fake_get_all, create=True),
 		):
 			result = notifications._branch_count_approver_recipients("Dokki", "staff@jarz.test")
 		self.assertEqual(result, ["branch.lead@jarz.test", "owner@jarz.test"])
+
+	def test_with_a_list_every_listed_approver_is_pushed_for_any_branch(self):
+		roles = MagicMock()
+		with (
+			patch.object(bwc, "listed_count_approvers", return_value={"kareem@jarz.test", "reem@jarz.test"}),
+			patch.object(notifications, "_get_users_with_roles", roles),
+		):
+			self.assertEqual(
+				notifications._branch_count_approver_recipients("Zayed", "reem@jarz.test"),
+				["kareem@jarz.test"],
+			)
+		roles.assert_not_called()
 
 
 if __name__ == "__main__":

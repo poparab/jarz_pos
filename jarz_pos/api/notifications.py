@@ -3242,14 +3242,22 @@ def send_task_notification(
 def _branch_count_approver_recipients(pos_profile: str, exclude: str | None = None) -> list[str]:
 	"""Enabled approvers who may act on *pos_profile*, minus *exclude*.
 
-	Approver = a role in LINE_MANAGER_TIER | STOCK | ADMIN (the same set
-	``api.branch_weekly_count`` gates approval on). Branch access is the usual
-	rule: a global user (Administrator or an ADMIN role) sees every branch,
-	anyone else only the POS Profiles they are a POS Profile User of.
+	When Jarz POS Settings lists Weekly Count Approvers, those people approve on
+	every branch and they alone are pushed. With no list, approver = a role in
+	LINE_MANAGER_TIER | STOCK | ADMIN (the same fallback
+	``api.branch_weekly_count`` gates approval on), and branch access is the
+	usual rule: a global user (Administrator or an ADMIN role) sees every
+	branch, anyone else only the POS Profiles they are a POS Profile User of.
 	"""
+	from jarz_pos.api.branch_weekly_count import listed_count_approvers
+
+	skip = _safe_str(exclude).strip()
+	listed = listed_count_approvers()
+	if listed is not None:
+		return sorted(u for u in listed if u != skip)
+
 	roles = set(ROLES.LINE_MANAGER_TIER) | set(ROLES.STOCK) | set(ROLES.ADMIN)
 	holders = _get_users_with_roles(sorted(roles))
-	skip = _safe_str(exclude).strip()
 	candidates = [u for u in holders if u != skip]
 	if not candidates:
 		return []

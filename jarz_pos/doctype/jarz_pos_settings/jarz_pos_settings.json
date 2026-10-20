@@ -115,7 +115,9 @@
   "roster_courier_designations",
   "roster_courier_overtime_multiplier",
   "roster_default_overtime_multiplier",
-  "attendance_late_grace_minutes"
+  "attendance_late_grace_minutes",
+  "weekly_count_section",
+  "weekly_count_approvers"
  ],
  "fields": [
   {
@@ -850,12 +852,24 @@
    "label": "Attendance Late Grace (minutes)",
    "default": "15",
    "description": "Minutes after a shift's start time before an arrival is reported as late on the attendance screen. NOT the HRMS Shift Type 'late entry grace period', which Desk only exposes once auto-attendance is enabled and which is unset on every shift here. Reporting only: nothing is written to any Attendance or payroll record. 0 means no grace at all."
+  },
+  {
+   "fieldname": "weekly_count_section",
+   "fieldtype": "Section Break",
+   "label": "Weekly Branch Count"
+  },
+  {
+   "description": "Who approves the weekly branch counts. Everyone listed approves on every branch, and their own counts post straight away; anyone else's count waits for one of them. Leave empty to fall back to the line-manager, stock and admin roles.",
+   "fieldname": "weekly_count_approvers",
+   "fieldtype": "Table",
+   "label": "Weekly Count Approvers",
+   "options": "Jarz Weekly Count Approver"
   }
  ],
  "index_web_pages_for_search": 0,
  "issingle": 1,
  "links": [],
- "modified": "2026-10-14 18:00:00.000000",
+ "modified": "2026-10-21 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "jarz pos",
  "name": "Jarz POS Settings",
