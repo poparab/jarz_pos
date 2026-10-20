@@ -698,6 +698,189 @@ def _build_negative_stock_submission_message(error: Exception) -> str:
 	).format(_normalize_inventory_error_text(error))
 
 
+def _reconcile_counts(
+	warehouse: str,
+	posting_date: str | None,
+	lines: list[dict[str, Any]],
+	debug: bool = False,
+) -> dict[str, Any]:
+	"""Post the Stock Reconciliation for counted lines. No permission check, no commit.
+
+	The shared engine behind :func:`submit_reconciliation` (manager count) and
+	the Branch Weekly Count approval. Callers own the access check and the
+	transaction: this inserts and submits the document and leaves the commit to
+	them, so an approval can stamp its own fields in the same transaction.
+
+	``lines`` take the shape :func:`_normalize_count_lines` accepts. Only rows
+	that differ from the Bin are written. ``posting_date`` may carry a time
+	("YYYY-MM-DD HH:MM:SS"). Returns ``{"ok", "stock_reconciliation", "differences"}``
+	(``stock_reconciliation`` is None with ``message`` set when nothing differs).
+	A failed insert/submit raises (a negative-stock refusal with a readable
+	message); with ``debug`` it returns ``{"ok": False, "error", "traceback"}``.
+	"""
+	counted, provided_vr, provided_batch, provided_serials = _normalize_count_lines(lines)
+
+	# Current quantities
+	cur_qty_map = _get_bin_qty_map(warehouse, list(counted.keys()))
+
+	# Create Stock Reconciliation only for differences
+	sr = frappe.new_doc("Stock Reconciliation")
+	# Set company from warehouse to align with stock rules across environments
+	wh_company = frappe.db.get_value("Warehouse", warehouse, "company")
+	if wh_company:
+		sr.company = wh_company
+	if posting_date:
+		# ``posting_date`` may carry a time ("YYYY-MM-DD HH:MM:SS"); a
+		# date-only value keeps behaving exactly as it did before.
+		apply_stock_posting_datetime(sr, posting_date)
+	else:
+		from frappe.utils import today
+
+		sr.posting_date = today()
+	sr.set_posting_time = 1
+	sr.purpose = "Stock Reconciliation"
+	# Ensure accounting defaults to avoid validation failures on some sites
+	if sr.company:
+		comp = frappe.get_all(
+			"Company",
+			filters={"name": sr.company},
+			fields=["stock_adjustment_account", "cost_center"],
+			limit=1,
+		)
+		if comp:
+			diff_acct = comp[0].get("stock_adjustment_account")
+			if diff_acct:
+				try:
+					sr.difference_account = diff_acct
+				except Exception:
+					pass
+			cc = comp[0].get("cost_center")
+			if cc:
+				try:
+					sr.cost_center = cc
+				except Exception:
+					pass
+
+	diffs = 0
+	# Allow zero valuation flag: some sites may not have this field; default to False
+	allow_zero_val = False
+	try:
+		_allow_zero_val = frappe.db.get_single_value("Stock Settings", "allow_zero_valuation_rate")
+		allow_zero_val = bool(_allow_zero_val or 0)
+	except Exception:
+		allow_zero_val = False
+	for code, counted_stock_qty in counted.items():
+		current = float(cur_qty_map.get(code, 0))
+		if abs(counted_stock_qty - current) < 1e-9:
+			continue
+		# If we're increasing stock and ERPNext may require valuation_rate, attempt to provide it
+		row: dict[str, Any] = {
+			"item_code": code,
+			"warehouse": warehouse,
+			"qty": counted_stock_qty,
+		}
+
+		is_increase = counted_stock_qty > current
+		if is_increase:
+			# Prefer client-provided valuation_rate if valid (> 0)
+			vr = provided_vr.get(code)
+			if vr is not None and float(vr) <= 0:
+				vr = None
+			if vr is None:
+				vr = _resolve_item_valuation(code, warehouse)
+			# If zero or negative, treat as missing unless zero valuation is allowed
+			if vr is not None and float(vr) <= 0:
+				vr = None if not allow_zero_val else 0.0
+			if vr is None and allow_zero_val:
+				vr = 0.0
+			if vr is None:
+				# Keep the failure user-facing, but explain which item/warehouse increase caused it.
+				frappe.throw(
+					_build_missing_valuation_rate_message(
+						item_code=code,
+						warehouse=warehouse,
+						current_qty=current,
+						counted_qty=counted_stock_qty,
+					)
+				)
+			row["valuation_rate"] = float(vr)
+		else:
+			# A decrease states no rate, so ERPNext keeps the current one --
+			# and refuses the whole count if that rate has gone negative.
+			current_rate = _current_valuation_rate(
+				code,
+				warehouse,
+				getattr(sr, "posting_date", None),
+				getattr(sr, "posting_time", None),
+			)
+			if current_rate is not None and current_rate < 0:
+				vr = _resolve_item_valuation(code, warehouse)
+				if vr is None:
+					frappe.throw(
+						_(
+							"Item {0} in Warehouse {1} is valued at a negative rate ({2}) and no positive valuation rate could be resolved. Set the Item's Valuation Rate, then count again."
+						).format(code, warehouse, current_rate)
+					)
+				row["valuation_rate"] = float(vr)
+
+		# Handle batch/serial requirements
+		has_batch = bool(frappe.db.get_value("Item", code, "has_batch_no") or 0)
+		has_serial = bool(frappe.db.get_value("Item", code, "has_serial_no") or 0)
+		if has_serial and is_increase:
+			# For increases, serial numbers are mandatory and cannot be auto-generated safely here
+			serials = provided_serials.get(code)
+			if not serials:
+				frappe.throw(
+					_(
+						"Serial No is required for Item {0}. Please provide serial_no/serial_nos in the submitted lines."
+					).format(code)
+				)
+			row["serial_no"] = serials
+		if has_batch and is_increase:
+			bno = provided_batch.get(code)
+			if not bno:
+				# Try reuse any existing batch for this item; else create a simple batch
+				ex = frappe.get_all("Batch", filters={"item": code}, fields=["name"], limit=1)
+				if ex:
+					bno = ex[0]["name"]
+				else:
+					from frappe.utils import today
+
+					b = frappe.new_doc("Batch")
+					b.item = code
+					b.batch_id = f"AUTO-{code}-{today()}"
+					b.insert(ignore_permissions=True)
+					bno = b.name
+			row["batch_no"] = bno
+
+		sr.append("items", row)
+		diffs += 1
+
+	if diffs == 0:
+		return {
+			"ok": True,
+			"stock_reconciliation": None,
+			"message": "No differences found",
+			"differences": 0,
+		}
+
+	# Save & submit
+	try:
+		sr.flags.ignore_permissions = True
+		sr.insert()
+		sr.flags.ignore_permissions = True
+		sr.submit()
+	except Exception as e:
+		tb = _safe_log("jarz_pos.submit_reconciliation")
+		if debug:
+			return {"ok": False, "error": str(e), "traceback": tb}
+		if e.__class__.__name__.endswith("NegativeStockError"):
+			frappe.throw(_build_negative_stock_submission_message(e))
+		frappe.throw(_(f"Submit reconciliation failed: {e}"))
+
+	return {"ok": True, "stock_reconciliation": sr.name, "differences": diffs}
+
+
 @frappe.whitelist(methods=["POST"])
 def submit_reconciliation(
 	warehouse: str,
@@ -736,10 +919,9 @@ def submit_reconciliation(
 		if not warehouse:
 			frappe.throw(_("warehouse is required"))
 
-		counted, provided_vr, provided_batch, provided_serials = _normalize_count_lines(lines)
-
 		# Enforce all items counted (subset: items matching the search criteria we expose)
 		if int(enforce_all or 0):
+			counted, _vr, _batch, _serials = _normalize_count_lines(lines)
 			expected = list_items_for_count(warehouse=warehouse)  # type: ignore
 			expected_codes = {e["item_code"] for e in expected}
 			missing = [c for c in expected_codes if c not in counted]
@@ -750,161 +932,19 @@ def submit_reconciliation(
 					)
 				)
 
-		# Current quantities
-		cur_qty_map = _get_bin_qty_map(warehouse, list(counted.keys()))
-
-		# Create Stock Reconciliation only for differences
-		sr = frappe.new_doc("Stock Reconciliation")
-		# Set company from warehouse to align with stock rules across environments
-		wh_company = frappe.db.get_value("Warehouse", warehouse, "company")
-		if wh_company:
-			sr.company = wh_company
-		if posting_date:
-			# ``posting_date`` may carry a time ("YYYY-MM-DD HH:MM:SS"); a
-			# date-only value keeps behaving exactly as it did before.
-			apply_stock_posting_datetime(sr, posting_date)
-		else:
-			from frappe.utils import today
-
-			sr.posting_date = today()
-		sr.set_posting_time = 1
-		sr.purpose = "Stock Reconciliation"
-		# Ensure accounting defaults to avoid validation failures on some sites
-		if sr.company:
-			comp = frappe.get_all(
-				"Company",
-				filters={"name": sr.company},
-				fields=["stock_adjustment_account", "cost_center"],
-				limit=1,
-			)
-			if comp:
-				diff_acct = comp[0].get("stock_adjustment_account")
-				if diff_acct:
-					try:
-						sr.difference_account = diff_acct
-					except Exception:
-						pass
-				cc = comp[0].get("cost_center")
-				if cc:
-					try:
-						sr.cost_center = cc
-					except Exception:
-						pass
-
-		diffs = 0
-		# Allow zero valuation flag: some sites may not have this field; default to False
-		allow_zero_val = False
-		try:
-			_allow_zero_val = frappe.db.get_single_value("Stock Settings", "allow_zero_valuation_rate")
-			allow_zero_val = bool(_allow_zero_val or 0)
-		except Exception:
-			allow_zero_val = False
-		for code, counted_stock_qty in counted.items():
-			current = float(cur_qty_map.get(code, 0))
-			if abs(counted_stock_qty - current) < 1e-9:
-				continue
-			# If we're increasing stock and ERPNext may require valuation_rate, attempt to provide it
-			row: dict[str, Any] = {
-				"item_code": code,
-				"warehouse": warehouse,
-				"qty": counted_stock_qty,
-			}
-
-			is_increase = counted_stock_qty > current
-			if is_increase:
-				# Prefer client-provided valuation_rate if valid (> 0)
-				vr = provided_vr.get(code)
-				if vr is not None and float(vr) <= 0:
-					vr = None
-				if vr is None:
-					vr = _resolve_item_valuation(code, warehouse)
-				# If zero or negative, treat as missing unless zero valuation is allowed
-				if vr is not None and float(vr) <= 0:
-					vr = None if not allow_zero_val else 0.0
-				if vr is None and allow_zero_val:
-					vr = 0.0
-				if vr is None:
-					# Keep the failure user-facing, but explain which item/warehouse increase caused it.
-					frappe.throw(
-						_build_missing_valuation_rate_message(
-							item_code=code,
-							warehouse=warehouse,
-							current_qty=current,
-							counted_qty=counted_stock_qty,
-						)
-					)
-				row["valuation_rate"] = float(vr)
-			else:
-				# A decrease states no rate, so ERPNext keeps the current one --
-				# and refuses the whole count if that rate has gone negative.
-				current_rate = _current_valuation_rate(
-					code,
-					warehouse,
-					getattr(sr, "posting_date", None),
-					getattr(sr, "posting_time", None),
-				)
-				if current_rate is not None and current_rate < 0:
-					vr = _resolve_item_valuation(code, warehouse)
-					if vr is None:
-						frappe.throw(
-							_(
-								"Item {0} in Warehouse {1} is valued at a negative rate ({2}) and no positive valuation rate could be resolved. Set the Item's Valuation Rate, then count again."
-							).format(code, warehouse, current_rate)
-						)
-					row["valuation_rate"] = float(vr)
-
-			# Handle batch/serial requirements
-			has_batch = bool(frappe.db.get_value("Item", code, "has_batch_no") or 0)
-			has_serial = bool(frappe.db.get_value("Item", code, "has_serial_no") or 0)
-			if has_serial and is_increase:
-				# For increases, serial numbers are mandatory and cannot be auto-generated safely here
-				serials = provided_serials.get(code)
-				if not serials:
-					frappe.throw(
-						_(
-							"Serial No is required for Item {0}. Please provide serial_no/serial_nos in the submitted lines."
-						).format(code)
-					)
-				row["serial_no"] = serials
-			if has_batch and is_increase:
-				bno = provided_batch.get(code)
-				if not bno:
-					# Try reuse any existing batch for this item; else create a simple batch
-					ex = frappe.get_all("Batch", filters={"item": code}, fields=["name"], limit=1)
-					if ex:
-						bno = ex[0]["name"]
-					else:
-						from frappe.utils import today
-
-						b = frappe.new_doc("Batch")
-						b.item = code
-						b.batch_id = f"AUTO-{code}-{today()}"
-						b.insert(ignore_permissions=True)
-						bno = b.name
-				row["batch_no"] = bno
-
-			sr.append("items", row)
-			diffs += 1
-
-		if diffs == 0:
+		result = _reconcile_counts(warehouse, posting_date, lines, debug=bool(debug_flag))
+		if not result.get("ok"):
+			# debug mode: the failure dict, exactly as before (nothing to commit)
+			return result
+		if result.get("stock_reconciliation") is None:
 			return {"ok": True, "stock_reconciliation": None, "message": "No differences found"}
 
-		# Save & submit
-		try:
-			sr.flags.ignore_permissions = True
-			sr.insert()
-			sr.flags.ignore_permissions = True
-			sr.submit()
-			frappe.db.commit()
-		except Exception as e:
-			tb = _safe_log("jarz_pos.submit_reconciliation")
-			if debug_flag:
-				return {"ok": False, "error": str(e), "traceback": tb}
-			if e.__class__.__name__.endswith("NegativeStockError"):
-				frappe.throw(_build_negative_stock_submission_message(e))
-			frappe.throw(_(f"Submit reconciliation failed: {e}"))
-
-		return {"ok": True, "stock_reconciliation": sr.name, "differences": diffs}
+		frappe.db.commit()
+		return {
+			"ok": True,
+			"stock_reconciliation": result["stock_reconciliation"],
+			"differences": result["differences"],
+		}
 
 	except Exception as e:
 		tb = _safe_log("jarz_pos.submit_reconciliation")

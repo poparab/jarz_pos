@@ -414,13 +414,25 @@ SETTLEMENT_REMINDER_NOTIFICATION_TYPE = "settlement_reminder"
 #: (services.chat_alerts.check_waiting). Quiet approvals channel, never the
 #: order alarm: a chat is answered within minutes, not a counter emergency.
 CHAT_WAITING_NOTIFICATION_TYPE = "chat_waiting"
+#: Branch Weekly Count (``api.branch_weekly_count``): a staff count is waiting
+#: for a line manager, or a manager sent one back for a recount. Both are
+#: decisions or chores for the day, not order alarms: the approvals channel.
+BRANCH_COUNT_APPROVAL_NOTIFICATION_TYPE = "branch_count_approval"
+BRANCH_COUNT_REJECTED_NOTIFICATION_TYPE = "branch_count_rejected"
+#: Stock Handover (``services.stock_handover``): the other side declared,
+#: changed, confirmed, rejected or cancelled a stock movement, or one is still
+#: waiting for an answer. A thing to act on, not an order alarm.
+STOCK_HANDOVER_NOTIFICATION_TYPE = "stock_handover"
 #: Push types that belong on the approvals channel.
 APPROVAL_NOTIFICATION_TYPES = (
 	EXPENSE_APPROVAL_NOTIFICATION_TYPE,
+	BRANCH_COUNT_APPROVAL_NOTIFICATION_TYPE,
+	BRANCH_COUNT_REJECTED_NOTIFICATION_TYPE,
 	LABEL_STOCK_NOTIFICATION_TYPE,
 	TASK_NOTIFICATION_TYPE,
 	SETTLEMENT_REMINDER_NOTIFICATION_TYPE,
 	CHAT_WAITING_NOTIFICATION_TYPE,
+	STOCK_HANDOVER_NOTIFICATION_TYPE,
 )
 
 
@@ -3212,6 +3224,215 @@ def send_task_notification(
 	except Exception:
 		try:
 			frappe.log_error(frappe.get_traceback(), "task_notification_failed", defer_insert=True)
+		except Exception:
+			pass
+		result["ok"] = False
+		result["status"] = "failed_exception"
+		return result
+
+
+# ── Branch Weekly Count ───────────────────────────────────────────────────────
+#
+# Both entry points take the count NAME (RQ pickles job arguments, and a
+# Document does not survive the trip) and are queued by api.branch_weekly_count
+# with enqueue_after_commit, so the count is durable before any device is told.
+# Neither raises: a push that cannot be sent must never undo a stock count.
+
+
+def _branch_count_approver_recipients(pos_profile: str, exclude: str | None = None) -> list[str]:
+	"""Enabled approvers who may act on *pos_profile*, minus *exclude*.
+
+	Approver = a role in LINE_MANAGER_TIER | STOCK | ADMIN (the same set
+	``api.branch_weekly_count`` gates approval on). Branch access is the usual
+	rule: a global user (Administrator or an ADMIN role) sees every branch,
+	anyone else only the POS Profiles they are a POS Profile User of.
+	"""
+	roles = set(ROLES.LINE_MANAGER_TIER) | set(ROLES.STOCK) | set(ROLES.ADMIN)
+	holders = _get_users_with_roles(sorted(roles))
+	skip = _safe_str(exclude).strip()
+	candidates = [u for u in holders if u != skip]
+	if not candidates:
+		return []
+
+	try:
+		member_of = set(
+			frappe.get_all(
+				"POS Profile User",
+				filters={"parent": pos_profile, "user": ["in", candidates]},
+				pluck="user",
+			)
+			or []
+		)
+		global_users = set(
+			frappe.get_all(
+				"Has Role",
+				filters={"role": ["in", sorted(ROLES.ADMIN)], "parent": ["in", candidates]},
+				pluck="parent",
+			)
+			or []
+		)
+	except Exception:
+		frappe.log_error(frappe.get_traceback(), "branch_count_recipients_failed", defer_insert=True)
+		return []
+	global_users.add(ROLES.ADMINISTRATOR)
+	return [u for u in candidates if u in member_of or u in global_users]
+
+
+def _send_branch_count_push(
+	recipients: Sequence[str], data: dict[str, str], gap_title: str, throttle_key: str
+) -> dict[str, Any]:
+	"""FCM plus web push for one Branch Weekly Count event."""
+	tokens, token_platforms = _get_token_targets_for_users(list(recipients))
+	vapid_subs = _get_vapid_subscriptions_for_users(list(recipients))
+	if tokens:
+		fcm_result = _send_fcm_notifications(tokens, data, platforms=token_platforms)
+	else:
+		fcm_result = _new_fcm_send_result(tokens, "skipped_no_tokens")
+		fcm_result["ok"] = True
+	if vapid_subs:
+		vapid_result = _send_vapid_notifications(vapid_subs, data)
+	else:
+		vapid_result = {
+			"ok": True,
+			"status": "skipped_no_subscriptions",
+			"success_count": 0,
+			"failure_count": 0,
+		}
+	if not tokens and not vapid_subs:
+		_log_notification_gap(
+			gap_title,
+			(
+				f"{data.get('count_name')} resolved {len(recipients)} recipient(s) but none has "
+				f"an enabled push token or web-push subscription. Recipients: {', '.join(recipients)}."
+			),
+			throttle_key=throttle_key,
+		)
+	return {
+		"ok": bool(fcm_result.get("ok")) or bool(vapid_result.get("ok")),
+		"status": fcm_result.get("status"),
+		"success_count": fcm_result.get("success_count", 0) + vapid_result.get("success_count", 0),
+		"failure_count": fcm_result.get("failure_count", 0) + vapid_result.get("failure_count", 0),
+	}
+
+
+def notify_branch_count_approval_required(count_name: str) -> dict[str, Any]:
+	"""Tell every approver of the branch that a staff count awaits their decision.
+
+	Excludes the counter. Body: "<counter name> · <branch> · <n> اختلاف".
+	"""
+	result: dict[str, Any] = {"ok": True, "status": "skipped", "recipients": 0}
+	try:
+		name = _safe_str(count_name).strip()
+		if not name:
+			result["status"] = "skipped_no_count"
+			return result
+		if outbound_alerts_suppressed("branch_count_approval"):
+			result["status"] = "suppressed_test_run"
+			return result
+		row = frappe.db.get_value(
+			"Branch Weekly Count",
+			name,
+			["pos_profile", "counted_by", "counted_by_name", "differences_count", "status"],
+			as_dict=True,
+		)
+		if not row:
+			result["status"] = "skipped_count_missing"
+			return result
+		if _safe_str(row.get("status")) != STATUS.PENDING_APPROVAL:
+			# Decided between the submit and this job running: nothing to ask.
+			result["status"] = "skipped_not_pending"
+			return result
+
+		recipients = _branch_count_approver_recipients(row.get("pos_profile"), row.get("counted_by"))
+		result["recipients"] = len(recipients)
+		if not recipients:
+			result["status"] = "skipped_no_recipients"
+			return result
+
+		counter = _pick_display_text(row.get("counted_by_name"), row.get("counted_by"), fallback="Someone")
+		branch = _safe_str(row.get("pos_profile"))
+		differences = int(row.get("differences_count") or 0)
+		data = {
+			"type": BRANCH_COUNT_APPROVAL_NOTIFICATION_TYPE,
+			"count_name": name,
+			"pos_profile": branch,
+			# The count name is the tray tag: each branch's count (and each
+			# recount) has its own name, so entries never collapse into one.
+			"notification_id": name,
+			"title": "جرد أسبوعي بانتظار الموافقة",
+			"body": f"{counter} · {branch} · {differences} اختلاف",
+			"timestamp": frappe.utils.now_datetime().isoformat(),
+		}
+		result.update(
+			_send_branch_count_push(
+				recipients,
+				data,
+				"Branch count approval reached no device",
+				"branch_count_approval:notokens",
+			)
+		)
+		return result
+	except Exception:
+		try:
+			frappe.log_error(
+				frappe.get_traceback(), "branch_count_approval_notification_failed", defer_insert=True
+			)
+		except Exception:
+			pass
+		result["ok"] = False
+		result["status"] = "failed_exception"
+		return result
+
+
+def notify_branch_count_rejected(count_name: str) -> dict[str, Any]:
+	"""Tell the counter their weekly count was sent back for a recount."""
+	result: dict[str, Any] = {"ok": True, "status": "skipped", "recipients": 0}
+	try:
+		name = _safe_str(count_name).strip()
+		if not name:
+			result["status"] = "skipped_no_count"
+			return result
+		if outbound_alerts_suppressed("branch_count_rejected"):
+			result["status"] = "suppressed_test_run"
+			return result
+		row = frappe.db.get_value(
+			"Branch Weekly Count",
+			name,
+			["pos_profile", "counted_by", "rejection_reason"],
+			as_dict=True,
+		)
+		if not row:
+			result["status"] = "skipped_count_missing"
+			return result
+		counter = _safe_str(row.get("counted_by")).strip()
+		if not counter:
+			result["status"] = "skipped_no_recipients"
+			return result
+		result["recipients"] = 1
+
+		data = {
+			"type": BRANCH_COUNT_REJECTED_NOTIFICATION_TYPE,
+			"count_name": name,
+			"pos_profile": _safe_str(row.get("pos_profile")),
+			"notification_id": f"{name}-rejected",
+			"title": "الجرد الأسبوعي مرفوض — أعد العد",
+			"body": _pick_display_text(row.get("rejection_reason"), fallback="الجرد الأسبوعي مرفوض"),
+			"timestamp": frappe.utils.now_datetime().isoformat(),
+		}
+		result.update(
+			_send_branch_count_push(
+				[counter],
+				data,
+				"Branch count rejection reached no device",
+				"branch_count_rejected:notokens",
+			)
+		)
+		return result
+	except Exception:
+		try:
+			frappe.log_error(
+				frappe.get_traceback(), "branch_count_rejected_notification_failed", defer_insert=True
+			)
 		except Exception:
 			pass
 		result["ok"] = False

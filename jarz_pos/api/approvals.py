@@ -38,6 +38,9 @@ Q_TASKS_ASSIGNED = "tasks_assigned"
 Q_TASKS_REVIEW = "tasks_review"
 #: B2B credit collections (``api.settlement_terms``): shops overdue or due today.
 Q_CREDIT_COLLECTIONS = "credit_collections"
+#: Branch Weekly Count (``api.branch_weekly_count``): staff counts waiting for a
+#: line manager of the branch.
+Q_BRANCH_COUNTS = "branch_counts"
 
 
 #: One Error Log row per broken queue per this many seconds. The endpoint is
@@ -215,6 +218,17 @@ def _credit_collections_queue() -> dict[str, Any] | None:
 	return {"count": int(count_collections_needing_attention() or 0)}
 
 
+def _branch_counts_queue() -> dict[str, Any] | None:
+	from jarz_pos.api import branch_weekly_count
+
+	# Approvers only, and only the branches they can act on: the same predicate
+	# and scope approve_weekly_count enforces, so the badge never leads to a
+	# Review screen whose Approve button answers 403.
+	if not branch_weekly_count.is_count_approver():
+		return None
+	return {"count": branch_weekly_count.count_pending_in_scope()}
+
+
 _QUEUES: list[tuple] = [
 	(Q_EXPENSES, _expenses_queue),
 	(Q_EMPLOYEE_ADVANCES, _employee_advances_queue),
@@ -224,6 +238,7 @@ _QUEUES: list[tuple] = [
 	(Q_TASKS_ASSIGNED, _tasks_assigned_queue),
 	(Q_TASKS_REVIEW, _tasks_review_queue),
 	(Q_CREDIT_COLLECTIONS, _credit_collections_queue),
+	(Q_BRANCH_COUNTS, _branch_counts_queue),
 ]
 
 

@@ -1,0 +1,240 @@
+{
+ "actions": [],
+ "autoname": "format:BWC-{YYYY}-{#####}",
+ "creation": "2026-10-20 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "pos_profile",
+  "warehouse",
+  "company",
+  "week_start",
+  "status",
+  "section_counter",
+  "counted_by",
+  "counted_by_name",
+  "counted_at",
+  "section_approval",
+  "approved_by",
+  "approved_by_name",
+  "approved_at",
+  "auto_approved",
+  "rejection_reason",
+  "section_result",
+  "stock_reconciliation",
+  "total_items",
+  "differences_count",
+  "client_request_id",
+  "section_items",
+  "items"
+ ],
+ "fields": [
+  {
+   "bold": 1,
+   "fieldname": "pos_profile",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "POS Profile",
+   "options": "POS Profile",
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "warehouse",
+   "fieldtype": "Link",
+   "in_list_view": 0,
+   "label": "Warehouse",
+   "options": "Warehouse",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "label": "Company",
+   "options": "Company",
+   "read_only": 1
+  },
+  {
+   "description": "The Saturday that starts the count week (Saturday to Friday).",
+   "fieldname": "week_start",
+   "fieldtype": "Date",
+   "in_list_view": 1,
+   "label": "Week Start",
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "default": "Pending Approval",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Status",
+   "options": "Pending Approval\nApproved\nRejected",
+   "search_index": 1
+  },
+  {
+   "fieldname": "section_counter",
+   "fieldtype": "Section Break",
+   "label": "Counter"
+  },
+  {
+   "fieldname": "counted_by",
+   "fieldtype": "Link",
+   "label": "Counted By",
+   "options": "User",
+   "read_only": 1
+  },
+  {
+   "fieldname": "counted_by_name",
+   "fieldtype": "Data",
+   "label": "Counted By Name",
+   "read_only": 1
+  },
+  {
+   "description": "When the stock was counted. The Stock Reconciliation is posted at this moment.",
+   "fieldname": "counted_at",
+   "fieldtype": "Datetime",
+   "label": "Counted At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_approval",
+   "fieldtype": "Section Break",
+   "label": "Approval"
+  },
+  {
+   "fieldname": "approved_by",
+   "fieldtype": "Link",
+   "label": "Approved By",
+   "options": "User",
+   "read_only": 1
+  },
+  {
+   "fieldname": "approved_by_name",
+   "fieldtype": "Data",
+   "label": "Approved By Name",
+   "read_only": 1
+  },
+  {
+   "fieldname": "approved_at",
+   "fieldtype": "Datetime",
+   "label": "Approved At",
+   "read_only": 1
+  },
+  {
+   "description": "Counted by a line manager or above: posted without a separate approval.",
+   "fieldname": "auto_approved",
+   "fieldtype": "Check",
+   "label": "Auto Approved",
+   "read_only": 1
+  },
+  {
+   "fieldname": "rejection_reason",
+   "fieldtype": "Small Text",
+   "label": "Rejection Reason",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_result",
+   "fieldtype": "Section Break",
+   "label": "Result"
+  },
+  {
+   "fieldname": "stock_reconciliation",
+   "fieldtype": "Link",
+   "label": "Stock Reconciliation",
+   "options": "Stock Reconciliation",
+   "read_only": 1
+  },
+  {
+   "fieldname": "total_items",
+   "fieldtype": "Int",
+   "label": "Total Items",
+   "read_only": 1
+  },
+  {
+   "fieldname": "differences_count",
+   "fieldtype": "Int",
+   "label": "Differences Count",
+   "read_only": 1
+  },
+  {
+   "description": "Idempotency key from the app; empty for counts made elsewhere.",
+   "fieldname": "client_request_id",
+   "fieldtype": "Data",
+   "label": "Client Request Id",
+   "read_only": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "section_items",
+   "fieldtype": "Section Break",
+   "label": "Counted Items"
+  },
+  {
+   "fieldname": "items",
+   "fieldtype": "Table",
+   "label": "Items",
+   "options": "Branch Weekly Count Item"
+  }
+ ],
+ "index_web_pages_for_search": 1,
+ "links": [],
+ "modified": "2026-10-20 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "jarz pos",
+ "name": "Branch Weekly Count",
+ "naming_rule": "Expression",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Stock Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "JARZ Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "read": 1,
+   "report": 1,
+   "role": "JARZ line manager"
+  }
+ ],
+ "row_format": "Dynamic",
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}
