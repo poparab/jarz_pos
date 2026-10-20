@@ -1,8 +1,12 @@
-"""Custom fields for check-in device flagging (idempotent, after_migrate).
+"""Custom fields for check-in device flagging and log-type correction
+(idempotent, after_migrate).
 
 Reuses ``roster_setup._ensure_fields`` so the mechanism is identical to the
 roster fields: one ``create_custom_fields`` call per field, failures logged and
 never raised, safe on a bench without HRMS.
+
+The two log-type fields (``custom_original_log_type`` / ``custom_log_type_note``)
+record a Check Out that ``services/checkin_log_type`` rewrote into a Check In.
 """
 
 from __future__ import annotations
@@ -14,6 +18,7 @@ from jarz_pos.services.checkin_device import (
 	FLAG_NONE_AVAILABLE,
 	FLAG_SHARED,
 )
+from jarz_pos.services.checkin_log_type import LOG_TYPE_NOTE_FIELD, ORIGINAL_LOG_TYPE_FIELD
 from jarz_pos.setup.roster_setup import _ensure_fields
 
 
@@ -60,6 +65,24 @@ def ensure_checkin_device_fields() -> dict[str, list[str]]:
 				"label": "Device Flag Detail",
 				"fieldtype": "Small Text",
 				"insert_after": "custom_device_flag",
+				"read_only": 1,
+			},
+			{
+				"fieldname": ORIGINAL_LOG_TYPE_FIELD,
+				"label": "Original Log Type",
+				"fieldtype": "Data",
+				"insert_after": "log_type",
+				"read_only": 1,
+				"description": (
+					"What the employee pressed, when it was corrected "
+					"(a stale Check Out recorded as a Check In)."
+				),
+			},
+			{
+				"fieldname": LOG_TYPE_NOTE_FIELD,
+				"label": "Log Type Note",
+				"fieldtype": "Small Text",
+				"insert_after": ORIGINAL_LOG_TYPE_FIELD,
 				"read_only": 1,
 			},
 		],

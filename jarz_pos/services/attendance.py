@@ -48,6 +48,20 @@ a day with four punches. A day with a single check-in has no departure and no
 ``worked_hours`` -- reporting the arrival time as the departure time would
 manufacture a zero-hour day that reads as "clocked in and immediately left".
 
+Two log_type hints are carried on each cell WITHOUT changing that pairing rule:
+
+* ``checkout_corrected`` -- some punch of the day was a Check Out that
+  ``services/checkin_log_type`` recorded as a Check In
+  (``custom_original_log_type == "OUT"``), or, for rows written before that
+  correction existed, the day's chronologically FIRST punch is an OUT (the
+  "pressed Check Out on arrival" shape). The historical half is a heuristic: a
+  stray past-window check-out dated by the wall clock onto the next day also
+  starts that day with an OUT.
+* ``missed_checkout`` -- a PAST shift day whose last punch is not a check-out:
+  last log_type ``IN`` -> true, ``OUT`` -> false, blank/unknown -> true only
+  for an odd number of punches (an unpaired arrival). A lone OUT is a tail,
+  not a missed check-out.
+
 Which day a check-in belongs to
 -------------------------------
 Every branch shift here crosses midnight (16:00 -> 01:00), so a check-out logged
@@ -125,6 +139,7 @@ from frappe.utils import add_days, flt, get_datetime, get_first_day, get_last_da
 from jarz_pos.events.employee_checkin import EMPLOYEE_EXEMPT_FIELD
 from jarz_pos.services import roster as roster_service
 from jarz_pos.services.checkin_device import CHECKIN_FLAG_FIELDS, FLAG_ORDER, mask_tokens_in_detail
+from jarz_pos.services.checkin_log_type import CHECKIN_LOG_TYPE_FIELDS
 from jarz_pos.utils.settings_utils import single_flag, single_int
 
 SETTINGS = "Jarz POS Settings"
@@ -233,6 +248,24 @@ def has_attendance_access() -> bool:
 def ensure_attendance_access() -> None:
 	if not has_attendance_access():
 		frappe.throw(_("Not permitted: attendance access required"), frappe.PermissionError)
+
+
+def can_approve_device() -> bool:
+	"""Whether the caller may approve a New Device phone from the board.
+
+	Narrower than the attendance door on purpose: approving a phone decides
+	which handset may clock somebody in, which is exactly what buddy-punch
+	flagging exists to police -- a branch line manager approving a colleague's
+	second phone would defeat it. Reuses ``branch_access.can_manage_all``
+	(Administrator, JARZ Manager, System Manager): the existing "manager, not
+	line manager" decision in this app. Never raises.
+	"""
+	try:
+		from jarz_pos.services import branch_access as branch_access_service
+
+		return bool(branch_access_service.can_manage_all())
+	except Exception:
+		return False
 
 
 def allowed_shift_locations() -> set[str] | None:
@@ -488,6 +521,22 @@ def _employee_exempt_field_exists() -> bool:
 # ---------------------------------------------------------------------------
 
 
+#: An unmatched OUT before this hour of the morning belongs to the previous
+#: shift day. Every branch shift ends by ~01:00; nobody starts before 10:00.
+OVERNIGHT_TAIL_END_HOUR = 6
+
+
+def _is_overnight_tail_out(row: dict[str, Any], when: Any) -> bool:
+	"""An unmatched check-out in the small hours: the tail of last night's shift."""
+	log_type = str(row.get("log_type") or "").strip().upper()
+	if log_type != "OUT" or str(row.get("custom_original_log_type") or "").strip():
+		return False
+	try:
+		return when.hour < OVERNIGHT_TAIL_END_HOUR
+	except Exception:
+		return False
+
+
 def group_checkins(rows: Iterable[dict[str, Any]]) -> dict[tuple[str, str], dict[str, Any]]:
 	"""Fold raw check-ins into one group per ``(employee, shift day)``.
 
@@ -520,7 +569,15 @@ def group_checkins(rows: Iterable[dict[str, Any]]) -> dict[tuple[str, str], dict
 			except Exception:
 				shift_start = None
 
-		day_key = str(getdate(shift_start or when))
+		if shift_start is None and _is_overnight_tail_out(row, when):
+			# A check-out HRMS could not match to a shift because it came after
+			# the shift's own grace -- e.g. 00:42 after a shift ending 00:30. It
+			# closes LAST night's shift; grouping it on its wall-clock date would
+			# leave that shift without a departure and open the next day with a
+			# phantom "check-out on arrival".
+			day_key = str(add_days(getdate(when), -1))
+		else:
+			day_key = str(getdate(shift_start or when))
 		key = (employee, day_key)
 		group = groups.get(key)
 		if group is None:
@@ -537,15 +594,33 @@ def group_checkins(rows: Iterable[dict[str, Any]]) -> dict[tuple[str, str], dict
 				"rows": [],
 				"device_flags": set(),
 				"device_details": [],
+				# log_type of the chronologically first / last punch.
+				"first_log_type": None,
+				"last_log_type": None,
+				# Any punch that services/checkin_log_type rewrote from OUT.
+				"original_out": False,
+				"log_type_note": None,
+				"log_type_note_at": None,
 			}
 			groups[key] = group
 
 		group["count"] += 1
 		group["rows"].append(row)
+		log_type = str(row.get("log_type") or "").strip().upper() or None
 		if group["first_in"] is None or when < group["first_in"]:
 			group["first_in"] = when
-		if group["last"] is None or when > group["last"]:
+			group["first_log_type"] = log_type
+		if group["last"] is None or when >= group["last"]:
+			# >= so that of two punches in the same second the later-read one
+			# (fetch order is time asc) is the last, mirroring "first" above.
 			group["last"] = when
+			group["last_log_type"] = log_type
+		if str(row.get("custom_original_log_type") or "").strip().upper() == "OUT":
+			group["original_out"] = True
+		note = row.get("custom_log_type_note")
+		if note and (group["log_type_note_at"] is None or when < group["log_type_note_at"]):
+			group["log_type_note"] = note
+			group["log_type_note_at"] = when
 		if shift_start is not None and (group["shift_start"] is None or shift_start < group["shift_start"]):
 			group["shift_start"] = shift_start
 		if row.get("shift") and not group["shift"]:
@@ -578,6 +653,47 @@ def device_detail_for(group: dict[str, Any] | None) -> str | None:
 	"""The flagged check-ins' explanations joined into one line, or ``None``."""
 	details = list(dict.fromkeys((group or {}).get("device_details") or []))
 	return " | ".join(details) if details else None
+
+
+def checkout_corrected_for(group: dict[str, Any] | None) -> bool:
+	"""A Check Out of this day was really an arrival (see the module docstring).
+
+	True when a punch carries ``custom_original_log_type == "OUT"`` (rewritten
+	at insert), or -- for rows from before that rewrite existed -- when the
+	day's chronologically first punch is an OUT.
+	"""
+	if not group or not group.get("count"):
+		return False
+	if group.get("original_out"):
+		return True
+	return group.get("first_log_type") == "OUT"
+
+
+def missed_checkout_for(group: dict[str, Any] | None, date_str: str, today: date_cls) -> bool:
+	"""A finished shift day that never got its check-out.
+
+	Only a day strictly before ``today`` can have missed anything. Then: last
+	punch IN -> missed; last punch OUT -> not; log_type blank -> missed only
+	for an odd number of punches (an arrival with nothing to pair it with).
+	"""
+	if not group or not group.get("count"):
+		return False
+	try:
+		if getdate(date_str) >= getdate(today):
+			return False
+	except Exception:
+		return False
+	last = group.get("last_log_type")
+	if last == "OUT":
+		return False
+	if last == "IN":
+		return True
+	return int(group.get("count") or 0) % 2 == 1
+
+
+def log_type_note_for(group: dict[str, Any] | None) -> str | None:
+	"""The earliest non-empty ``custom_log_type_note`` of the day, or ``None``."""
+	return (group or {}).get("log_type_note") or None
 
 
 def late_minutes_for(group: dict[str, Any] | None) -> int | None:
@@ -711,6 +827,10 @@ def build_cell(
 		# Additive (buddy-punch flagging); old clients ignore unknown keys.
 		"device_flags": device_flags_for(group),
 		"device_flag_detail": device_detail_for(group),
+		# Additive (stale check-out correction); old clients ignore unknown keys.
+		"checkout_corrected": checkout_corrected_for(group),
+		"missed_checkout": missed_checkout_for(group, date_str, today),
+		"log_type_note": log_type_note_for(group),
 	}
 
 
@@ -853,12 +973,13 @@ def _fetch_checkins(employees: list[str], start: date_cls, end: date_cls) -> lis
 		f"{add_days(end, 2)} 00:00:00",
 	]
 	filters = {"employee": ("in", employees), "time": ("between", window)}
-	# Device-flag columns exist only once the after_migrate seeder has run; ask
+	# Device-flag and log-type-correction columns exist only once the
+	# after_migrate seeder has run; ask
 	# for them only when present so an un-migrated site keeps every other field.
 	fields = list(CHECKIN_FIELDS)
 	try:
 		meta = frappe.get_meta(CHECKIN_DOCTYPE)
-		fields += [f for f in CHECKIN_FLAG_FIELDS if meta.has_field(f)]
+		fields += [f for f in (*CHECKIN_FLAG_FIELDS, *CHECKIN_LOG_TYPE_FIELDS) if meta.has_field(f)]
 	except Exception:
 		pass
 	try:
@@ -918,6 +1039,13 @@ def _checkin_visible(
 			shift_start = get_datetime(row.get("shift_start"))
 		except Exception:
 			shift_start = None
+
+	if shift_start is None and _is_overnight_tail_out(row, when):
+		# group_checkins files it under the previous day; judge it there too.
+		previous = add_days(getdate(when), -1)
+		if getdate(previous) < getdate(start):
+			return False
+		return (employee, str(getdate(previous))) not in redacted
 
 	day = getdate(shift_start or when)
 	key = str(day)
@@ -1214,6 +1342,8 @@ def bootstrap() -> dict[str, Any]:
 		"grace_minutes": grace_minutes(),
 		"statuses": list(STATUSES),
 		"checkin_enforced": checkin_enforced(),
+		# Additive: lets the app hide the "Approve phone" action for line managers.
+		"can_approve_device": can_approve_device(),
 		"notice": None,
 	}
 	if not payload["hrms_available"]:
@@ -1299,6 +1429,9 @@ _DAY_ROW_KEYS = (
 	"is_cover",
 	"device_flags",
 	"device_flag_detail",
+	"checkout_corrected",
+	"missed_checkout",
+	"log_type_note",
 )
 
 
@@ -1472,6 +1605,9 @@ def get_employee(employee: str, from_date: str | None = None, to_date: str | Non
 					"offshift": bool(raw.get("offshift")),
 					"device_flag": raw.get("custom_device_flag") or None,
 					"device_flag_detail": mask_tokens_in_detail(raw.get("custom_device_flag_detail")) or None,
+					# What was pressed, when the stale-check-out rule rewrote it.
+					"original_log_type": raw.get("custom_original_log_type") or None,
+					"log_type_note": raw.get("custom_log_type_note") or None,
 					"latitude": lat,
 					"longitude": lng,
 					"geo_ok": _geo_ok(

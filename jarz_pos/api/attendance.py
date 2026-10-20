@@ -7,11 +7,17 @@ the service.
 
 Read-only by design
 -------------------
-There is no write endpoint in this module and there must not be one. Every
-number here is derived on read from Employee Checkin, Shift Assignment and the
-day-off records; nothing is stored, so a wrong rule is fixed by a deploy rather
-than by unpicking a month of written Attendance rows. Enabling HRMS
-auto-attendance would turn that on its head -- see the service module docstring.
+Nothing here writes attendance, and nothing must. Every number is derived on
+read from Employee Checkin, Shift Assignment and the day-off records; nothing is
+stored, so a wrong rule is fixed by a deploy rather than by unpicking a month of
+written Attendance rows. Enabling HRMS auto-attendance would turn that on its
+head -- see the service module docstring.
+
+The one write, ``approve_device``, does not touch attendance either: it
+registers an employee's phone (``Employee.custom_checkin_device``) and clears
+the New Device flags it explains. It is POST-only and narrower than the rest of
+the module -- managers (``attendance_service.can_approve_device``), not the
+whole line-manager tier.
 
 The gate is the authority
 -------------------------
@@ -31,6 +37,7 @@ from frappe import _
 from frappe.utils import getdate
 
 from jarz_pos.services import attendance as attendance_service
+from jarz_pos.services import checkin_device as checkin_device_service
 
 
 def _ensure_access() -> None:
@@ -134,6 +141,38 @@ def get_employee(
 		from_date=_coerce_date(from_date, _("From date")),
 		to_date=_coerce_date(to_date, _("To date")),
 	)
+	data["success"] = True
+	return data
+
+
+@frappe.whitelist(methods=["POST"])
+def approve_device(employee: str, date: str) -> dict[str, Any]:
+	"""Approve the New Device phone behind ``employee``'s check-ins on shift day ``date``.
+
+	Registers the latest New Device token of that day as the employee's phone
+	and clears the New Device flag on every check-in carrying it. Never
+	approves a Shared Device. Gate: attendance access, THEN the manager check,
+	THEN branch scope (same message for a missing id as for an out-of-scope
+	one, like ``get_employee``).
+	"""
+	_ensure_access()
+	if not attendance_service.can_approve_device():
+		frappe.throw(
+			_("Only a JARZ Manager can approve a new phone."),
+			frappe.PermissionError,
+		)
+	employee = _clean(employee)
+	if not employee:
+		frappe.throw(_("Employee is required."))
+	day = _coerce_date(date, _("Date"))
+	if not day:
+		frappe.throw(_("Date is required."))
+
+	attendance_service.ensure_employee_in_scope(employee)
+	if not frappe.db.exists("Employee", employee):
+		frappe.throw(attendance_service.NOT_AVAILABLE_MESSAGE(), frappe.PermissionError)
+
+	data = checkin_device_service.approve_device(employee, day)
 	data["success"] = True
 	return data
 

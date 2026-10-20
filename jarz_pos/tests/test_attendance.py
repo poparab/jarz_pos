@@ -1952,6 +1952,9 @@ class TestUnmatchedTailOfAnotherBranchsNight(AttendanceGridCase):
 	City on the 11th. He clocks out at 02:30 -- past the window, so HRMS matches
 	no shift and the punch carries the 11th. The 11th is a Nasr City day. Without
 	this, the Nasr City manager gets that punch's coordinates.
+
+	An unmatched small-hours OUT is now filed under the night it closes (the
+	10th), so where it is visible it counts on the 10th, never on the 11th.
 	"""
 
 	NIGHT_THEN_DAY = [
@@ -1993,7 +1996,8 @@ class TestUnmatchedTailOfAnotherBranchsNight(AttendanceGridCase):
 
 	def test_an_unrestricted_caller_still_sees_it(self):
 		grid = self._run(None)
-		self.assertEqual(grid["cells"]["HR-EMP-1"]["2026-09-11"]["checkin_count"], 1)
+		self.assertEqual(grid["cells"]["HR-EMP-1"]["2026-09-10"]["checkin_count"], 1)
+		self.assertEqual(grid["cells"]["HR-EMP-1"]["2026-09-11"]["checkin_count"], 0)
 
 	def test_the_tail_of_the_callers_own_night_is_kept(self):
 		both_nasr = [
@@ -2001,7 +2005,8 @@ class TestUnmatchedTailOfAnotherBranchsNight(AttendanceGridCase):
 			_assignment("HR-EMP-1", "Branch Opening", "Nasr City", "2026-09-11", "2026-09-11"),
 		]
 		grid = self._run({"Nasr City"}, assignments=both_nasr)
-		self.assertEqual(grid["cells"]["HR-EMP-1"]["2026-09-11"]["checkin_count"], 1)
+		self.assertEqual(grid["cells"]["HR-EMP-1"]["2026-09-10"]["checkin_count"], 1)
+		self.assertEqual(grid["cells"]["HR-EMP-1"]["2026-09-11"]["checkin_count"], 0)
 
 	def test_a_genuinely_late_unmatched_arrival_on_the_callers_day_is_kept(self):
 		"""After the scheduled start it is an arrival for this day, not a tail."""

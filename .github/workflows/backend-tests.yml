@@ -507,6 +507,12 @@ jobs:
             # Buddy-punch flagging on check-ins. FLAG ONLY: the pin that matters is
             # that fingerprinting never raises inside a check-in insert.
             test_checkin_device
+            # Stale Check Out -> Check In at insert, the "you just checked in"
+            # refusal, the board's checkout_corrected / missed_checkout keys and
+            # approving a New Device phone. The pins that matter: the 16 h / 4 h
+            # boundaries, that the rewrite never raises on its own failures, and
+            # that a Shared Device is never approved.
+            test_checkin_log_type
             # Module history (Stock Transfer, Cash Transfer, Inventory Count,
             # Shift). Two reasons this must be in CI: the cash transfer history
             # has no marker to filter on and recognises a transfer purely by

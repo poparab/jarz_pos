@@ -220,8 +220,10 @@ after_migrate = [
 	# the box. Guarded on HRMS being installed, never raises. Deliberately last:
 	# it reads POS Profiles, which earlier seeders may create.
 	"jarz_pos.setup.roster_setup.ensure_roster_setup",
-	# Employee Checkin device-flag columns + Employee.custom_checkin_device. After
-	# ensure_roster_setup: it anchors on custom_roster_checkin_exempt.
+	# Employee Checkin device-flag columns + Employee.custom_checkin_device, and
+	# the log-type correction columns (custom_original_log_type /
+	# custom_log_type_note). After ensure_roster_setup: it anchors on
+	# custom_roster_checkin_exempt.
 	"jarz_pos.setup.checkin_device_setup.ensure_checkin_device_fields",
 	# Task Board: seed the full-access list with the owner account, only while
 	# the list is empty and only if that User exists. Create-only, never raises.
@@ -410,9 +412,17 @@ doc_events = {
 	# already resolved and can be trusted.
 	"Employee Checkin": {
 		"validate": "jarz_pos.events.employee_checkin.enforce_roster_on_checkin",
-		# Buddy-punch flagging: stamps the phone cookie token and flags a new or
-		# shared device. FLAG ONLY -- never raises, never refuses.
-		"before_insert": "jarz_pos.services.checkin_device.stamp_device",
+		"before_insert": [
+			# Stale check-out -> check-in: the HRMS PWA offers "Check Out" the
+			# morning after a forgotten check-out, and staff press it on arrival.
+			# Rewrites log_type before validate, so HRMS's own validate and the
+			# roster gate above see the corrected value. Never raises, EXCEPT the
+			# deliberate "you checked in N minutes ago" refusal.
+			"jarz_pos.services.checkin_log_type.correct_log_type",
+			# Buddy-punch flagging: stamps the phone cookie token and flags a new
+			# or shared device. FLAG ONLY -- never raises, never refuses.
+			"jarz_pos.services.checkin_device.stamp_device",
+		],
 	},
 	# Staff-order picker: keep one staff Customer per Active employee as people
 	# are hired or reactivated, so the POS never has to create one mid-order.

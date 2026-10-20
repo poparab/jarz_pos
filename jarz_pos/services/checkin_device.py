@@ -28,9 +28,10 @@ The rules (see ``classify``)
 * Employee has no registered device -> register this one, no flag.
 * Registered and the same -> no flag.
 * Registered and different -> ``New Device``. NOT re-registered automatically:
-  a manager approves it by pasting the new token into
-  ``Employee.custom_checkin_device``, or clears the field to re-register on the
-  next check-in.
+  a manager approves it from the attendance board (``approve_device`` below,
+  served by ``api/attendance.approve_device``), or in Desk by pasting the new
+  token into ``Employee.custom_checkin_device``, or clears the field to
+  re-register on the next check-in. A ``Shared Device`` is never approvable.
 * The same token checked in a DIFFERENT employee on the same calendar day ->
   ``Shared Device``, which outranks ``New Device`` because it is the stronger
   signal. A shared phone is deliberately not registered to anyone.
@@ -48,7 +49,8 @@ from datetime import datetime, timedelta
 from typing import Any, Optional
 
 import frappe
-from frappe.utils import add_days, getdate, now_datetime
+from frappe import _
+from frappe.utils import add_days, get_datetime, getdate, now_datetime
 
 COOKIE = "jarz_device"
 COOKIE_YEARS = 5
@@ -254,3 +256,138 @@ def _stamp(doc) -> None:
 			},
 			update_modified=False,
 		)
+
+
+# ---------------------------------------------------------------------------
+# Approval from the attendance board
+# ---------------------------------------------------------------------------
+
+
+class DeviceApprovalError(frappe.ValidationError):
+	"""Nothing approvable on that day, or the phone is shared."""
+
+
+def _shift_day(row: dict[str, Any]):
+	"""Same rule as the attendance board: shift_start's date, else the wall clock."""
+	try:
+		return getdate(row.get("shift_start") or row.get("time"))
+	except Exception:
+		return None
+
+
+def _approver_name() -> str:
+	user = frappe.session.user
+	try:
+		return frappe.db.get_value("User", user, "full_name") or user
+	except Exception:
+		return user
+
+
+def _shared_refusal() -> str:
+	return _(
+		"This phone also checked in another employee, so it cannot be approved as "
+		"anyone's own phone. Ask each person to check in from their own phone."
+	)
+
+
+def approve_device(employee: str, day: Any) -> dict[str, Any]:
+	"""Register the phone behind ``employee``'s New Device check-in on ``day``.
+
+	``day`` is a SHIFT day (the attendance board's grouping). The latest New
+	Device check-in of that day that carries a token is the one approved. The
+	caller (``api/attendance.approve_device``) owns the role and scope gate.
+
+	Refuses -- never approves -- a Shared Device: a phone that checked in a
+	colleague (on that day, or registered to somebody else) is not one person's
+	phone.
+	"""
+	day = getdate(day)
+	checkin_meta = frappe.get_meta("Employee Checkin")
+	if not checkin_meta.has_field("custom_device_token") or not frappe.get_meta("Employee").has_field(
+		EMPLOYEE_DEVICE_FIELD
+	):
+		frappe.throw(_("Phone approval is not set up on this site yet."), exc=DeviceApprovalError)
+
+	# Padded by a day on each side, exactly like the board's read: a shift day
+	# owns punches on the neighbouring calendar days.
+	rows = (
+		frappe.db.get_all(
+			"Employee Checkin",
+			filters=[
+				["employee", "=", employee],
+				["time", ">=", f"{add_days(day, -1)} 00:00:00"],
+				["time", "<", f"{add_days(day, 2)} 00:00:00"],
+				["custom_device_flag", "in", [FLAG_NEW, FLAG_SHARED]],
+			],
+			fields=["name", "time", "shift_start", "custom_device_flag", "custom_device_token"],
+			order_by="time desc",
+		)
+		or []
+	)
+	on_day = [row for row in rows if _shift_day(row) == day]
+	candidates = [
+		row for row in on_day if row.get("custom_device_flag") == FLAG_NEW and row.get("custom_device_token")
+	]
+
+	if not candidates:
+		if any(row.get("custom_device_flag") == FLAG_SHARED for row in on_day):
+			frappe.throw(_shared_refusal(), exc=DeviceApprovalError, title=_("Shared Phone"))
+		frappe.throw(
+			_("There is no new phone to approve for this employee on {0}.").format(str(day)),
+			exc=DeviceApprovalError,
+			title=_("Nothing To Approve"),
+		)
+
+	latest = max(candidates, key=lambda row: get_datetime(row.get("time")))
+	token = latest["custom_device_token"]
+
+	if any(
+		row.get("custom_device_flag") == FLAG_SHARED and row.get("custom_device_token") == token
+		for row in on_day
+	):
+		frappe.throw(_shared_refusal(), exc=DeviceApprovalError, title=_("Shared Phone"))
+	if frappe.db.get_value("Employee", {EMPLOYEE_DEVICE_FIELD: token, "name": ("!=", employee)}, "name"):
+		frappe.throw(
+			_("This phone is already registered to another employee, so it cannot be approved for this one."),
+			exc=DeviceApprovalError,
+			title=_("Shared Phone"),
+		)
+
+	now = now_datetime()
+	frappe.db.set_value(
+		"Employee",
+		employee,
+		{EMPLOYEE_DEVICE_FIELD: token, EMPLOYEE_REGISTERED_ON_FIELD: now},
+		update_modified=False,
+	)
+
+	approver = _approver_name()
+	suffix = f"Approved as this employee's phone by {approver} on {now.day} {now.strftime('%b %Y')}."
+	flagged = (
+		frappe.db.get_all(
+			"Employee Checkin",
+			filters={"employee": employee, "custom_device_token": token, "custom_device_flag": FLAG_NEW},
+			fields=["name", "custom_device_flag_detail"],
+		)
+		or []
+	)
+	for row in flagged:
+		detail = str(row.get("custom_device_flag_detail") or "").rstrip()
+		frappe.db.set_value(
+			"Employee Checkin",
+			row["name"],
+			{
+				"custom_device_flag": "",
+				"custom_device_flag_detail": f"{detail} {suffix}".strip(),
+			},
+			update_modified=False,
+		)
+
+	return {
+		"employee": employee,
+		"employee_name": frappe.db.get_value("Employee", employee, "employee_name") or employee,
+		"device": mask_token(token),
+		"approved_by": approver,
+		"approved_on": now.strftime("%Y-%m-%d %H:%M:%S"),
+		"cleared": len(flagged),
+	}
