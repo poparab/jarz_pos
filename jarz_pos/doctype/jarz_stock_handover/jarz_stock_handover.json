@@ -6,6 +6,7 @@
  "engine": "InnoDB",
  "field_order": [
   "status",
+  "kind",
   "company",
   "from_warehouse",
   "to_warehouse",
@@ -22,6 +23,7 @@
   "last_proposed_by",
   "last_proposed_at",
   "reminder_sent_at",
+  "was_changed",
   "column_break_trail",
   "confirmed_by",
   "confirmed_at",
@@ -30,7 +32,9 @@
   "rejected_at",
   "reject_reason",
   "cancelled_by",
-  "cancelled_at"
+  "cancelled_at",
+  "match_note",
+  "client_request_id"
  ],
  "fields": [
   {
@@ -43,6 +47,18 @@
    "options": "Pending\nConfirmed\nRejected\nCancelled",
    "read_only": 1,
    "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "default": "Handover",
+   "description": "Handover = a one-to-one movement. Dispatch = 'I sent out' with no destination, matched by a manager.",
+   "fieldname": "kind",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Kind",
+   "options": "Handover\nDispatch",
+   "read_only": 1,
    "search_index": 1
   },
   {
@@ -71,8 +87,8 @@
    "label": "To Warehouse",
    "options": "Warehouse",
    "read_only": 1,
-   "reqd": 1,
-   "search_index": 1
+   "search_index": 1,
+   "description": "Empty on a Dispatch (a 'sent out' declaration that names no destination)."
   },
   {
    "fieldname": "column_break_sides",
@@ -84,7 +100,7 @@
    "fieldtype": "Select",
    "in_list_view": 1,
    "label": "Awaiting Side",
-   "options": "From\nTo",
+   "options": "From\nTo\nManager",
    "read_only": 1
   },
   {
@@ -163,6 +179,14 @@
    "read_only": 1
   },
   {
+   "default": "0",
+   "description": "Set when the other side changed the quantities. A changed handover can no longer be cancelled.",
+   "fieldname": "was_changed",
+   "fieldtype": "Check",
+   "label": "Was Changed",
+   "read_only": 1
+  },
+  {
    "fieldname": "column_break_trail",
    "fieldtype": "Column Break"
   },
@@ -217,11 +241,27 @@
    "fieldtype": "Datetime",
    "label": "Cancelled At",
    "read_only": 1
+  },
+  {
+   "description": "What the manager changed against the declarations when matching a sent-out batch.",
+   "fieldname": "match_note",
+   "fieldtype": "Small Text",
+   "label": "Match Note",
+   "read_only": 1
+  },
+  {
+   "description": "Client-generated id; a repeated declare with the same id and user returns the existing row.",
+   "fieldname": "client_request_id",
+   "fieldtype": "Data",
+   "label": "Client Request Id",
+   "length": 64,
+   "read_only": 1,
+   "search_index": 1
   }
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-10-20 12:00:00.000000",
+ "modified": "2026-10-20 18:00:00.000000",
  "modified_by": "Administrator",
  "module": "jarz pos",
  "name": "Jarz Stock Handover",
@@ -238,7 +278,7 @@
    "report": 1,
    "role": "System Manager",
    "share": 1,
-   "write": 1
+   "write": 0
   },
   {
    "create": 0,
@@ -250,7 +290,7 @@
    "report": 1,
    "role": "Stock Manager",
    "share": 0,
-   "write": 1
+   "write": 0
   },
   {
    "create": 0,
@@ -262,7 +302,7 @@
    "report": 1,
    "role": "JARZ Manager",
    "share": 0,
-   "write": 1
+   "write": 0
   }
  ],
  "sort_field": "creation",

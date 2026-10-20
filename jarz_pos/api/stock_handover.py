@@ -21,21 +21,36 @@ def get_context(pos_profile: str | None = None) -> dict[str, Any]:
 
 
 @frappe.whitelist()
-def list_items(my_warehouse: str, counterpart_warehouse: str, search: str | None = None) -> dict[str, Any]:
-	"""Items that may be handed over between the two sides (no stock numbers)."""
+def list_items(
+	my_warehouse: str, counterpart_warehouse: str | None = None, search: str | None = None
+) -> dict[str, Any]:
+	"""Items a side may hand over (no stock numbers). No counterpart = the "sent out" set."""
 	return service.list_items(my_warehouse, counterpart_warehouse, search=search)
 
 
 @frappe.whitelist(methods=["POST"])
 def declare(
 	my_warehouse: str,
-	counterpart_warehouse: str,
-	direction: str,
-	lines: Any,
+	counterpart_warehouse: str | None = None,
+	direction: str = "",
+	lines: Any = None,
 	pos_profile: str | None = None,
+	client_request_id: str | None = None,
 ) -> dict[str, Any]:
-	"""Declare a movement: ``direction`` "in" = I received from them, "out" = they took from me."""
-	return service.declare(my_warehouse, counterpart_warehouse, direction, lines, pos_profile=pos_profile)
+	"""Declare a movement.
+
+	``direction`` "in" = I received from ``counterpart_warehouse`` (required);
+	"out" = I sent stock out, no destination: a manager matches it later.
+	``client_request_id`` makes a repeated call (a double tap) return the first row.
+	"""
+	return service.declare(
+		my_warehouse,
+		counterpart_warehouse,
+		direction,
+		lines,
+		pos_profile=pos_profile,
+		client_request_id=client_request_id,
+	)
 
 
 @frappe.whitelist()
@@ -44,7 +59,7 @@ def list_handovers(
 	pos_profile: str | None = None,
 	limit: Any = 30,
 ) -> dict[str, Any]:
-	"""``{waiting_for_me, waiting_for_them, recent}`` for the user's sides."""
+	"""``{waiting_for_me, waiting_for_them, recent, to_match}`` (``to_match``: managers only)."""
 	return service.list_handovers(my_warehouse=my_warehouse, pos_profile=pos_profile, limit=limit)
 
 
@@ -64,3 +79,15 @@ def respond(
 def cancel(name: str, pos_profile: str | None = None) -> dict[str, Any]:
 	"""Withdraw your own declaration while it is pending and nobody has changed it."""
 	return service.cancel(name, pos_profile=pos_profile)
+
+
+@frappe.whitelist(methods=["POST"])
+def confirm_match(
+	source_warehouse: str,
+	members: Any,
+	lines: Any,
+	note: str | None = None,
+	pos_profile: str | None = None,
+) -> dict[str, Any]:
+	"""Manager: approve a sender's whole batch as ONE transfer split across its receivers."""
+	return service.confirm_match(source_warehouse, members, lines, note=note, pos_profile=pos_profile)
