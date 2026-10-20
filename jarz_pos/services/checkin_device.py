@@ -268,8 +268,16 @@ class DeviceApprovalError(frappe.ValidationError):
 
 
 def _shift_day(row: dict[str, Any]):
-	"""Same rule as the attendance board: shift_start's date, else the wall clock."""
+	"""Same rule as the attendance board: shift_start's date, else the wall clock --
+	except an unmatched small-hours check-out, which closes the previous day."""
+	# Imported here: services.attendance imports this module at load time.
+	from jarz_pos.services.attendance import _is_overnight_tail_out
+
 	try:
+		if not row.get("shift_start"):
+			when = get_datetime(row.get("time"))
+			if when is not None and _is_overnight_tail_out(row, when):
+				return add_days(getdate(when), -1)
 		return getdate(row.get("shift_start") or row.get("time"))
 	except Exception:
 		return None
@@ -298,7 +306,7 @@ def approve_device(employee: str, day: Any) -> dict[str, Any]:
 	caller (``api/attendance.approve_device``) owns the role and scope gate.
 
 	Refuses -- never approves -- a Shared Device: a phone that checked in a
-	colleague (on that day, or registered to somebody else) is not one person's
+	colleague (at any time, or registered to somebody else) is not one person's
 	phone.
 	"""
 	day = getdate(day)
@@ -310,6 +318,9 @@ def approve_device(employee: str, day: Any) -> dict[str, Any]:
 
 	# Padded by a day on each side, exactly like the board's read: a shift day
 	# owns punches on the neighbouring calendar days.
+	fields = ["name", "time", "shift_start", "log_type", "custom_device_flag", "custom_device_token"]
+	if checkin_meta.has_field("custom_original_log_type"):
+		fields.append("custom_original_log_type")
 	rows = (
 		frappe.db.get_all(
 			"Employee Checkin",
@@ -319,7 +330,7 @@ def approve_device(employee: str, day: Any) -> dict[str, Any]:
 				["time", "<", f"{add_days(day, 2)} 00:00:00"],
 				["custom_device_flag", "in", [FLAG_NEW, FLAG_SHARED]],
 			],
-			fields=["name", "time", "shift_start", "custom_device_flag", "custom_device_token"],
+			fields=fields,
 			order_by="time desc",
 		)
 		or []
@@ -345,6 +356,11 @@ def approve_device(employee: str, day: Any) -> dict[str, Any]:
 		row.get("custom_device_flag") == FLAG_SHARED and row.get("custom_device_token") == token
 		for row in on_day
 	):
+		frappe.throw(_shared_refusal(), exc=DeviceApprovalError, title=_("Shared Phone"))
+	# The Shared flag lands on the SECOND person to use a phone, so the first
+	# user's own rows look clean. Any colleague's check-in on this phone, ever,
+	# means it is not one person's phone.
+	if frappe.db.exists("Employee Checkin", {"custom_device_token": token, "employee": ("!=", employee)}):
 		frappe.throw(_shared_refusal(), exc=DeviceApprovalError, title=_("Shared Phone"))
 	if frappe.db.get_value("Employee", {EMPLOYEE_DEVICE_FIELD: token, "name": ("!=", employee)}, "name"):
 		frappe.throw(

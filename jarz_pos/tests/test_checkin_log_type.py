@@ -41,6 +41,7 @@ def _run(previous, log_type="OUT", when=ARRIVAL, columns=True):
 	doc = _Doc(employee="HR-EMP-1", time=when, log_type=log_type, name=None)
 	with (
 		patch.object(lt, "_columns_ready", return_value=columns),
+		patch.object(lt, "_is_live_press", return_value=True),
 		patch.object(lt, "_previous_checkin", return_value=previous) as lookup,
 	):
 		lt.correct_log_type(doc)
@@ -182,6 +183,7 @@ class TestNeverRaisesOnItsOwnFailures(unittest.TestCase):
 		doc = _Doc(employee="HR-EMP-1", time=ARRIVAL, log_type="OUT", name=None)
 		with (
 			patch.object(lt, "_columns_ready", return_value=True),
+			patch.object(lt, "_is_live_press", return_value=True),
 			patch.object(lt, "_previous_checkin", side_effect=RuntimeError("db gone")),
 			patch.object(lt, "frappe") as fr,
 		):
@@ -189,12 +191,64 @@ class TestNeverRaisesOnItsOwnFailures(unittest.TestCase):
 			lt.correct_log_type(doc)  # must not raise
 		self.assertEqual(doc.log_type, "OUT")
 
+	def test_a_failed_note_leaves_the_press_exactly_as_it_was(self):
+		doc = _Doc(employee="HR-EMP-1", time=ARRIVAL, log_type="OUT", name=None)
+		with (
+			patch.object(lt, "_columns_ready", return_value=True),
+			patch.object(lt, "_is_live_press", return_value=True),
+			patch.object(lt, "_previous_checkin", return_value=None),
+			patch.object(lt, "note_for", side_effect=RuntimeError("boom")),
+			patch.object(lt, "_safe_log"),
+		):
+			lt.correct_log_type(doc)
+		self.assertEqual(doc.log_type, "OUT")
+		self.assertIsNone(doc.get("custom_original_log_type"))
+		self.assertIsNone(doc.get("custom_log_type_note"))
+
 	def test_a_failed_meta_read_is_swallowed(self):
 		doc = _Doc(employee="HR-EMP-1", time=ARRIVAL, log_type="OUT", name=None)
 		with patch.object(lt, "frappe") as fr:
 			fr.get_meta.side_effect = RuntimeError("db gone")
 			lt.correct_log_type(doc)
 		self.assertEqual(doc.log_type, "OUT")
+
+
+class TestLivePressOnly(unittest.TestCase):
+	"""Desk backfills, imports and patches are stored exactly as entered."""
+
+	def _live(self, when, now=ARRIVAL, **flags):
+		with (
+			patch.object(lt, "now_datetime", return_value=now),
+			patch.object(lt.frappe, "flags", SimpleNamespace(**flags)),
+		):
+			return lt._is_live_press(when)
+
+	def test_a_press_made_now_is_live(self):
+		self.assertTrue(self._live(ARRIVAL))
+		self.assertTrue(self._live(ARRIVAL - timedelta(minutes=30)))
+		self.assertTrue(self._live(ARRIVAL + timedelta(minutes=5)))  # phone clock a little ahead
+
+	def test_a_backfill_is_not(self):
+		self.assertFalse(self._live(ARRIVAL - timedelta(minutes=31)))
+		self.assertFalse(self._live(ARRIVAL - timedelta(days=2)))
+
+	def test_import_patch_and_migrate_are_not(self):
+		for flag in ("in_import", "in_patch", "in_migrate"):
+			self.assertFalse(self._live(ARRIVAL, **{flag: True}), flag)
+
+	def test_a_backfilled_out_is_neither_converted_nor_refused(self):
+		doc = _Doc(employee="HR-EMP-1", time=ARRIVAL, log_type="OUT", name=None)
+		with (
+			patch.object(lt, "_columns_ready", return_value=True),
+			patch.object(lt, "_is_live_press", return_value=False),
+			patch.object(
+				lt, "_previous_checkin", return_value=_prev(ARRIVAL - timedelta(minutes=1))
+			) as lookup,
+		):
+			lt.correct_log_type(doc)  # an OUT 1 min after an IN: would be refused live
+		self.assertEqual(doc.log_type, "OUT")
+		self.assertIsNone(doc.get("custom_original_log_type"))
+		lookup.assert_not_called()
 
 
 class TestLookupShape(unittest.TestCase):
@@ -329,6 +383,26 @@ class TestMissedCheckout(unittest.TestCase):
 
 	def test_a_lone_out_is_not_a_missed_checkout(self):
 		self.assertFalse(_cell(_group({"time": _at(11, 30), "log_type": "OUT"}))["missed_checkout"])
+
+	def test_last_nights_shift_is_not_missed_before_six(self):
+		group = _group({"time": _at(16, 3), "log_type": "IN"})
+		for now, expected in (
+			(datetime(2026, 10, 20, 0, 30), False),  # 16:00-01:00 shift still running
+			(datetime(2026, 10, 20, 5, 59), False),
+			(datetime(2026, 10, 20, 6, 0), True),
+			(datetime(2026, 10, 20, 14, 0), True),
+		):
+			self.assertEqual(
+				attendance_service.missed_checkout_for(group, "2026-10-19", _TODAY, now=now), expected, now
+			)
+
+	def test_two_days_back_is_missed_even_in_the_small_hours(self):
+		group = _group({"time": datetime(2026, 10, 18, 16), "log_type": "IN"}, day="2026-10-18")
+		self.assertTrue(
+			attendance_service.missed_checkout_for(
+				group, "2026-10-18", _TODAY, now=datetime(2026, 10, 20, 0, 30)
+			)
+		)
 
 	def test_blank_log_types_fall_back_to_an_odd_count(self):
 		self.assertTrue(_cell(_group({"time": _at(13), "log_type": ""}))["missed_checkout"])
@@ -467,7 +541,7 @@ def _ck(name, time, flag, token, shift_start=None):
 	}
 
 
-def _approve(day_rows, flagged_rows=(), registered_elsewhere=None):
+def _approve(day_rows, flagged_rows=(), registered_elsewhere=None, used_by_colleague=None):
 	"""Run ``checkin_device.approve_device`` with the DB mocked; return (result, fr)."""
 	meta = MagicMock()
 	meta.has_field.return_value = True
@@ -494,6 +568,7 @@ def _approve(day_rows, flagged_rows=(), registered_elsewhere=None):
 		fr.throw.side_effect = _fake_throw
 		fr.db.get_all.side_effect = get_all
 		fr.db.get_value.side_effect = get_value
+		fr.db.exists.return_value = used_by_colleague
 		result = dev.approve_device("HR-EMP-1", "2026-10-19")
 		return result, fr
 
@@ -573,6 +648,35 @@ class TestApproveDevice(unittest.TestCase):
 		with self.assertRaises(dev.DeviceApprovalError) as ctx:
 			_approve(day_rows, registered_elsewhere="HR-EMP-7")
 		self.assertIn("already registered", str(ctx.exception))
+
+	def test_a_phone_a_colleague_used_after_this_employee_is_refused(self):
+		# A checked in first (New Device); B then used it (B's row is the Shared one).
+		day_rows = [_ck("C3", _at(12, 37), dev.FLAG_NEW, TOKEN, _at(12, 30))]
+		with self.assertRaises(dev.DeviceApprovalError) as ctx:
+			_approve(day_rows, used_by_colleague="EMP-CKIN-9")
+		self.assertIn("another employee", str(ctx.exception))
+
+	def test_the_colleague_check_is_by_token_and_other_employees(self):
+		day_rows = [_ck("C3", _at(21), dev.FLAG_NEW, TOKEN, _at(12, 30))]
+		_, fr = _approve(day_rows)
+		fr.db.exists.assert_called_once_with(
+			"Employee Checkin", {"custom_device_token": TOKEN, "employee": ("!=", "HR-EMP-1")}
+		)
+
+	def test_an_unmatched_small_hours_out_belongs_to_the_night_before(self):
+		# 00:40 on the 20th, HRMS matched no shift: the board files it under the 19th.
+		tail = {**_ck("C5", datetime(2026, 10, 20, 0, 40), dev.FLAG_NEW, TOKEN), "log_type": "OUT"}
+		result, _ = _approve([tail], [{"name": "C5", "custom_device_flag_detail": None}])
+		self.assertEqual(result["cleared"], 1)
+
+	def test_a_converted_small_hours_press_stays_on_its_own_day(self):
+		row = {
+			**_ck("C5", datetime(2026, 10, 20, 0, 40), dev.FLAG_NEW, TOKEN),
+			"log_type": "IN",
+			"custom_original_log_type": "OUT",
+		}
+		with self.assertRaises(dev.DeviceApprovalError):
+			_approve([row])
 
 	def test_nothing_to_approve_is_a_friendly_error(self):
 		with self.assertRaises(dev.DeviceApprovalError) as ctx:

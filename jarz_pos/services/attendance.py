@@ -134,7 +134,7 @@ from typing import Any, Optional
 
 import frappe
 from frappe import _
-from frappe.utils import add_days, flt, get_datetime, get_first_day, get_last_day, getdate
+from frappe.utils import add_days, flt, get_datetime, get_first_day, get_last_day, getdate, now_datetime
 
 from jarz_pos.events.employee_checkin import EMPLOYEE_EXEMPT_FIELD
 from jarz_pos.services import roster as roster_service
@@ -669,17 +669,29 @@ def checkout_corrected_for(group: dict[str, Any] | None) -> bool:
 	return group.get("first_log_type") == "OUT"
 
 
-def missed_checkout_for(group: dict[str, Any] | None, date_str: str, today: date_cls) -> bool:
+def missed_checkout_for(
+	group: dict[str, Any] | None, date_str: str, today: date_cls, now: Any = None
+) -> bool:
 	"""A finished shift day that never got its check-out.
 
-	Only a day strictly before ``today`` can have missed anything. Then: last
-	punch IN -> missed; last punch OUT -> not; log_type blank -> missed only
-	for an odd number of punches (an arrival with nothing to pair it with).
+	Only a day strictly before ``today`` can have missed anything -- and
+	yesterday's night shift is still running until ``OVERNIGHT_TAIL_END_HOUR``,
+	so it is not missed before then. Then: last punch IN -> missed; last punch
+	OUT -> not; log_type blank -> missed only for an odd number of punches (an
+	arrival with nothing to pair it with).
 	"""
 	if not group or not group.get("count"):
 		return False
 	try:
-		if getdate(date_str) >= getdate(today):
+		day, today = getdate(date_str), getdate(today)
+		if day >= today:
+			return False
+		now = get_datetime(now) if now is not None else now_datetime()
+		if (
+			getdate(now) == today
+			and day == getdate(add_days(today, -1))
+			and now.hour < OVERNIGHT_TAIL_END_HOUR
+		):
 			return False
 	except Exception:
 		return False

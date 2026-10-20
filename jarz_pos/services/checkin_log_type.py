@@ -39,6 +39,13 @@ message instead of being stored as a 30-second shift. That refusal is the ONLY
 thing in this module allowed to raise; every other failure is logged and the
 check-in goes through untouched.
 
+Live presses only
+-----------------
+The rules judge a press against the clock, so they apply only to a check-in
+stamped within ``LIVE_PRESS_WINDOW`` of the server's now, and never during a
+data import, patch or migrate. A manager keying a missing pair in Desk, a Data
+Import or a biometric backfill is stored exactly as entered.
+
 Ordering
 --------
 Frappe's ``Document.insert`` runs ``before_insert`` before
@@ -55,7 +62,7 @@ from typing import Any
 
 import frappe
 from frappe import _
-from frappe.utils import get_datetime, getdate
+from frappe.utils import get_datetime, getdate, now_datetime
 
 CHECKIN_DOCTYPE = "Employee Checkin"
 
@@ -76,6 +83,8 @@ NEW_SHIFT_AFTER_OUT = timedelta(hours=4)
 LOOKBACK = timedelta(days=7)
 #: An OUT this soon after an IN is a second press, not a departure.
 DOUBLE_PRESS_WINDOW = timedelta(minutes=10)
+#: A check-in stamped further than this from now is a backfill, not a press.
+LIVE_PRESS_WINDOW = timedelta(minutes=30)
 
 ACTION_KEEP = "keep"
 ACTION_CONVERT = "convert"
@@ -236,6 +245,16 @@ def _previous_checkin(employee: str, when: datetime, name: str | None) -> dict[s
 	return rows[0] if rows else None
 
 
+def _is_live_press(when: datetime) -> bool:
+	"""A press made just now -- not an import, a patch, or a Desk backfill."""
+	flags = getattr(frappe, "flags", None)
+	if flags is not None and any(
+		getattr(flags, name, False) for name in ("in_import", "in_patch", "in_migrate")
+	):
+		return False
+	return abs(when - now_datetime()) <= LIVE_PRESS_WINDOW
+
+
 def _correct(doc) -> str | None:
 	"""Apply the rules to ``doc``. Returns a refusal message, or ``None``."""
 	if _norm(doc.get("log_type")) != LOG_OUT:
@@ -250,15 +269,19 @@ def _correct(doc) -> str | None:
 	when = get_datetime(raw_time)
 	if when is None:
 		return None
+	if not _is_live_press(when):
+		return None
 
 	previous = _previous_checkin(employee, when, doc.get("name"))
 	action, reason = decide(when, previous)
 
 	if action == ACTION_CONVERT:
+		# The note first: if it fails, the doc is left exactly as pressed.
+		note = note_for(reason, when, previous)
 		original = doc.get("log_type")
 		doc.log_type = LOG_IN
 		doc.custom_original_log_type = original
-		doc.custom_log_type_note = note_for(reason, when, previous)
+		doc.custom_log_type_note = note
 		return None
 	if action == ACTION_REFUSE and previous:
 		return refusal_message(previous)
