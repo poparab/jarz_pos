@@ -97,7 +97,7 @@ class TestReportsAPI(unittest.TestCase):
 		self.assertEqual("Medium", result["groups"][0]["group_name"])
 		self.assertEqual("Medium", result["groups"][0]["items"][0]["item_group"])
 
-	def test_get_final_products_report_lists_small_first(self):
+	def test_get_final_products_report_lists_small_last(self):
 		from jarz_pos.api import reports
 
 		items = [
@@ -126,8 +126,8 @@ class TestReportsAPI(unittest.TestCase):
 		):
 			result = reports.get_final_products_report()
 
-		self.assertEqual(["Small", "Medium", "Large"], [group["group_name"] for group in result["groups"]])
-		small = result["groups"][0]
+		self.assertEqual(["Medium", "Large", "Small"], [group["group_name"] for group in result["groups"]])
+		small = result["groups"][-1]
 		self.assertEqual("Molten Small", small["items"][0]["item_name"])
 		self.assertEqual(9.0, small["items"][0]["total_qty"])
 		# Every size carries the same warehouse columns.

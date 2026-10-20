@@ -223,8 +223,9 @@ def get_final_products_report(branch: str | None = None) -> dict[str, Any]:
 			warehouse_set.update(wh_qty.keys())
 		warehouses = sorted(warehouse_set)
 
-	# Build separate tables per group, smallest jar first.
-	groups_order = ["Small", "Medium", "Large"]
+	# Build separate tables per group: Medium, Large, then Small at the bottom
+	# (the owner asked for the small jars last, 2026-10-20).
+	groups_order = ["Medium", "Large", "Small"]
 	result_groups = []
 
 	for group_name in groups_order:
