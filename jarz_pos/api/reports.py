@@ -12,8 +12,30 @@ from typing import Any, Optional
 
 import frappe
 from frappe import _
+from frappe.utils import add_days, getdate, nowdate
 
 from jarz_pos.constants import ROLES
+
+# Pure maths shared with the branch replenishment plan, so "sells per day" and
+# "days of cover" mean the same thing on the stock report as on the plan.
+from jarz_pos.services.replenishment_planning import days_of_cover, sells_per_day
+
+#: Days-of-cover on the Final Products report. The rate is net jars sold per
+#: day over the last ``_COVER_SALES_DAYS`` whole days (ending yesterday); the
+#: app colours a quantity cell red when it is <= 0 or covers fewer than
+#: ``_COVER_RED_BELOW`` days, yellow from there up to ``_COVER_GREEN_ABOVE``
+#: days, and green above it. ``None`` cover (no recent sales) is not coloured.
+_COVER_SALES_DAYS = 14
+_COVER_RED_BELOW = 3
+_COVER_GREEN_ABOVE = 7
+
+
+def _cover_meta() -> dict[str, int]:
+	return {
+		"sales_days": _COVER_SALES_DAYS,
+		"red_below": _COVER_RED_BELOW,
+		"green_above": _COVER_GREEN_ABOVE,
+	}
 
 
 def _ensure_jarz_manager():
@@ -134,6 +156,111 @@ def _bin_maps(item_codes: list[str], warehouse: str | None):
 	return qty_map, value_map
 
 
+def _log_degraded_read(title: str, message: str) -> None:
+	"""Log a degraded read without letting the logger itself break the report.
+
+	``frappe.log_error`` reads System Settings outside its own try block, so it
+	can raise from inside an ``except`` — same guard as
+	``api/replenishment._log_failure``.
+	"""
+	title = (title or "JARZ Reports")[:140]
+	try:
+		frappe.log_error(title=title, message=message)
+		return
+	except Exception as logging_error:
+		fallback = f"{title}: {message} (log_error itself failed: {logging_error})"
+	try:
+		frappe.logger().error(fallback)
+	except Exception:
+		return
+
+
+def _jar_sales_by_warehouse(
+	item_codes: list[str],
+	warehouse: str | None,
+	sales_days: int,
+) -> dict[tuple[str, str], float]:
+	"""Net quantity sold per ``(warehouse, item_code)`` over the cover window.
+
+	Same shape as ``api/replenishment._resolve_sales``: submitted Sales
+	Invoices only, keyed on ``Sales Invoice Item.warehouse``, ``SUM(stock_qty)``
+	so returns (negative qty) net themselves out, and the window is whole
+	completed days ending yesterday so the rate does not sag through the
+	morning.
+
+	With ``warehouse`` it reads that warehouse only. Without it, it reads EVERY
+	warehouse — not just the report's columns — because the totals and the
+	finished-goods column need company-wide demand. Rows with no warehouse are
+	skipped (they cannot be keyed).
+
+	Fail-soft: any failure is logged and ``{}`` is returned, which leaves every
+	cover ``None``. The stock report must never break because the sales read did.
+	"""
+	codes = sorted({str(c) for c in item_codes or [] if c})
+	if not codes or sales_days <= 0:
+		return {}
+
+	try:
+		today = getdate(nowdate())
+		params: dict[str, Any] = {
+			"from_date": add_days(today, -sales_days),
+			"to_date": add_days(today, -1),
+			"codes": codes,
+		}
+		warehouse_clause = "AND IFNULL(sii.warehouse, '') != ''"
+		if warehouse:
+			warehouse_clause = "AND sii.warehouse = %(warehouse)s"
+			params["warehouse"] = warehouse
+		rows = frappe.db.sql(
+			f"""
+			SELECT sii.warehouse AS warehouse,
+			       sii.item_code AS item_code,
+			       SUM(sii.stock_qty) AS qty
+			FROM `tabSales Invoice Item` sii
+			INNER JOIN `tabSales Invoice` si ON si.name = sii.parent
+			WHERE si.docstatus = 1
+			  AND si.posting_date BETWEEN %(from_date)s AND %(to_date)s
+			  AND sii.item_code IN %(codes)s
+			  {warehouse_clause}
+			GROUP BY sii.warehouse, sii.item_code
+			""",
+			params,
+			as_dict=True,
+		)
+		return {
+			(str(row["warehouse"]), str(row["item_code"])): float(row.get("qty") or 0)
+			for row in rows or []
+		}
+	except Exception:
+		try:
+			tb = frappe.get_traceback()
+		except Exception:
+			tb = ""
+		_log_degraded_read(
+			"JARZ Reports - final products sales read failed",
+			f"warehouse={warehouse} days={sales_days}\n{tb}",
+		)
+		return {}
+
+
+def _sales_rates(
+	sales: dict[tuple[str, str], float], sales_days: int
+) -> tuple[dict[str, dict[str, float]], dict[str, float]]:
+	"""``(rate_map, company_rate)``: item → {warehouse: rate}, item → summed rate.
+
+	Each warehouse's rate goes through ``sells_per_day`` on its own (so a
+	warehouse that took back more than it sold contributes 0, not a negative);
+	the item's company-wide rate is the sum of those per-warehouse rates.
+	"""
+	rate_map: dict[str, dict[str, float]] = {}
+	company_rate: dict[str, float] = {}
+	for (wh, item_code), qty in sales.items():
+		rate = sells_per_day(qty_sold=qty, sales_days=sales_days)
+		rate_map.setdefault(item_code, {})[wh] = rate
+		company_rate[item_code] = company_rate.get(item_code, 0.0) + rate
+	return rate_map, {code: round(rate, 3) for code, rate in company_rate.items()}
+
+
 def _totals(rows: list[dict[str, Any]]) -> dict[str, float]:
 	return {
 		"qty": round(sum(float(r.get("total_qty") or 0) for r in rows), 3),
@@ -157,20 +284,57 @@ def get_final_products_report(branch: str | None = None) -> dict[str, Any]:
 	not it has stock, because "we are out of Carrot cake" is the line a stock
 	count exists to show and the old "skip items with no Bin row" rule hid it.
 
+	Days of cover (so the app can colour each quantity cell). The rate is net
+	jars sold per day over the last ``cover.sales_days`` (14) whole days ending
+	yesterday, read off submitted Sales Invoices by ``Sales Invoice Item.warehouse``.
+	Per item row:
+
+	* ``sells_per_day``: ``{wh: rate}`` — one entry for EVERY warehouse column,
+	  that warehouse's own rate; ``0.0`` when it sold none (never omitted).
+	* ``days_cover``: ``{wh: float | None}`` — one entry for EVERY column. Own
+	  rate > 0 → ``qty / own rate``. Otherwise, a finished-goods store (it feeds
+	  every branch) → ``qty / company-wide rate``. Otherwise ``None``. Stock at
+	  or below zero with a rate covers ``0.0``, never a negative number.
+	* ``total_sells_per_day``: the item's rate summed over every warehouse it
+	  sold from (company-wide, not only the columns). Branch view: that
+	  branch's own rate.
+	* ``total_days_cover``: ``total_qty / total_sells_per_day``, same rules.
+
+	Colour: qty <= 0 or cover < ``red_below`` (3) = red; 3..7 = yellow;
+	> ``green_above`` (7) = green; ``None`` = no recent sales, no colour. The
+	thresholds travel in the top-level ``cover`` block. If the sales read fails
+	every cover is ``None`` and every rate ``0.0``; the stock figures are untouched.
+
 	Response shape:
 	{
-	    "warehouses": ["WH-A", "WH-B", ...],
-	    "items": [
+	    "groups": [
 	        {
-	            "item_code": "ITEM-001",
-	            "item_name": "...",
-	            "item_group": "Medium",
-	            "stock_uom": "Nos",
-	            "warehouse_qty": {"WH-A": 10.0, "WH-B": 5.0},
-	            "total_qty": 15.0
+	            "group_name": "Medium",
+	            "warehouses": ["WH-A", "WH-B", ...],
+	            "items": [
+	                {
+	                    "item_code": "ITEM-001",
+	                    "item_name": "...",
+	                    "item_group": "Medium",
+	                    "stock_uom": "Nos",
+	                    "warehouse_qty": {"WH-A": 10.0, "WH-B": 5.0},
+	                    "total_qty": 15.0,
+	                    "warehouse_value": {"WH-A": 300.0, "WH-B": 150.0},
+	                    "stock_value": 450.0,
+	                    "sells_per_day": {"WH-A": 2.0, "WH-B": 0.0},
+	                    "days_cover": {"WH-A": 5.0, "WH-B": None},
+	                    "total_sells_per_day": 2.0,
+	                    "total_days_cover": 7.5
+	                },
+	                ...
+	            ],
+	            "totals": {"qty": 15.0, "stock_value": 450.0}
 	        },
 	        ...
-	    ]
+	    ],
+	    "totals": {"qty": ..., "stock_value": ...},
+	    "filters": {"branch": None, "warehouse": None},
+	    "cover": {"sales_days": 14, "red_below": 3, "green_above": 7}
 	}
 	"""
 	_ensure_jarz_manager()
@@ -194,7 +358,12 @@ def get_final_products_report(branch: str | None = None) -> dict[str, Any]:
 	)
 
 	if not items:
-		return {"groups": [], "totals": {"qty": 0.0, "stock_value": 0.0}, "filters": filters_echo}
+		return {
+			"groups": [],
+			"totals": {"qty": 0.0, "stock_value": 0.0},
+			"filters": filters_echo,
+			"cover": _cover_meta(),
+		}
 
 	item_codes = [it["item_code"] for it in items]
 
@@ -203,6 +372,14 @@ def get_final_products_report(branch: str | None = None) -> dict[str, Any]:
 	# HIGH: on production Chocolate Hazelnut Medium showed 74 while the ledger
 	# said 70, because Dokki's -4 was simply not fetched.
 	item_wh_map, item_value_map = _bin_maps(item_codes, warehouse)
+
+	# Demand for days-of-cover. Branch view: that warehouse only. Otherwise
+	# every warehouse, so totals and the finished-goods column see company-wide
+	# demand. Fail-soft: {} leaves every cover None.
+	rate_map, company_rate = _sales_rates(
+		_jar_sales_by_warehouse(item_codes, warehouse, _COVER_SALES_DAYS),
+		_COVER_SALES_DAYS,
+	)
 
 	# One column set for the whole report. What this guarantees is that the
 	# Company's FG warehouse is ALWAYS a column, and that Small, Medium and
@@ -215,10 +392,14 @@ def get_final_products_report(branch: str | None = None) -> dict[str, Any]:
 	# sprouted a "Raw Material" column was cured by repairing the phantom bins,
 	# not by this line.
 	if warehouse:
-		# A branch view shows that branch's store and nothing else.
+		# A branch view shows that branch's store and nothing else. Its sales
+		# read is that warehouse only, so the company-wide fallback for a
+		# finished-goods column would equal its own rate anyway.
 		warehouses = [warehouse]
+		fg_warehouses: set = set()
 	else:
-		warehouse_set: set = set(_finished_goods_warehouses())
+		fg_warehouses = set(_finished_goods_warehouses())
+		warehouse_set: set = set(fg_warehouses)
 		for wh_qty in item_wh_map.values():
 			warehouse_set.update(wh_qty.keys())
 		warehouses = sorted(warehouse_set)
@@ -238,6 +419,22 @@ def get_final_products_report(branch: str | None = None) -> dict[str, Any]:
 			wh_qty = item_wh_map.get(it["item_code"], {})
 			wh_value = item_value_map.get(it["item_code"], {})
 			total = sum(wh_qty.values())
+
+			own_rates = rate_map.get(it["item_code"], {})
+			item_company_rate = company_rate.get(it["item_code"], 0.0)
+			wh_rates: dict[str, float] = {}
+			wh_cover: dict[str, float | None] = {}
+			for wh in warehouses:
+				own_rate = own_rates.get(wh, 0.0)
+				wh_rates[wh] = own_rate
+				if own_rate > 0:
+					wh_cover[wh] = days_of_cover(on_hand=wh_qty.get(wh, 0.0), rate=own_rate)
+				elif wh in fg_warehouses:
+					# The store feeds every branch: measure it against all demand.
+					wh_cover[wh] = days_of_cover(on_hand=wh_qty.get(wh, 0.0), rate=item_company_rate)
+				else:
+					wh_cover[wh] = None
+
 			group_result_items.append(
 				{
 					"item_code": it["item_code"],
@@ -248,6 +445,10 @@ def get_final_products_report(branch: str | None = None) -> dict[str, Any]:
 					"total_qty": total,
 					"warehouse_value": {wh: round(v, 2) for wh, v in wh_value.items()},
 					"stock_value": round(sum(wh_value.values()), 2),
+					"sells_per_day": wh_rates,
+					"days_cover": wh_cover,
+					"total_sells_per_day": item_company_rate,
+					"total_days_cover": days_of_cover(on_hand=total, rate=item_company_rate),
 				}
 			)
 
@@ -261,7 +462,12 @@ def get_final_products_report(branch: str | None = None) -> dict[str, Any]:
 		)
 
 	all_rows = [row for group in result_groups for row in group["items"]]
-	return {"groups": result_groups, "totals": _totals(all_rows), "filters": filters_echo}
+	return {
+		"groups": result_groups,
+		"totals": _totals(all_rows),
+		"filters": filters_echo,
+		"cover": _cover_meta(),
+	}
 
 
 def _materials_payload(raw_materials, sub_assemblies, consumables, filters_echo) -> dict[str, Any]:

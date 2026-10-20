@@ -1,9 +1,16 @@
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 
 class TestReportsAPI(unittest.TestCase):
+	def setUp(self):
+		# The days-of-cover sales read is SQL; keep these stock tests hermetic.
+		# It degrades to {} on its own too, but must not hit the database here.
+		patcher = patch("jarz_pos.api.reports._jar_sales_by_warehouse", return_value={})
+		patcher.start()
+		self.addCleanup(patcher.stop)
+
 	def test_get_final_products_report_includes_medium_group(self):
 		from jarz_pos.api import reports
 
@@ -524,3 +531,222 @@ class TestReportsAPI(unittest.TestCase):
 		self.assertEqual({"qty": 10.0, "stock_value": 400.0}, result["bucket_totals"]["raw_materials"])
 		self.assertEqual({"qty": 0.0, "stock_value": 0.0}, result["bucket_totals"]["consumables"])
 		self.assertEqual({"qty": 10.0, "stock_value": 400.0}, result["totals"])
+
+
+FG = "Finished Goods - J"
+DOKKI = "Dokki - J"
+NASR = "Nasr city - J"
+ZAMALEK = "Zamalek - J"
+
+
+class TestFinalProductsDaysOfCover(unittest.TestCase):
+	"""Days-of-cover on the Final Products report (14-day net sales rate)."""
+
+	def _run(self, items, bins, sales, fg=(FG,), branch=None, db=None):
+		from jarz_pos.api import reports
+
+		def fake_get_all(doctype, **kwargs):
+			if doctype == "Item":
+				return items
+			if doctype == "Bin":
+				return bins
+			self.fail(f"Unexpected doctype lookup: {doctype}")
+
+		sales_mock = MagicMock(return_value=sales)
+		patches = [
+			patch("jarz_pos.api.reports._ensure_jarz_manager"),
+			patch("jarz_pos.api.reports._finished_goods_warehouses", return_value=list(fg)),
+			patch("jarz_pos.api.reports.frappe.get_all", side_effect=fake_get_all),
+			patch("jarz_pos.api.reports._jar_sales_by_warehouse", sales_mock),
+		]
+		if db is not None:
+			patches.append(patch("jarz_pos.api.reports.frappe.db", db))
+		for p in patches:
+			p.start()
+		try:
+			result = reports.get_final_products_report(branch=branch)
+		finally:
+			for p in reversed(patches):
+				p.stop()
+		return result, sales_mock
+
+	@staticmethod
+	def _item(code="ITEM-M", name="Lotus Medium", group="Medium"):
+		return {"item_code": code, "item_name": name, "item_group": group, "stock_uom": "Nos"}
+
+	@staticmethod
+	def _bin(warehouse, qty, code="ITEM-M"):
+		return {"item_code": code, "warehouse": warehouse, "actual_qty": qty, "stock_value": 0.0}
+
+	def test_branch_column_uses_its_own_rate(self):
+		# 28 sold at Dokki over 14 days = 2/day; 10 on the shelf = 5 days.
+		result, sales_mock = self._run(
+			[self._item()],
+			[self._bin(DOKKI, 10)],
+			{(DOKKI, "ITEM-M"): 28.0},
+		)
+		row = result["groups"][0]["items"][0]
+		self.assertEqual(2.0, row["sells_per_day"][DOKKI])
+		self.assertEqual(5.0, row["days_cover"][DOKKI])
+		# Company-wide read: no warehouse filter, 14-day window.
+		args = sales_mock.call_args[0]
+		self.assertIsNone(args[1])
+		self.assertEqual(14, args[2])
+		self.assertEqual({"sales_days": 14, "red_below": 3, "green_above": 7}, result["cover"])
+
+	def test_finished_goods_column_uses_the_company_wide_rate(self):
+		# Dokki 2/day + Nasr city 1/day (not a column: no bin there) = 3/day.
+		result, _ = self._run(
+			[self._item()],
+			[self._bin(FG, 60), self._bin(DOKKI, 4)],
+			{(DOKKI, "ITEM-M"): 28.0, (NASR, "ITEM-M"): 14.0},
+		)
+		group = result["groups"][0]
+		self.assertEqual([DOKKI, FG], group["warehouses"])
+		row = group["items"][0]
+		self.assertEqual(20.0, row["days_cover"][FG])
+		self.assertEqual(2.0, row["days_cover"][DOKKI])
+		# One sells_per_day entry per column, 0.0 where that column sold none;
+		# demand outside the columns is not listed but is in the total.
+		self.assertEqual({DOKKI: 2.0, FG: 0.0}, row["sells_per_day"])
+		self.assertEqual(3.0, row["total_sells_per_day"])
+		# 64 jars company-wide / 3 per day.
+		self.assertEqual(21.3, row["total_days_cover"])
+
+	def test_column_with_no_sales_has_no_cover(self):
+		result, _ = self._run(
+			[self._item(), self._item("ITEM-M2", "Carrot cake Medium")],
+			[self._bin(ZAMALEK, 5), self._bin(DOKKI, 3, code="ITEM-M2")],
+			{(DOKKI, "ITEM-M2"): 14.0},
+		)
+		rows = {r["item_code"]: r for r in result["groups"][0]["items"]}
+		# Every column has an entry, even where the item is absent.
+		self.assertEqual({DOKKI, FG, ZAMALEK}, set(rows["ITEM-M"]["days_cover"]))
+		self.assertIsNone(rows["ITEM-M"]["days_cover"][ZAMALEK])
+		self.assertIsNone(rows["ITEM-M"]["days_cover"][DOKKI])
+		# The FG store with no demand anywhere has nothing to measure against.
+		self.assertIsNone(rows["ITEM-M"]["days_cover"][FG])
+		self.assertEqual(0.0, rows["ITEM-M"]["total_sells_per_day"])
+		self.assertIsNone(rows["ITEM-M"]["total_days_cover"])
+		self.assertIsNone(rows["ITEM-M2"]["days_cover"][ZAMALEK])
+
+	def test_empty_or_oversold_shelf_with_sales_covers_zero_days(self):
+		result, _ = self._run(
+			[self._item(), self._item("ITEM-M2", "Carrot cake Medium")],
+			[self._bin(DOKKI, -4), self._bin(NASR, 6, code="ITEM-M2")],
+			{(DOKKI, "ITEM-M"): 14.0, (NASR, "ITEM-M"): 7.0},
+		)
+		row = {r["item_code"]: r for r in result["groups"][0]["items"]}["ITEM-M"]
+		self.assertEqual(0.0, row["days_cover"][DOKKI])  # -4 on hand, never negative
+		self.assertEqual(0.0, row["days_cover"][NASR])  # no bin at all, but it sells
+		self.assertEqual(0.0, row["days_cover"][FG])  # store empty, company sells 1.5/day
+		self.assertEqual(1.5, row["total_sells_per_day"])
+		self.assertEqual(0.0, row["total_days_cover"])
+
+	def test_branch_view_reads_that_warehouse_only(self):
+		result, sales_mock = self._run(
+			[self._item()],
+			[self._bin("Stores - Dokki", 21)],
+			{("Stores - Dokki", "ITEM-M"): 42.0},
+			fg=(),
+			branch="Dokki",
+			db=SimpleNamespace(get_value=lambda *a, **k: "Stores - Dokki"),
+		)
+		self.assertEqual("Stores - Dokki", sales_mock.call_args[0][1])
+		row = result["groups"][0]["items"][0]
+		self.assertEqual({"Stores - Dokki": 3.0}, row["sells_per_day"])
+		self.assertEqual({"Stores - Dokki": 7.0}, row["days_cover"])
+		self.assertEqual(3.0, row["total_sells_per_day"])
+		self.assertEqual(7.0, row["total_days_cover"])
+
+	def test_empty_report_still_carries_the_cover_block(self):
+		result, _ = self._run([], [], {})
+		self.assertEqual([], result["groups"])
+		self.assertEqual({"sales_days": 14, "red_below": 3, "green_above": 7}, result["cover"])
+
+	def test_failed_sales_read_leaves_every_cover_none(self):
+		"""The stock report must never break because the sales read did."""
+		from jarz_pos.api import reports
+
+		items = [self._item()]
+		bins = [self._bin(FG, 60), self._bin(DOKKI, 4)]
+
+		def fake_get_all(doctype, **kwargs):
+			if doctype == "Item":
+				return items
+			if doctype == "Bin":
+				return bins
+			self.fail(f"Unexpected doctype lookup: {doctype}")
+
+		def broken_sql(*a, **k):
+			raise Exception("Lost connection to MySQL server")
+
+		logged = []
+		with (
+			patch("jarz_pos.api.reports._ensure_jarz_manager"),
+			patch("jarz_pos.api.reports._finished_goods_warehouses", return_value=[FG]),
+			patch("jarz_pos.api.reports.frappe.get_all", side_effect=fake_get_all),
+			patch("jarz_pos.api.reports.frappe.db", SimpleNamespace(sql=broken_sql)),
+			patch("jarz_pos.api.reports.nowdate", return_value="2026-10-20"),
+			patch(
+				"jarz_pos.api.reports._log_degraded_read",
+				side_effect=lambda title, message: logged.append(title),
+			),
+		):
+			result = reports.get_final_products_report()
+
+		row = result["groups"][0]["items"][0]
+		self.assertEqual(64.0, row["total_qty"])
+		self.assertEqual({DOKKI: None, FG: None}, row["days_cover"])
+		self.assertEqual({DOKKI: 0.0, FG: 0.0}, row["sells_per_day"])
+		self.assertEqual(0.0, row["total_sells_per_day"])
+		self.assertIsNone(row["total_days_cover"])
+		self.assertEqual(1, len(logged))
+
+	def test_sales_helper_survives_a_failing_logger(self):
+		"""``frappe.log_error`` can itself raise; the helper must still return {}."""
+		from jarz_pos.api import reports
+
+		def broken(*a, **k):
+			raise Exception("boom")
+
+		with (
+			patch("jarz_pos.api.reports.frappe.db", SimpleNamespace(sql=broken)),
+			patch("jarz_pos.api.reports.nowdate", return_value="2026-10-20"),
+			patch("jarz_pos.api.reports.frappe.log_error", side_effect=broken),
+			patch("jarz_pos.api.reports.frappe.logger", side_effect=broken),
+			patch("jarz_pos.api.reports.frappe.get_traceback", side_effect=broken),
+		):
+			self.assertEqual({}, reports._jar_sales_by_warehouse(["ITEM-M"], None, 14))
+
+	def test_sales_helper_query_shape(self):
+		from jarz_pos.api import reports
+
+		captured = []
+
+		def fake_sql(query, params, as_dict=False):
+			captured.append((query, params))
+			return [{"warehouse": DOKKI, "item_code": "ITEM-M", "qty": 9}]
+
+		with (
+			patch("jarz_pos.api.reports.frappe.db", SimpleNamespace(sql=fake_sql)),
+			patch("jarz_pos.api.reports.nowdate", return_value="2026-10-20"),
+		):
+			company = reports._jar_sales_by_warehouse(["ITEM-M"], None, 14)
+			branch = reports._jar_sales_by_warehouse(["ITEM-M"], DOKKI, 14)
+
+		self.assertEqual({(DOKKI, "ITEM-M"): 9.0}, company)
+		self.assertEqual({(DOKKI, "ITEM-M"): 9.0}, branch)
+		company_query, company_params = captured[0]
+		branch_query, branch_params = captured[1]
+		self.assertIn("si.docstatus = 1", company_query)
+		self.assertNotIn("%(warehouse)s", company_query)
+		self.assertNotIn("warehouse", company_params)
+		self.assertIn("sii.warehouse = %(warehouse)s", branch_query)
+		self.assertEqual(DOKKI, branch_params["warehouse"])
+		# Whole completed days ending yesterday.
+		self.assertEqual("2026-10-19", str(company_params["to_date"]))
+		self.assertEqual("2026-10-06", str(company_params["from_date"]))
+		# No items: no query at all.
+		self.assertEqual({}, reports._jar_sales_by_warehouse([], None, 14))
+		self.assertEqual(2, len(captured))
