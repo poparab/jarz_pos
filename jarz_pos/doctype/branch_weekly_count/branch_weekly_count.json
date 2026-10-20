@@ -37,6 +37,7 @@
    "in_standard_filter": 1,
    "label": "POS Profile",
    "options": "POS Profile",
+   "read_only": 1,
    "reqd": 1,
    "search_index": 1
   },
@@ -62,6 +63,7 @@
    "fieldtype": "Date",
    "in_list_view": 1,
    "label": "Week Start",
+   "read_only": 1,
    "reqd": 1,
    "search_index": 1
   },
@@ -73,6 +75,7 @@
    "in_standard_filter": 1,
    "label": "Status",
    "options": "Pending Approval\nApproved\nRejected",
+   "read_only": 1,
    "search_index": 1
   },
   {
@@ -183,7 +186,7 @@
  ],
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2026-10-20 00:00:00.000000",
+ "modified": "2026-10-20 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "jarz pos",
  "name": "Branch Weekly Count",
@@ -191,7 +194,6 @@
  "owner": "Administrator",
  "permissions": [
   {
-   "create": 1,
    "delete": 1,
    "email": 1,
    "export": 1,
@@ -203,33 +205,20 @@
    "write": 1
   },
   {
-   "create": 1,
-   "delete": 1,
    "email": 1,
    "export": 1,
    "print": 1,
    "read": 1,
    "report": 1,
-   "role": "Stock Manager",
-   "share": 1,
-   "write": 1
+   "role": "Stock Manager"
   },
   {
-   "create": 1,
-   "delete": 1,
    "email": 1,
    "export": 1,
    "print": 1,
    "read": 1,
    "report": 1,
-   "role": "JARZ Manager",
-   "share": 1,
-   "write": 1
-  },
-  {
-   "read": 1,
-   "report": 1,
-   "role": "JARZ line manager"
+   "role": "JARZ Manager"
   }
  ],
  "row_format": "Dynamic",

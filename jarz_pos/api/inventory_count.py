@@ -317,6 +317,33 @@ def _get_bin_qty_map(warehouse: str, item_codes: list[str]) -> dict[str, float]:
 	return out
 
 
+def _get_qty_as_of_map(
+	warehouse: str, item_codes: list[str], posting_date: Any, posting_time: Any
+) -> dict[str, float]:
+	"""Stock balance per item at a posting datetime (the same figure ERPNext's
+	Stock Reconciliation compares a row with when it is backdated)."""
+	if not item_codes:
+		return {}
+	# get_previous_sle directly, not erpnext's get_stock_balance: that one
+	# demands Item read permission of the session user, which the posting
+	# engine must not depend on.
+	from erpnext.stock.stock_ledger import get_previous_sle
+	from frappe.utils import nowdate, nowtime
+
+	out: dict[str, float] = {}
+	for code in item_codes:
+		last = get_previous_sle(
+			{
+				"item_code": code,
+				"warehouse": warehouse,
+				"posting_date": posting_date or nowdate(),
+				"posting_time": posting_time or nowtime(),
+			}
+		)
+		out[code] = float((last or {}).get("qty_after_transaction") or 0)
+	return out
+
+
 def _first_positive(value: Any) -> float | None:
 	"""A usable rate, or None. Zero, negative and NaN are not usable rates."""
 	if value is None:
@@ -703,6 +730,7 @@ def _reconcile_counts(
 	posting_date: str | None,
 	lines: list[dict[str, Any]],
 	debug: bool = False,
+	qty_as_of_posting: bool = False,
 ) -> dict[str, Any]:
 	"""Post the Stock Reconciliation for counted lines. No permission check, no commit.
 
@@ -717,11 +745,15 @@ def _reconcile_counts(
 	(``stock_reconciliation`` is None with ``message`` set when nothing differs).
 	A failed insert/submit raises (a negative-stock refusal with a readable
 	message); with ``debug`` it returns ``{"ok": False, "error", "traceback"}``.
+
+	``qty_as_of_posting`` compares the counts with the stock balance at the
+	posting datetime instead of the live Bin. A count approved days after it
+	was counted posts back at the counting moment, so the rows to write (and
+	whether each is an increase) must be judged against the stock *then*:
+	against the live Bin a shortage that sales have since "caught up with"
+	would be dropped, and an unchanged row could look like a change.
 	"""
 	counted, provided_vr, provided_batch, provided_serials = _normalize_count_lines(lines)
-
-	# Current quantities
-	cur_qty_map = _get_bin_qty_map(warehouse, list(counted.keys()))
 
 	# Create Stock Reconciliation only for differences
 	sr = frappe.new_doc("Stock Reconciliation")
@@ -760,6 +792,17 @@ def _reconcile_counts(
 					sr.cost_center = cc
 				except Exception:
 					pass
+
+	# Quantities the counts are compared with: now, or at the posting datetime.
+	if qty_as_of_posting:
+		cur_qty_map = _get_qty_as_of_map(
+			warehouse,
+			list(counted.keys()),
+			getattr(sr, "posting_date", None),
+			getattr(sr, "posting_time", None),
+		)
+	else:
+		cur_qty_map = _get_bin_qty_map(warehouse, list(counted.keys()))
 
 	diffs = 0
 	# Allow zero valuation flag: some sites may not have this field; default to False

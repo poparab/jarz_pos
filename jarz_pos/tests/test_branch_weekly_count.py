@@ -529,6 +529,7 @@ class TestSubmit(_Base):
 		self.reconcile.assert_called_once()
 		warehouse, posting, lines = self.reconcile.call_args.args
 		self.assertEqual((warehouse, posting), ("Dokki - J", "2026-10-20 13:05:00"))
+		self.assertEqual(self.reconcile.call_args.kwargs, {"qty_as_of_posting": True})
 		self.assertEqual(
 			sorted((ln["item_code"], ln["qty"]) for ln in lines),
 			[("BAG-1", 10.0), ("JAR-L-TIR", 3.0), ("JAR-S-TIR", 2.0)],
@@ -618,7 +619,7 @@ class TestSubmit(_Base):
 		self.assertEqual(self.submit()["status"], STATUS.PENDING_APPROVAL)
 
 	def test_a_retry_returns_the_same_count_without_a_second_one(self):
-		self.patch(
+		get_value = self.patch(
 			bwc.frappe.db,
 			"get_value",
 			return_value={
@@ -637,6 +638,18 @@ class TestSubmit(_Base):
 		self.assertEqual(self.docs, [])
 		self.reconcile.assert_not_called()
 		self.enqueue.assert_not_called()
+		filters = get_value.call_args.args[1]
+		self.assertEqual(filters["client_request_id"], "req-1")
+		self.assertEqual(filters["counted_by"], self.user)
+
+	def test_a_retry_never_echoes_a_rejected_count(self):
+		# The lookup skips Rejected, so the same request id after a rejection
+		# records a new count instead of handing the rejected one back.
+		get_value = self.patch(bwc.frappe.db, "get_value", return_value=None, create=True)
+		result = self.submit(client_request_id="req-1")
+		self.assertEqual(get_value.call_args.args[1]["status"], ["!=", STATUS.REJECTED])
+		self.assertEqual(result["status"], STATUS.PENDING_APPROVAL)
+		self.assertEqual(len(self.docs), 1)
 
 	def test_branch_access_is_checked_first(self):
 		self.patch(
@@ -674,6 +687,8 @@ class TestDecide(_Base):
 		self.reconcile.assert_called_once()
 		warehouse, posting, lines = self.reconcile.call_args.args
 		self.assertEqual((warehouse, posting), ("Dokki - J", "2026-10-19 20:15:00"))
+		# A late approval is judged against the stock at counted_at, not today's Bin.
+		self.assertEqual(self.reconcile.call_args.kwargs, {"qty_as_of_posting": True})
 		self.assertEqual(
 			sorted((ln["item_code"], ln["qty"]) for ln in lines),
 			[("BAG-1", 10.0), ("JAR-L-TIR", 3.0), ("JAR-S-TIR", 4.0)],
@@ -713,6 +728,18 @@ class TestDecide(_Base):
 			code, _exc = self.refusal(bwc.approve_weekly_count, "BWC-2026-00007")
 			self.assertEqual(code, "not_pending")
 		self.reconcile.assert_not_called()
+
+	def test_nobody_decides_on_their_own_count(self):
+		self.doc = _pending_doc(counted_by=self.user)
+		for call in (
+			lambda: bwc.approve_weekly_count("BWC-2026-00007"),
+			lambda: bwc.reject_weekly_count("BWC-2026-00007", "why"),
+		):
+			code, exc = self.refusal(call)
+			self.assertEqual(code, "own_count")
+			self.assertIsInstance(exc, frappe.PermissionError)
+		self.reconcile.assert_not_called()
+		self.assertEqual(self.doc.status, STATUS.PENDING_APPROVAL)
 
 	def test_approve_needs_an_approver(self):
 		type(self).approver = False
@@ -794,6 +821,7 @@ class TestReads(_Base):
 	def test_an_approver_sees_quantities_biggest_difference_first(self):
 		type(self).approver = True
 		self.addCleanup(setattr, type(self), "approver", False)
+		self.doc = _pending_doc(counted_by="someone.else@jarz.test")
 		result = bwc.get_weekly_count("BWC-2026-00007")
 		self.assertTrue(result["can_approve"])
 		self.assertEqual(result["differences_count"], 1)
@@ -806,7 +834,13 @@ class TestReads(_Base):
 	def test_can_approve_only_while_pending(self):
 		type(self).approver = True
 		self.addCleanup(setattr, type(self), "approver", False)
-		self.doc = _pending_doc(status=STATUS.APPROVED)
+		self.doc = _pending_doc(status=STATUS.APPROVED, counted_by="someone.else@jarz.test")
+		self.assertFalse(bwc.get_weekly_count("BWC-2026-00007")["can_approve"])
+
+	def test_an_approver_cannot_approve_their_own_count(self):
+		type(self).approver = True
+		self.addCleanup(setattr, type(self), "approver", False)
+		self.doc = _pending_doc(counted_by=self.user)
 		self.assertFalse(bwc.get_weekly_count("BWC-2026-00007")["can_approve"])
 
 	def test_an_approver_without_the_branch_cannot_read_it(self):

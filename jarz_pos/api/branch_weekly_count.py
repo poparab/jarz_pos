@@ -532,6 +532,7 @@ def get_weekly_count(name: str) -> dict[str, Any]:
 	result["can_approve"] = bool(
 		approver
 		and doc.status == STATUS.PENDING_APPROVAL
+		and doc.counted_by != user
 		and doc.pos_profile in set(get_allowed_pos_profiles_for_user(user))
 	)
 	result["lines"] = lines
@@ -628,9 +629,11 @@ def submit_weekly_count(pos_profile: str, lines: Any, client_request_id: str | N
 	frappe.db.sql("SELECT name FROM `tabPOS Profile` WHERE name = %s FOR UPDATE", (branch["name"],))
 
 	if crid:
+		# A Rejected count is never "this submit again": a draft whose first
+		# submit was rejected must record a new count, not echo the old one.
 		earlier = frappe.db.get_value(
 			DOCTYPE,
-			{"client_request_id": crid, "counted_by": user},
+			{"client_request_id": crid, "counted_by": user, "status": ["!=", STATUS.REJECTED]},
 			["name", "status", "auto_approved", "stock_reconciliation", "differences_count", "total_items"],
 			as_dict=True,
 		)
@@ -707,6 +710,7 @@ def submit_weekly_count(pos_profile: str, lines: Any, client_request_id: str | N
 			warehouse,
 			counted_at,
 			[{"item_code": r["item_code"], "qty": r["counted_qty"]} for r in rows],
+			qty_as_of_posting=True,
 		)
 		if not posted.get("ok", True):
 			_refuse("post_failed", str(posted.get("error") or _("The stock could not be updated")))
@@ -751,6 +755,8 @@ def _load_pending_for_decision(name: str, user: str):
 		_refuse("no_access", _("You do not have access to this branch"), frappe.PermissionError)
 	if doc.status != STATUS.PENDING_APPROVAL:
 		_refuse("not_pending", _("This count is not waiting for approval"))
+	if doc.counted_by == user:
+		_refuse("own_count", _("Someone else must decide on your own count"), frappe.PermissionError)
 	return doc
 
 
@@ -760,10 +766,13 @@ def approve_weekly_count(name: str) -> dict[str, Any]:
 	user = frappe.session.user
 	doc = _load_pending_for_decision(name, user)
 
+	# Judged against the stock at counted_at, not today's Bin: sales since the
+	# count must neither hide a shortage nor fake a change.
 	posted = _reconcile_counts(
 		doc.warehouse,
 		_fmt_dt(doc.counted_at),
 		[{"item_code": r.item_code, "qty": r.counted_qty} for r in doc.items or []],
+		qty_as_of_posting=True,
 	)
 	if not posted.get("ok", True):
 		_refuse("post_failed", str(posted.get("error") or _("The stock could not be updated")))

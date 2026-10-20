@@ -514,6 +514,65 @@ class TestInventoryCountAPI(unittest.TestCase):
 			self._submit_one_decrease(current_rate=-7.16, resolved_rate=None)
 		self.assertIn("negative rate", str(ctx.exception))
 
+	def _reconcile_late(self, *, qty_as_of_posting):
+		"""A count of 3 posted back at 2026-10-19 20:15 after sales since then.
+
+		At the counting moment the ledger held 5; the live Bin has since been
+		sold down to 3, the very number counted.
+		"""
+
+		class FakeReconciliation:
+			def __init__(self):
+				self.company = None
+				self.flags = SimpleNamespace(ignore_permissions=False)
+				self.name = "MAT-RECO-1"
+				self.items = []
+
+			def append(self, field, row):
+				self.items.append(row)
+
+			def insert(self):
+				return None
+
+			def submit(self):
+				return None
+
+		doc = FakeReconciliation()
+		with (
+			patch.object(inventory_count, "_get_bin_qty_map", return_value={"Lotus Large": 3}) as live,
+			patch.object(inventory_count, "_get_qty_as_of_map", return_value={"Lotus Large": 5}) as then,
+			patch.object(inventory_count, "_current_valuation_rate", return_value=40.0),
+			patch.object(inventory_count.frappe.db, "get_value", return_value=None),
+			patch.object(inventory_count.frappe.db, "get_single_value", return_value=0),
+			patch.object(inventory_count.frappe, "get_all", return_value=[]),
+			patch.object(inventory_count.frappe, "new_doc", return_value=doc, create=True),
+		):
+			result = inventory_count._reconcile_counts(
+				"Dokki - J",
+				"2026-10-19 20:15:00",
+				[{"item_code": "Lotus Large", "counted_qty": 3}],
+				qty_as_of_posting=qty_as_of_posting,
+			)
+		return result, doc, live, then
+
+	def test_a_late_approval_is_judged_against_the_stock_at_the_counting_moment(self):
+		result, doc, live, then = self._reconcile_late(qty_as_of_posting=True)
+		live.assert_not_called()
+		warehouse, codes, posting_date, posting_time = then.call_args.args
+		self.assertEqual(("Dokki - J", ["Lotus Large"]), (warehouse, codes))
+		self.assertEqual("2026-10-19", str(posting_date))
+		self.assertTrue(str(posting_time).startswith("20:15"))
+		# The shortage of 2 at the counting moment is written, not lost.
+		self.assertEqual(1, result["differences"])
+		self.assertEqual([3.0], [row["qty"] for row in doc.items])
+
+	def test_the_live_bin_stays_the_default(self):
+		result, doc, live, then = self._reconcile_late(qty_as_of_posting=False)
+		then.assert_not_called()
+		live.assert_called_once()
+		self.assertEqual(0, result["differences"])
+		self.assertEqual([], doc.items)
+
 	def test_to_stock_qty_rejects_an_unconfigured_uom(self):
 		with (
 			patch.object(inventory_count.frappe.db, "get_value", return_value="Kg"),
