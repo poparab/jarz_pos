@@ -641,6 +641,10 @@ scheduler_events = {
 		# never raise. See jarz_pos.services.meta_capi.
 		"jarz_pos.services.meta_capi.queue_delivered_orders",
 		"jarz_pos.services.meta_capi.send_approved_events",
+		# Stock Handover: push the awaiting side again for every handover left
+		# unanswered for over 12h, at most once per 12h. No-op until the DocType
+		# exists (pre-migrate); never raises. See jarz_pos.services.stock_handover.
+		"jarz_pos.services.stock_handover.remind_stale_handovers",
 	],
 	"cron": {
 		# Task Board reminders at 09:00 site time (Africa/Cairo): due tomorrow,

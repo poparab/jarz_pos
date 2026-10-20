@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Any, Optional
 
 import frappe
@@ -227,6 +228,70 @@ def search_items_with_stock(
 	return out
 
 
+def _clean_transfer_lines(lines: Any) -> list[dict[str, Any]]:
+	"""Validate ``lines`` (list[{item_code, qty}]) the way :func:`submit_transfer` always has.
+
+	Every line must name an item and carry a positive, finite qty; anything
+	else refuses the whole request rather than silently dropping a line.
+	"""
+	out: list[dict[str, Any]] = []
+	for ln in lines or []:
+		if not isinstance(ln, dict):
+			frappe.throw(_("Each line must be an object"))
+		item_code = ln.get("item_code") or ln.get("item")
+		qty = float(ln.get("qty") or 0)
+		if not item_code or not math.isfinite(qty) or qty <= 0:
+			frappe.throw(_("Invalid item or qty in lines"))
+		out.append({"item_code": str(item_code).strip(), "qty": qty})
+	return out
+
+
+def _build_material_transfer(
+	source_warehouse: str,
+	target_warehouse: str,
+	lines: list[dict[str, Any]],
+	posting_date: str | None = None,
+	remarks: str | None = None,
+) -> Any:
+	"""An unsaved Material Transfer Stock Entry ``source -> target`` for ``lines``.
+
+	Shared by :func:`submit_transfer` and the stock-handover confirmation
+	(``jarz_pos.services.stock_handover``), so both post exactly the same
+	shape: one line per item, ``uom`` = the item's stock UOM.
+	"""
+	se = frappe.new_doc("Stock Entry")
+	se.stock_entry_type = "Material Transfer"
+	# ``posting_date`` may carry a time ("YYYY-MM-DD HH:MM:SS"). Date-only is
+	# the legacy shape and still leaves ``posting_time`` untouched.
+	apply_stock_posting_datetime(se, posting_date)
+	if remarks:
+		se.remarks = remarks
+
+	for ln in _clean_transfer_lines(lines):
+		item_code = ln["item_code"]
+		stock_uom = frappe.db.get_value("Item", item_code, "stock_uom") or DEFAULT_UOM
+		se.append(
+			"items",
+			{
+				"item_code": item_code,
+				"uom": stock_uom,
+				"qty": ln["qty"],
+				"s_warehouse": source_warehouse,
+				"t_warehouse": target_warehouse,
+			},
+		)
+	return se
+
+
+def _insert_and_submit_stock_entry(se: Any) -> Any:
+	"""Insert and submit ``se`` without Desk permission checks; the callers gate."""
+	se.flags.ignore_permissions = True
+	se.insert()
+	se.flags.ignore_permissions = True
+	se.submit()
+	return se
+
+
 @frappe.whitelist(methods=["POST"])
 def submit_transfer(
 	source_warehouse: str,
@@ -237,6 +302,16 @@ def submit_transfer(
 	"""Create a Stock Entry (Material Transfer) between warehouses for given items.
 
 	lines: list[{item_code, qty}]
+
+	When the source OR the target is a branch warehouse (one an enabled POS
+	Profile sells from), nothing is posted yet: a pending Jarz Stock Handover is
+	created instead, declared by the source side, and the Stock Entry is posted
+	only when the other side confirms it (``api.stock_handover.respond``). The
+	reply is then ``{"ok": True, "stock_entry": None, "handover": <name>,
+	"pending": True}``. ``posting_date`` does not apply to that path: a
+	confirmed handover always posts at the moment of confirmation.
+
+	Transfers touching no branch keep posting immediately, unchanged.
 	"""
 	_ensure_transfer_access()
 	try:
@@ -254,35 +329,17 @@ def submit_transfer(
 	if source_warehouse == target_warehouse:
 		frappe.throw(_("Source and Target warehouses must be different"))
 
-	se = frappe.new_doc("Stock Entry")
-	se.stock_entry_type = "Material Transfer"
-	# ``posting_date`` may carry a time ("YYYY-MM-DD HH:MM:SS"). Date-only is
-	# the legacy shape and still leaves ``posting_time`` untouched.
-	apply_stock_posting_datetime(se, posting_date)
+	cleaned = _clean_transfer_lines(lines)
 
-	for ln in lines:
-		if not isinstance(ln, dict):
-			frappe.throw(_("Each line must be an object"))
-		item_code = ln.get("item_code") or ln.get("item")
-		qty = float(ln.get("qty") or 0)
-		if not item_code or qty <= 0:
-			frappe.throw(_("Invalid item or qty in lines"))
-		stock_uom = frappe.db.get_value("Item", item_code, "stock_uom") or DEFAULT_UOM
-		se.append(
-			"items",
-			{
-				"item_code": item_code,
-				"uom": stock_uom,
-				"qty": qty,
-				"s_warehouse": source_warehouse,
-				"t_warehouse": target_warehouse,
-			},
-		)
+	# Imported here, not at module level: the service imports this module.
+	from jarz_pos.services import stock_handover as handover_service
 
-	se.flags.ignore_permissions = True
-	se.insert()
-	se.flags.ignore_permissions = True
-	se.submit()
+	if handover_service.touches_branch(source_warehouse, target_warehouse):
+		handover = handover_service.create_manager_handover(source_warehouse, target_warehouse, cleaned)
+		return {"ok": True, "stock_entry": None, "handover": handover, "pending": True}
+
+	se = _build_material_transfer(source_warehouse, target_warehouse, cleaned, posting_date)
+	_insert_and_submit_stock_entry(se)
 	frappe.db.commit()
 
 	return {"ok": True, "stock_entry": se.name}

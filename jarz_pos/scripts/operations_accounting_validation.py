@@ -323,8 +323,34 @@ def _case_stock_transfer(ctx: RunContext, env: dict[str, Any], art: _Artifacts) 
 		target_warehouse=target,
 		lines=[{"item_code": item, "qty": 1}],
 	)
+	handover = result.get("handover") if result.get("pending") else None
+	if handover:
+		# A transfer touching a branch only becomes a pending Jarz Stock
+		# Handover; nothing may move until the other side confirms it.
+		frappe.db.commit()
+		pending_src, pending_tgt = _bin_qty(item, source), _bin_qty(item, target)
+		ctx.record(
+			f"{case}.pending_handover_moves_nothing",
+			abs(pending_src - before_src) <= 0.001 and abs(pending_tgt - before_tgt) <= 0.001,
+			f"{handover}: {source} {before_src} -> {pending_src}, {target} {before_tgt} -> {pending_tgt}",
+		)
+		# Confirm through the service's posting step directly: this run is one
+		# user, and the turn rule (a proposer never confirms) is unit-tested.
+		from jarz_pos.services import stock_handover as handover_service
+
+		doc = frappe.get_doc(handover_service.DOCTYPE, handover, for_update=True)
+		try:
+			handover_service._confirm(doc, frappe.session.user, handover_service._load_sides())
+		except Exception:
+			# Nothing was posted; still remove the pending handover on unwind.
+			art.add("Jarz Stock Handover", handover)
+			raise
+		result = {"ok": True, "stock_entry": doc.stock_entry, "handover": handover}
 	se = result.get("stock_entry") or result.get("name")
 	art.add("Stock Entry", se)
+	if handover:
+		# Added after the Stock Entry so it is unwound first: it links to it.
+		art.add("Jarz Stock Handover", handover)
 	frappe.db.commit()
 
 	ctx.record(f"{case}.transfer_created", bool(se), json.dumps(result, default=str)[:200])

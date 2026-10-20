@@ -780,6 +780,12 @@ jobs:
             # (feature manager-home-bar): always a bool, follows the User
             # field, False on a site that has not migrated it yet.
             test_api_user
+            # Stock Handover (feature stock-handover). Mocked, no DocType
+            # needed: declare in/out sides, zero lines dropped, a proposer
+            # never confirms, change flips the turn, confirm posts the Stock
+            # Entry (or stays Pending naming the shortage), reject/cancel
+            # rules, shift-bound branch sides, branch transfers go pending.
+            test_api_stock_handover
           )
           rc=0
           for m in "${MODULES[@]}"; do

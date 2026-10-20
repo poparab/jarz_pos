@@ -1,0 +1,272 @@
+{
+ "actions": [],
+ "autoname": "HND-.YYYY.-.#####",
+ "creation": "2026-10-20 12:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "status",
+  "company",
+  "from_warehouse",
+  "to_warehouse",
+  "column_break_sides",
+  "awaiting_side",
+  "declared_side",
+  "source",
+  "pos_profile",
+  "section_break_items",
+  "items",
+  "section_break_trail",
+  "declared_by",
+  "declared_at",
+  "last_proposed_by",
+  "last_proposed_at",
+  "reminder_sent_at",
+  "column_break_trail",
+  "confirmed_by",
+  "confirmed_at",
+  "stock_entry",
+  "rejected_by",
+  "rejected_at",
+  "reject_reason",
+  "cancelled_by",
+  "cancelled_at"
+ ],
+ "fields": [
+  {
+   "default": "Pending",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Status",
+   "options": "Pending\nConfirmed\nRejected\nCancelled",
+   "read_only": 1,
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "label": "Company",
+   "options": "Company",
+   "read_only": 1
+  },
+  {
+   "fieldname": "from_warehouse",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "From Warehouse",
+   "options": "Warehouse",
+   "read_only": 1,
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "to_warehouse",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "To Warehouse",
+   "options": "Warehouse",
+   "read_only": 1,
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "column_break_sides",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "The side that has to answer next: confirm, change or reject.",
+   "fieldname": "awaiting_side",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Awaiting Side",
+   "options": "From\nTo",
+   "read_only": 1
+  },
+  {
+   "description": "The side that declared the movement first. Only this side may cancel, and only while nobody has changed it.",
+   "fieldname": "declared_side",
+   "fieldtype": "Select",
+   "label": "Declared Side",
+   "options": "From\nTo",
+   "read_only": 1
+  },
+  {
+   "fieldname": "source",
+   "fieldtype": "Select",
+   "in_standard_filter": 1,
+   "label": "Declared Through",
+   "options": "Branch\nFactory\nManager",
+   "read_only": 1
+  },
+  {
+   "description": "The branch shift the declaration was made from (branch declarations only).",
+   "fieldname": "pos_profile",
+   "fieldtype": "Link",
+   "label": "POS Profile",
+   "options": "POS Profile",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_break_items",
+   "fieldtype": "Section Break",
+   "label": "Items"
+  },
+  {
+   "fieldname": "items",
+   "fieldtype": "Table",
+   "label": "Items",
+   "options": "Jarz Stock Handover Item",
+   "reqd": 1
+  },
+  {
+   "fieldname": "section_break_trail",
+   "fieldtype": "Section Break",
+   "label": "Trail"
+  },
+  {
+   "fieldname": "declared_by",
+   "fieldtype": "Link",
+   "label": "Declared By",
+   "options": "User",
+   "read_only": 1
+  },
+  {
+   "fieldname": "declared_at",
+   "fieldtype": "Datetime",
+   "label": "Declared At",
+   "read_only": 1
+  },
+  {
+   "description": "Whoever made the latest proposal (the declaration or a change). They can never confirm it.",
+   "fieldname": "last_proposed_by",
+   "fieldtype": "Link",
+   "label": "Last Proposed By",
+   "options": "User",
+   "read_only": 1
+  },
+  {
+   "fieldname": "last_proposed_at",
+   "fieldtype": "Datetime",
+   "label": "Last Proposed At",
+   "read_only": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "reminder_sent_at",
+   "fieldtype": "Datetime",
+   "label": "Reminder Sent At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_trail",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "confirmed_by",
+   "fieldtype": "Link",
+   "label": "Confirmed By",
+   "options": "User",
+   "read_only": 1
+  },
+  {
+   "fieldname": "confirmed_at",
+   "fieldtype": "Datetime",
+   "label": "Confirmed At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "stock_entry",
+   "fieldtype": "Link",
+   "label": "Stock Entry",
+   "options": "Stock Entry",
+   "read_only": 1
+  },
+  {
+   "fieldname": "rejected_by",
+   "fieldtype": "Link",
+   "label": "Rejected By",
+   "options": "User",
+   "read_only": 1
+  },
+  {
+   "fieldname": "rejected_at",
+   "fieldtype": "Datetime",
+   "label": "Rejected At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "reject_reason",
+   "fieldtype": "Small Text",
+   "label": "Reject Reason",
+   "read_only": 1
+  },
+  {
+   "fieldname": "cancelled_by",
+   "fieldtype": "Link",
+   "label": "Cancelled By",
+   "options": "User",
+   "read_only": 1
+  },
+  {
+   "fieldname": "cancelled_at",
+   "fieldtype": "Datetime",
+   "label": "Cancelled At",
+   "read_only": 1
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-10-20 12:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "jarz pos",
+ "name": "Jarz Stock Handover",
+ "naming_rule": "Expression (old style)",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 0,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 0,
+   "delete": 0,
+   "email": 0,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Stock Manager",
+   "share": 0,
+   "write": 1
+  },
+  {
+   "create": 0,
+   "delete": 0,
+   "email": 0,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "JARZ Manager",
+   "share": 0,
+   "write": 1
+  }
+ ],
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}
