@@ -260,6 +260,11 @@ class TestStockHandoverDeclare(unittest.TestCase):
 			patch.object(svc, "_maybe_push_balanced") as balanced,
 			patch.object(svc, "_user_names", return_value={}),
 			patch.object(svc.frappe, "get_all", return_value=[]),
+			patch.object(svc, "_unsourced_receipt_item_codes", return_value={"JAR-L", "JAR-M"}),
+			patch.object(svc, "_warehouse_company", return_value="JARZ"),
+			patch.object(svc, "_resolve_transit_warehouse", return_value="Goods In Transit - J"),
+			patch.object(svc, "_post_transit_entry", return_value="MAT-STE-T1") as post_transit,
+			patch.object(svc, "_notify_transit_managers") as transit_push,
 		):
 			result = svc.declare(
 				my,
@@ -270,6 +275,8 @@ class TestStockHandoverDeclare(unittest.TestCase):
 				client_request_id=client_request_id,
 			)
 		self.balanced = balanced
+		self.post_transit = post_transit
+		self.transit_push = transit_push
 		return result, captured, push
 
 	def test_in_means_from_counterpart_to_me(self):
@@ -299,10 +306,15 @@ class TestStockHandoverDeclare(unittest.TestCase):
 		self.assertIsNone(handover["to_label"])
 		self.assertEqual(handover["awaiting_side"], svc.SIDE_MANAGER)
 		self.assertEqual(handover["awaiting_label"], svc.MANAGER_LABEL)
-		# Nobody answers it one-to-one: only the balanced check runs.
+		# Changed by stock-transit-matching: the stock moves to transit now and the
+		# managers are told there is something to match (no batch-balanced check).
+		self.assertEqual(captured["transit_warehouse"], "Goods In Transit - J")
+		self.post_transit.assert_called_once()
+		self.assertEqual(handover["transit_entry"], "MAT-STE-T1")
+		self.assertEqual(handover["transit_warehouse"], "Goods In Transit - J")
 		push.assert_not_called()
-		self.balanced.assert_called_once()
-		self.assertEqual(self.balanced.call_args.args[0], DOKKI)
+		self.balanced.assert_not_called()
+		self.transit_push.assert_called_once()
 
 	def test_out_needs_no_counterpart(self):
 		_result, captured, _push = self._declare(_branch_actor(), "out", other=None)
@@ -338,9 +350,23 @@ class TestStockHandoverDeclare(unittest.TestCase):
 		with self.assertRaises(frappe.ValidationError):
 			self._declare(_branch_actor(), "out", lines=[{"item_code": "FLOUR", "qty": 1}])
 
-	def test_in_without_a_counterpart_is_refused(self):
+	def test_in_without_a_counterpart_is_an_unsourced_receipt(self):
+		# Changed by stock-transit-matching (was: refused). A manager matches it.
+		result, captured, push = self._declare(_branch_actor(), "in", other=None)
+		self.assertIsNone(captured["from_warehouse"])
+		self.assertEqual(captured["to_warehouse"], DOKKI)
+		self.assertEqual(captured["declared_side"], svc.SIDE_TO)
+		handover = result["handover"]
+		self.assertEqual(handover["awaiting_side"], svc.SIDE_MANAGER)
+		self.assertEqual(handover["from_label"], svc.UNKNOWN_SENDER_LABEL)
+		self.assertFalse(handover["can_respond"])
+		push.assert_not_called()
+		self.transit_push.assert_called_once()
+		self.post_transit.assert_not_called()
+
+	def test_unsourced_receipt_refuses_an_item_nobody_hands_to_me(self):
 		with self.assertRaises(frappe.ValidationError):
-			self._declare(_branch_actor(), "in", other=None)
+			self._declare(_branch_actor(), "in", other=None, lines=[{"item_code": "FLOUR", "qty": 1}])
 
 	def test_bad_direction_is_refused(self):
 		with self.assertRaises(frappe.ValidationError):

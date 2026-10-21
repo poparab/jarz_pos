@@ -18,6 +18,10 @@ from __future__ import annotations
 import frappe
 from frappe import _
 from frappe.model.document import Document
+from frappe.utils import flt
+
+#: Quantities carry 3 decimals; this absorbs float noise in the counter sum.
+_QTY_TOLERANCE = 5e-4
 
 
 class JarzStockHandover(Document):
@@ -26,14 +30,34 @@ class JarzStockHandover(Document):
 		if (self.kind or "Handover") == "Handover":
 			if not self.to_warehouse:
 				frappe.throw(_("A stock handover needs a To warehouse."))
-		elif self.to_warehouse:
-			frappe.throw(_("A sent-out declaration (Dispatch) has no destination."))
+			# A receipt ("I received", declared by the To side) may leave the sender
+			# blank: a manager matches it to a send. Anything declared by the sender
+			# must name itself.
+			if (self.declared_side or "From") != "To" and not self.from_warehouse:
+				frappe.throw(_("A stock handover needs a From warehouse."))
+		else:
+			if self.to_warehouse:
+				frappe.throw(_("A sent-out declaration (Dispatch) has no destination."))
+			if not self.from_warehouse:
+				frappe.throw(_("A sent-out declaration (Dispatch) needs a From warehouse."))
+			self._guard_transit_counters()
 		if self.from_warehouse and self.from_warehouse == self.to_warehouse:
 			frappe.throw(_("From and To warehouses must be different."))
 		if not self.items:
 			frappe.throw(_("A stock handover needs at least one item."))
 		for index, row in enumerate(self.items, start=1):
 			row.idx = index
+
+	def _guard_transit_counters(self):
+		"""A send never accounts for more than it sent: matched + written off + returned <= qty."""
+		for row in self.items or []:
+			used = flt(row.get("matched_qty")) + flt(row.get("written_off_qty")) + flt(row.get("returned_qty"))
+			if used > flt(row.get("qty")) + _QTY_TOLERANCE:
+				frappe.throw(
+					_("{0}: matched, written off and returned add up to {1}, more than the {2} sent.").format(
+						row.get("item_name") or row.get("item_code"), flt(used), flt(row.get("qty"))
+					)
+				)
 
 	def _guard_closed_rows(self):
 		"""A Confirmed / Rejected / Cancelled row is history: only the service may touch it."""

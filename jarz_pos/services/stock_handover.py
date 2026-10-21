@@ -24,13 +24,36 @@ Branch users never send their own warehouse as a free choice nor a date: the
 branch side is derived from ``pos_profile`` + the open shift and checked against
 ``my_warehouse``, and a confirmation always posts at "now".
 
-Sent-out batches (v2): a side may also say only **what left** ("I sent out",
-kind ``Dispatch``) without naming where it went. The receiving branches each
-declare "I got this from X" as before. While X has a pending Dispatch, X's pending
-receipts and its Dispatches form a **match group** (computed when needed, never
-stored); X cannot answer a receipt 1:1 then, and a manager confirms the whole
-group at once with :func:`confirm_match`, posting ONE Material Transfer that
-splits what X sent across the receivers, only when every unit is accounted for.
+Transit model (v3, Feature: stock-transit-matching). Each side answers only for
+its own half of a movement it cannot see the other end of:
+
+* **send** ("I sent out", kind ``Dispatch``): names no destination and posts AT
+  ONCE a Material Transfer sender -> the company's transit warehouse
+  (``transit_entry``). The stock is then "in transit", nobody's shelf.
+* **receipt** ("I received", a ``Handover`` declared by the To side): names the
+  sender, or leaves ``from_warehouse`` blank ("I don't know who sent it").
+* A **pool receipt** is a pending receipt that is unsourced, or names a sender
+  with an open transit send. A manager approves it on the transit board
+  (:func:`get_transit_board` / :func:`approve_receipt`): ONE Material Transfer
+  transit -> receiver per send allocation (sender -> receiver for a "sender never
+  declared it" direct allocation), a ``Jarz Stock Transit Match`` row per
+  allocation, and ``matched_qty`` bumped on both sides. The pure engine in
+  ``jarz_pos.services.transit_match`` recommends the allocation with reasons.
+* What is left of a send stays in transit, aged, until it is matched,
+  :func:`return_to_sender` (transit -> sender) or :func:`write_off_transit`
+  (Material Issue from transit). A send closes Confirmed once every line's
+  ``remaining = qty - matched - written_off - returned`` is 0; its declarer or a
+  manager may :func:`cancel` it (the transit entry is cancelled) only while
+  nothing on it has moved on.
+* A receipt naming a sender with NO open send keeps the one-to-one flow above.
+
+Locks: Dispatches before receipts, each group in name order (the one global
+order; see :func:`_lock_dispatches`), then status is re-checked, so a receipt is
+never posted twice.
+
+Legacy (v2) sent-out batches without ``transit_entry`` still form per-sender
+**match groups** confirmed by :func:`confirm_match`; it refuses any group holding
+a transit send ("Update the app to match transit sends.").
 
 API surface: ``jarz_pos.api.stock_handover`` (thin, whitelisted). Managers'
 ``api.transfer.submit_transfer`` routes branch-touching transfers here through
@@ -39,6 +62,7 @@ API surface: ``jarz_pos.api.stock_handover`` (thin, whitelisted). Managers'
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from collections.abc import Iterable, Sequence
@@ -51,6 +75,7 @@ from frappe.utils import cint, flt, get_datetime, now_datetime
 
 from jarz_pos.api import transfer as transfer_api
 from jarz_pos.constants import DEFAULT_UOM, ROLES
+from jarz_pos.services import transit_match
 from jarz_pos.utils.access_control import (
 	BranchAccessError,
 	ShiftRequiredError,
@@ -107,7 +132,9 @@ EVENT_REMINDER = "reminder"
 EVENT_BALANCED = "batch_balanced"
 EVENT_BATCH_CONFIRMED = "batch_confirmed"
 EVENT_BATCH_REMINDER = "batch_reminder"
-_BATCH_MANAGER_EVENTS = (EVENT_BALANCED, EVENT_BATCH_REMINDER)
+#: Something new to match on the transit board (a send, or a pool receipt). Managers.
+EVENT_TRANSIT = "transit_to_match"
+_BATCH_MANAGER_EVENTS = (EVENT_BALANCED, EVENT_BATCH_REMINDER, EVENT_TRANSIT)
 
 #: Quantities are whole units or fractions to this many decimals.
 QTY_DP = 3
@@ -115,6 +142,20 @@ _QTY_EPS = 5e-4
 
 _REJECT_NOT_IN_BATCH = "Not in {0}'s shipment (manager match)"
 _DRIFT_MESSAGE = "Something changed in this batch. Reload and check again."
+
+TRANSIT_MATCH_DOCTYPE = "Jarz Stock Transit Match"
+UNKNOWN_SENDER_LABEL = "Unknown sender"
+#: A send open longer than this is "overdue" on the transit board.
+TRANSIT_OVERDUE_HOURS = 24
+#: History window of the "usual supplier" affinity.
+AFFINITY_DAYS = 60
+#: Managers hear about new transit work at most once per this window.
+TRANSIT_PUSH_DEBOUNCE_SEC = 300
+_TRANSIT_PUSH_CACHE_KEY = "jarz_pos:stock_transit_push"
+#: ``match_note`` prefix of a receipt a manager answered on the transit board.
+_TRANSIT_NOTE_PREFIX = "Transit: "
+_TRANSIT_UPDATE_APP = "Update the app to match transit sends."
+_CONFIDENCES = ("high", "medium", "low")
 
 
 # ---------------------------------------------------------------------------
@@ -323,6 +364,10 @@ class _Actor:
 		self.sides = sides
 		self.is_manager = bool(self.roles & set(ROLES.STOCK_TRANSFER))
 		self.is_production = bool(self.roles & set(ROLES.PRODUCTION_EXECUTE))
+		# One-step stock power: the same set ``api.transfer.can_post_direct`` checks,
+		# read off the roles already resolved here. A line manager (STOCK_TRANSFER
+		# only) approves against declared sends but cannot conjure stock directly.
+		self.can_direct = bool(self.roles & set(ROLES.STOCK_TRANSFER_DIRECT))
 		self.assigned_profiles = set(assigned_profiles or [])
 		self.open_profiles = set(open_profiles or [])
 		self.pos_profile = (pos_profile or "").strip() or None
@@ -485,6 +530,21 @@ def _dispatch_item_codes(my_warehouse: str, sides: _Sides) -> set[str]:
 	return codes
 
 
+def _unsourced_receipt_item_codes(my_warehouse: str, sides: _Sides) -> set[str]:
+	"""The item codes a side may declare as received from an unknown sender.
+
+	The union of what any known side may hand to *my_warehouse*, plus everything a
+	side may send out (anything sent can arrive anywhere), so the list the app
+	shows for "I don't know who sent it" never refuses what it offered.
+	"""
+	codes: set[str] = set()
+	others = ([sides.factory] if sides.factory else []) + sides.branch_warehouses()
+	for counterpart in dict.fromkeys(others):
+		if counterpart and counterpart != my_warehouse:
+			codes |= _allowed_item_codes(my_warehouse, counterpart, sides)
+	return codes | _dispatch_item_codes(my_warehouse, sides)
+
+
 def _item_rows(codes: Iterable[str], search: str | None = None) -> list[dict[str, Any]]:
 	wanted = sorted({c for c in codes if c})
 	if not wanted:
@@ -588,6 +648,44 @@ def _group_source(row: Any, dispatch_sources: Iterable[str]) -> str | None:
 	return None
 
 
+def _is_transit_send(row: Any) -> bool:
+	"""A Dispatch whose stock already sits in transit (posted at declaration)."""
+	return _is_dispatch(row) and bool(_g(row, "transit_entry"))
+
+
+def _is_receipt(row: Any) -> bool:
+	return not _is_dispatch(row) and _g(row, "declared_side") == SIDE_TO
+
+
+def _is_pool_receipt(row: Any, transit_sources: Iterable[str]) -> bool:
+	"""A pending receipt a manager approves on the transit board.
+
+	Unsourced ("I don't know who sent it"), or naming a sender that has an open
+	transit send. A receipt naming a sender with no open send stays one-to-one.
+	"""
+	if _g(row, "status") != STATUS_PENDING or not _is_receipt(row):
+		return False
+	source = _g(row, "from_warehouse")
+	return not source or source in set(transit_sources or ())
+
+
+def _line_remaining(item: Any) -> float:
+	"""A send line's ``qty - matched - written off - returned`` (never below 0)."""
+	left = flt(_g(item, "qty")) - flt(_g(item, "matched_qty")) - flt(_g(item, "written_off_qty"))
+	left -= flt(_g(item, "returned_qty"))
+	return round(max(left, 0.0), QTY_DP)
+
+
+def _transit_moved(items: Sequence[Any]) -> bool:
+	"""True once any line of a send was matched, written off or returned."""
+	return any(
+		flt(_g(i, "matched_qty")) > _QTY_EPS
+		or flt(_g(i, "written_off_qty")) > _QTY_EPS
+		or flt(_g(i, "returned_qty")) > _QTY_EPS
+		for i in items or []
+	)
+
+
 def _is_changed(row: Any, items: Sequence[Any]) -> bool:
 	"""True once the other side changed the quantities (the flag, or any qty off its declaration)."""
 	if cint(_g(row, "was_changed")):
@@ -598,6 +696,11 @@ def _is_changed(row: Any, items: Sequence[Any]) -> bool:
 def _can_cancel(row: Any, items: Sequence[Any], actor: _Actor) -> bool:
 	if _g(row, "status") != STATUS_PENDING:
 		return False
+	if _is_transit_send(row):
+		# Its declarer or a manager, only while nothing on it has moved on.
+		if _transit_moved(items):
+			return False
+		return actor.is_manager or _g(row, "declared_by") == actor.user
 	declared_side = _g(row, "declared_side")
 	if _g(row, "awaiting_side") == declared_side:
 		return False
@@ -611,10 +714,16 @@ def _can_respond(row: Any, actor: _Actor, group_source: str | None = None) -> bo
 		return False
 	if _g(row, "last_proposed_by") == actor.user:
 		return False
+	if _is_transit_send(row):
+		# Its stock is in transit: the transit board returns or writes it off.
+		return False
 	if _is_dispatch(row):
 		# The only answer a Dispatch takes through ``respond`` is a manager's reject.
 		return actor.is_manager
 	if group_source:
+		return False
+	if _is_receipt(row) and not _g(row, "from_warehouse"):
+		# Unsourced: a manager matches it on the transit board.
 		return False
 	return actor.can_act_for(_side_warehouse(row, _g(row, "awaiting_side")))
 
@@ -627,14 +736,15 @@ def _serialize(
 	dispatch_sources: Iterable[str] = (),
 ) -> dict[str, Any]:
 	sides = actor.sides
-	from_wh = _g(row, "from_warehouse")
+	from_wh = _g(row, "from_warehouse") or None
 	to_wh = _g(row, "to_warehouse") or None
 	dispatch = _is_dispatch(row)
 	group_source = _group_source(row, dispatch_sources)
 	awaiting = _g(row, "awaiting_side")
 	declared_by = _g(row, "declared_by")
 	last_by = _g(row, "last_proposed_by")
-	if dispatch or group_source:
+	unsourced = _is_receipt(row) and not from_wh
+	if dispatch or group_source or (unsourced and _g(row, "status") == STATUS_PENDING):
 		awaiting, awaiting_label = SIDE_MANAGER, MANAGER_LABEL
 	else:
 		awaiting_label = sides.label(_side_warehouse(row, awaiting))
@@ -644,7 +754,9 @@ def _serialize(
 		"kind": _kind(row),
 		"group_source": group_source,
 		"from_warehouse": from_wh,
-		"from_label": sides.label(from_wh),
+		"from_label": sides.label(from_wh) if from_wh else UNKNOWN_SENDER_LABEL,
+		"transit_entry": _g(row, "transit_entry") or None,
+		"transit_warehouse": _g(row, "transit_warehouse") or None,
 		"to_warehouse": to_wh,
 		"to_label": sides.label(to_wh) if to_wh else None,
 		"awaiting_side": awaiting,
@@ -697,6 +809,7 @@ _GROUP_FIELDS = [
 	"last_proposed_by",
 	"last_proposed_at",
 	"reminder_sent_at",
+	"transit_entry",
 ]
 
 
@@ -714,6 +827,17 @@ def _pending_dispatch_sources() -> set[str]:
 		limit_page_length=0,
 	)
 	return {str(w) for w in rows or [] if w}
+
+
+def _transit_sources() -> set[str]:
+	"""Warehouses with an open transit send (their pending receipts are pool receipts). Unlocked."""
+	rows = frappe.get_all(
+		DOCTYPE,
+		filters={"status": STATUS_PENDING, "kind": DOC_KIND_DISPATCH, "transit_entry": ["is", "set"]},
+		pluck="from_warehouse",
+		limit_page_length=0,
+	)
+	return {w for w in rows or [] if isinstance(w, str) and w}
 
 
 def _locked_names(filters: dict[str, Any]) -> list[dict[str, Any]]:
@@ -815,11 +939,14 @@ def _match_groups(rows: Iterable[Any]) -> dict[str, dict[str, list[Any]]]:
 
 	Pure: a group exists for every sender with a pending Dispatch; receipts are the
 	pending ones declared by the receiving side that name the sender as source.
+	A sender with an open transit send has no group: its receipts are pool
+	receipts, approved on the transit board.
 	"""
 	pending = [r for r in rows or [] if _g(r, "status") == STATUS_PENDING]
+	transit = {_g(r, "from_warehouse") for r in pending if _is_transit_send(r)}
 	groups: dict[str, dict[str, list[Any]]] = {}
 	for row in pending:
-		if _is_dispatch(row) and _g(row, "from_warehouse"):
+		if _is_dispatch(row) and _g(row, "from_warehouse") and _g(row, "from_warehouse") not in transit:
 			groups.setdefault(_g(row, "from_warehouse"), {"dispatches": [], "receipts": []})[
 				"dispatches"
 			].append(row)
@@ -893,6 +1020,7 @@ def _group_summary(
 		"destinations": [{"warehouse": w, "handovers": names} for w, names in destinations.items()],
 		"items": items_out,
 		"balanced": balanced,
+		"transit": any(_is_transit_send(d) for d in dispatches),
 		"oldest_at": oldest,
 		"declarers": sorted({_g(m, "declared_by") for m in members if _g(m, "declared_by")}),
 		"unmatched_units": round(sum(abs(i["remaining"]) for i in items_out), QTY_DP),
@@ -1005,15 +1133,20 @@ def _insert_handover(
 	pos_profile: str | None = None,
 	kind: str = DOC_KIND_HANDOVER,
 	client_request_id: str | None = None,
+	transit_warehouse: str | None = None,
 ) -> Any:
 	now = _now()
 	dispatch = kind == DOC_KIND_DISPATCH
+	payload: dict[str, Any] = {}
+	if transit_warehouse:
+		payload["transit_warehouse"] = transit_warehouse
 	doc = frappe.get_doc(
 		{
+			**payload,
 			"doctype": DOCTYPE,
 			"kind": kind,
 			"company": _warehouse_company(from_warehouse, to_warehouse),
-			"from_warehouse": from_warehouse,
+			"from_warehouse": from_warehouse or None,
 			"to_warehouse": None if dispatch else to_warehouse,
 			"status": STATUS_PENDING,
 			"declared_side": declared_side,
@@ -1106,11 +1239,21 @@ def _looks_like_shortage(exc: BaseException) -> bool:
 	return "insufficient" in text or "not enough" in text
 
 
+def _shortage_messages(shortage_doc: Any, sides: _Sides) -> str | None:
+	"""``_shortage_message`` for one doc, or for each of a list/tuple of docs (joined)."""
+	if shortage_doc is None:
+		return None
+	docs = list(shortage_doc) if isinstance(shortage_doc, (list, tuple)) else [shortage_doc]
+	parts = [m for m in (_shortage_message(d, sides) for d in docs if d is not None) if m]
+	return " ".join(parts) if parts else None
+
+
 def _post_or_explain(post: Any, shortage_doc: Any, sides: _Sides, subject: str) -> Any:
 	"""Run ``post()`` inside a savepoint; on failure roll back and throw ONE clear message.
 
-	A stock shortage is explained per line (item + what is available). Any other
-	failure surfaces its real message. Either way the handover stays Pending.
+	A stock shortage is explained per line (item + what is available); *shortage_doc*
+	may be one doc, a list of docs (one per source warehouse) or ``None``. Any other
+	failure surfaces its real message. Either way nothing is recorded.
 	"""
 	savepoint = "jarz_stock_handover_confirm"
 	try:
@@ -1126,7 +1269,7 @@ def _post_or_explain(post: Any, shortage_doc: Any, sides: _Sides, subject: str) 
 			except Exception:
 				pass
 		_safe_log("stock_handover: confirm failed")
-		message = _shortage_message(shortage_doc, sides) if _looks_like_shortage(exc) else None
+		message = _shortage_messages(shortage_doc, sides) if _looks_like_shortage(exc) else None
 		if not message:
 			detail = frappe.utils.strip_html(str(exc) or exc.__class__.__name__)[:300]
 			message = _("Could not post the stock transfer for {0}: {1}. It is still pending.").format(
@@ -1175,6 +1318,131 @@ def _confirm(doc: Any, user: str, sides: _Sides) -> None:
 	doc.confirmed_at = now
 	doc.stock_entry = stock_entry
 	_save(doc)
+
+
+def _resolve_transit_warehouse(company: str | None) -> str:
+	"""The company's transit warehouse, or throw.
+
+	The Company's ``default_in_transit_warehouse`` when set; else the single enabled,
+	non-group Warehouse of that company with ``warehouse_type = "Transit"``.
+	"""
+	if not company:
+		frappe.throw(_("Could not tell which company this warehouse belongs to."))
+	configured = frappe.db.get_value("Company", company, "default_in_transit_warehouse")
+	if configured:
+		return str(configured)
+	found = frappe.get_all(
+		"Warehouse",
+		filters={"company": company, "warehouse_type": "Transit", "is_group": 0, "disabled": 0},
+		pluck="name",
+		order_by="name asc",
+		limit_page_length=0,
+	)
+	found = [str(w) for w in found or [] if w]
+	if len(found) == 1:
+		return found[0]
+	if not found:
+		frappe.throw(_("No transit warehouse for {0}").format(company))
+	frappe.throw(
+		_("{0} has several transit warehouses ({1}). Set the Company's Default In-Transit Warehouse.").format(
+			company, ", ".join(found)
+		)
+	)
+	raise AssertionError("unreachable")  # frappe.throw raises
+
+
+def _post_transit_entry(doc: Any, transit_warehouse: str, sides: _Sides) -> str:
+	"""Post *doc*'s lines sender -> transit now (a send). Returns the Stock Entry name.
+
+	A shortage throws the per-line explanation and the caller's transaction is rolled
+	back to before the send existed: nothing is recorded.
+	"""
+	lines = [
+		{"item_code": _g(row, "item_code"), "qty": flt(_g(row, "qty"))}
+		for row in (_g(doc, "items") or [])
+		if flt(_g(row, "qty")) > 0
+	]
+
+	def post() -> str:
+		se = transfer_api._build_material_transfer(
+			_g(doc, "from_warehouse"),
+			transit_warehouse,
+			lines,
+			posting_date=None,
+			remarks=_("Stock sent out {0} (in transit)").format(_g(doc, "name")),
+		)
+		transfer_api._insert_and_submit_stock_entry(se)
+		return se.name
+
+	return _post_or_explain(post, doc, sides, _g(doc, "name"))
+
+
+def _cancel_stock_entry(name: str) -> None:
+	se = frappe.get_doc("Stock Entry", name)
+	if cint(se.docstatus) != 1:
+		return
+	se.flags.ignore_permissions = True
+	# Lets :func:`guard_transit_entry_cancel` through: this IS the send's own cancel path.
+	se.flags.from_handover_service = True
+	se.cancel()
+
+
+def _live_transit_entries(names: Iterable[str]) -> set[str]:
+	"""Which of these transit Stock Entries are still submitted (docstatus 1)."""
+	wanted = sorted({str(n) for n in names or [] if n})
+	if not wanted:
+		return set()
+	rows = frappe.get_all(
+		"Stock Entry",
+		filters={"name": ["in", wanted], "docstatus": 1},
+		pluck="name",
+		limit_page_length=0,
+	)
+	return {str(r) for r in rows or [] if r}
+
+
+def _require_live_transit(send: Any) -> None:
+	"""Refuse a send whose transit Stock Entry was cancelled outside the app."""
+	entry = _g(send, "transit_entry")
+	if entry and entry not in _live_transit_entries([entry]):
+		frappe.throw(
+			_(
+				"{0} cannot be used: its transit Stock Entry {1} is no longer submitted (it was "
+				"cancelled outside the app), so nothing of it is in transit."
+			).format(_g(send, "name"), entry)
+		)
+
+
+def guard_transit_entry_cancel(doc: Any, method: str | None = None) -> None:
+	"""``Stock Entry.before_cancel``: never cancel the transit entry of a pending send.
+
+	Cancelling it in Desk would leave the send "in transit" with nothing behind it.
+	The send's own cancel (:func:`_cancel_stock_entry`) flags the entry and passes.
+	Fails open before ``bench migrate`` has added the ``transit_entry`` column.
+	"""
+	flags = getattr(doc, "flags", None)
+	if flags is not None and getattr(flags, "from_handover_service", False):
+		return
+	name = _g(doc, "name")
+	if not name:
+		return
+	try:
+		send = frappe.db.get_value(
+			DOCTYPE,
+			{"transit_entry": name, "status": STATUS_PENDING, "kind": DOC_KIND_DISPATCH},
+			"name",
+		)
+	except Exception:
+		_safe_log("stock_handover: transit entry cancel guard lookup failed")
+		return
+	if send:
+		frappe.throw(
+			_(
+				"{0} carries the stock of pending send {1} into transit. Cancel the send in the app "
+				"(or settle it on the transit board) instead of cancelling this entry."
+			).format(name, send),
+			title=_("Stock in transit"),
+		)
 
 
 def _lock(name: str) -> Any:
@@ -1245,6 +1513,8 @@ def get_context(pos_profile: str | None = None) -> dict[str, Any]:
 		# Same set ``transfer.can_post_direct`` checks; the app shows the
 		# "post now" switch from this flag.
 		"can_post_direct": bool(set(actor.roles) & ROLES.STOCK_TRANSFER_DIRECT),
+		# Managers approve receipts against transit sends on the transit board.
+		"can_match_transit": actor.is_manager,
 	}
 
 
@@ -1271,9 +1541,17 @@ def _validate_pair(actor: _Actor, my_warehouse: str, counterpart: str) -> tuple[
 
 
 def list_items(
-	my_warehouse: str, counterpart_warehouse: str | None = None, search: str | None = None
+	my_warehouse: str,
+	counterpart_warehouse: str | None = None,
+	search: str | None = None,
+	direction: str | None = None,
 ) -> dict[str, Any]:
-	"""Items a side may hand over. With no counterpart: the "sent out" set (all jar groups)."""
+	"""Items a side may hand over.
+
+	With no counterpart: the "sent out" set (all jar groups); with ``direction="in"``
+	also everything any known side may hand to *my_warehouse* (an unsourced receipt
+	accepts exactly this union, see :func:`declare`).
+	"""
 	actor = _build_actor()
 	counterpart = (counterpart_warehouse or "").strip()
 	if counterpart:
@@ -1284,6 +1562,8 @@ def list_items(
 		_refuse_side(actor, my_warehouse, _("record a stock handover"))
 	if counterpart:
 		codes = _allowed_item_codes(my_warehouse, counterpart, actor.sides)
+	elif (direction or "").strip().lower() == "in":
+		codes = _unsourced_receipt_item_codes(my_warehouse, actor.sides)
 	else:
 		codes = _dispatch_item_codes(my_warehouse, actor.sides)
 	return {"items": _item_rows(codes, search)}
@@ -1324,10 +1604,13 @@ def declare(
 ) -> dict[str, Any]:
 	"""Declare a movement.
 
-	``direction`` "in" = I received from *counterpart_warehouse* (a one-to-one
-	handover the counterpart confirms, or a manager matches when the counterpart
-	has a sent-out batch open). "out" = I sent stock out: a Dispatch with no
-	destination (*counterpart_warehouse* is ignored), matched later by a manager.
+	``direction`` "in" = I received from *counterpart_warehouse*: a one-to-one
+	handover the counterpart confirms, or a pool receipt a manager approves on the
+	transit board when the counterpart has an open transit send. A blank
+	*counterpart_warehouse* = "I don't know who sent it" (an unsourced receipt,
+	always a pool receipt). "out" = I sent stock out: a Dispatch with no
+	destination (*counterpart_warehouse* is ignored) whose stock is moved sender ->
+	transit in this same request (``transit_entry``); a shortage records nothing.
 
 	*client_request_id* makes a repeated declare (a double tap) return the row the
 	first one created.
@@ -1340,10 +1623,11 @@ def declare(
 		frappe.throw(_("direction must be 'in' (I received) or 'out' (I sent out)"))
 
 	counterpart = ""
-	if direction == "in":
+	if direction == "in" and (counterpart_warehouse or "").strip():
 		my_warehouse, counterpart = _validate_pair(actor, my_warehouse, counterpart_warehouse or "")
 	else:
 		my_warehouse = _validate_side(actor, my_warehouse)
+	unsourced = direction == "in" and not counterpart
 
 	source, used_profile = _declaring_source(actor, my_warehouse)
 
@@ -1361,12 +1645,20 @@ def declare(
 			return {"ok": True, "handover": _serialize_doc(frappe.get_doc(DOCTYPE, existing[0]), actor)}
 
 	merged = _normalize_lines(lines)
-	if direction == "in":
+	if unsourced:
+		allowed = _unsourced_receipt_item_codes(my_warehouse, sides)
+	elif direction == "in":
 		allowed = _allowed_item_codes(my_warehouse, counterpart, sides)
 	else:
 		allowed = _dispatch_item_codes(my_warehouse, sides)
 	unknown = sorted(code for code in merged if code not in allowed)
 	if unknown:
+		if unsourced:
+			frappe.throw(
+				_("These items cannot be received at {0}: {1}").format(
+					sides.label(my_warehouse), ", ".join(unknown)
+				)
+			)
 		if direction == "in":
 			frappe.throw(
 				_("These items cannot be handed over between {0} and {1}: {2}").format(
@@ -1381,7 +1673,7 @@ def declare(
 
 	if direction == "in":
 		doc = _insert_handover(
-			from_warehouse=counterpart,
+			from_warehouse=counterpart or None,
 			to_warehouse=my_warehouse,
 			declared_side=SIDE_TO,
 			source=source,
@@ -1391,6 +1683,8 @@ def declare(
 			client_request_id=request_id,
 		)
 	else:
+		# Resolve the transit warehouse BEFORE inserting: no transit, no send.
+		transit = _resolve_transit_warehouse(_warehouse_company(my_warehouse))
 		doc = _insert_handover(
 			from_warehouse=my_warehouse,
 			to_warehouse=None,
@@ -1401,18 +1695,49 @@ def declare(
 			pos_profile=used_profile,
 			kind=DOC_KIND_DISPATCH,
 			client_request_id=request_id,
+			transit_warehouse=transit,
 		)
+		# Sender -> transit, now. A failure throws and the whole request (the
+		# Dispatch insert included) is rolled back: nothing is recorded.
+		doc.transit_entry = _post_transit_entry(doc, transit, sides)
+		doc.transit_warehouse = transit
+		_save(doc)
 
 	dispatch_sources = _pending_dispatch_sources()
 	if direction == "out":
-		# Nobody answers a Dispatch one-to-one; managers hear about it once it adds up.
-		_maybe_push_balanced(my_warehouse, actor.user)
+		# Nobody answers a send one-to-one: the managers have something to match.
+		_notify_transit_managers(doc.name, actor.user)
+	elif unsourced or counterpart in _transit_sources():
+		# A pool receipt: a manager approves it on the transit board.
+		_notify_transit_managers(doc.name, actor.user)
 	elif counterpart in dispatch_sources:
-		# The counterpart has a sent-out batch open: a manager matches this receipt.
+		# The counterpart has a (legacy) sent-out batch open: a manager matches this receipt.
 		_maybe_push_balanced(counterpart, actor.user)
 	else:
 		_enqueue_push(doc.name, EVENT_DECLARED, actor.user)
 	return {"ok": True, "handover": _serialize_doc(doc, actor, dispatch_sources)}
+
+
+def _notify_transit_managers(handover_name: str, actor_user: str | None) -> bool:
+	"""Tell the managers there is something to match, at most once per 5 minutes. Never raises.
+
+	A burst of sends / receipts (a morning round) becomes one push. The debounce lives
+	in the cache; when the cache fails the push goes out anyway.
+	"""
+	try:
+		if _suppressed(f"stock_handover:{EVENT_TRANSIT}"):
+			return False
+		try:
+			cache = frappe.cache()
+			if cache.get_value(_TRANSIT_PUSH_CACHE_KEY):
+				return False
+			cache.set_value(_TRANSIT_PUSH_CACHE_KEY, 1, expires_in_sec=TRANSIT_PUSH_DEBOUNCE_SEC)
+		except Exception:
+			_safe_log("stock_handover: transit debounce failed")
+		return _enqueue_push(handover_name, EVENT_TRANSIT, actor_user)
+	except Exception:
+		_safe_log("stock_handover: transit push failed")
+		return False
 
 
 def _list_fields() -> list[str]:
@@ -1433,6 +1758,8 @@ def _list_fields() -> list[str]:
 		"stock_entry",
 		"reject_reason",
 		"match_note",
+		"transit_entry",
+		"transit_warehouse",
 		"modified",
 	]
 
@@ -1444,7 +1771,13 @@ def list_handovers(
 ) -> dict[str, Any]:
 	actor = _build_actor(pos_profile)
 	limit = max(1, min(cint(limit) or 30, 200))
-	empty: dict[str, Any] = {"waiting_for_me": [], "waiting_for_them": [], "recent": [], "to_match": []}
+	empty: dict[str, Any] = {
+		"waiting_for_me": [],
+		"waiting_for_them": [],
+		"recent": [],
+		"to_match": [],
+		"transit_to_match": 0,
+	}
 
 	my_warehouse = (my_warehouse or "").strip() or None
 	scope: set[str] | None
@@ -1513,10 +1846,16 @@ def list_handovers(
 	)
 	dispatch_sources = _pending_dispatch_sources()
 
-	out: dict[str, Any] = {"waiting_for_me": [], "waiting_for_them": [], "recent": [], "to_match": []}
+	out: dict[str, Any] = {
+		"waiting_for_me": [],
+		"waiting_for_them": [],
+		"recent": [],
+		"to_match": [],
+		"transit_to_match": 0,
+	}
 	for row in pending:
-		if _group_source(row, dispatch_sources):
-			# Answered by a manager's match, never one-to-one.
+		if _group_source(row, dispatch_sources) or (_is_receipt(row) and not row.get("from_warehouse")):
+			# Answered by a manager's match (batch or transit board), never one-to-one.
 			bucket = "waiting_for_them"
 		else:
 			awaiting_wh = _side_warehouse(row, row.get("awaiting_side"))
@@ -1537,6 +1876,10 @@ def list_handovers(
 		]
 		summaries.sort(key=lambda s: str(_iso(s.get("oldest_at")) or ""))
 		out["to_match"] = [_serialize_group(s, actor, user_names) for s in summaries]
+		transit_sources = {
+			_g(r, "from_warehouse") for r in group_rows if _is_transit_send(r) and _g(r, "from_warehouse")
+		}
+		out["transit_to_match"] = sum(1 for r in group_rows if _is_pool_receipt(r, transit_sources))
 	return out
 
 
@@ -1562,6 +1905,8 @@ def respond(
 		return _respond_dispatch(doc, actor, action, reason)
 
 	source = doc.from_warehouse
+	if doc.declared_side == SIDE_TO and not source:
+		frappe.throw(_("A manager matches this receipt to a send."), frappe.PermissionError)
 	if doc.declared_side == SIDE_TO and group_locked:
 		frappe.throw(
 			_("This is part of {0}'s sent-out batch. A manager matches it.").format(sides.label(source)),
@@ -1619,6 +1964,9 @@ def respond(
 
 def _respond_dispatch(doc: Any, actor: _Actor, action: str, reason: str | None) -> dict[str, Any]:
 	"""A Dispatch has no counterpart to answer it: only a manager may reject it."""
+	if _is_transit_send(doc):
+		# Its stock already sits in transit: rejecting would strand it there.
+		frappe.throw(_("Use the transit board: return it to the sender or write it off."))
 	if action != "reject":
 		frappe.throw(_("Use the manager match."))
 	if not actor.is_manager:
@@ -1643,6 +1991,8 @@ def cancel(name: str, pos_profile: str | None = None) -> dict[str, Any]:
 	doc, group_locked = _lock_with_group(name)
 	if doc.status != STATUS_PENDING:
 		frappe.throw(_("This handover is already {0}.").format(_(doc.status)))
+	if _is_transit_send(doc):
+		return _cancel_transit_send(doc, actor)
 	declared_wh = _side_warehouse(doc, doc.declared_side)
 	if not actor.can_act_for(declared_wh):
 		_refuse_side(actor, declared_wh, _("cancel this handover"))
@@ -1661,8 +2011,34 @@ def cancel(name: str, pos_profile: str | None = None) -> dict[str, Any]:
 		_after_dispatch_closed(source, actor.user)
 	elif grouped:
 		_maybe_push_balanced(source, actor.user)
-	else:
+	elif source:
 		_enqueue_push(doc.name, EVENT_CANCELLED, actor.user)
+	# An unsourced receipt had nobody waiting on it: no push.
+	return {"ok": True, "handover": _serialize_doc(doc, actor)}
+
+
+def _cancel_transit_send(doc: Any, actor: _Actor) -> dict[str, Any]:
+	"""Cancel a send (its declarer or a manager) while nothing on it has moved on.
+
+	The sender -> transit Stock Entry is cancelled (docstatus 2) in the same request;
+	if ERPNext refuses, nothing changes.
+	"""
+	if not (actor.is_manager or doc.declared_by == actor.user):
+		frappe.throw(
+			_("Only whoever declared this send, or a manager, can cancel it."), frappe.PermissionError
+		)
+	if _transit_moved(list(doc.items or [])):
+		frappe.throw(
+			_("Part of this send was already matched, returned or written off, so it cannot be cancelled.")
+		)
+	sides = actor.sides
+	entry = doc.transit_entry
+	_post_or_explain(lambda: _cancel_stock_entry(entry), None, sides, doc.name)
+	doc.status = STATUS_CANCELLED
+	doc.cancelled_by = actor.user
+	doc.cancelled_at = _now()
+	_save(doc)
+	_after_dispatch_closed(doc.from_warehouse, actor.user)
 	return {"ok": True, "handover": _serialize_doc(doc, actor)}
 
 
@@ -1674,7 +2050,8 @@ def _maybe_push_balanced(source: str, actor_user: str | None) -> bool:
 	"""
 	try:
 		group = _load_group(source)
-		if not group or not group.get("balanced"):
+		if not group or not group.get("balanced") or group.get("transit"):
+			# A transit sender's receipts are approved on the transit board instead.
 			return False
 		return _enqueue_push(group["newest"], EVENT_BALANCED, actor_user)
 	except Exception:
@@ -1919,7 +2296,7 @@ def confirm_match(
 	# 1. Lock the source's Dispatches, then its receipts (name order), check nobody
 	# added to / removed from the group meanwhile, then load every member.
 	dispatch_names, receipt_names = _current_group_names(source, for_update=True)
-	if not dispatch_names or set(dispatch_names) | set(receipt_names) != set(member_names):
+	if not dispatch_names:
 		frappe.throw(_(_DRIFT_MESSAGE))
 	docs: dict[str, Any] = {}
 	for name in sorted(dispatch_names) + sorted(receipt_names):
@@ -1927,6 +2304,11 @@ def confirm_match(
 			docs[name] = _lock(name)
 		except frappe.DoesNotExistError:
 			frappe.throw(_(_DRIFT_MESSAGE))
+	# A transit send's stock already left; this per-source batch would post it twice.
+	if any(_is_transit_send(docs[n]) for n in dispatch_names):
+		frappe.throw(_(_TRANSIT_UPDATE_APP))
+	if set(dispatch_names) | set(receipt_names) != set(member_names):
+		frappe.throw(_(_DRIFT_MESSAGE))
 	for doc in docs.values():
 		if doc.status != STATUS_PENDING or doc.from_warehouse != source:
 			frappe.throw(_(_DRIFT_MESSAGE))
@@ -2110,6 +2492,802 @@ def _close_member(doc: Any, status: str, user: str, now: Any, stock_entry: str |
 
 
 # ---------------------------------------------------------------------------
+# Transit board (sends in transit + pool receipts, matched by a manager)
+# ---------------------------------------------------------------------------
+
+_TRANSIT_SEND_FIELDS = [
+	"name",
+	"status",
+	"kind",
+	"from_warehouse",
+	"declared_by",
+	"declared_at",
+	"transit_entry",
+	"transit_warehouse",
+	"modified",
+]
+_TRANSIT_RECEIPT_FIELDS = [
+	"name",
+	"status",
+	"kind",
+	"from_warehouse",
+	"to_warehouse",
+	"declared_side",
+	"declared_by",
+	"declared_at",
+	"modified",
+]
+
+
+def _require_transit_manager(actor: _Actor) -> None:
+	if not actor.is_manager:
+		frappe.throw(_("Only a manager can match stock in transit."), frappe.PermissionError)
+
+
+def _load_transit_pool() -> tuple[list[Any], list[Any]]:
+	"""``(open sends, pool receipts)``, each oldest first. Unlocked reads.
+
+	A send whose transit Stock Entry is no longer submitted (cancelled outside the
+	app) is left out: nothing of it is in transit. Its sender still counts as a
+	transit source for receipt membership, the same as :func:`_transit_sources`.
+	"""
+	sends = frappe.get_all(
+		DOCTYPE,
+		filters={"status": STATUS_PENDING, "kind": DOC_KIND_DISPATCH, "transit_entry": ["is", "set"]},
+		fields=_TRANSIT_SEND_FIELDS,
+		order_by="declared_at asc, name asc",
+		limit_page_length=_PENDING_SCAN_LIMIT,
+	)
+	sends = [s for s in sends or [] if _is_transit_send(s)]
+	transit_sources = {_g(s, "from_warehouse") for s in sends if _g(s, "from_warehouse")}
+	live = _live_transit_entries(_g(s, "transit_entry") for s in sends)
+	sends = [s for s in sends if _g(s, "transit_entry") in live]
+	receipts = frappe.get_all(
+		DOCTYPE,
+		filters={"status": STATUS_PENDING, "kind": DOC_KIND_HANDOVER, "declared_side": SIDE_TO},
+		fields=_TRANSIT_RECEIPT_FIELDS,
+		order_by="declared_at asc, name asc",
+		limit_page_length=_PENDING_SCAN_LIMIT,
+	)
+	receipts = [r for r in receipts or [] if _is_pool_receipt(r, transit_sources)]
+	return list(sends), receipts
+
+
+def _version_of(rows: Iterable[Any]) -> str:
+	"""sha1 of the sorted ``name|modified`` of every board member."""
+	parts = sorted(f"{_g(r, 'name')}|{_iso(_g(r, 'modified')) or ''}" for r in rows or [])
+	return hashlib.sha1("\n".join(parts).encode("utf-8")).hexdigest()
+
+
+def _current_board_version() -> str:
+	sends, receipts = _load_transit_pool()
+	return _version_of(list(sends) + list(receipts))
+
+
+def _load_transit_items(names: Sequence[str]) -> dict[str, list[dict[str, Any]]]:
+	"""Child rows with the transit counters, ``{parent: [row...]}`` in line order."""
+	wanted = [n for n in names if n]
+	out: dict[str, list[dict[str, Any]]] = {n: [] for n in wanted}
+	if not wanted:
+		return out
+	for item in frappe.get_all(
+		ITEM_DOCTYPE,
+		filters={"parent": ["in", wanted], "parenttype": DOCTYPE},
+		fields=[
+			"parent",
+			"item_code",
+			"item_name",
+			"stock_uom",
+			"qty",
+			"declared_qty",
+			"matched_qty",
+			"written_off_qty",
+			"returned_qty",
+		],
+		order_by="parent asc, idx asc",
+		limit_page_length=0,
+	):
+		out.setdefault(item.get("parent"), []).append(item)
+	return out
+
+
+def _transit_affinity(targets: Iterable[str], sides: _Sides) -> dict[tuple[str, str], float]:
+	"""``{(source, target): share}`` of each target's inbound transfers, last 60 days. Never raises.
+
+	Direct Material Transfers between known sides, plus approved transit matches
+	(those post transit -> receiver, so the Stock Entry alone does not show the sender).
+	"""
+	wanted = sorted({t for t in targets or [] if t})
+	known = sorted({w for w in ([sides.factory] if sides.factory else []) + list(sides.branch_profiles) if w})
+	if not wanted or not known:
+		return {}
+	try:
+		since = (_now() - timedelta(days=AFFINITY_DAYS)).date()
+		rows = frappe.db.sql(
+			"""
+			select sed.s_warehouse, sed.t_warehouse, sum(sed.transfer_qty)
+			from `tabStock Entry Detail` sed
+			inner join `tabStock Entry` se on se.name = sed.parent
+			where se.docstatus = 1
+				and se.purpose = 'Material Transfer'
+				and se.posting_date >= %(since)s
+				and sed.s_warehouse in %(known)s
+				and sed.t_warehouse in %(targets)s
+			group by sed.s_warehouse, sed.t_warehouse
+			""",
+			{"since": since, "known": tuple(known), "targets": tuple(wanted)},
+		)
+		totals: list[tuple[str, str, float]] = [(r[0], r[1], flt(r[2])) for r in rows or []]
+		matches = frappe.get_all(
+			TRANSIT_MATCH_DOCTYPE,
+			filters={
+				"approved_at": [">=", since],
+				"dispatch": ["is", "set"],
+				"target_warehouse": ["in", wanted],
+			},
+			fields=["source_warehouse", "target_warehouse", "qty"],
+			limit_page_length=0,
+		)
+		totals += [
+			(m.get("source_warehouse"), m.get("target_warehouse"), flt(m.get("qty"))) for m in matches or []
+		]
+		return transit_match.affinity_from_totals(totals)
+	except Exception:
+		_safe_log("stock_handover: transit affinity failed")
+		return {}
+
+
+def get_transit_board(pos_profile: str | None = None) -> dict[str, Any]:
+	"""Every open send and every pool receipt, with the matcher's suggestions. Managers only."""
+	actor = _build_actor(pos_profile)
+	sides = actor.sides
+	_require_transit_manager(actor)
+
+	sends, receipts = _load_transit_pool()
+	names = [_g(r, "name") for r in list(sends) + list(receipts)]
+	items = _load_transit_items(names)
+	users = _user_names([_g(r, "declared_by") for r in list(sends) + list(receipts)])
+	now = _now()
+
+	sends_out: list[dict[str, Any]] = []
+	engine_sends: list[dict[str, Any]] = []
+	units = 0.0
+	overdue_count = 0
+	for send in sends:
+		name = _g(send, "name")
+		declared_by = _g(send, "declared_by")
+		declared_at = _g(send, "declared_at")
+		lines: list[dict[str, Any]] = []
+		open_lines: dict[str, float] = {}
+		for item in items.get(name, []):
+			code = _g(item, "item_code")
+			remaining = _line_remaining(item)
+			lines.append(
+				{
+					"item_code": code,
+					"item_name": _g(item, "item_name") or code,
+					"stock_uom": _g(item, "stock_uom") or DEFAULT_UOM,
+					"qty": flt(_g(item, "qty")),
+					"matched_qty": flt(_g(item, "matched_qty")),
+					"written_off_qty": flt(_g(item, "written_off_qty")),
+					"returned_qty": flt(_g(item, "returned_qty")),
+					"remaining": remaining,
+				}
+			)
+			if remaining > _QTY_EPS:
+				open_lines[code] = round(open_lines.get(code, 0.0) + remaining, QTY_DP)
+		units += sum(open_lines.values())
+		age_hours = 0.0
+		if declared_at:
+			try:
+				age_hours = round(max((now - get_datetime(declared_at)).total_seconds(), 0.0) / 3600.0, 1)
+			except Exception:
+				age_hours = 0.0
+		overdue = age_hours > TRANSIT_OVERDUE_HOURS
+		overdue_count += 1 if overdue else 0
+		source = _g(send, "from_warehouse")
+		sends_out.append(
+			{
+				"name": name,
+				"source_warehouse": source,
+				"source_label": sides.label(source),
+				"declared_by": declared_by,
+				"declared_by_name": users.get(declared_by, declared_by) if declared_by else None,
+				"declared_at": _iso(declared_at),
+				"age_hours": age_hours,
+				"transit_entry": _g(send, "transit_entry"),
+				"overdue": overdue,
+				"can_act": bool(actor.is_manager and declared_by != actor.user),
+				"lines": lines,
+			}
+		)
+		engine_sends.append({"name": name, "source": source, "declared_at": declared_at, "lines": open_lines})
+
+	engine_receipts: list[dict[str, Any]] = []
+	for receipt in receipts:
+		lines_in: dict[str, float] = {}
+		for item in items.get(_g(receipt, "name"), []):
+			code = _g(item, "item_code")
+			lines_in[code] = round(lines_in.get(code, 0.0) + flt(_g(item, "qty")), QTY_DP)
+		engine_receipts.append(
+			{
+				"name": _g(receipt, "name"),
+				"target": _g(receipt, "to_warehouse"),
+				"declared_at": _g(receipt, "declared_at"),
+				"named_source": _g(receipt, "from_warehouse") or None,
+				"lines": lines_in,
+			}
+		)
+	affinity = _transit_affinity([_g(r, "to_warehouse") for r in receipts], sides)
+	suggested = transit_match.recommend(engine_sends, engine_receipts, affinity, default_source=sides.factory)
+
+	receipts_out: list[dict[str, Any]] = []
+	for receipt in receipts:
+		name = _g(receipt, "name")
+		meta = {_g(i, "item_code"): i for i in items.get(name, [])}
+		target = _g(receipt, "to_warehouse")
+		named = _g(receipt, "from_warehouse") or None
+		declared_by = _g(receipt, "declared_by")
+		lines_out = []
+		for line in suggested.get(name, []):
+			code = line["item_code"]
+			item = meta.get(code)
+			lines_out.append(
+				{
+					"item_code": code,
+					"item_name": _g(item, "item_name") or code,
+					"stock_uom": _g(item, "stock_uom") or DEFAULT_UOM,
+					"qty": line["qty"],
+					"suggestions": [
+						{
+							"dispatch": s.get("dispatch"),
+							"source_warehouse": s.get("source_warehouse"),
+							"source_label": sides.label(s.get("source_warehouse")),
+							"qty": s.get("qty"),
+							"confidence": s.get("confidence"),
+							"reasons": list(s.get("reasons") or []),
+						}
+						for s in line["suggestions"]
+					],
+					"unresolved_qty": line["unresolved_qty"],
+				}
+			)
+		receipts_out.append(
+			{
+				"name": name,
+				"target_warehouse": target,
+				"target_label": sides.label(target),
+				"named_source": named,
+				"named_source_label": sides.label(named) if named else None,
+				"declared_by": declared_by,
+				"declared_by_name": users.get(declared_by, declared_by) if declared_by else None,
+				"declared_at": _iso(_g(receipt, "declared_at")),
+				"can_approve": bool(actor.is_manager and declared_by != actor.user),
+				"lines": lines_out,
+			}
+		)
+
+	senders = []
+	if sides.factory:
+		senders.append({"warehouse": sides.factory, "label": FACTORY_LABEL})
+	for warehouse in sides.branch_warehouses():
+		senders.append({"warehouse": warehouse, "label": sides.label(warehouse)})
+
+	return {
+		"version": _version_of(list(sends) + list(receipts)),
+		"summary": {
+			"to_approve": len(receipts_out),
+			"units_in_transit": round(units, QTY_DP),
+			"overdue_sends": overdue_count,
+		},
+		"sends": sends_out,
+		"receipts": receipts_out,
+		"senders": senders,
+		# A direct ("sender never declared it") allocation and a received correction
+		# above the declared qty need ROLES.STOCK_TRANSFER_DIRECT.
+		"can_direct": actor.can_direct,
+	}
+
+
+def _parse_json(value: Any, label: str, kind: type) -> Any:
+	if isinstance(value, str):
+		if not value.strip():
+			return None
+		try:
+			value = json.loads(value)
+		except Exception:
+			frappe.throw(_("Invalid JSON for {0}").format(label))
+	if value is not None and not isinstance(value, kind):
+		frappe.throw(_("{0} has the wrong shape").format(label))
+	return value
+
+
+def _normalize_allocations(allocations: Any) -> list[dict[str, Any]]:
+	"""Finite, > 0, 3 dp allocations; a zero line is dropped."""
+	out: list[dict[str, Any]] = []
+	for alloc in _parse_json(allocations, "allocations", list) or []:
+		if not isinstance(alloc, dict):
+			frappe.throw(_("Each allocation must be an object with item_code, dispatch, source_warehouse and qty"))
+		code = str(alloc.get("item_code") or "").strip()
+		if not code:
+			frappe.throw(_("An allocation has no item"))
+		qty = _match_qty(alloc.get("qty"), code)
+		if qty <= _QTY_EPS:
+			continue
+		dispatch = str(alloc.get("dispatch") or "").strip() or None
+		source = str(alloc.get("source_warehouse") or "").strip() or None
+		if not dispatch and not source:
+			frappe.throw(_("An allocation of {0} names no send and no sender.").format(code))
+		confidence = str(alloc.get("confidence") or "").strip().lower()
+		out.append(
+			{
+				"item_code": code,
+				"dispatch": dispatch,
+				"source_warehouse": source,
+				"qty": qty,
+				"was_recommended": 1 if cint(alloc.get("was_recommended")) else 0,
+				"confidence": confidence if confidence in _CONFIDENCES else "",
+			}
+		)
+	return out
+
+
+def _send_transit_warehouse(send: Any) -> str:
+	transit = _g(send, "transit_warehouse")
+	if transit:
+		return str(transit)
+	return _resolve_transit_warehouse(_g(send, "company") or _warehouse_company(_g(send, "from_warehouse")))
+
+
+def _post_transfer_rows(
+	by_source: dict[str, dict[str, float]], target: str, meta: dict[str, Any], remarks: str
+) -> str:
+	"""ONE Material Transfer, a row per (source, item) into *target*."""
+	sources = list(by_source)
+	first = sources[0]
+	se = transfer_api._build_material_transfer(
+		first,
+		target,
+		[{"item_code": code, "qty": qty} for code, qty in by_source[first].items()],
+		posting_date=None,
+		remarks=remarks,
+	)
+	for source in sources[1:]:
+		for code, qty in by_source[source].items():
+			se.append(
+				"items",
+				{
+					"item_code": code,
+					"uom": (_g(meta.get(code), "stock_uom") or DEFAULT_UOM),
+					"qty": qty,
+					"s_warehouse": source,
+					"t_warehouse": target,
+				},
+			)
+	transfer_api._insert_and_submit_stock_entry(se)
+	return se.name
+
+
+def _close_sends(sends: Iterable[Any], user: str, now: Any) -> list[str]:
+	"""Mark every send whose lines are all at 0 remaining Confirmed. Returns their names."""
+	closed: list[str] = []
+	for send in sends:
+		if all(_line_remaining(r) <= _QTY_EPS for r in (send.items or [])):
+			send.status = STATUS_CONFIRMED
+			send.confirmed_by = user
+			send.confirmed_at = now
+			closed.append(send.name)
+	return closed
+
+
+def approve_receipt(
+	receipt: str,
+	allocations: Any,
+	received: Any = None,
+	note: str | None = None,
+	version: str | None = None,
+	pos_profile: str | None = None,
+) -> dict[str, Any]:
+	"""A manager approves a pool receipt: ONE Material Transfer into the receiver.
+
+	Rows: transit -> receiver per send allocation, sender -> receiver per direct
+	allocation. Lock order: the referenced sends (name order), then the receipt.
+	"""
+	actor = _build_actor(pos_profile)
+	sides = actor.sides
+	_require_transit_manager(actor)
+	receipt_name = str(receipt or "").strip()
+	if not receipt_name:
+		frappe.throw(_("receipt is required"))
+	allocs = _normalize_allocations(allocations)
+	received_map = _parse_json(received, "received", dict)
+
+	# 1. Lock: sends first (name order), then the receipt; re-check everything after.
+	sends: dict[str, Any] = {}
+	for name in sorted({a["dispatch"] for a in allocs if a["dispatch"]}):
+		try:
+			sends[name] = _lock(name)
+		except frappe.DoesNotExistError:
+			frappe.throw(_(_DRIFT_MESSAGE))
+	try:
+		doc = _lock(receipt_name)
+	except frappe.DoesNotExistError:
+		frappe.throw(_(_DRIFT_MESSAGE))
+	if doc.status != STATUS_PENDING:
+		frappe.throw(_("This receipt is already {0}.").format(_(doc.status)))
+	if not _is_receipt(doc):
+		frappe.throw(_("{0} is not a receipt.").format(doc.name))
+	if doc.from_warehouse and doc.from_warehouse not in _transit_sources():
+		frappe.throw(
+			_("{0} has nothing in transit, so {0} confirms this receipt itself.").format(
+				sides.label(doc.from_warehouse)
+			)
+		)
+	if version and str(version).strip() and str(version).strip() != _current_board_version():
+		frappe.throw(_(_DRIFT_MESSAGE))
+
+	# 2. Nobody approves their own declaration (the receipt, or a send it uses).
+	if actor.user == doc.declared_by:
+		frappe.throw(_("You declared this receipt, so another manager has to approve it."), frappe.PermissionError)
+	for send in sends.values():
+		if actor.user == send.declared_by:
+			frappe.throw(
+				_("You declared {0}, so another manager has to approve this receipt.").format(send.name),
+				frappe.PermissionError,
+			)
+
+	# 3. What actually arrived (the manager may correct it; the declaration stays).
+	target = doc.to_warehouse
+	names_by_code = {row.item_code: (row.item_name or row.item_code) for row in doc.items}
+	final = {row.item_code: round(flt(row.qty), QTY_DP) for row in doc.items}
+	declared_by_code: dict[str, float] = {}
+	for row in doc.items:
+		base = _g(row, "declared_qty")
+		declared_by_code[row.item_code] = round(
+			declared_by_code.get(row.item_code, 0.0) + flt(row.qty if base in (None, "") else base), QTY_DP
+		)
+	for code, raw in (received_map or {}).items():
+		code = str(code or "").strip()
+		if code not in final:
+			frappe.throw(_("{0} is not on this receipt.").format(code))
+		final[code] = _match_qty(raw, names_by_code.get(code, code))
+		# Correcting DOWN is any manager's call; UP adds stock nobody declared.
+		if final[code] > declared_by_code.get(code, 0.0) + _QTY_EPS and not actor.can_direct:
+			frappe.throw(
+				_("{0}: only a senior manager can record more than the {1} declared.").format(
+					names_by_code.get(code, code), _fmt_qty(declared_by_code.get(code, 0.0))
+				),
+				frappe.PermissionError,
+			)
+	if not any(q > _QTY_EPS for q in final.values()):
+		frappe.throw(_("Nothing was received: reject the receipt instead."))
+
+	# 4. Every unit received comes from exactly one place.
+	per_item: dict[str, float] = {}
+	for alloc in allocs:
+		if alloc["item_code"] not in final:
+			frappe.throw(_("{0} is not on this receipt.").format(alloc["item_code"]))
+		per_item[alloc["item_code"]] = round(per_item.get(alloc["item_code"], 0.0) + alloc["qty"], QTY_DP)
+	for code, qty in final.items():
+		assigned = per_item.get(code, 0.0)
+		if abs(assigned - qty) > _QTY_EPS:
+			frappe.throw(
+				_("{0}: received {1}, assigned {2}. Every unit must come from somewhere.").format(
+					names_by_code.get(code, code), _fmt_qty(qty), _fmt_qty(assigned)
+				)
+			)
+
+	use: dict[tuple[str, str], float] = {}
+	for alloc in allocs:
+		name = alloc["dispatch"]
+		if name:
+			send = sends[name]
+			if send.status != STATUS_PENDING or not _is_transit_send(send):
+				frappe.throw(_(_DRIFT_MESSAGE))
+			_require_live_transit(send)
+			if alloc["source_warehouse"] and alloc["source_warehouse"] != send.from_warehouse:
+				frappe.throw(
+					_("{0} was sent by {1}, not {2}.").format(
+						name, sides.label(send.from_warehouse), sides.label(alloc["source_warehouse"])
+					)
+				)
+			if send.from_warehouse == target:
+				frappe.throw(_("{0} cannot supply its own sender.").format(name))
+			alloc["source_warehouse"] = send.from_warehouse
+			key = (name, alloc["item_code"])
+			use[key] = round(use.get(key, 0.0) + alloc["qty"], QTY_DP)
+		else:
+			if not actor.can_direct:
+				frappe.throw(
+					_(
+						"Only a senior manager can take stock straight from a sender that never "
+						"declared sending it. Match this receipt to a send instead."
+					),
+					frappe.PermissionError,
+				)
+			source = alloc["source_warehouse"]
+			if not sides.is_known(source):
+				frappe.throw(_("{0} is neither the Factory nor a branch.").format(source))
+			if source == target:
+				frappe.throw(_("A receipt cannot come from its own warehouse."))
+	stale_check = bool(version and str(version).strip())
+	for (name, code), qty in use.items():
+		line = next((r for r in sends[name].items if r.item_code == code), None)
+		left = _line_remaining(line) if line is not None else 0.0
+		if qty > left + _QTY_EPS:
+			if stale_check:
+				# The board the manager saw promised more: somebody used it meanwhile.
+				frappe.throw(_(_DRIFT_MESSAGE))
+			frappe.throw(
+				_("{0}: only {1} of {2} left in transit, {3} assigned.").format(
+					name, _fmt_qty(left), names_by_code.get(code, code), _fmt_qty(qty)
+				)
+			)
+
+	# 5. ONE Material Transfer into the receiver.
+	by_source: dict[str, dict[str, float]] = {}
+	for alloc in allocs:
+		s_wh = _send_transit_warehouse(sends[alloc["dispatch"]]) if alloc["dispatch"] else alloc["source_warehouse"]
+		per = by_source.setdefault(s_wh, {})
+		per[alloc["item_code"]] = round(per.get(alloc["item_code"], 0.0) + alloc["qty"], QTY_DP)
+	meta = _item_meta(final)
+	shortage_docs = [
+		{
+			"from_warehouse": s_wh,
+			"items": [
+				{"item_code": c, "item_name": names_by_code.get(c, c), "qty": q} for c, q in per.items()
+			],
+		}
+		for s_wh, per in by_source.items()
+	]
+	remarks = _("Transit receipt {0}: {1}").format(
+		doc.name, ", ".join(sorted({a["dispatch"] for a in allocs if a["dispatch"]})) or _("direct")
+	)
+	stock_entry = _post_or_explain(
+		lambda: _post_transfer_rows(by_source, target, meta, remarks), shortage_docs, sides, doc.name
+	)
+
+	# 6. Close the receipt, bump the sends, write the trail.
+	now = _now()
+	changed = False
+	for row in doc.items:
+		qty = final.get(row.item_code, 0.0)
+		if abs(flt(row.qty) - qty) > _QTY_EPS:
+			changed = True
+		row.qty = qty
+		row.matched_qty = qty
+	parts = []
+	for alloc in allocs:
+		origin = alloc["dispatch"] or _("direct")
+		parts.append(
+			f"{sides.label(alloc['source_warehouse'])} {_fmt_qty(alloc['qty'])} "
+			f"{names_by_code.get(alloc['item_code'], alloc['item_code'])} ({origin})"
+		)
+	note_text = _TRANSIT_NOTE_PREFIX + "; ".join(parts)
+	if changed:
+		doc.was_changed = 1
+		note_text += ". Received corrected by the manager"
+	named = doc.from_warehouse
+	used = list(dict.fromkeys(a["source_warehouse"] for a in allocs if a["source_warehouse"]))
+	if named and any(s != named for s in used):
+		# The receiver named a sender; the manager took (some of) it from elsewhere.
+		note_text += ". Sender overridden by {0}: receipt named {1}, used {2}".format(
+			actor.user, sides.label(named), ", ".join(sides.label(s) for s in used)
+		)
+	extra = str(note or "").strip()
+	if extra:
+		note_text += f". Note: {extra}"
+	doc.status = STATUS_CONFIRMED
+	doc.confirmed_by = actor.user
+	doc.confirmed_at = now
+	doc.stock_entry = stock_entry
+	doc.match_note = note_text[:2000]
+	_save(doc)
+
+	for (name, code), qty in use.items():
+		for row in sends[name].items:
+			if row.item_code == code:
+				row.matched_qty = round(flt(_g(row, "matched_qty")) + qty, QTY_DP)
+				break
+	closed = _close_sends([sends[n] for n in sorted(sends)], actor.user, now)
+	for name in sorted(sends):
+		_save(sends[name])
+
+	for alloc in allocs:
+		record = frappe.get_doc(
+			{
+				"doctype": TRANSIT_MATCH_DOCTYPE,
+				"receipt": doc.name,
+				"dispatch": alloc["dispatch"],
+				"item_code": alloc["item_code"],
+				"qty": alloc["qty"],
+				"source_warehouse": alloc["source_warehouse"],
+				"target_warehouse": target,
+				"stock_entry": stock_entry,
+				"approved_by": actor.user,
+				"approved_at": now,
+				"was_recommended": alloc["was_recommended"],
+				"confidence": alloc["confidence"],
+			}
+		)
+		record.flags.from_handover_service = True
+		record.insert(ignore_permissions=True)
+
+	_enqueue_push(doc.name, EVENT_CONFIRMED, actor.user)
+	for source in dict.fromkeys(sends[n].from_warehouse for n in closed):
+		_after_dispatch_closed(source, actor.user)
+	return {"ok": True, "stock_entry": stock_entry, "receipt": doc.name, "closed_sends": closed}
+
+
+def reject_receipt(receipt: str, reason: str | None = None, pos_profile: str | None = None) -> dict[str, Any]:
+	"""A manager rejects a pool receipt (nothing arrived from any send). Nothing posts."""
+	actor = _build_actor(pos_profile)
+	_require_transit_manager(actor)
+	name = str(receipt or "").strip()
+	if not name:
+		frappe.throw(_("receipt is required"))
+	doc, _grouped = _lock_with_group(name)
+	if doc.status != STATUS_PENDING:
+		frappe.throw(_("This receipt is already {0}.").format(_(doc.status)))
+	if not _is_receipt(doc):
+		frappe.throw(_("{0} is not a receipt.").format(doc.name))
+	if doc.from_warehouse and doc.from_warehouse not in _transit_sources():
+		frappe.throw(
+			_("{0} has nothing in transit, so {0} answers this receipt itself.").format(
+				actor.sides.label(doc.from_warehouse)
+			)
+		)
+	if actor.user == doc.declared_by:
+		frappe.throw(_("You declared this receipt, so another manager has to reject it."), frappe.PermissionError)
+	text = str(reason or "").strip()[:1000]
+	doc.status = STATUS_REJECTED
+	doc.rejected_by = actor.user
+	doc.rejected_at = _now()
+	doc.reject_reason = text or None
+	doc.match_note = (_TRANSIT_NOTE_PREFIX + (text or "rejected by a manager"))[:2000]
+	_save(doc)
+	_enqueue_push(doc.name, EVENT_REJECTED, actor.user)
+	return {"ok": True, "handover": _serialize_doc(doc, actor)}
+
+
+def _settle_send(
+	dispatch: str, lines: Any, reason: str | None, mode: str, pos_profile: str | None
+) -> dict[str, Any]:
+	"""Write off (``mode="write_off"``) or return (``"return"``) part of a send's remaining stock."""
+	actor = _build_actor(pos_profile)
+	sides = actor.sides
+	_require_transit_manager(actor)
+	reason_text = str(reason or "").strip()[:1000]
+	write_off = mode == "write_off"
+	if write_off and not reason_text:
+		frappe.throw(_("Give a reason for the write-off."))
+	merged = _normalize_lines(lines)
+
+	send = _lock(dispatch)
+	if send.status != STATUS_PENDING:
+		frappe.throw(_("This send is already {0}.").format(_(send.status)))
+	if not _is_transit_send(send):
+		frappe.throw(_("{0} is not a send in transit.").format(send.name))
+	if actor.user == send.declared_by:
+		frappe.throw(
+			_("You declared this send, so another manager has to settle it."), frappe.PermissionError
+		)
+	_require_live_transit(send)
+	by_code = {row.item_code: row for row in send.items}
+	for code, qty in merged.items():
+		row = by_code.get(code)
+		if row is None:
+			frappe.throw(_("{0} is not on this send.").format(code))
+		left = _line_remaining(row)
+		if qty > left + _QTY_EPS:
+			frappe.throw(
+				_("{0}: only {1} left in transit, {2} asked.").format(
+					row.item_name or code, _fmt_qty(left), _fmt_qty(qty)
+				)
+			)
+
+	transit = _send_transit_warehouse(send)
+	company = _g(send, "company") or _warehouse_company(transit, send.from_warehouse)
+	shortage = {
+		"from_warehouse": transit,
+		"items": [
+			{"item_code": c, "item_name": by_code[c].item_name or c, "qty": q} for c, q in merged.items()
+		],
+	}
+	if write_off:
+		account = frappe.db.get_value("Company", company, "stock_adjustment_account") if company else None
+		if not account:
+			frappe.throw(
+				_("Set the Stock Adjustment Account on {0} to write off stock in transit.").format(
+					company or _("the company")
+				)
+			)
+		# No existing warehouse -> POS Profile cost-centre helper: the Company's default.
+		cost_center = frappe.db.get_value("Company", company, "cost_center") if company else None
+		remarks = _("Written off from transit, send {0}: {1}").format(send.name, reason_text)
+		entry = _post_or_explain(
+			lambda: _post_write_off(company, transit, merged, account, remarks, cost_center),
+			shortage,
+			sides,
+			send.name,
+		)
+		field = "written_off_qty"
+	else:
+		remarks = _("Returned from transit to the sender, send {0}").format(send.name)
+		if reason_text:
+			remarks += f": {reason_text}"
+		entry = _post_or_explain(
+			lambda: _post_transfer_rows({transit: merged}, send.from_warehouse, _item_meta(merged), remarks),
+			shortage,
+			sides,
+			send.name,
+		)
+		field = "returned_qty"
+
+	for code, qty in merged.items():
+		row = by_code[code]
+		setattr(row, field, round(flt(_g(row, field)) + qty, QTY_DP))
+	detail = ", ".join(f"{by_code[c].item_name or c} {_fmt_qty(q)}" for c, q in merged.items())
+	if write_off:
+		line = f"Written off {detail} ({entry}): {reason_text}"
+	else:
+		line = f"Returned to {sides.label(send.from_warehouse)} {detail} ({entry})"
+		if reason_text:
+			line += f": {reason_text}"
+	send.match_note = (f"{send.match_note}; {line}" if send.match_note else line)[:2000]
+	now = _now()
+	closed = bool(_close_sends([send], actor.user, now))
+	_save(send)
+	if closed:
+		_after_dispatch_closed(send.from_warehouse, actor.user)
+	return {"ok": True, "stock_entry": entry, "dispatch": send.name, "closed": closed}
+
+
+def _post_write_off(
+	company: str,
+	transit: str,
+	lines: dict[str, float],
+	account: str,
+	remarks: str,
+	cost_center: str | None = None,
+) -> str:
+	"""A Material Issue out of *transit*, charged to the Stock Adjustment Account."""
+	meta = _item_meta(lines)
+	se = frappe.new_doc("Stock Entry")
+	se.stock_entry_type = "Material Issue"
+	se.purpose = "Material Issue"
+	se.company = company
+	se.remarks = remarks
+	for code, qty in lines.items():
+		row = {
+			"item_code": code,
+			"uom": (_g(meta.get(code), "stock_uom") or DEFAULT_UOM),
+			"qty": qty,
+			"s_warehouse": transit,
+			"expense_account": account,
+		}
+		if cost_center:
+			row["cost_center"] = cost_center
+		se.append("items", row)
+	transfer_api._insert_and_submit_stock_entry(se)
+	return se.name
+
+
+def write_off_transit(
+	dispatch: str, lines: Any, reason: str | None = None, pos_profile: str | None = None
+) -> dict[str, Any]:
+	"""Write off part of a send as lost (Material Issue from transit). Reason required."""
+	return _settle_send(dispatch, lines, reason, "write_off", pos_profile)
+
+
+def return_to_sender(
+	dispatch: str, lines: Any, reason: str | None = None, pos_profile: str | None = None
+) -> dict[str, Any]:
+	"""Move part of a send back from transit to its sender (Material Transfer)."""
+	return _settle_send(dispatch, lines, reason, "return", pos_profile)
+
+
+# ---------------------------------------------------------------------------
 # Push
 # ---------------------------------------------------------------------------
 
@@ -2150,20 +3328,33 @@ def _push_text(
 ) -> tuple[str, str]:
 	"""(title, body) -- Arabic first, English second."""
 	extra = extra or {}
-	from_label = sides.label(_g(doc, "from_warehouse"))
+	from_wh = _g(doc, "from_warehouse")
+	from_label = sides.label(from_wh) if from_wh else UNKNOWN_SENDER_LABEL
 	dispatch = _is_dispatch(doc)
 	to_label = "" if dispatch else sides.label(_g(doc, "to_warehouse"))
 	n = _fmt_qty(sum(flt(_g(r, "qty")) for r in (_g(doc, "items") or [])))
 	awaiting = _g(doc, "awaiting_side")
 	proposer_label = sides.label(_side_warehouse(doc, _other_side(awaiting)))
+	transit_answer = str(_g(doc, "match_note") or "").startswith(_TRANSIT_NOTE_PREFIX) or (
+		_is_receipt(doc) and not from_wh
+	)
 	responder_label = (
-		MANAGER_LABEL if awaiting == SIDE_MANAGER else sides.label(_side_warehouse(doc, awaiting))
+		MANAGER_LABEL
+		if awaiting == SIDE_MANAGER or transit_answer
+		else sides.label(_side_warehouse(doc, awaiting))
 	)
 	route_ar = from_label if dispatch else f"{from_label} ← {to_label}"
 	route_en = from_label if dispatch else f"{from_label} → {to_label}"
 	title = "تسليم مخزون · Stock handover"
 
-	if event == EVENT_BALANCED:
+	if event == EVENT_TRANSIT:
+		if dispatch:
+			ar = f"{from_label} بعت {n} برطمان (في الطريق) — طابقها"
+			en = f"{from_label} sent out {n} jars (in transit) — match it"
+		else:
+			ar = f"{to_label} استلم {n} برطمان — طابق الاستلام"
+			en = f"{to_label} received {n} jars — match the receipt"
+	elif event == EVENT_BALANCED:
 		sent = _fmt_qty(extra.get("sent", 0))
 		ar = f"شحنة {from_label} اتطابقت: {sent} برطمان — راجع وأكّد"
 		en = f"{from_label}'s sent-out batch adds up ({sent} jars) — match it"

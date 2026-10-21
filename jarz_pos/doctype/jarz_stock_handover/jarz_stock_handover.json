@@ -34,7 +34,9 @@
   "cancelled_by",
   "cancelled_at",
   "match_note",
-  "client_request_id"
+  "client_request_id",
+  "transit_warehouse",
+  "transit_entry"
  ],
  "fields": [
   {
@@ -76,8 +78,8 @@
    "label": "From Warehouse",
    "options": "Warehouse",
    "read_only": 1,
-   "reqd": 1,
-   "search_index": 1
+   "search_index": 1,
+   "description": "Empty on a receipt whose receiver did not name the sender (a manager matches it to a send)."
   },
   {
    "fieldname": "to_warehouse",
@@ -257,11 +259,28 @@
    "length": 64,
    "read_only": 1,
    "search_index": 1
+  },
+  {
+   "description": "The transit warehouse a sent-out declaration (Dispatch) moved its stock into.",
+   "fieldname": "transit_warehouse",
+   "fieldtype": "Link",
+   "label": "Transit Warehouse",
+   "options": "Warehouse",
+   "read_only": 1
+  },
+  {
+   "description": "The Material Transfer that moved a Dispatch's stock from the sender into transit at declaration.",
+   "fieldname": "transit_entry",
+   "fieldtype": "Link",
+   "label": "Transit Entry",
+   "options": "Stock Entry",
+   "read_only": 1,
+   "search_index": 1
   }
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-10-20 18:00:00.000000",
+ "modified": "2026-10-22 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "jarz pos",
  "name": "Jarz Stock Handover",

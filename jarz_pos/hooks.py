@@ -482,6 +482,12 @@ doc_events = {
 			"jarz_pos.services.cash_custody.verify_custody_after_posting",
 		],
 	},
+	# Stock transit: a pending send's sender -> transit entry may not be cancelled
+	# in Desk (the send would claim stock that is no longer in transit). The send's
+	# own cancel path flags the entry and passes. One indexed read per cancel.
+	"Stock Entry": {
+		"before_cancel": "jarz_pos.services.stock_handover.guard_transit_entry_cancel",
+	},
 	"Journal Entry": {
 		"before_submit": "jarz_pos.services.cash_custody.guard_custody_balance",
 		"before_cancel": "jarz_pos.services.cash_custody.guard_custody_balance_on_cancel",
