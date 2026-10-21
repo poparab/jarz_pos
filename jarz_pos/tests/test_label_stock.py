@@ -45,14 +45,21 @@ def _settings(**overrides):
 		yield
 
 
-def _item(qty, item_code="MANGO-M", item_group="Medium", item_name=None, is_bundle_parent=0):
+def _item(
+	qty, item_code="MANGO-M", item_group="Medium", item_name=None, is_bundle_parent=0, warehouse=None
+):
 	return SimpleNamespace(
 		qty=qty,
 		item_code=item_code,
 		item_name=item_name or item_code,
 		item_group=item_group,
 		is_bundle_parent=is_bundle_parent,
+		warehouse=warehouse,
 	)
+
+
+NASR = "Nasr city - J"
+OCT6 = "6th of october - J"
 
 
 def _label(name, item="MANGO-M", per_unit=1.0, location=None):
@@ -202,7 +209,8 @@ def _status(**kwargs):
 
 
 class TestStatus(unittest.TestCase):
-	def test_customers_who_print_their_own_are_never_tracked(self):
+	def test_untracked_labels_are_never_alerted_on(self):
+		# "Not Tracked" now means a disabled label only (JARZ prints them all).
 		self.assertEqual(_status(tracked=False, on_hand=0), ls.STATUS_NOT_TRACKED)
 
 	def test_healthy_stock_is_ok(self):
@@ -338,6 +346,318 @@ class TestInvoiceUsage(unittest.TestCase):
 		usage, unmatched = ls.invoice_label_usage(doc, [])
 		self.assertEqual(usage, {})
 		self.assertEqual(len(unmatched), 1)
+
+
+class TestBranchMatching(unittest.TestCase):
+	"""Label stock is per (customer, flavour, branch): Lucaffe is filled by two branches."""
+
+	def _branch_labels(self):
+		return [_label("L-NASR", "MANGO-M", location=NASR), _label("L-OCT", "MANGO-M", location=OCT6)]
+
+	def test_two_branch_labels_for_one_flavour_each_draw_their_own(self):
+		doc = SimpleNamespace(items=[_item(10, warehouse=NASR), _item(4, warehouse=OCT6)])
+		usage, unmatched = ls.invoice_label_usage(doc, self._branch_labels())
+		self.assertEqual(usage, {"L-NASR": 10, "L-OCT": 4})
+		self.assertEqual(unmatched, [])
+
+	def test_a_nasr_city_invoice_consumes_only_the_nasr_city_label(self):
+		doc = SimpleNamespace(items=[_item(12, warehouse=NASR)])
+		usage, unmatched = ls.invoice_label_usage(doc, self._branch_labels())
+		self.assertEqual(usage, {"L-NASR": 12})
+		self.assertEqual(unmatched, [])
+
+	def test_a_branch_with_no_label_there_is_unmatched_at_that_branch(self):
+		# Only Nasr City stocks the label: 6th of October must NOT borrow it.
+		doc = SimpleNamespace(items=[_item(5, warehouse=OCT6)])
+		usage, unmatched = ls.invoice_label_usage(doc, [_label("L-NASR", "MANGO-M", location=NASR)])
+		self.assertEqual(usage, {})
+		self.assertEqual(len(unmatched), 1)
+		self.assertEqual(unmatched[0]["item_code"], "MANGO-M")
+		self.assertEqual(unmatched[0]["warehouse"], OCT6)
+		self.assertEqual(unmatched[0]["labels"], 5)
+
+	def test_blank_location_label_is_a_wildcard_fallback(self):
+		doc = SimpleNamespace(items=[_item(7, warehouse=OCT6)])
+		labels = [_label("L-NASR", "MANGO-M", location=NASR), _label("L-ANY", "MANGO-M", location=None)]
+		usage, unmatched = ls.invoice_label_usage(doc, labels)
+		self.assertEqual(usage, {"L-ANY": 7})
+		self.assertEqual(unmatched, [])
+
+	def test_exact_branch_beats_the_blank_wildcard(self):
+		doc = SimpleNamespace(items=[_item(7, warehouse=NASR)])
+		labels = [_label("L-ANY", "MANGO-M", location=""), _label("L-NASR", "MANGO-M", location=NASR)]
+		usage, _ = ls.invoice_label_usage(doc, labels)
+		self.assertEqual(usage, {"L-NASR": 7})
+
+	def test_unresolvable_warehouse_uses_the_single_label(self):
+		doc = SimpleNamespace(items=[_item(3)])  # no row / header / profile warehouse
+		usage, unmatched = ls.invoice_label_usage(doc, [_label("L-NASR", "MANGO-M", location=NASR)])
+		self.assertEqual(usage, {"L-NASR": 3})
+		self.assertEqual(unmatched, [])
+
+	def test_unresolvable_warehouse_with_two_branch_labels_draws_the_oldest(self):
+		# Auto-creating a blank-location label here would make a wildcard every
+		# other branch's invoices then drain; the oldest label is the safer pick.
+		doc = SimpleNamespace(items=[_item(3)])
+		usage, unmatched = ls.invoice_label_usage(doc, self._branch_labels())
+		self.assertEqual(usage, {"L-NASR": 3})
+		self.assertEqual(unmatched, [])
+
+	def test_row_warehouse_beats_the_header_and_the_profile(self):
+		doc = SimpleNamespace(set_warehouse=OCT6, items=[_item(2, warehouse=NASR)])
+		usage, _ = ls.invoice_label_usage(doc, self._branch_labels(), profile_warehouse=OCT6)
+		self.assertEqual(usage, {"L-NASR": 2})
+
+	def test_header_set_warehouse_is_used_when_the_row_has_none(self):
+		doc = SimpleNamespace(set_warehouse=OCT6, items=[_item(2)])
+		usage, _ = ls.invoice_label_usage(doc, self._branch_labels(), profile_warehouse=NASR)
+		self.assertEqual(usage, {"L-OCT": 2})
+
+	def test_pos_profile_warehouse_is_the_last_resort(self):
+		doc = SimpleNamespace(set_warehouse="", items=[_item(2)])
+		usage, _ = ls.invoice_label_usage(doc, self._branch_labels(), profile_warehouse=OCT6)
+		self.assertEqual(usage, {"L-OCT": 2})
+
+	def test_unmatched_lines_are_grouped_per_branch(self):
+		doc = SimpleNamespace(
+			items=[
+				_item(2, "NEW-M", warehouse=NASR),
+				_item(3, "NEW-M", warehouse=NASR),
+				_item(1, "NEW-M", warehouse=OCT6),
+			]
+		)
+		_, unmatched = ls.invoice_label_usage(doc, [])
+		by_wh = {u["warehouse"]: u["labels"] for u in unmatched}
+		self.assertEqual(by_wh, {NASR: 5, OCT6: 1})
+
+
+class TestAutoCreateLocation(unittest.TestCase):
+	def test_known_warehouse_wins_over_the_peers_location(self):
+		peers = [_label("L-NASR", "MANGO-M", location=NASR)]
+		self.assertEqual(ls._auto_create_location({"warehouse": OCT6}, peers), OCT6)
+
+	def test_unknown_warehouse_inherits_a_single_common_location(self):
+		peers = [_label("L1", "MANGO-M", location=NASR), _label("L2", "BERRY-M", location=NASR)]
+		self.assertEqual(ls._auto_create_location({"warehouse": None}, peers), NASR)
+
+	def test_unknown_warehouse_with_two_branches_stays_blank(self):
+		peers = [_label("L1", location=NASR), _label("L2", location=OCT6)]
+		self.assertIsNone(ls._auto_create_location({"warehouse": None}, peers))
+
+	def test_auto_create_reuses_an_existing_row_for_the_key(self):
+		with (
+			patch.object(ls, "_existing_label", return_value="L-OLD") as existing,
+			patch.object(ls.frappe, "new_doc") as new_doc,
+		):
+			name = ls._auto_create_label("LUCAFFE", {"item_code": "MANGO-M", "warehouse": OCT6}, [])
+		self.assertEqual(name, "L-OLD")
+		existing.assert_called_once_with("LUCAFFE", "MANGO-M", OCT6)
+		new_doc.assert_not_called()
+
+
+class TestBranchConsumption(unittest.TestCase):
+	"""End to end through the submit hook, with the DB mocked."""
+
+	def _invoice(self, warehouse, qty=6, name="SI-OCT-1"):
+		return SimpleNamespace(
+			name=name,
+			customer="LUCAFFE",
+			posting_date="2026-10-22",
+			is_return=0,
+			set_warehouse="",
+			pos_profile="6th of october",
+			items=[_item(qty, "MANGO-M", warehouse=warehouse)],
+		)
+
+	def test_oct6_invoice_auto_creates_at_oct6_and_leaves_nasr_alone(self):
+		from unittest.mock import MagicMock
+
+		created_doc = MagicMock()
+		created_doc.name = "L-OCT-NEW"
+		with (
+			_settings(),
+			patch.object(
+				ls, "labels_for_customer", return_value=[_label("L-NASR", "MANGO-M", location=NASR)]
+			),
+			patch.object(ls, "_movements_for_invoice", return_value=[]),
+			patch.object(ls, "_existing_label", return_value=None),
+			patch.object(ls.frappe, "new_doc", return_value=created_doc),
+			patch.object(ls, "post_movement") as post,
+		):
+			ls.consume_labels_on_invoice_submit(self._invoice(OCT6))
+		self.assertEqual(created_doc.storage_location, OCT6)
+		self.assertEqual(created_doc.item, "MANGO-M")
+		self.assertEqual(created_doc.we_print, 1)
+		created_doc.insert.assert_called_once()
+		posted = {c.kwargs["label"]: c.kwargs["qty"] for c in post.call_args_list}
+		self.assertEqual(posted, {"L-OCT-NEW": -6})
+
+	def test_nasr_invoice_consumes_the_nasr_label_only(self):
+		labels = [_label("L-NASR", "MANGO-M", location=NASR), _label("L-OCT", "MANGO-M", location=OCT6)]
+		with (
+			_settings(),
+			patch.object(ls, "labels_for_customer", return_value=labels),
+			patch.object(ls, "_movements_for_invoice", return_value=[]),
+			patch.object(ls, "_auto_create_label") as created,
+			patch.object(ls, "post_movement") as post,
+		):
+			ls.consume_labels_on_invoice_submit(self._invoice(NASR, qty=9, name="SI-NASR-1"))
+		created.assert_not_called()
+		posted = {c.kwargs["label"]: c.kwargs["qty"] for c in post.call_args_list}
+		self.assertEqual(posted, {"L-NASR": -9})
+
+	def test_profile_warehouse_is_looked_up_only_when_a_line_lacks_one(self):
+		labels = [_label("L-OCT", "MANGO-M", location=OCT6)]
+		with (
+			_settings(),
+			patch.object(ls, "labels_for_customer", return_value=labels),
+			patch.object(ls, "_movements_for_invoice", return_value=[]),
+			patch.object(ls, "pos_profile_warehouse", return_value=OCT6) as profile,
+			patch.object(ls, "post_movement") as post,
+		):
+			ls.consume_labels_on_invoice_submit(self._invoice(None))
+		profile.assert_called_once()
+		self.assertEqual(post.call_args.kwargs["label"], "L-OCT")
+
+		with (
+			_settings(),
+			patch.object(ls, "labels_for_customer", return_value=labels),
+			patch.object(ls, "_movements_for_invoice", return_value=[]),
+			patch.object(ls, "pos_profile_warehouse") as profile,
+			patch.object(ls, "post_movement"),
+		):
+			ls.consume_labels_on_invoice_submit(self._invoice(OCT6))
+		profile.assert_not_called()
+
+
+class TestLabelController(unittest.TestCase):
+	"""Jarz Customer Label validation: the (customer, item, location) key, we_print forced."""
+
+	def _mod(self):
+		from jarz_pos.doctype.jarz_customer_label import jarz_customer_label as mod
+
+		return mod
+
+	def _doc(self, *, location=NASR, name="JLBL-00002", we_print=0, enabled=1, item="MANGO-M"):
+		from unittest.mock import MagicMock
+
+		doc = MagicMock()
+		doc.doctype = "Jarz Customer Label"
+		doc.name = name
+		doc.customer = "LUCAFFE"
+		doc.item = item
+		doc.storage_location = location
+		doc.we_print = we_print
+		doc.enabled = enabled
+		doc.labels_per_unit = 1
+		doc.label_title = "Mango"
+		doc.get = lambda field: 0
+		return doc
+
+	def test_we_print_is_forced_to_one(self):
+		mod = self._mod()
+		doc = self._doc(we_print=0)
+		mod.JarzCustomerLabel.validate(doc)
+		self.assertEqual(doc.we_print, 1)
+
+	def test_same_flavour_at_another_branch_is_allowed(self):
+		mod = self._mod()
+		doc = self._doc(location=OCT6)
+		with (
+			patch.object(mod.frappe.db, "get_value", return_value=None) as lookup,
+			patch.object(mod.frappe, "throw") as throw,
+		):
+			mod.JarzCustomerLabel._validate_unique_flavour(doc)
+		throw.assert_not_called()
+		filters = lookup.call_args.args[1]
+		self.assertEqual(filters["storage_location"], OCT6)
+		self.assertEqual(filters["item"], "MANGO-M")
+		self.assertEqual(filters["customer"], "LUCAFFE")
+
+	def test_duplicate_at_the_same_location_is_rejected_and_names_it(self):
+		mod = self._mod()
+		doc = self._doc(location=NASR)
+
+		class Refused(Exception):
+			pass
+
+		with (
+			patch.object(mod.frappe.db, "get_value", return_value="JLBL-00001"),
+			patch.object(mod.frappe, "throw", side_effect=Refused) as throw,
+			patch.object(mod, "_", new=lambda text, *a, **k: text),
+		):
+			with self.assertRaises(Refused):
+				mod.JarzCustomerLabel._validate_unique_flavour(doc)
+		message = throw.call_args.args[0]
+		self.assertIn(NASR, message)
+		self.assertIn("JLBL-00001", message)
+
+	def test_blank_location_is_its_own_key(self):
+		mod = self._mod()
+		doc = self._doc(location="  ")
+		with (
+			patch.object(mod.frappe.db, "get_value", return_value=None) as lookup,
+			patch.object(mod.frappe, "throw"),
+		):
+			mod.JarzCustomerLabel._validate_unique_flavour(doc)
+		self.assertEqual(lookup.call_args.args[1]["storage_location"], ["is", "not set"])
+		self.assertIsNone(doc.storage_location)
+
+	def test_an_enabled_label_needs_a_flavour_whatever_we_print_says(self):
+		mod = self._mod()
+
+		class Refused(Exception):
+			pass
+
+		doc = self._doc(item="", we_print=0)
+		with (
+			patch.object(mod.frappe, "throw", side_effect=Refused),
+			patch.object(mod, "_", new=lambda text, *a, **k: text),
+		):
+			with self.assertRaises(Refused):
+				mod.JarzCustomerLabel._require_flavour_when_tracked(doc)
+
+	def test_we_print_field_is_hidden_read_only_default_one(self):
+		import json
+		import os
+
+		mod = self._mod()
+		path = os.path.join(os.path.dirname(mod.__file__), "jarz_customer_label.json")
+		with open(path, encoding="utf-8") as handle:
+			schema = json.load(handle)
+		field = next(f for f in schema["fields"] if f["fieldname"] == "we_print")
+		self.assertEqual(field["default"], "1")
+		self.assertEqual(field.get("hidden"), 1)
+		self.assertEqual(field.get("read_only"), 1)
+
+
+class TestSnapshotTracking(unittest.TestCase):
+	def _snap(self, **row):
+		base = {"name": "L1", "customer": "LUCAFFE", "item": "MANGO-M", "storage_location": NASR}
+		base.update(row)
+		with (
+			_settings(),
+			patch.object(ls, "get_position", return_value={"on_hand": 0, "value": 0.0, "avg_cost": 0.0}),
+			patch.object(
+				ls, "get_usage_stats", return_value={"consumed": 0, "window_days": 0, "avg_daily_usage": 0.0}
+			),
+			patch.object(ls, "get_open_print_orders", return_value=[]),
+			patch.object(ls, "lead_time_calendar_days", return_value=4),
+			patch.object(ls, "expected_ready_date", return_value="2026-10-26"),
+		):
+			return ls.build_snapshot(base)
+
+	def test_a_stale_we_print_zero_is_still_tracked(self):
+		snap = self._snap(enabled=1, we_print=0)
+		self.assertTrue(snap["tracked"])
+		self.assertTrue(snap["we_print"])
+		self.assertEqual(snap["status"], ls.STATUS_OUT_OF_STOCK)
+		self.assertEqual(snap["storage_location"], NASR)
+
+	def test_not_tracked_means_disabled(self):
+		snap = self._snap(enabled=0)
+		self.assertFalse(snap["tracked"])
+		self.assertEqual(snap["status"], ls.STATUS_NOT_TRACKED)
 
 
 class TestSheets(unittest.TestCase):
@@ -1062,6 +1382,23 @@ class TestAlertMessage(unittest.TestCase):
 		# The printer sells sheets: the ask is 2 sheets, with the 42-label
 		# equivalence spelled out.
 		self.assertIn("2 sheet(s) (42 labels)", message)
+
+	def test_message_names_the_branch_so_two_stocks_read_differently(self):
+		base = {
+			"customer_name": "Lucaffe",
+			"label_title": "Mango",
+			"size": "Medium",
+			"on_hand_qty": 10,
+			"lead_days_min": 2,
+			"lead_days_max": 3,
+			"rest_day": "Friday",
+			"expected_ready_if_ordered_today": "2026-10-26",
+		}
+		nasr = ls._alert_message({**base, "storage_location": NASR})
+		oct6 = ls._alert_message({**base, "storage_location": OCT6})
+		self.assertIn(f"Mango (Medium) at {NASR}: 10 label(s) left.", nasr)
+		self.assertIn(f"at {OCT6}", oct6)
+		self.assertNotEqual(nasr, oct6)
 
 
 # ---------------------------------------------------------------------------

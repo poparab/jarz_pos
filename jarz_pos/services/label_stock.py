@@ -8,10 +8,12 @@ for the better part of a week. This module is the ledger and the early warning.
 
 Model
 -----
-``Jarz Customer Label``     one label design per (customer, title).
-                            ``we_print = 0`` marks the customers who supply their
-                            own labels: they are never counted and never alerted
-                            on, which is the whole point of the flag.
+``Jarz Customer Label``     one stock of one label: (customer, flavour item,
+                            storage location). A customer filled by two branches
+                            has a separate stock of each flavour at each branch,
+                            and an invoice draws from the branch that filled it.
+                            JARZ prints every label, so ``we_print`` is always 1
+                            (kept only so older app builds still parse it).
 ``Jarz Label Movement``     the ledger. On hand is ALWAYS ``SUM(qty)`` over this
                             table -- never a stored counter, which would drift the
                             first time a movement was deleted.
@@ -496,7 +498,8 @@ def build_snapshot(label_row: dict[str, Any], *, settings: dict[str, Any] | None
 	settings = settings or get_label_settings()
 	name = label_row.get("name")
 
-	tracked = bool(_int(label_row.get("enabled"), 1)) and bool(_int(label_row.get("we_print"), 1))
+	# JARZ prints every label, so "Not Tracked" now means disabled and nothing else.
+	tracked = bool(_int(label_row.get("enabled"), 1))
 	position = get_position(name)
 	on_hand = position["on_hand"]
 	usage = get_usage_stats(name, settings=settings)
@@ -539,7 +542,8 @@ def build_snapshot(label_row: dict[str, Any], *, settings: dict[str, Any] | None
 		"size": label_row.get("size"),
 		"storage_location": label_row.get("storage_location"),
 		"enabled": bool(_int(label_row.get("enabled"), 1)),
-		"we_print": bool(_int(label_row.get("we_print"), 1)),
+		# Always True; kept in the payload so older app builds still parse it.
+		"we_print": True,
 		"tracked": tracked,
 		"labels_per_unit": _float(label_row.get("labels_per_unit"), 1.0) or 1.0,
 		"labels_per_sheet": per_sheet,
@@ -1170,13 +1174,18 @@ def _resync_after_debit_note(doc: Any) -> None:
 # Sales Invoice consumption
 # ---------------------------------------------------------------------------
 def labels_for_customer(customer: str) -> list[dict[str, Any]]:
-	"""Enabled, we-print labels for *customer*, keyed for per-flavour matching."""
+	"""Enabled labels for *customer*, keyed for per-(flavour, branch) matching.
+
+	No ``we_print`` filter: JARZ prints every label now, and filtering on it
+	would hide a row a missed patch left at 0 -- consumption would then try to
+	auto-create a duplicate of it.
+	"""
 	if not customer or not _doctype_exists(LABEL_DOCTYPE):
 		return []
 	try:
 		return frappe.get_all(
 			LABEL_DOCTYPE,
-			filters={"customer": customer, "enabled": 1, "we_print": 1},
+			filters={"customer": customer, "enabled": 1},
 			fields=["name", "label_title", "item", "size", "labels_per_unit", "storage_location"],
 			order_by="creation asc",
 			limit_page_length=0,
@@ -1191,41 +1200,102 @@ def labels_for_customer(customer: str) -> list[dict[str, Any]]:
 LABEL_BEARING_GROUPS = {"Small", "Medium", "Meduim", "Large"}
 
 
+def _clean_str(value: Any) -> str:
+	return str(value or "").strip()
+
+
+def pos_profile_warehouse(doc: Any) -> str | None:
+	"""The invoice's POS Profile warehouse, or None. Never raises."""
+	profile = _clean_str(getattr(doc, "pos_profile", None))
+	if not profile or not frappe:
+		return None
+	try:
+		return _clean_str(frappe.db.get_value("POS Profile", profile, "warehouse")) or None
+	except Exception:
+		return None
+
+
+def line_warehouse(row: Any, doc: Any, profile_warehouse: str | None = None) -> str | None:
+	"""The warehouse that filled one invoice line.
+
+	``row.warehouse`` first (production invoices carry it on every item and
+	leave ``set_warehouse`` empty), then the header ``set_warehouse``, then the
+	POS Profile's warehouse. None when none of them is set.
+	"""
+	return (
+		_clean_str(getattr(row, "warehouse", None))
+		or _clean_str(getattr(doc, "set_warehouse", None))
+		or _clean_str(profile_warehouse)
+		or None
+	)
+
+
+def match_label(
+	item_code: str, warehouse: str | None, labels: Sequence[dict[str, Any]]
+) -> dict[str, Any] | None:
+	"""Pick the label stock one jar line draws from.
+
+	1. Exact (item, warehouse): the branch that filled the line holds its own
+	   stock of the customer's label.
+	2. A label for the item with a BLANK storage location -- the legacy
+	   "any branch" wildcard.
+	3. Only when the warehouse could not be resolved at all: the customer's
+	   oldest label for the item (*labels* arrive creation-ascending). Creating
+	   a blank-location label here would turn it into a wildcard that later
+	   invoices from every other branch would silently draw from.
+	Otherwise None, and the caller auto-creates a label at *warehouse*. A
+	known warehouse never borrows another branch's stock.
+	"""
+	candidates = [lb for lb in labels if _clean_str(lb.get("item")) == item_code]
+	if not candidates:
+		return None
+	if warehouse:
+		for lb in candidates:
+			if _clean_str(lb.get("storage_location")) == warehouse:
+				return lb
+	for lb in candidates:
+		if not _clean_str(lb.get("storage_location")):
+			return lb
+	if not warehouse:
+		return candidates[0]
+	return None
+
+
 def invoice_label_usage(
-	doc: Any, labels: Sequence[dict[str, Any]]
+	doc: Any,
+	labels: Sequence[dict[str, Any]],
+	*,
+	profile_warehouse: str | None = None,
 ) -> tuple[dict[str, int], list[dict[str, Any]]]:
-	"""Per-flavour label usage for one invoice.
+	"""Per-(flavour, branch) label usage for one invoice.
 
 	Returns ``(usage, unmatched)`` where *usage* maps label name -> signed label
-	qty, and *unmatched* lists jar lines the customer has NO label for yet:
-	``[{"item_code", "item_name", "item_group", "labels"}]``. Every flavour has
-	its own label, so matching is by exact ``item_code`` — the Item already
-	encodes both the flavour and the size (Item Group = Small/Medium/Large).
+	qty, and *unmatched* lists jar lines with no label stock to draw from:
+	``[{"item_code", "item_name", "item_group", "warehouse", "labels"}]``, one
+	entry per (item, warehouse). Matching is by ``item_code`` (the Item encodes
+	flavour and size) AND the line's fulfilling warehouse -- see
+	``line_warehouse`` and ``match_label``. *profile_warehouse* is the POS
+	Profile's warehouse, passed in so this stays DB-free.
 
 	Bundle *parent* rows are skipped: they carry the bundle SKU at a 100%
 	discount while the physical jars are the child rows underneath, so counting
 	both would double every bundled order. Lines outside the jar groups (merch,
 	services) carry no label and are ignored rather than reported unmatched.
 	"""
-	by_item: dict[str, dict[str, Any]] = {}
-	for label in labels:
-		item_code = str(label.get("item") or "").strip()
-		if item_code:
-			by_item.setdefault(item_code, label)
-
 	usage: dict[str, int] = {}
-	unmatched: dict[str, dict[str, Any]] = {}
+	unmatched: dict[tuple[str, str | None], dict[str, Any]] = {}
 	for row in getattr(doc, "items", None) or []:
 		if _int(getattr(row, "is_bundle_parent", 0)):
 			continue
 		qty = _float(getattr(row, "qty", 0))
 		if not qty:
 			continue
-		group = str(getattr(row, "item_group", "") or "").strip()
+		group = _clean_str(getattr(row, "item_group", ""))
 		if group not in LABEL_BEARING_GROUPS:
 			continue
-		item_code = str(getattr(row, "item_code", "") or "").strip()
-		label = by_item.get(item_code)
+		item_code = _clean_str(getattr(row, "item_code", ""))
+		warehouse = line_warehouse(row, doc, profile_warehouse)
+		label = match_label(item_code, warehouse, labels)
 		if label:
 			per_unit = _float(label.get("labels_per_unit"), 1.0) or 1.0
 			# Return invoices carry negative qty, which flows straight through
@@ -1233,11 +1303,12 @@ def invoice_label_usage(
 			usage[label["name"]] = usage.get(label["name"], 0) + int(round(qty * per_unit))
 		else:
 			entry = unmatched.setdefault(
-				item_code,
+				(item_code, warehouse),
 				{
 					"item_code": item_code,
 					"item_name": str(getattr(row, "item_name", "") or item_code),
 					"item_group": group,
+					"warehouse": warehouse,
 					"labels": 0,
 				},
 			)
@@ -1249,41 +1320,72 @@ def invoice_label_usage(
 	)
 
 
+def _auto_create_location(unmatched_line: dict[str, Any], peers: Sequence[dict[str, Any]]) -> str | None:
+	"""Where an auto-created label lives.
+
+	The invoice's own warehouse whenever it is known: that branch is where the
+	jars were labelled, so that is where the stock has to be counted. Only when
+	the invoice names no warehouse at all does it fall back to the customer's
+	location -- and only if every existing label of theirs sits in ONE place;
+	with labels at two branches there is no honest guess, so it stays blank.
+	"""
+	warehouse = _clean_str(unmatched_line.get("warehouse"))
+	if warehouse:
+		return warehouse
+	locations = {_clean_str(p.get("storage_location")) for p in peers} - {""}
+	if len(locations) == 1:
+		return next(iter(locations))
+	return None
+
+
+def _existing_label(customer: str, item_code: str, location: str | None) -> str | None:
+	filters: dict[str, Any] = {"customer": customer, "item": item_code}
+	filters["storage_location"] = location if location else ["is", "not set"]
+	try:
+		return frappe.db.get_value(LABEL_DOCTYPE, filters, "name")
+	except Exception:
+		return None
+
+
 def _auto_create_label(
 	customer: str, unmatched_line: dict[str, Any], peers: Sequence[dict[str, Any]]
 ) -> str | None:
-	"""Start tracking a flavour the customer ordered but has no label for.
+	"""Start tracking a flavour (at a branch) the customer has no label stock for.
 
 	Customers add and remove flavours at will, and an untracked flavour is a
 	silent hole in the count — the exact failure this feature exists to close.
-	So the first invoice carrying a new flavour creates its label at zero stock:
-	it lands on the board as Out of Stock immediately, which is the truthful
-	state (nothing was ever printed into the ledger), and the alert makes a
-	human decide whether to print or to correct the setup.
+	So the first invoice carrying a new flavour, or the first one a new branch
+	fills, creates its label at zero stock: it lands on the board as Out of
+	Stock immediately, which is the truthful state (nothing was ever printed
+	into the ledger), and the alert makes a human decide whether to print or to
+	correct the setup.
 
-	The home location is inherited from the customer's existing labels (they
-	all live in the same place), and the sheet/batch defaults resolve from the
-	size, so the record is complete without a human filling a form mid-dispatch.
+	The location is the invoice's warehouse (see ``_auto_create_location``),
+	and the sheet/batch defaults resolve from the size, so the record is
+	complete without a human filling a form mid-dispatch. A row that already
+	exists for the key (a disabled label, or a concurrent invoice that created
+	it first) is reused rather than duplicated.
 	"""
 	try:
-		location = next(
-			(
-				str(p.get("storage_location") or "").strip()
-				for p in peers
-				if str(p.get("storage_location") or "").strip()
-			),
-			None,
-		)
+		location = _auto_create_location(unmatched_line, peers)
+		item_code = unmatched_line["item_code"]
+		existing = _existing_label(customer, item_code, location)
+		if existing:
+			return existing
 		doc = frappe.new_doc(LABEL_DOCTYPE)
 		doc.customer = customer
-		doc.item = unmatched_line["item_code"]
-		doc.label_title = unmatched_line.get("item_name") or unmatched_line["item_code"]
+		doc.item = item_code
+		doc.label_title = unmatched_line.get("item_name") or item_code
 		doc.enabled = 1
 		doc.we_print = 1
 		doc.labels_per_unit = 1
 		if location:
 			doc.storage_location = location
-		doc.notes = "Auto-created: flavour appeared on an invoice with no label tracked."
+		doc.notes = (
+			"Auto-created: flavour appeared on an invoice"
+			+ (f" filled by {location}" if location else "")
+			+ " with no label tracked there."
+		)
 		doc.flags.ignore_permissions = True
 		doc.insert(ignore_permissions=True)
 		return doc.name
@@ -1333,11 +1435,20 @@ def consume_labels_on_invoice_submit(doc: Any, method: str | None = None) -> Non
 		if _movements_for_invoice(doc.name):
 			return  # already consumed on an earlier fire
 
-		usage, unmatched = invoice_label_usage(doc, labels)
+		# The POS Profile is the last resort for the fulfilling warehouse; only
+		# look it up when some line names no warehouse of its own.
+		profile_wh = None
+		if not _clean_str(getattr(doc, "set_warehouse", None)) and any(
+			not _clean_str(getattr(r, "warehouse", None)) for r in (getattr(doc, "items", None) or [])
+		):
+			profile_wh = pos_profile_warehouse(doc)
 
-		# A flavour with no label yet is a hole in the count. Create it dark
-		# (zero stock) and consume from it, so it surfaces as Out of Stock on
-		# the board instead of silently not existing.
+		usage, unmatched = invoice_label_usage(doc, labels, profile_warehouse=profile_wh)
+
+		# A flavour with no label stock at the filling branch is a hole in the
+		# count. Create it dark (zero stock) at that branch and consume from it,
+		# so it surfaces as Out of Stock on the board instead of silently not
+		# existing -- and never draws another branch's stock down.
 		for line in unmatched:
 			created = _auto_create_label(customer, line, labels)
 			if created:
@@ -1442,7 +1553,6 @@ def list_label_snapshots(
 		filters["storage_location"] = storage_location
 	if not include_untracked:
 		filters["enabled"] = 1
-		filters["we_print"] = 1
 
 	try:
 		rows = frappe.get_all(
@@ -1566,8 +1676,12 @@ def _alert_recipients() -> list[str]:
 
 def _alert_message(snap: dict[str, Any]) -> str:
 	size = f" ({snap['size']})" if snap.get("size") else ""
+	# One flavour can have a stock at two branches: name the branch, or the two
+	# alerts read identically.
+	location = f" at {snap['storage_location']}" if snap.get("storage_location") else ""
 	bits = [
-		f"{snap['customer_name']} - {snap['label_title']}{size}: {snap['on_hand_qty']} label(s) left.",
+		f"{snap['customer_name']} - {snap['label_title']}{size}{location}: "
+		f"{snap['on_hand_qty']} label(s) left.",
 	]
 	if snap.get("days_of_cover") is not None:
 		bits.append(f"About {snap['days_of_cover']} day(s) of cover at {snap['avg_daily_usage']}/day.")
@@ -1702,6 +1816,7 @@ def _publish_alert(snap: dict[str, Any], recipients: Sequence[str]) -> None:
 		"customer": snap.get("customer"),
 		"customer_name": snap.get("customer_name"),
 		"label_title": snap.get("label_title"),
+		"storage_location": snap.get("storage_location"),
 		"status": snap.get("status"),
 		"on_hand_qty": snap.get("on_hand_qty"),
 		"days_of_cover": snap.get("days_of_cover"),

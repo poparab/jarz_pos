@@ -1,6 +1,7 @@
 """Whitelisted API for B2B customer label stock (mobile app + Desk buttons).
 
-v2: one label per (customer, flavour item); ordering in sheets (21 Small / 21
+v2: one label per (customer, flavour item, storage location) -- a customer
+filled by two branches keeps a stock of each flavour at each; ordering in sheets (21 Small / 21
 Medium / 18 Large per sheet); a home storage location per label; and real money -- print
 batches are billed on supplier Purchase Invoices into a Labels Inventory asset,
 and consumption drains that value into Label Cost (COGS) via Journal Entries
@@ -346,7 +347,7 @@ def search_label_customers(query=""):
 
 
 @frappe.whitelist()
-def get_flavour_options(customer):
+def get_flavour_options(customer, storage_location=None):
 	"""The flavours a customer deals in, grouped by size, for the setup wizard.
 
 	Sources, in order of authority:
@@ -357,6 +358,9 @@ def get_flavour_options(customer):
 
 	Each option is flagged with where it came from and whether a label already
 	tracks it, so the wizard renders confirm-a-list, not type-from-memory.
+	When *storage_location* is given, ``has_label`` means "tracked AT that
+	location" -- so setting up a customer's second branch shows every flavour
+	as still to do. Without it, any location counts (the original behaviour).
 	"""
 	_ensure_access()
 	name = _clean(customer)
@@ -418,16 +422,19 @@ def get_flavour_options(customer):
 	except Exception:
 		frappe.log_error(frappe.get_traceback(), "labels.get_flavour_options history")
 
+	location = _clean(storage_location)
 	try:
 		for row in frappe.get_all(
 			LABEL_DOCTYPE,
 			filters={"customer": name},
-			fields=["name", "item"],
+			fields=["name", "item", "storage_location"],
 			limit_page_length=0,
 		):
 			code = (row.get("item") or "").strip()
 			if code:
 				add(code, "label")
+				if location and (_clean(row.get("storage_location")) or None) != location:
+					continue  # tracked elsewhere, not at the branch being set up
 				if code in options:
 					options[code]["has_label"] = True
 					options[code]["label"] = row["name"]
@@ -545,7 +552,9 @@ def create_label(
 	doc.item = _clean(item)
 	doc.label_title = _clean(label_title)
 	doc.enabled = 1
-	doc.we_print = 1 if _bool(we_print, True) else 0
+	# ``we_print`` is still accepted so older app builds don't break, but JARZ
+	# prints every label: it is always 1 (the controller forces it too).
+	doc.we_print = 1
 	doc.storage_location = _clean(storage_location)
 	doc.labels_per_unit = _float(labels_per_unit, 1.0) or 1.0
 	doc.labels_per_sheet = max(_int(labels_per_sheet), 0)
@@ -583,8 +592,11 @@ def setup_customer_labels(
 	"""One-shot account setup: assign the price list, create every flavour label.
 
 	*flavours*: list of ``{"item_code", "opening_qty"?, "min_stock_qty"?}``.
-	Existing labels for the same flavour are left untouched (reported under
-	``skipped``), so re-running the wizard is additive, never destructive.
+	A label is one stock at one location, so "existing" means the same
+	(customer, flavour, storage_location): those are left untouched (reported
+	under ``skipped``), and running the wizard again for a second branch
+	creates that branch's set. Re-running is additive, never destructive.
+	``we_print`` is accepted for older app builds and ignored (always 1).
 
 	This is the "new customer ilo" flow: pick his flavours off his price list,
 	say where his labels live, and every design is tracked in one tap.
@@ -628,16 +640,25 @@ def setup_customer_labels(
 		item_code = _clean(row.get("item_code"))
 		if not item_code:
 			continue
-		existing = frappe.db.get_value(LABEL_DOCTYPE, {"customer": name, "item": item_code}, "name")
+		existing = frappe.db.get_value(
+			LABEL_DOCTYPE,
+			{
+				"customer": name,
+				"item": item_code,
+				# "is not set" matches NULL and "": a blank location is one key.
+				"storage_location": location if location else ["is", "not set"],
+			},
+			"name",
+		)
 		if existing:
-			skipped.append({"item_code": item_code, "label": existing})
+			skipped.append({"item_code": item_code, "label": existing, "storage_location": location})
 			continue
 
 		doc = frappe.new_doc(LABEL_DOCTYPE)
 		doc.customer = name
 		doc.item = item_code
 		doc.enabled = 1
-		doc.we_print = 1 if _bool(we_print, True) else 0
+		doc.we_print = 1
 		doc.storage_location = location
 		doc.labels_per_unit = 1
 		doc.default_print_sheets = sheets
@@ -700,8 +721,8 @@ def update_label(
 		doc.item = _clean(item)
 	if enabled is not None:
 		doc.enabled = 1 if _bool(enabled) else 0
-	if we_print is not None:
-		doc.we_print = 1 if _bool(we_print) else 0
+	# ``we_print`` is accepted for older app builds and ignored: always 1.
+	doc.we_print = 1
 	if storage_location is not None:
 		# An explicit empty string clears the location.
 		doc.storage_location = _clean(storage_location)

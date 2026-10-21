@@ -1,8 +1,9 @@
-"""Jarz Customer Label -- one printed label design: one customer, one flavour.
+"""Jarz Customer Label -- one stock of one printed label: customer, flavour, branch.
 
-Every flavour has its own artwork and every size its own sheet layout, so the
-tracked unit is (customer, flavour item) -- the Item already encodes the size
-through its Item Group (Medium / Large). The document holds only *policy*
+Every flavour has its own artwork and every size its own sheet layout, and a
+customer filled by two branches keeps a separate stock at each, so the tracked
+unit is (customer, flavour item, storage location) -- the Item already encodes
+the size through its Item Group (Medium / Large). The document holds only *policy*
 (where the labels live, the safety floor, the batch size in sheets); every
 quantity and cost on it is a cached read of ``Jarz Label Movement``, recomputed
 by ``services.label_stock.refresh_label`` -- never a counter this controller
@@ -14,6 +15,7 @@ from __future__ import annotations
 import frappe
 from frappe import _
 from frappe.model.document import Document
+from frappe.utils import cint
 
 # Kept in step with the ``naming_series`` field's options in the DocType JSON.
 DEFAULT_NAMING_SERIES = "JLBL-.#####"
@@ -28,6 +30,10 @@ class JarzCustomerLabel(Document):
 			self.naming_series = DEFAULT_NAMING_SERIES
 
 	def validate(self):
+		# JARZ prints every customer label (owner, 2026-10-22); customers never
+		# bring their own. The column stays so older app builds still parse it,
+		# but nothing can set it to 0 any more.
+		self.we_print = 1
 		self._require_flavour_when_tracked()
 		self._default_title_from_item()
 
@@ -41,13 +47,13 @@ class JarzCustomerLabel(Document):
 		self._validate_unique_flavour()
 
 	def _require_flavour_when_tracked(self):
-		"""A tracked label without a flavour cannot be matched to any invoice line.
+		"""A label without a flavour cannot be matched to any invoice line.
 
-		``we_print = 0`` records (the customers who bring their own labels) may
-		omit the item -- they exist only so the customer shows on the board as
-		"Customer prints" and are never consumed from.
+		Every label is printed by JARZ, so every enabled label needs its item. A
+		disabled (retired) record is left alone so old item-less rows can still
+		be opened and kept disabled.
 		"""
-		if int(self.we_print or 0) and not (self.item or "").strip():
+		if cint(self.enabled) and not (self.item or "").strip():
 			frappe.throw(
 				_(
 					"Pick the flavour (Item) this label is printed for. "
@@ -66,32 +72,37 @@ class JarzCustomerLabel(Document):
 		self.label_title = title
 
 	def _validate_unique_flavour(self):
-		"""One label record per (customer, flavour): the ledger key must be unambiguous.
+		"""One label record per (customer, flavour, storage location).
 
-		Two records for the same flavour would leave consumption free to pick
-		either, splitting one flavour's history across two ledgers.
+		A customer filled by two branches keeps a separate physical stock of the
+		same label at each, so the ledger key includes the location. Two records
+		for the same flavour at the SAME location would leave consumption free to
+		pick either, splitting one stock's history across two ledgers. A blank
+		location is its own key (the legacy "any branch" label).
 		"""
 		if not self.customer or not (self.item or "").strip():
 			return
-		clash = frappe.db.exists(
-			self.doctype,
-			{
-				"customer": self.customer,
-				"item": self.item,
-				"name": ["!=", self.name or ""],
-			},
-		)
+		location = (self.storage_location or "").strip()
+		self.storage_location = location or None
+		filters = {
+			"customer": self.customer,
+			"item": self.item,
+			"name": ["!=", self.name or ""],
+		}
+		# "is not set" matches both NULL and "" -- a blank location is one key.
+		filters["storage_location"] = location if location else ["is", "not set"]
+		clash = frappe.db.get_value(self.doctype, filters, "name")
 		if clash:
+			where = frappe.bold(location) if location else _("no storage location")
 			frappe.throw(
-				_("{0} already tracks a label for {1} ({2}).").format(
-					frappe.bold(self.customer), frappe.bold(self.item), clash
+				_("{0} already tracks a label for {1} at {2} ({3}).").format(
+					frappe.bold(self.customer), frappe.bold(self.item), where, clash
 				)
 			)
 
 	def on_update(self):
-		# Turning we_print off (or retiring the design) changes the status even
-		# though no label moved, so recompute rather than leave a stale "Reorder
-		# Now" on a customer who now supplies their own.
+		# Retiring the design changes the status even though no label moved, so
+		# recompute rather than leave a stale "Reorder Now" on a dead label.
 		from jarz_pos.services import label_stock
 
 		label_stock.refresh_label(self.name)

@@ -93,11 +93,12 @@
   },
   {
    "default": "1",
-   "description": "Tick when JARZ prints this label. Untick for customers who supply their own labels — those are never counted and never alerted on.",
+   "description": "Always on: JARZ prints every customer label. Kept for older app builds; the controller forces it to 1.",
    "fieldname": "we_print",
    "fieldtype": "Check",
-   "in_standard_filter": 1,
-   "label": "We Print This Label"
+   "hidden": 1,
+   "label": "We Print This Label",
+   "read_only": 1
   },
   {
    "default": "1",
@@ -209,7 +210,7 @@
    "read_only": 1
   },
   {
-   "description": "Where this customer's labels physically live: the branch warehouse closest to them, or the factory.",
+   "description": "The branch warehouse holding THIS stock of the label. A customer served by two branches has one label per flavour at each; an invoice draws from the label at the warehouse that filled it. Leave blank only for a legacy label that any branch may draw from.",
    "fieldname": "storage_location",
    "fieldtype": "Link",
    "in_standard_filter": 1,
@@ -259,7 +260,7 @@
  "is_submittable": 0,
  "istable": 0,
  "links": [],
- "modified": "2026-09-23 12:00:00.000000",
+ "modified": "2026-10-22 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "jarz pos",
  "name": "Jarz Customer Label",

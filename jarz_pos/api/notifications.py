@@ -2980,8 +2980,10 @@ def notify_label_stock_alert(
 		lines = []
 		for snap in due[:4]:
 			size = f" {snap.get('size')}" if snap.get("size") else ""
+			# One flavour can be stocked at two branches; name the branch.
+			where = f" @ {snap.get('storage_location')}" if snap.get("storage_location") else ""
 			lines.append(
-				f"{snap.get('customer_name')} - {snap.get('label_title')}{size}: "
+				f"{snap.get('customer_name')} - {snap.get('label_title')}{size}{where}: "
 				f"{snap.get('on_hand_qty')} left"
 			)
 		if len(due) > 4:

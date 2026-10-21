@@ -136,6 +136,9 @@ jobs:
             # refusal of a Small line no price list backs (so retail cannot book
             # one at 0), and its 30 EGP B2B base rate.
             test_small_jar_setup
+            # B2B printed labels: per-(customer, flavour, branch) stock, invoice
+            # consumption from the fulfilling branch, and the money cycle.
+            test_label_stock
             test_b2b_pricing
             test_pricing_manager_gate
             # Order purpose drives the price list: a purpose that owns a list

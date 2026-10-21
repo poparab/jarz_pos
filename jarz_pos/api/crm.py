@@ -1205,6 +1205,8 @@ def _label_summary_for_customer(customer):
 					"label": s["name"],
 					"title": s["label_title"],
 					"size": s.get("size"),
+					# A flavour stocked at two branches is two rows; this tells them apart.
+					"storage_location": s.get("storage_location"),
 					"on_hand_qty": s["on_hand_qty"],
 					"status": s["status"],
 				}
