@@ -129,6 +129,11 @@ class ROLES:
 	# Transfer and the Purchase Invoice, which commit money and stay closed to
 	# the line manager.
 	STOCK_TRANSFER = MANAGER | LINE_MANAGER_TIER
+	# Post a branch-touching transfer in ONE step, skipping the other side's
+	# confirmation (``api.transfer.submit_transfer(direct=1)``).  Deliberately
+	# NARROWER than STOCK_TRANSFER: the owner chose the JARZ Managers; a line
+	# manager's branch transfer still waits for the branch to confirm it.
+	STOCK_TRANSFER_DIRECT: ClassVar[set[str]] = {JARZ_MANAGER, SYSTEM_MANAGER, ADMINISTRATOR}
 	# Read-only access to the Production Board.  Deliberately WIDER than
 	# MANUFACTURING: the mobile screen has always been gated client-side on
 	# "JARZ Manager", which MANUFACTURING does not contain — so a

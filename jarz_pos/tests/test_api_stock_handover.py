@@ -1898,6 +1898,59 @@ class TestSubmitTransferRouting(unittest.TestCase):
 		create.assert_not_called()
 		post.assert_called_once()
 
+	def test_jarz_manager_posts_a_branch_transfer_directly(self):
+		class _SE:
+			name = "MAT-STE-2026-00003"
+
+		with (
+			patch.object(transfer_api, "_ensure_transfer_access"),
+			patch.object(transfer_api.frappe, "get_roles", return_value=["JARZ Manager"]),
+			patch.object(svc, "touches_branch", return_value=True),
+			patch.object(svc, "create_manager_handover") as create,
+			patch.object(transfer_api, "_build_material_transfer", return_value=_SE()) as build,
+			patch.object(transfer_api, "_insert_and_submit_stock_entry") as post,
+			patch.object(transfer_api.frappe.db, "commit"),
+		):
+			result = transfer_api.submit_transfer(
+				source_warehouse=FACTORY,
+				target_warehouse=DOKKI,
+				lines=[{"item_code": "JAR-L", "qty": 5}],
+				direct="1",
+			)
+		self.assertEqual(result, {"ok": True, "stock_entry": "MAT-STE-2026-00003", "direct": True})
+		create.assert_not_called()
+		post.assert_called_once()
+		# The Stock Entry says it skipped the confirmation.
+		self.assertTrue(build.call_args.args[4])
+
+	def test_direct_is_refused_below_jarz_manager(self):
+		with (
+			patch.object(transfer_api, "_ensure_transfer_access"),
+			patch.object(transfer_api.frappe, "get_roles", return_value=["JARZ line manager", "Stock Manager"]),
+			patch.object(svc, "touches_branch", return_value=True),
+			patch.object(svc, "create_manager_handover") as create,
+			patch.object(transfer_api, "_insert_and_submit_stock_entry") as post,
+		):
+			with self.assertRaises(frappe.PermissionError):
+				transfer_api.submit_transfer(
+					source_warehouse=FACTORY,
+					target_warehouse=DOKKI,
+					lines=[{"item_code": "JAR-L", "qty": 5}],
+					direct=1,
+				)
+		create.assert_not_called()
+		post.assert_not_called()
+
+	def test_context_flags_direct_posting_for_jarz_manager_only(self):
+		manager = _branch_actor()
+		manager.roles = {"JARZ Manager"}
+		with patch.object(svc, "_build_actor", return_value=manager):
+			self.assertTrue(svc.get_context()["can_post_direct"])
+		line_manager = _branch_actor()
+		line_manager.roles = {"JARZ line manager", "Stock Manager"}
+		with patch.object(svc, "_build_actor", return_value=line_manager):
+			self.assertFalse(svc.get_context()["can_post_direct"])
+
 	def test_touches_branch_is_false_before_migrate(self):
 		with (
 			patch.object(svc, "_doctype_ready", return_value=False),

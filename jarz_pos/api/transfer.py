@@ -26,6 +26,11 @@ def _ensure_transfer_access() -> None:
 		frappe.throw(_("Not permitted: Managers only"), frappe.PermissionError)
 
 
+def can_post_direct(user: str | None = None) -> bool:
+	"""May ``user`` post a branch transfer at once, without the other side's confirmation?"""
+	return bool(set(frappe.get_roles(user)) & ROLES.STOCK_TRANSFER_DIRECT)
+
+
 def _get_default_fg_warehouse(company: str | None = None) -> str | None:
 	"""The Finished Goods store: ``company``'s, else the default company's.
 
@@ -298,6 +303,7 @@ def submit_transfer(
 	target_warehouse: str,
 	lines: Any,
 	posting_date: str | None = None,
+	direct: Any = 0,
 ) -> dict[str, Any]:
 	"""Create a Stock Entry (Material Transfer) between warehouses for given items.
 
@@ -311,9 +317,15 @@ def submit_transfer(
 	"pending": True}``. ``posting_date`` does not apply to that path: a
 	confirmed handover always posts at the moment of confirmation.
 
+	``direct=1`` skips that confirmation for a holder of
+	``ROLES.STOCK_TRANSFER_DIRECT``: the branch transfer posts at once, like a
+	non-branch one, and the reply carries ``"direct": True``. Anyone else asking
+	for it is refused rather than silently sent down the handover path.
+
 	Transfers touching no branch keep posting immediately, unchanged.
 	"""
 	_ensure_transfer_access()
+	direct = bool(cint(direct))
 	try:
 		if isinstance(lines, str):
 			import json
@@ -334,15 +346,28 @@ def submit_transfer(
 	# Imported here, not at module level: the service imports this module.
 	from jarz_pos.services import stock_handover as handover_service
 
+	remarks = None
 	if handover_service.touches_branch(source_warehouse, target_warehouse):
-		handover = handover_service.create_manager_handover(source_warehouse, target_warehouse, cleaned)
-		return {"ok": True, "stock_entry": None, "handover": handover, "pending": True}
+		if not direct:
+			handover = handover_service.create_manager_handover(source_warehouse, target_warehouse, cleaned)
+			return {"ok": True, "stock_entry": None, "handover": handover, "pending": True}
+		if not can_post_direct():
+			frappe.throw(
+				_("Not permitted: only a JARZ Manager can post a branch transfer without confirmation."),
+				frappe.PermissionError,
+			)
+		remarks = _("Direct transfer by {0}, posted without the other side's confirmation.").format(
+			frappe.session.user
+		)
 
-	se = _build_material_transfer(source_warehouse, target_warehouse, cleaned, posting_date)
+	se = _build_material_transfer(source_warehouse, target_warehouse, cleaned, posting_date, remarks)
 	_insert_and_submit_stock_entry(se)
 	frappe.db.commit()
 
-	return {"ok": True, "stock_entry": se.name}
+	out: dict[str, Any] = {"ok": True, "stock_entry": se.name}
+	if remarks:
+		out["direct"] = True
+	return out
 
 
 @frappe.whitelist()

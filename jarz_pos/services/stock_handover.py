@@ -1238,7 +1238,14 @@ def get_context(pos_profile: str | None = None) -> dict[str, Any]:
 	for warehouse in sides.branch_warehouses():
 		counterparts.append({"warehouse": warehouse, "label": sides.label(warehouse), "kind": KIND_BRANCH})
 
-	return {"my_sides": my_sides, "counterparts": counterparts, "can_manage": actor.is_manager}
+	return {
+		"my_sides": my_sides,
+		"counterparts": counterparts,
+		"can_manage": actor.is_manager,
+		# Same set ``transfer.can_post_direct`` checks; the app shows the
+		# "post now" switch from this flag.
+		"can_post_direct": bool(set(actor.roles) & ROLES.STOCK_TRANSFER_DIRECT),
+	}
 
 
 def _validate_side(actor: _Actor, warehouse: str) -> str:
