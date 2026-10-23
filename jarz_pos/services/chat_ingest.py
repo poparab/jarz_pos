@@ -37,6 +37,13 @@ MAX_BODY_BYTES = 8 * 1024 * 1024
 #: Contact names from ``smb_app_state_sync`` wait this long for their chat to arrive.
 CONTACT_NAME_TTL_SECONDS = 7 * 24 * 3600
 HISTORY_PROGRESS_KEY = "jarz_chat_history_progress"
+#: TEMPORARY (2026-10-23): replies typed in the Business Suite inbox never reach Jarz Chats.
+#: This ring keeps the WhatsApp webhook traffic that could carry them (every non-"messages"
+#: change, and statuses for message ids we never stored) so one test reply can be traced.
+#: Remove once the cause is known.
+WA_PROBE_KEY = "jarz_chat_wa_probe"
+WA_PROBE_SIZE = 300
+WA_PROBE_TTL_SECONDS = 3 * 24 * 3600
 #: Echo heuristic: an app send and its echo within this many seconds are one message.
 ECHO_MATCH_SECONDS = 120
 #: Meta's customer-service window (WhatsApp / Messenger / Instagram DMs).
@@ -266,6 +273,7 @@ def _parse_whatsapp(entry: dict[str, Any], events: list[dict[str, Any]]) -> None
 						channel=cc.WHATSAPP,
 						external_message_id=str(st["id"]),
 						status=str(st["status"]),
+						recipient=str(st.get("recipient_id") or "") or None,
 						error=error,
 						timestamp=_epoch(st.get("timestamp")),
 					)
@@ -771,6 +779,11 @@ def _is_app_echo(conversation: str, body: str, when: _dt.datetime) -> bool:
 def _apply_status(event: dict[str, Any]) -> str | None:
 	name = frappe.db.get_value(cc.MESSAGE, {"external_message_id": event["external_message_id"]}, "name")
 	if not name:
+		if event.get("channel") == cc.WHATSAPP:
+			_wa_probe(
+				"unknown_status",
+				{k: event.get(k) for k in ("external_message_id", "status", "recipient", "error", "timestamp")},
+			)
 		return None
 	row = frappe.db.get_value(cc.MESSAGE, name, ["status", "direction", "conversation"], as_dict=True)
 	if not row or row.direction != "Outbound":
@@ -1082,6 +1095,7 @@ def process_webhook(payload: Any = None) -> dict[str, Any]:
 		settings = get_chat_settings(refresh=True)
 		if not settings.get("enabled"):
 			return result
+		_wa_probe_changes(payload or {})
 		events = parse_webhook(payload or {}, _own_ids(settings))
 		result["events"] = len(events)
 		tz = _site_tz()
@@ -1132,6 +1146,31 @@ def process_webhook(payload: Any = None) -> dict[str, Any]:
 			pass
 		cc.safe_log_error("chat: process_webhook failed")
 	return result
+
+
+def _wa_probe(kind: str, data: Any) -> None:
+	"""TEMPORARY: append one entry to the capped WhatsApp probe ring. Never raises."""
+	try:
+		cache = frappe.cache()
+		entry = json.dumps({"at": cc.dt_str(cc.now()), "kind": kind, "data": data}, default=str)
+		cache.lpush(WA_PROBE_KEY, entry[:4000])
+		cache.ltrim(WA_PROBE_KEY, 0, WA_PROBE_SIZE - 1)
+		cache.expire_key(WA_PROBE_KEY, WA_PROBE_TTL_SECONDS)
+	except Exception:
+		pass
+
+
+def _wa_probe_changes(payload: Any) -> None:
+	"""TEMPORARY: keep every WhatsApp change except plain customer messages and statuses."""
+	try:
+		if not isinstance(payload, dict) or payload.get("object") != "whatsapp_business_account":
+			return
+		for entry in payload.get("entry") or []:
+			for change in (entry or {}).get("changes") or []:
+				if (change or {}).get("field") != "messages":
+					_wa_probe("change", change)
+	except Exception:
+		pass
 
 
 def _note_history_progress(text: Any) -> None:

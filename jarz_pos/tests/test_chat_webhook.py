@@ -267,6 +267,27 @@ class WhatsAppParseTest(unittest.TestCase):
 		self.assertIsNone(events[0]["error"])
 		self.assertEqual(events[1]["status"], "failed")
 		self.assertEqual(events[1]["error"], "131047: Re-engagement message")
+		self.assertEqual(events[0]["recipient"], "2011")
+
+	def test_wa_probe_keeps_only_non_message_changes(self):
+		# TEMPORARY probe for Business Suite replies: customer messages stay out of the ring.
+		from unittest import mock
+
+		payload = {
+			"object": "whatsapp_business_account",
+			"entry": [
+				{
+					"changes": [
+						{"field": "messages", "value": {"messages": []}},
+						{"field": "smb_message_echoes", "value": {"message_echoes": []}},
+					]
+				}
+			],
+		}
+		with mock.patch.object(ing, "_wa_probe") as probe:
+			ing._wa_probe_changes(payload)
+			ing._wa_probe_changes({"object": "page", "entry": [{"changes": [{"field": "feed"}]}]})
+		self.assertEqual([c.args[1]["field"] for c in probe.call_args_list], ["smb_message_echoes"])
 
 	def test_business_app_echo_is_outbound_from_phone(self):
 		events = ing.parse_webhook(
