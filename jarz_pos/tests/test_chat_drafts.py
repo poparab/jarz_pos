@@ -672,6 +672,33 @@ class ReadyAnswersCapTest(unittest.TestCase):
 		self.assertEqual(out, list(d.DEFAULT_READY_ANSWERS))
 
 
+class DraftFromResponseTest(unittest.TestCase):
+	def test_tool_call_wins_over_text(self):
+		content = [
+			SimpleNamespace(type="text", text="Here is the draft."),
+			SimpleNamespace(type="tool_use", name="submit_draft", input={"reply": "hi", "intent": "Order"}),
+		]
+		self.assertEqual(d.draft_input_from_content(content), ({"reply": "hi", "intent": "Order"}, False))
+
+	def test_text_only_answer_becomes_the_reply(self):
+		content = [SimpleNamespace(type="text", text="  أهلاً بحضرتك 💛  ")]
+		data, from_text = d.draft_input_from_content(content)
+		self.assertTrue(from_text)
+		self.assertEqual(data, {"reply": "أهلاً بحضرتك 💛", "intent": "Other", "is_complaint": False})
+
+	def test_empty_response(self):
+		self.assertEqual(d.draft_input_from_content([]), (None, False))
+		self.assertEqual(d.draft_input_from_content([SimpleNamespace(type="text", text=" ")]), (None, False))
+
+	def test_tool_choice_is_never_forced(self):
+		# Sonnet 5.5 / Opus 5.5 answer a forced tool_choice with a 400 (broke every draft on 2026-10-23).
+		import inspect
+
+		src = inspect.getsource(d._call_claude)
+		self.assertIn('tool_choice={"type": "auto"}', src)
+		self.assertNotIn('"type": "tool"', src)
+
+
 class FirstNameTest(unittest.TestCase):
 	def test_skips_phone_like_names(self):
 		self.assertEqual(d.first_name("+201111034268", "Sara Ali"), "Sara")

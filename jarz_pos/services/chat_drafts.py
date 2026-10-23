@@ -1005,6 +1005,25 @@ def _history_block(customer: str | None) -> str:
 # ── Claude call ─────────────────────────────────────────────────────────
 
 
+def draft_input_from_content(content: Any) -> tuple[dict[str, Any] | None, bool]:
+	"""The submit_draft input from a response, or the plain-text answer as a fallback.
+
+	Returns ``(input, from_text)``. tool_choice stays "auto" (Sonnet 5.5 and Opus 5.5
+	reject a forced tool with a 400), so the model may answer in text instead.
+	"""
+	texts: list[str] = []
+	for block in content or []:
+		kind = getattr(block, "type", None)
+		if kind == "tool_use" and getattr(block, "name", "submit_draft") == "submit_draft":
+			return getattr(block, "input", None), False
+		if kind == "text":
+			texts.append(str(getattr(block, "text", "") or ""))
+	text = "\n".join(t.strip() for t in texts if t.strip())
+	if not text:
+		return None, False
+	return {"reply": text, "intent": "Other", "is_complaint": False}, True
+
+
 def _call_claude(api_key: str, model: str, context_text: str, user_text: str) -> dict[str, Any]:
 	import anthropic
 
@@ -1019,17 +1038,14 @@ def _call_claude(api_key: str, model: str, context_text: str, user_text: str) ->
 		],
 		messages=[{"role": "user", "content": user_text}],
 		tools=[TOOL],
-		tool_choice={"type": "tool", "name": "submit_draft"},
+		tool_choice={"type": "auto"},
 	)
 	latency = int((time.monotonic() - started) * 1000)
-	tool_input = None
-	for block in resp.content or []:
-		if getattr(block, "type", None) == "tool_use":
-			tool_input = getattr(block, "input", None)
-			break
+	tool_input, from_text = draft_input_from_content(resp.content)
 	usage = getattr(resp, "usage", None)
 	return {
 		"input": tool_input,
+		"from_text": from_text,
 		"latency_ms": latency,
 		"input_tokens": int(getattr(usage, "input_tokens", 0) or 0),
 		"output_tokens": int(getattr(usage, "output_tokens", 0) or 0),
@@ -1124,7 +1140,7 @@ def generate_draft(conversation: str, for_message: str | None = None, hint: str 
 		if hint:
 			hint_text = mask_text(hint, names) if mask else str(hint)
 			user_parts.append(f"Moderator's instruction for this draft: {hint_text[:500]}")
-		user_parts.append("Draft the next reply to the customer's latest message.")
+		user_parts.append("Draft the next reply to the customer's latest message and submit it with submit_draft.")
 		result = _call_claude(api_key, model, context["text"], "\n\n".join(user_parts))
 	except Exception as exc:
 		message = f"{type(exc).__name__}: {str(exc)[:500]}"
@@ -1135,6 +1151,8 @@ def generate_draft(conversation: str, for_message: str | None = None, hint: str 
 		return _failed(conversation, for_message, model, "The model returned no draft")
 
 	clean, warnings = sanitize_tool_input(result["input"], context.get("candidates") or [])
+	if result.get("from_text"):
+		warnings.append("The model answered without the draft tool: check the reply and intent")
 	template = clean["reply"]
 	ctx = dict(context)
 	ctx["customer_first_name"] = first_name(customer_name, conv.contact_name)
