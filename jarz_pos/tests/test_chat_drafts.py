@@ -698,6 +698,15 @@ class DraftFromResponseTest(unittest.TestCase):
 		self.assertIn('tool_choice={"type": "auto"}', src)
 		self.assertNotIn('"type": "tool"', src)
 
+	def test_thinking_has_room_for_the_tool_call(self):
+		# 5.5 models think by default and thinking counts against max_tokens: 600 cut Sonnet off
+		# before submit_draft. Low effort plus headroom keeps the tool call inside the budget.
+		import inspect
+
+		self.assertGreaterEqual(d.MAX_TOKENS, 2000)
+		self.assertEqual(d.DRAFT_EFFORT, "low")
+		self.assertIn('"effort": DRAFT_EFFORT', inspect.getsource(d._call_claude))
+
 
 class FirstNameTest(unittest.TestCase):
 	def test_skips_phone_like_names(self):

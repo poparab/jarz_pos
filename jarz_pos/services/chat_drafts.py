@@ -37,7 +37,10 @@ from jarz_pos.services.chat_settings import cap_ready_answers, render_ready_answ
 INTENTS = ("Inquiry", "Order", "Complaint", "Other")
 HISTORY_MESSAGES = 20
 CONTEXT_CACHE_SECONDS = 600
-MAX_TOKENS = 600
+# Sonnet/Haiku 5.5 think by default and thinking counts against max_tokens: 600 cut
+# Sonnet off before it called submit_draft. Effort "low" keeps thinking short.
+MAX_TOKENS = 2000
+DRAFT_EFFORT = "low"
 UNKNOWN = "[؟]"
 TYPED_NUMBER_WARNING = "AI typed a number — check it"
 EDIT_DISTANCE_CAP = 2000
@@ -1027,7 +1030,7 @@ def draft_input_from_content(content: Any) -> tuple[dict[str, Any] | None, bool]
 def _call_claude(api_key: str, model: str, context_text: str, user_text: str) -> dict[str, Any]:
 	import anthropic
 
-	client = anthropic.Anthropic(api_key=api_key, timeout=20.0, max_retries=1)
+	client = anthropic.Anthropic(api_key=api_key, timeout=45.0, max_retries=1)
 	started = time.monotonic()
 	resp = client.messages.create(
 		model=model,
@@ -1039,6 +1042,7 @@ def _call_claude(api_key: str, model: str, context_text: str, user_text: str) ->
 		messages=[{"role": "user", "content": user_text}],
 		tools=[TOOL],
 		tool_choice={"type": "auto"},
+		extra_body={"output_config": {"effort": DRAFT_EFFORT}},
 	)
 	latency = int((time.monotonic() - started) * 1000)
 	tool_input, from_text = draft_input_from_content(resp.content)
@@ -1046,6 +1050,7 @@ def _call_claude(api_key: str, model: str, context_text: str, user_text: str) ->
 	return {
 		"input": tool_input,
 		"from_text": from_text,
+		"stop_reason": getattr(resp, "stop_reason", None),
 		"latency_ms": latency,
 		"input_tokens": int(getattr(usage, "input_tokens", 0) or 0),
 		"output_tokens": int(getattr(usage, "output_tokens", 0) or 0),
@@ -1148,7 +1153,10 @@ def generate_draft(conversation: str, for_message: str | None = None, hint: str 
 		return _failed(conversation, for_message, model, message)
 
 	if not result.get("input"):
-		return _failed(conversation, for_message, model, "The model returned no draft")
+		reason = "The model returned no draft"
+		if result.get("stop_reason") == "max_tokens":
+			reason += " (it ran out of tokens)"
+		return _failed(conversation, for_message, model, reason)
 
 	clean, warnings = sanitize_tool_input(result["input"], context.get("candidates") or [])
 	if result.get("from_text"):
