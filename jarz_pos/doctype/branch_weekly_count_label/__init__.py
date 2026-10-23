@@ -1,1 +1,1 @@
-from .branch_weekly_count_item import BranchWeeklyCountItem
+from .branch_weekly_count_label import BranchWeeklyCountLabel
