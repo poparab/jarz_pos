@@ -37,13 +37,19 @@ MAX_BODY_BYTES = 8 * 1024 * 1024
 #: Contact names from ``smb_app_state_sync`` wait this long for their chat to arrive.
 CONTACT_NAME_TTL_SECONDS = 7 * 24 * 3600
 HISTORY_PROGRESS_KEY = "jarz_chat_history_progress"
-#: TEMPORARY (2026-10-23): replies typed in the Business Suite inbox never reach Jarz Chats.
-#: This ring keeps the WhatsApp webhook traffic that could carry them (every non-"messages"
-#: change, and statuses for message ids we never stored) so one test reply can be traced.
-#: Remove once the cause is known.
-WA_PROBE_KEY = "jarz_chat_wa_probe"
-WA_PROBE_SIZE = 300
-WA_PROBE_TTL_SECONDS = 3 * 24 * 3600
+#: A WhatsApp reply typed in the Meta Business Suite inbox reaches us only as status
+#: updates (sent / delivered / read) for a message id we never stored: no echo, no text.
+#: The first such status leaves this placeholder so the chat shows as answered.
+STATUS_ONLY_BODY = (
+	"Reply sent from Meta Business Suite (Meta does not share its text)\n"
+	"تم الرد من Meta Business Suite (ميتا لا ترسل نص الرد)"
+)
+#: ``raw_json`` of a placeholder, so a later echo with the real content can fill it in.
+STATUS_ONLY_MARKER = '{"source": "status_only"}'
+#: A "read" can come hours after the reply, so only these open a placeholder.
+_STATUS_ONLY_STATES = ("sent", "delivered")
+#: Templates (marketing / utility / authentication) are automated sends, not staff replies.
+_STATUS_ONLY_CATEGORIES = ("", "service")
 #: Echo heuristic: an app send and its echo within this many seconds are one message.
 ECHO_MATCH_SECONDS = 120
 #: Meta's customer-service window (WhatsApp / Messenger / Instagram DMs).
@@ -267,6 +273,9 @@ def _parse_whatsapp(entry: dict[str, Any], events: list[dict[str, Any]]) -> None
 					error = (
 						f"{first.get('code', '')}: {first.get('title') or first.get('message') or ''}".strip()
 					)
+				category = (st.get("pricing") or {}).get("category") or (
+					(st.get("conversation") or {}).get("origin") or {}
+				).get("type")
 				events.append(
 					_event(
 						kind="status",
@@ -274,6 +283,7 @@ def _parse_whatsapp(entry: dict[str, Any], events: list[dict[str, Any]]) -> None
 						external_message_id=str(st["id"]),
 						status=str(st["status"]),
 						recipient=str(st.get("recipient_id") or "") or None,
+						category=str(category or "").lower() or None,
 						error=error,
 						timestamp=_epoch(st.get("timestamp")),
 					)
@@ -779,11 +789,6 @@ def _is_app_echo(conversation: str, body: str, when: _dt.datetime) -> bool:
 def _apply_status(event: dict[str, Any]) -> str | None:
 	name = frappe.db.get_value(cc.MESSAGE, {"external_message_id": event["external_message_id"]}, "name")
 	if not name:
-		if event.get("channel") == cc.WHATSAPP:
-			_wa_probe(
-				"unknown_status",
-				{k: event.get(k) for k in ("external_message_id", "status", "recipient", "error", "timestamp")},
-			)
 		return None
 	row = frappe.db.get_value(cc.MESSAGE, name, ["status", "direction", "conversation"], as_dict=True)
 	if not row or row.direction != "Outbound":
@@ -801,6 +806,123 @@ def _apply_status(event: dict[str, Any]) -> str | None:
 		frappe.db.set_value(cc.MESSAGE, name, "status", new, update_modified=True)
 		return row.conversation
 	return None
+
+
+def _status_only_reply_event(event: dict[str, Any]) -> dict[str, Any] | None:
+	"""The placeholder Outbound message for a status about a WhatsApp reply we never saw.
+
+	``None`` unless the status could only come from a staff reply: WhatsApp, a
+	recipient, an early status (sent / delivered) and a service conversation
+	rather than a template.
+	"""
+	if event.get("channel") != cc.WHATSAPP or not event.get("external_message_id"):
+		return None
+	recipient = str(event.get("recipient") or "")
+	if not recipient or str(event.get("status") or "") not in _STATUS_ONLY_STATES:
+		return None
+	if str(event.get("category") or "") not in _STATUS_ONLY_CATEGORIES:
+		return None
+	return _event(
+		channel=cc.WHATSAPP,
+		external_id=recipient,
+		phone=recipient,
+		direction="Outbound",
+		sent_via="Phone",
+		external_message_id=event["external_message_id"],
+		message_type="text",
+		body=STATUS_ONLY_BODY,
+		timestamp=event.get("timestamp") or 0.0,
+		status=event.get("status"),
+		status_only=True,
+	)
+
+
+def _app_send_in_flight(conversation: str, when: _dt.datetime) -> bool:
+	"""A Jarz send whose message id is not stored yet: its status is not an outside reply."""
+	low = when - _dt.timedelta(seconds=ECHO_MATCH_SECONDS)
+	high = when + _dt.timedelta(seconds=ECHO_MATCH_SECONDS)
+	return bool(
+		frappe.get_all(
+			cc.MESSAGE,
+			filters={
+				"conversation": conversation,
+				"direction": "Outbound",
+				"sent_via": "App",
+				"status": "queued",
+				"timestamp": ["between", [low, high]],
+			},
+			fields=["name"],
+			limit_page_length=1,
+			ignore_permissions=True,
+		)
+	)
+
+
+def _record_status_only_reply(
+	event: dict[str, Any], settings: dict[str, Any], tz: str | None
+) -> dict[str, Any] | None:
+	"""Store a Business Suite reply from its status update. Only for a chat we already have."""
+	reply = _status_only_reply_event(event)
+	if reply is None:
+		return None
+	conv = _find_conversation(cc.WHATSAPP, reply["external_id"])
+	if conv is None:
+		return None
+	when = epoch_to_site(reply["timestamp"], tz) if reply.get("timestamp") else cc.now()
+	last_in = cc.to_dt(conv.get("last_inbound_at"))
+	if last_in is not None and when < last_in:
+		# The customer wrote after this reply went out: it does not answer them.
+		return None
+	if _app_send_in_flight(conv.name, when):
+		return None
+	return _persist_message(reply, settings, tz)
+
+
+def _upgrade_status_only(event: dict[str, Any]) -> dict[str, Any] | None:
+	"""Give a status-only placeholder the real content of its late echo."""
+	if event.get("direction") != "Outbound" or not (event.get("body") or event.get("media_id")):
+		return None
+	row = frappe.db.get_value(
+		cc.MESSAGE,
+		{"external_message_id": event.get("external_message_id")},
+		["name", "conversation", "raw_json"],
+		as_dict=True,
+	)
+	if not row or row.raw_json != STATUS_ONLY_MARKER:
+		return None
+	body = str(event.get("body") or "")
+	mtype = event.get("message_type") or "text"
+	frappe.db.set_value(
+		cc.MESSAGE,
+		row.name,
+		{
+			"message_type": mtype,
+			"body": body,
+			"media_id": event.get("media_id"),
+			"media_mime": event.get("media_mime"),
+			"raw_json": None,
+		},
+		update_modified=True,
+	)
+	placeholder = cc.preview(STATUS_ONLY_BODY, "text")
+	if frappe.db.get_value(cc.CONVERSATION, row.conversation, "last_message_preview") == placeholder:
+		frappe.db.set_value(
+			cc.CONVERSATION,
+			row.conversation,
+			"last_message_preview",
+			cc.preview(body, mtype),
+			update_modified=False,
+		)
+	return {
+		"conversation": row.conversation,
+		"message": row.name,
+		"draft": False,
+		"media": bool(event.get("media_id")) and mtype in _WA_MEDIA_TYPES,
+		"media_url": None,
+		"superseded": False,
+		"push": False,
+		"quiet": bool(event.get("history")),
+	}
 
 
 def _apply_contact(event: dict[str, Any]) -> str | None:
@@ -947,7 +1069,7 @@ def _persist_message(
 	if _message_exists(event.get("external_message_id")):
 		if event.get("media_update"):
 			return _apply_media_update(event)
-		return None
+		return _upgrade_status_only(event)
 	if event.get("media_update"):
 		# Media for a placeholder we never stored: its sender side is unknowable here.
 		return None
@@ -978,7 +1100,7 @@ def _persist_message(
 
 	media_url = event.get("media_url")
 	stored_url = media_url if media_url and len(str(media_url)) <= 140 else None
-	raw = None
+	raw = STATUS_ONLY_MARKER if event.get("status_only") else None
 	if event.get("message_type") == "unsupported" and event.get("raw") is not None:
 		try:
 			raw = json.dumps(event["raw"], ensure_ascii=False)[:RAW_JSON_MAX]
@@ -997,7 +1119,7 @@ def _persist_message(
 			"media_url": stored_url,
 			"media_mime": event.get("media_mime"),
 			"sent_via": event.get("sent_via") or ("" if inbound else "Phone"),
-			"status": "received" if inbound else "sent",
+			"status": "received" if inbound else (event.get("status") if event.get("status_only") else "sent"),
 			"timestamp": when,
 			"raw_json": raw,
 		}
@@ -1095,7 +1217,6 @@ def process_webhook(payload: Any = None) -> dict[str, Any]:
 		settings = get_chat_settings(refresh=True)
 		if not settings.get("enabled"):
 			return result
-		_wa_probe_changes(payload or {})
 		events = parse_webhook(payload or {}, _own_ids(settings))
 		result["events"] = len(events)
 		tz = _site_tz()
@@ -1111,6 +1232,11 @@ def process_webhook(payload: Any = None) -> dict[str, Any]:
 					if conv:
 						status_conversations.add(conv)
 						result["statuses"] += 1
+					else:
+						action = _record_status_only_reply(event, settings, tz)
+						if action:
+							actions.append(action)
+							result["messages"] += 1
 				elif kind == "contact":
 					if _apply_contact(event):
 						result["contacts"] = result.get("contacts", 0) + 1
@@ -1146,31 +1272,6 @@ def process_webhook(payload: Any = None) -> dict[str, Any]:
 			pass
 		cc.safe_log_error("chat: process_webhook failed")
 	return result
-
-
-def _wa_probe(kind: str, data: Any) -> None:
-	"""TEMPORARY: append one entry to the capped WhatsApp probe ring. Never raises."""
-	try:
-		cache = frappe.cache()
-		entry = json.dumps({"at": cc.dt_str(cc.now()), "kind": kind, "data": data}, default=str)
-		cache.lpush(WA_PROBE_KEY, entry[:4000])
-		cache.ltrim(WA_PROBE_KEY, 0, WA_PROBE_SIZE - 1)
-		cache.expire_key(WA_PROBE_KEY, WA_PROBE_TTL_SECONDS)
-	except Exception:
-		pass
-
-
-def _wa_probe_changes(payload: Any) -> None:
-	"""TEMPORARY: keep every WhatsApp change except plain customer messages and statuses."""
-	try:
-		if not isinstance(payload, dict) or payload.get("object") != "whatsapp_business_account":
-			return
-		for entry in payload.get("entry") or []:
-			for change in (entry or {}).get("changes") or []:
-				if (change or {}).get("field") != "messages":
-					_wa_probe("change", change)
-	except Exception:
-		pass
 
 
 def _note_history_progress(text: Any) -> None:

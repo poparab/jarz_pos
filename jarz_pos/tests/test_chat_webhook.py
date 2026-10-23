@@ -269,25 +269,31 @@ class WhatsAppParseTest(unittest.TestCase):
 		self.assertEqual(events[1]["error"], "131047: Re-engagement message")
 		self.assertEqual(events[0]["recipient"], "2011")
 
-	def test_wa_probe_keeps_only_non_message_changes(self):
-		# TEMPORARY probe for Business Suite replies: customer messages stay out of the ring.
-		from unittest import mock
-
-		payload = {
-			"object": "whatsapp_business_account",
-			"entry": [
+	def test_status_keeps_its_pricing_category(self):
+		events = ing.parse_webhook(
+			wa_payload(
 				{
-					"changes": [
-						{"field": "messages", "value": {"messages": []}},
-						{"field": "smb_message_echoes", "value": {"message_echoes": []}},
+					"statuses": [
+						{
+							"id": "wamid.s1",
+							"status": "sent",
+							"timestamp": "2",
+							"recipient_id": "2011",
+							"pricing": {"billable": False, "category": "service"},
+						},
+						{
+							"id": "wamid.s2",
+							"status": "sent",
+							"timestamp": "2",
+							"recipient_id": "2011",
+							"conversation": {"id": "c", "origin": {"type": "utility"}},
+						},
+						{"id": "wamid.s3", "status": "sent", "timestamp": "2", "recipient_id": "2011"},
 					]
 				}
-			],
-		}
-		with mock.patch.object(ing, "_wa_probe") as probe:
-			ing._wa_probe_changes(payload)
-			ing._wa_probe_changes({"object": "page", "entry": [{"changes": [{"field": "feed"}]}]})
-		self.assertEqual([c.args[1]["field"] for c in probe.call_args_list], ["smb_message_echoes"])
+			)
+		)
+		self.assertEqual([e["category"] for e in events], ["service", "utility", None])
 
 	def test_business_app_echo_is_outbound_from_phone(self):
 		events = ing.parse_webhook(
@@ -556,6 +562,145 @@ class RobustnessTest(unittest.TestCase):
 		self.assertEqual(ing.parse_webhook([]), [])
 		self.assertEqual(ing.parse_webhook({"object": "unknown", "entry": [{"id": 1}]}), [])
 		self.assertEqual(ing.parse_webhook({"object": "page", "entry": ["junk", None]}), [])
+
+
+class _Row(dict):
+	"""``frappe._dict`` stand-in: attribute and ``.get`` access."""
+
+	__getattr__ = dict.get
+
+
+def wa_status(status="sent", category="service", recipient="201111034268", ts=1760608800.0):
+	return {
+		"kind": "status",
+		"channel": cc.WHATSAPP,
+		"external_message_id": "wamid.suite",
+		"status": status,
+		"recipient": recipient,
+		"category": category,
+		"error": None,
+		"timestamp": ts,
+	}
+
+
+class StatusOnlyReplyTest(unittest.TestCase):
+	"""A Business Suite reply reaches us only as statuses for an id we never stored."""
+
+	def setUp(self):
+		from unittest import mock
+
+		self.mock = mock
+
+	def test_service_status_becomes_outbound_placeholder(self):
+		reply = ing._status_only_reply_event(wa_status())
+		self.assertEqual(reply["kind"], "message")
+		self.assertEqual(reply["direction"], "Outbound")
+		self.assertEqual(reply["sent_via"], "Phone")
+		self.assertEqual(reply["external_id"], "201111034268")
+		self.assertEqual(reply["external_message_id"], "wamid.suite")
+		self.assertEqual(reply["body"], ing.STATUS_ONLY_BODY)
+		self.assertEqual(reply["status"], "sent")
+		self.assertTrue(reply["status_only"])
+		self.assertIsNotNone(ing._status_only_reply_event(wa_status("delivered", category=None)))
+
+	def test_statuses_that_are_not_a_staff_reply(self):
+		for event in (
+			wa_status(category="utility"),  # order template
+			wa_status(category="marketing"),
+			wa_status("read"),  # may come hours after the reply
+			wa_status("failed"),
+			wa_status(recipient=None),
+			{**wa_status(), "channel": cc.MESSENGER},
+		):
+			self.assertIsNone(ing._status_only_reply_event(event), event)
+
+	def _record(self, conv, in_flight=False):
+		mock = self.mock
+		with (
+			mock.patch.object(ing, "_find_conversation", return_value=conv),
+			mock.patch.object(ing, "_app_send_in_flight", return_value=in_flight),
+			mock.patch.object(ing, "_persist_message", return_value={"conversation": "CHAT-1"}) as persist,
+		):
+			action = ing._record_status_only_reply(wa_status(), {}, "UTC")
+		return action, persist
+
+	def test_records_reply_for_known_chat(self):
+		conv = _Row(name="CHAT-1", last_inbound_at=datetime.datetime(2025, 10, 16, 9, 0))
+		action, persist = self._record(conv)
+		self.assertEqual(action, {"conversation": "CHAT-1"})
+		self.assertTrue(persist.call_args.args[0]["status_only"])
+
+	def test_never_opens_a_chat_from_a_bare_status(self):
+		action, persist = self._record(None)
+		self.assertIsNone(action)
+		persist.assert_not_called()
+
+	def test_skips_when_customer_wrote_after_the_reply(self):
+		conv = _Row(name="CHAT-1", last_inbound_at=datetime.datetime(2025, 10, 16, 11, 0))
+		action, persist = self._record(conv)
+		self.assertIsNone(action)
+		persist.assert_not_called()
+
+	def test_skips_while_a_jarz_send_is_in_flight(self):
+		action, persist = self._record(_Row(name="CHAT-1"), in_flight=True)
+		self.assertIsNone(action)
+		persist.assert_not_called()
+
+	def test_placeholder_marks_chat_answered(self):
+		mock = self.mock
+		conv = _Row(name="CHAT-1", status="Open", unread_count=2, alert_count=1)
+		doc = mock.MagicMock()
+		doc.name = "MSG-1"
+		db = mock.MagicMock()
+		with (
+			mock.patch.object(ing, "_message_exists", return_value=False),
+			mock.patch.object(ing, "_find_conversation", return_value=conv),
+			mock.patch.object(ing, "_is_app_echo", return_value=False),
+			mock.patch.object(ing.frappe, "get_doc", return_value=doc, create=True) as get_doc,
+			mock.patch.object(ing.frappe, "db", db),
+			mock.patch.object(cc, "supersede_live_drafts", return_value=["D1"]) as supersede,
+		):
+			action = ing._persist_message(ing._status_only_reply_event(wa_status("delivered")), {}, "UTC")
+		fields = get_doc.call_args.args[0]
+		self.assertEqual(fields["raw_json"], ing.STATUS_ONLY_MARKER)
+		self.assertEqual(fields["status"], "delivered")
+		self.assertEqual(fields["sent_via"], "Phone")
+		self.assertEqual(fields["direction"], "Outbound")
+		updates = db.set_value.call_args.args[2]
+		self.assertEqual(updates["status"], "Answered")
+		self.assertEqual(updates["unread_count"], 0)
+		self.assertEqual(updates["alert_count"], 0)
+		self.assertIsNone(updates["waiting_since"])
+		supersede.assert_called_once_with("CHAT-1")
+		self.assertFalse(action["push"])
+		self.assertFalse(action["draft"])
+
+	def test_late_echo_fills_in_the_placeholder(self):
+		mock = self.mock
+		db = mock.MagicMock()
+		db.get_value.side_effect = [
+			_Row(name="MSG-1", conversation="CHAT-1", raw_json=ing.STATUS_ONLY_MARKER),
+			cc.preview(ing.STATUS_ONLY_BODY, "text"),
+		]
+		echo = {"direction": "Outbound", "external_message_id": "wamid.suite", "body": "تمام", "message_type": "text"}
+		with mock.patch.object(ing.frappe, "db", db):
+			action = ing._upgrade_status_only(echo)
+		msg_update = db.set_value.call_args_list[0].args[2]
+		self.assertEqual(msg_update["body"], "تمام")
+		self.assertIsNone(msg_update["raw_json"])
+		self.assertEqual(db.set_value.call_args_list[1].args[2:4], ("last_message_preview", "تمام"))
+		self.assertEqual(action["message"], "MSG-1")
+		self.assertFalse(action["quiet"])
+
+	def test_echo_of_a_real_message_changes_nothing(self):
+		mock = self.mock
+		db = mock.MagicMock()
+		db.get_value.return_value = _Row(name="MSG-1", conversation="CHAT-1", raw_json=None)
+		echo = {"direction": "Outbound", "external_message_id": "wamid.x", "body": "hi"}
+		with mock.patch.object(ing.frappe, "db", db):
+			self.assertIsNone(ing._upgrade_status_only(echo))
+			self.assertIsNone(ing._upgrade_status_only({**echo, "direction": "Inbound"}))
+		db.set_value.assert_not_called()
 
 
 class ShouldDraftTest(unittest.TestCase):
