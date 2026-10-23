@@ -1246,6 +1246,8 @@ class TestLabels(_Base):
 		self.patch(bwc.label_stock, "get_on_hand", side_effect=lambda name: LABEL_ON_HAND[name])
 		self.patch(bwc.label_stock, "refresh_label")
 		self.on_hand_at = self.patch(bwc, "_label_on_hand_at", side_effect=lambda name, at: LABEL_ON_HAND[name])
+		self.lock = self.patch(bwc.label_stock, "_lock_label")
+		self.recounted = self.patch(bwc, "_label_recounted_after", return_value=False)
 		self.post = self.patch(
 			bwc.label_stock, "post_movement", side_effect=lambda **kw: f"JLMV-{kw['label']}"
 		)
@@ -1330,10 +1332,33 @@ class TestLabels(_Base):
 
 		bwc.approve_weekly_count("BWC-2026-00007")
 
-		self.on_hand_at.assert_called_once_with("JLBL-2", "2026-10-19 20:15:00")
+		# The raw counted_at (microseconds kept), not the second-truncated display string.
+		self.on_hand_at.assert_called_once_with("JLBL-2", doc.counted_at)
 		self.assertEqual(self.post.call_args.kwargs["qty"], -3)
 		self.assertEqual(self.post.call_args.kwargs["posting_date"], "2026-10-19")
 		self.assertEqual(doc.labels[0].movement, "JLMV-JLBL-2")
+
+	def test_a_label_recounted_after_the_count_is_not_double_corrected(self):
+		type(self).approver = True
+		self.addCleanup(setattr, type(self), "approver", False)
+		self.user = "boss@jarz.test"
+		self.patch(bwc.frappe, "session", new=SimpleNamespace(user=self.user), create=True)
+		doc = _pending_doc()
+		doc.labels = [_LabelRow(label="JLBL-2", counted_qty=1), _LabelRow(label="JLBL-3", counted_qty=6)]
+		self.patch(bwc.frappe.db, "exists", return_value="BWC-2026-00007", create=True)
+		self.patch(bwc.frappe, "get_doc", side_effect=lambda *a, **k: doc)
+		self.recounted.side_effect = lambda name, at: name == "JLBL-2"
+
+		bwc.approve_weekly_count("BWC-2026-00007")
+
+		self.assertEqual([c.kwargs["label"] for c in self.post.call_args_list], ["JLBL-3"])
+		# Locked before the ledger is read, so an uncommitted sale cannot slip between.
+		self.assertEqual([c.args[0] for c in self.lock.call_args_list], ["JLBL-2", "JLBL-3"])
+
+	def test_an_absurd_label_count_is_refused_not_a_server_error(self):
+		lines = [{"label": "JLBL-1", "qty": 5_000_000_000}] + FULL_LABEL_LINES[1:]
+		code, _exc = self.refusal(self.submit, lines)
+		self.assertEqual(code, "invalid_qty")
 
 	def test_reads_hide_label_ledger_figures_from_staff(self):
 		doc = _pending_doc()

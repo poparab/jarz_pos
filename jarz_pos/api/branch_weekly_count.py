@@ -509,18 +509,40 @@ def _label_on_hand_at(label: str, at: Any) -> int:
 	return int(sum(int(q or 0) for q in rows or []))
 
 
+# Movements that set a label's position from a physical count.
+_RECOUNT_TYPES = ["Adjustment", "Opening"]
+
+
+def _label_recounted_after(label: str, at: Any) -> bool:
+	"""True when a newer count (or an opening) was posted for *label* after *at*."""
+	return bool(
+		frappe.get_all(
+			label_stock.MOVEMENT_DOCTYPE,
+			filters={"label": label, "movement_type": ["in", _RECOUNT_TYPES], "creation": [">", at]},
+			pluck="name",
+			limit_page_length=1,
+		)
+	)
+
+
 def _post_label_counts(doc) -> None:
 	"""Post each counted label's difference against its ledger at ``counted_at``.
 
 	Movements after the count (sales consuming labels while the count waited
 	for approval) stay in the ledger: only what the count found different at
-	that moment is adjusted.
+	that moment is adjusted. A label adjustment is a delta, not an absolute
+	set, so a label recounted after this count (a newer weekly count or a
+	manual count) is skipped: stacking this older delta on it would
+	double-correct.
 	"""
-	counted_at = _fmt_dt(doc.counted_at)
-	posting_date = str(counted_at or "").split(" ")[0] or None
+	cut = doc.counted_at
+	posting_date = (_fmt_dt(cut) or "").split(" ")[0] or None
 	for row in doc.get("labels") or []:
+		label_stock._lock_label(row.label)
+		if _label_recounted_after(row.label, cut):
+			continue
 		counted = int(row.counted_qty or 0)
-		before = _label_on_hand_at(row.label, counted_at)
+		before = _label_on_hand_at(row.label, cut)
 		delta = counted - before
 		if delta:
 			movement = label_stock.post_movement(
@@ -768,6 +790,9 @@ def _parse_lines(lines: Any) -> dict[str, float]:
 	return counted
 
 
+_MAX_LABEL_QTY = 1_000_000  # the count fields are 32-bit Int; refuse a typo instead of a 500
+
+
 def _parse_label_lines(label_lines: Any) -> dict[str, int] | None:
 	"""``[{"label", "qty"}, ...]`` -> ``{label: qty}``; None when the client sent none."""
 	if label_lines is None:
@@ -798,7 +823,7 @@ def _parse_label_lines(label_lines: Any) -> dict[str, int] | None:
 			qty = float(raw)
 		except (TypeError, ValueError):
 			_refuse("invalid_qty", _("Quantity for label {0} is not a number").format(name))
-		if not math.isfinite(qty) or qty < 0 or qty != int(qty):
+		if not math.isfinite(qty) or qty < 0 or qty != int(qty) or qty > _MAX_LABEL_QTY:
 			_refuse("invalid_qty", _("Quantity for label {0} must be a whole number, zero or more").format(name))
 		if name in counted:
 			_refuse("invalid_qty", _("Label {0} appears twice in the count").format(name))
