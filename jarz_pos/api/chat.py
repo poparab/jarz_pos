@@ -146,6 +146,7 @@ def get_conversations(
 			[cc.CONVERSATION, "phone", "like", like],
 			[cc.CONVERSATION, "last_message_preview", "like", like],
 			[cc.CONVERSATION, "external_id", "like", like],
+			[cc.CONVERSATION, "name", "like", like],
 		]
 		try:
 			from jarz_pos.utils.phone import phone_search_terms

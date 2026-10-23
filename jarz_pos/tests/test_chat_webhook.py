@@ -703,6 +703,45 @@ class StatusOnlyReplyTest(unittest.TestCase):
 		db.set_value.assert_not_called()
 
 
+class DmNameLookupTest(unittest.TestCase):
+	"""Messenger / Instagram webhooks carry only an id; the name comes from Graph."""
+
+	def setUp(self):
+		from unittest import mock
+
+		from jarz_pos.services import chat_meta_client as meta
+
+		self.mock = mock
+		self.meta = meta
+
+	def test_messenger_name_comes_from_the_thread_participants(self):
+		thread = {
+			"data": [
+				{"participants": {"data": [{"id": "PAGE", "name": "JARZ"}, {"id": "PSID1", "name": "Sara Ali"}]}}
+			]
+		}
+		with (
+			self.mock.patch.object(self.meta, "_settings", return_value={"facebook_page_id": "PAGE"}),
+			self.mock.patch.object(self.meta, "_request", return_value=thread) as req,
+		):
+			self.assertEqual(self.meta.dm_contact_name("messenger", "PSID1"), "Sara Ali")
+			self.assertIsNone(self.meta.dm_contact_name("messenger", "OTHER"))
+		self.assertEqual(req.call_args.args[1], "PAGE/conversations")
+		self.assertEqual(req.call_args.kwargs["params"]["user_id"], "OTHER")
+
+	def test_instagram_falls_back_to_username(self):
+		with self.mock.patch.object(self.meta, "_request", return_value={"username": "mona.k"}):
+			self.assertEqual(self.meta.dm_contact_name("instagram", "IGSID"), "mona.k")
+
+	def test_lookup_is_dm_only_and_never_raises(self):
+		with self.mock.patch.object(self.meta, "dm_contact_name", side_effect=self.meta.MetaApiError("x", 100)):
+			self.assertIsNone(ing._lookup_dm_name(cc.MESSENGER, "PSID1"))
+		with self.mock.patch.object(self.meta, "dm_contact_name", return_value="Sara") as lookup:
+			self.assertIsNone(ing._lookup_dm_name(cc.WHATSAPP, "201000000000"))
+			self.assertIsNone(ing._lookup_dm_name(cc.FACEBOOK_COMMENT, "c1"))
+			lookup.assert_not_called()
+
+
 class ShouldDraftTest(unittest.TestCase):
 	def ev(self, **kw):
 		base = {"kind": "message", "direction": "Inbound", "message_type": "text", "body": "hi"}

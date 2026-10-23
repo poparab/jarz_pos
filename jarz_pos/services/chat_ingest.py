@@ -36,6 +36,8 @@ from jarz_pos.services import chat_common as cc
 MAX_BODY_BYTES = 8 * 1024 * 1024
 #: Contact names from ``smb_app_state_sync`` wait this long for their chat to arrive.
 CONTACT_NAME_TTL_SECONDS = 7 * 24 * 3600
+#: A Messenger / Instagram name lookup that found nothing is not retried for this long.
+NAME_LOOKUP_RETRY_SECONDS = 6 * 3600
 HISTORY_PROGRESS_KEY = "jarz_chat_history_progress"
 #: A WhatsApp reply typed in the Meta Business Suite inbox reaches us only as status
 #: updates (sent / delivered / read) for a message id we never stored: no echo, no text.
@@ -719,6 +721,31 @@ def _cached_contact_name(phone: str | None) -> str | None:
 		return None
 
 
+def _lookup_dm_name(channel: str, external_id: str | None) -> str | None:
+	"""Ask Meta for a DM customer's name (their webhooks carry only an id).
+
+	Best effort: at most one attempt per person every
+	:data:`NAME_LOOKUP_RETRY_SECONDS`, and a Graph failure just leaves the chat unnamed.
+	"""
+	if channel not in (cc.MESSENGER, cc.INSTAGRAM) or not external_id:
+		return None
+	try:
+		key = frappe.cache().make_key(f"jarz_chat_name_lookup:{channel}:{external_id}")
+		if frappe.cache().get(key):
+			return None
+		frappe.cache().set(key, "1", ex=NAME_LOOKUP_RETRY_SECONDS)
+	except Exception:
+		pass
+	from jarz_pos.services import chat_meta_client as meta
+
+	platform = "instagram" if channel == cc.INSTAGRAM else "messenger"
+	try:
+		name = meta.dm_contact_name(platform, external_id)
+	except Exception:
+		return None
+	return name[:140] if name else None
+
+
 def _create_conversation(event: dict[str, Any], when: _dt.datetime) -> Any:
 	channel = event["channel"]
 	external_id = event["external_id"]
@@ -1142,6 +1169,10 @@ def _persist_message(
 		)
 	if event.get("contact_name") and inbound:
 		updates["contact_name"] = str(event["contact_name"])[:140]
+	elif inbound and not conv.get("contact_name"):
+		looked_up = _lookup_dm_name(event["channel"], event["external_id"])
+		if looked_up:
+			updates["contact_name"] = looked_up
 
 	superseded: list[str] = []
 	mtype = event.get("message_type")

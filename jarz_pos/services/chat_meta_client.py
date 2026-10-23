@@ -190,6 +190,33 @@ def page_conversations(platform: str, after: str | None = None, limit: int = 25)
 	return _request("GET", f"{page_id}/conversations", _page_token(), params=params)
 
 
+def dm_contact_name(platform: str, user_id: str) -> str | None:
+	"""The display name of a Messenger / Instagram DM customer, or ``None``.
+
+	DM webhooks carry only the PSID / IGSID. Messenger refuses ``GET /{psid}``
+	without the Business Asset User Profile Access feature, but the Page's own
+	thread with that person lists them as a participant. Instagram answers
+	``GET /{igsid}`` with ``name`` and ``username``.
+	"""
+	if platform == "instagram":
+		data = _request("GET", str(user_id), _page_token(), params={"fields": "name,username"})
+		return str(data.get("name") or data.get("username") or "").strip() or None
+	page_id = _settings().get("facebook_page_id")
+	if not page_id:
+		raise MetaApiError("Facebook Page id is not configured in Jarz Chat Settings", "config")
+	data = _request(
+		"GET",
+		f"{page_id}/conversations",
+		_page_token(),
+		params={"platform": "messenger", "user_id": str(user_id), "fields": "participants"},
+	)
+	for thread in data.get("data") or []:
+		for person in (thread.get("participants") or {}).get("data") or []:
+			if str(person.get("id")) == str(user_id):
+				return str(person.get("name") or "").strip() or None
+	return None
+
+
 def download(url: str, token: str | None = None) -> tuple[bytes, str]:
 	"""Fetch a media URL. Returns ``(content, content_type)``.
 
