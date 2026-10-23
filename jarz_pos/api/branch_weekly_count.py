@@ -18,6 +18,12 @@ How it works
 * **Posting.** Both paths post through ``inventory_count._reconcile_counts``,
   with the posting datetime set to ``counted_at`` (the moment the stock was
   counted), so a late approval still lands on the right day.
+* **B2B labels.** The customer labels kept at the branch (``Jarz Customer
+  Label`` whose ``storage_location`` is the branch warehouse) are counted on
+  the same sheet, one section per customer. ``label_lines`` is optional so an
+  older client still submits; when it is sent it must cover every label. On
+  approval each label's difference against its ledger at ``counted_at`` is
+  posted as an ``Adjustment`` movement referencing the count.
 
 Every refusal is a ``frappe.throw`` whose message starts with ``[error_code]``
 so the client can map it to its own (Arabic) text.
@@ -42,6 +48,7 @@ from jarz_pos.api.inventory_count import (
 	_resolve_count_item_codes,
 )
 from jarz_pos.constants import ROLES, STATUS
+from jarz_pos.services import label_stock
 from jarz_pos.utils.courier_visibility import (
 	get_allowed_pos_profiles_for_user,
 	user_has_global_profile_access,
@@ -419,6 +426,121 @@ def _build_sections(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
 	return sections
 
 
+def _sheet_labels(warehouse: str) -> list[dict[str, Any]]:
+	"""Enabled B2B customer labels stored at *warehouse*."""
+	if not warehouse or not frappe.db.exists("DocType", label_stock.LABEL_DOCTYPE):
+		return []
+	rows = frappe.get_all(
+		label_stock.LABEL_DOCTYPE,
+		filters={"storage_location": warehouse, "enabled": 1},
+		fields=["name", "customer", "customer_name", "label_title", "item", "size"],
+		limit_page_length=0,
+	)
+	codes = sorted({r.get("item") for r in rows or [] if r.get("item")})
+	items: dict[str, Any] = {}
+	if codes:
+		items = {
+			i["name"]: i
+			for i in frappe.get_all(
+				"Item", filters={"name": ["in", codes]}, fields=["name", "item_name", "item_group", "image"]
+			)
+			or []
+		}
+	out = []
+	for r in rows or []:
+		item = items.get(r.get("item")) or {}
+		item_name = item.get("item_name") or r.get("item") or ""
+		out.append(
+			{
+				"label": r.get("name"),
+				"customer": r.get("customer") or "",
+				"customer_name": r.get("customer_name") or r.get("customer") or "",
+				"title": r.get("label_title") or item_name or r.get("name"),
+				"item_code": r.get("item") or None,
+				"item_name": item_name,
+				"size": r.get("size") or item.get("item_group") or "",
+				"image": item.get("image") or None,
+			}
+		)
+	return out
+
+
+def _label_sort_key(label: dict[str, Any]) -> tuple:
+	return (_section_rank(label.get("size")), _flavour_key(label.get("item_name")), str(label.get("label")))
+
+
+def _build_label_sections(labels: list[dict[str, Any]]) -> list[dict[str, Any]]:
+	"""One section per customer, customers A-Z, labels by size then flavour."""
+	by_customer: dict[str, list[dict[str, Any]]] = {}
+	for label in labels:
+		by_customer.setdefault(label["customer"], []).append(label)
+	sections = []
+	for customer in sorted(by_customer, key=lambda c: (by_customer[c][0]["customer_name"].casefold(), c)):
+		ordered = sorted(by_customer[customer], key=_label_sort_key)
+		sections.append(
+			{
+				"key": f"label:{customer}",
+				"customer": customer,
+				"title": ordered[0]["customer_name"],
+				"labels": [
+					{
+						"label": lb["label"],
+						"title": lb["title"],
+						"item_code": lb["item_code"],
+						"item_name": lb["item_name"],
+						"size": lb["size"],
+						"image": lb["image"],
+					}
+					for lb in ordered
+				],
+			}
+		)
+	return sections
+
+
+def _label_on_hand_at(label: str, at: Any) -> int:
+	"""A label's ledger quantity as it stood at *at* (movements created up to then)."""
+	rows = frappe.get_all(
+		label_stock.MOVEMENT_DOCTYPE,
+		filters={"label": label, "creation": ["<=", at]},
+		pluck="qty",
+		limit_page_length=0,
+	)
+	return int(sum(int(q or 0) for q in rows or []))
+
+
+def _post_label_counts(doc) -> None:
+	"""Post each counted label's difference against its ledger at ``counted_at``.
+
+	Movements after the count (sales consuming labels while the count waited
+	for approval) stay in the ledger: only what the count found different at
+	that moment is adjusted.
+	"""
+	counted_at = _fmt_dt(doc.counted_at)
+	posting_date = str(counted_at or "").split(" ")[0] or None
+	for row in doc.get("labels") or []:
+		counted = int(row.counted_qty or 0)
+		before = _label_on_hand_at(row.label, counted_at)
+		delta = counted - before
+		if delta:
+			movement = label_stock.post_movement(
+				label=row.label,
+				movement_type="Adjustment",
+				qty=delta,
+				posting_date=posting_date,
+				reference_doctype=DOCTYPE,
+				reference_name=doc.name,
+				remarks=f"Branch weekly count {doc.name}: {counted} (was {before})",
+			)
+			if movement:
+				row.db_set("movement", movement, update_modified=False)
+		frappe.db.set_value(
+			label_stock.LABEL_DOCTYPE, row.label, "last_counted_on", posting_date, update_modified=False
+		)
+		if not delta:
+			label_stock.refresh_label(row.label)
+
+
 # ── Reads ────────────────────────────────────────────────────────────────────
 
 
@@ -474,6 +596,7 @@ def get_weekly_count_sheet(pos_profile: str) -> dict[str, Any]:
 	week_start, due_date = _week_bounds(today)
 
 	items = _sheet_items(branch["warehouse"])
+	labels = _sheet_labels(branch["warehouse"])
 	count = _latest_counts([branch["name"]], week_start).get(branch["name"])
 	return {
 		"pos_profile": branch["name"],
@@ -485,6 +608,8 @@ def get_weekly_count_sheet(pos_profile: str) -> dict[str, Any]:
 		"count": _count_summary(count),
 		"total_items": len(items),
 		"sections": _build_sections(items),
+		"total_labels": len(labels),
+		"label_sections": _build_label_sections(labels),
 	}
 
 
@@ -573,6 +698,27 @@ def get_weekly_count(name: str) -> dict[str, Any]:
 	else:
 		lines.sort(key=lambda ln: (_section_rank(ln["item_group"]), _flavour_key(ln["item_name"])))
 
+	label_lines = [
+		{
+			"label": row.label,
+			"customer": row.customer,
+			"customer_name": row.customer_name,
+			"item_code": row.item_code,
+			"item_name": row.item_name,
+			"counted_qty": row.counted_qty,
+			"system_qty": row.system_qty if approver else None,
+			"difference": row.difference if approver else None,
+		}
+		for row in doc.get("labels") or []
+	]
+	label_lines.sort(
+		key=lambda ln: (
+			str(ln["customer_name"] or "").casefold(),
+			-abs(int(ln["difference"] or 0)) if approver else 0,
+			_flavour_key(ln["item_name"]),
+		)
+	)
+
 	result = _header({key: doc.get(key) for key in _HEADER_FIELDS + ["approved_at"]}, approver)
 	result["can_approve"] = bool(
 		approver
@@ -581,6 +727,7 @@ def get_weekly_count(name: str) -> dict[str, Any]:
 		and doc.pos_profile in set(count_scope(user))
 	)
 	result["lines"] = lines
+	result["label_lines"] = label_lines
 	return result
 
 
@@ -621,6 +768,44 @@ def _parse_lines(lines: Any) -> dict[str, float]:
 	return counted
 
 
+def _parse_label_lines(label_lines: Any) -> dict[str, int] | None:
+	"""``[{"label", "qty"}, ...]`` -> ``{label: qty}``; None when the client sent none."""
+	if label_lines is None:
+		return None
+	if isinstance(label_lines, str):
+		if not label_lines.strip():
+			return None
+		try:
+			label_lines = json.loads(label_lines)
+		except ValueError:
+			_refuse("invalid_qty", _("The label count lines could not be read"))
+	if not isinstance(label_lines, list):
+		_refuse("invalid_qty", _("The label count lines must be a list"))
+
+	counted: dict[str, int] = {}
+	for line in label_lines:
+		if not isinstance(line, dict):
+			_refuse("invalid_qty", _("Each label count line must be an object"))
+		name = str(line.get("label") or "").strip()
+		if not name:
+			_refuse("unknown_items", _("A label count line has no label"))
+		raw = line.get("qty")
+		if raw is None:
+			raw = line.get("counted_qty")
+		try:
+			if isinstance(raw, bool) or raw is None or str(raw).strip() == "":
+				raise ValueError
+			qty = float(raw)
+		except (TypeError, ValueError):
+			_refuse("invalid_qty", _("Quantity for label {0} is not a number").format(name))
+		if not math.isfinite(qty) or qty < 0 or qty != int(qty):
+			_refuse("invalid_qty", _("Quantity for label {0} must be a whole number, zero or more").format(name))
+		if name in counted:
+			_refuse("invalid_qty", _("Label {0} appears twice in the count").format(name))
+		counted[name] = int(qty)
+	return counted
+
+
 def _submit_response(row: dict[str, Any], approver: bool) -> dict[str, Any]:
 	return {
 		"ok": True,
@@ -656,11 +841,18 @@ def _enqueue_push(method: str, count_name: str, context: str) -> bool:
 
 
 @frappe.whitelist(methods=["POST"])
-def submit_weekly_count(pos_profile: str, lines: Any, client_request_id: str | None = None) -> dict[str, Any]:
+def submit_weekly_count(
+	pos_profile: str,
+	lines: Any,
+	client_request_id: str | None = None,
+	label_lines: Any = None,
+) -> dict[str, Any]:
 	"""Record this week's count for a branch.
 
 	An approver (see ``is_count_approver``) posts immediately (auto-approved);
 	anyone else leaves it ``Pending Approval`` and the approvers are pushed.
+	``label_lines`` (optional) carries the B2B label counts; when present it
+	must cover every label stored at the branch.
 	"""
 	user = frappe.session.user
 	branch = _require_branch(pos_profile, user)
@@ -711,9 +903,37 @@ def submit_weekly_count(pos_profile: str, lines: Any, client_request_id: str | N
 	if missing:
 		_refuse("missing_items", _("Count every item. Missing: {0}").format(", ".join(sorted(missing))))
 
+	label_counted = _parse_label_lines(label_lines)
+	label_rows = []
+	if label_counted is not None:
+		label_sheet = {lb["label"]: lb for lb in _sheet_labels(warehouse)}
+		unknown = sorted(name for name in label_counted if name not in label_sheet)
+		if unknown:
+			_refuse("unknown_items", _("Not on this branch's label sheet: {0}").format(", ".join(unknown)))
+		missing = [
+			f"{lb['customer_name']} - {lb['item_name']}" for name, lb in label_sheet.items() if name not in label_counted
+		]
+		if missing:
+			_refuse("missing_items", _("Count every label. Missing: {0}").format(", ".join(sorted(missing))))
+		ordered = sorted(label_sheet.items(), key=lambda kv: (kv[1]["customer_name"].casefold(), _label_sort_key(kv[1])))
+		for name, lb in ordered:
+			system = int(label_stock.get_on_hand(name))
+			label_rows.append(
+				{
+					"label": name,
+					"customer": lb["customer"] or None,
+					"customer_name": lb["customer_name"],
+					"item_code": lb["item_code"],
+					"item_name": lb["item_name"],
+					"counted_qty": label_counted[name],
+					"system_qty": system,
+					"difference": label_counted[name] - system,
+				}
+			)
+
 	system_qty = _get_bin_qty_map(warehouse, list(sheet))
 	rows = []
-	differences = 0
+	differences = sum(1 for r in label_rows if r["difference"])
 	for code, item in sheet.items():
 		system = float(system_qty.get(code, 0.0))
 		difference = counted[code] - system
@@ -748,6 +968,7 @@ def submit_weekly_count(pos_profile: str, lines: Any, client_request_id: str | N
 		"client_request_id": crid,
 		"auto_approved": 1 if approver else 0,
 		"items": rows,
+		"labels": label_rows,
 	}
 
 	if approver:
@@ -770,7 +991,9 @@ def submit_weekly_count(pos_profile: str, lines: Any, client_request_id: str | N
 
 	doc = frappe.get_doc(values)
 	doc.insert(ignore_permissions=True)
-	if not approver:
+	if approver:
+		_post_label_counts(doc)
+	else:
 		_enqueue_push("notify_branch_count_approval_required", doc.name, "branch_count_approval")
 	frappe.db.commit()
 	return _submit_response(
@@ -821,6 +1044,7 @@ def approve_weekly_count(name: str) -> dict[str, Any]:
 	)
 	if not posted.get("ok", True):
 		_refuse("post_failed", str(posted.get("error") or _("The stock could not be updated")))
+	_post_label_counts(doc)
 
 	doc.status = STATUS.APPROVED
 	doc.approved_by = user

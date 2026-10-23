@@ -1173,5 +1173,189 @@ class TestBranchCountNotifications(unittest.TestCase):
 		roles.assert_not_called()
 
 
+SHEET_LABELS = [
+	{
+		"label": "JLBL-2",
+		"customer": "CUST-LUC",
+		"customer_name": "Lucaffe",
+		"title": "Lucaffe Tiramisu L",
+		"item_code": "JAR-L-TIR",
+		"item_name": "Tiramisu Large",
+		"size": "Large",
+		"image": None,
+	},
+	{
+		"label": "JLBL-1",
+		"customer": "CUST-ABC",
+		"customer_name": "Abc Cafe",
+		"title": "Abc Lotus M",
+		"item_code": "JAR-M-LOT",
+		"item_name": "Lotus Medium",
+		"size": "Medium",
+		"image": None,
+	},
+	{
+		"label": "JLBL-3",
+		"customer": "CUST-LUC",
+		"customer_name": "Lucaffe",
+		"title": "Lucaffe Lotus M",
+		"item_code": "JAR-M-LOT",
+		"item_name": "Lotus Medium",
+		"size": "Medium",
+		"image": None,
+	},
+]
+LABEL_ON_HAND = {"JLBL-1": 10, "JLBL-2": 4, "JLBL-3": 0}
+FULL_LABEL_LINES = [
+	{"label": "JLBL-1", "qty": 10},
+	{"label": "JLBL-2", "qty": 1},
+	{"label": "JLBL-3", "qty": 6},
+]
+
+
+class _LabelRow(SimpleNamespace):
+	def db_set(self, field, value, **kwargs):
+		setattr(self, field, value)
+
+
+class TestLabels(_Base):
+	"""B2B labels stored at the branch are counted on the same sheet, per customer."""
+
+	def setUp(self):
+		super().setUp()
+		self.docs = []
+
+		def fake_get_doc(values, *args, **kwargs):
+			doc = _FakeDoc(values)
+			doc.labels = [_LabelRow(**row) for row in values.get("labels", [])]
+			self.docs.append(doc)
+			return doc
+
+		self.patch(
+			bwc,
+			"_require_branch",
+			return_value={"name": "Dokki", "warehouse": "Dokki - J", "company": "Jarz"},
+		)
+		self.patch(bwc, "_sheet_items", return_value=SHEET)
+		self.patch(bwc, "_sheet_labels", return_value=SHEET_LABELS)
+		self.patch(bwc, "_get_bin_qty_map", return_value=BIN_QTY)
+		self.patch(bwc.frappe, "get_all", return_value=[])
+		self.patch(bwc.frappe.db, "get_value", return_value=None, create=True)
+		self.set_value = self.patch(bwc.frappe.db, "set_value", create=True)
+		self.patch(bwc.frappe, "get_doc", side_effect=fake_get_doc)
+		self.patch(bwc.label_stock, "get_on_hand", side_effect=lambda name: LABEL_ON_HAND[name])
+		self.patch(bwc.label_stock, "refresh_label")
+		self.on_hand_at = self.patch(bwc, "_label_on_hand_at", side_effect=lambda name, at: LABEL_ON_HAND[name])
+		self.post = self.patch(
+			bwc.label_stock, "post_movement", side_effect=lambda **kw: f"JLMV-{kw['label']}"
+		)
+
+	def submit(self, label_lines=FULL_LABEL_LINES, **kwargs):
+		return bwc.submit_weekly_count("Dokki", FULL_LINES, label_lines=label_lines, **kwargs)
+
+	def test_sheet_groups_labels_by_customer(self):
+		with patch.object(bwc, "_latest_counts", return_value={}):
+			sheet = bwc.get_weekly_count_sheet("Dokki")
+		self.assertEqual(sheet["total_labels"], 3)
+		self.assertEqual(
+			[(s["key"], s["title"], [lb["label"] for lb in s["labels"]]) for s in sheet["label_sections"]],
+			[("label:CUST-ABC", "Abc Cafe", ["JLBL-1"]), ("label:CUST-LUC", "Lucaffe", ["JLBL-2", "JLBL-3"])],
+		)
+		# Blind: no ledger quantity on the sheet.
+		for section in sheet["label_sections"]:
+			for label in section["labels"]:
+				self.assertNotIn("system_qty", label)
+				self.assertNotIn("on_hand", label)
+
+	def test_an_old_client_without_label_lines_still_submits(self):
+		result = bwc.submit_weekly_count("Dokki", FULL_LINES)
+		self.assertEqual(result["status"], STATUS.PENDING_APPROVAL)
+		self.assertEqual(self.docs[0].labels, [])
+
+	def test_staff_label_counts_wait_and_post_nothing(self):
+		self.submit()
+		doc = self.docs[0]
+		self.assertEqual(
+			{r.label: (r.counted_qty, r.system_qty, r.difference) for r in doc.labels},
+			{"JLBL-1": (10, 10, 0), "JLBL-2": (1, 4, -3), "JLBL-3": (6, 0, 6)},
+		)
+		# One item line off plus two label lines off.
+		self.assertEqual(doc.differences_count, 3)
+		self.post.assert_not_called()
+
+	def test_every_label_must_be_counted_once_lines_are_sent(self):
+		code, _exc = self.refusal(self.submit, [{"label": "JLBL-1", "qty": 1}])
+		self.assertEqual(code, "missing_items")
+
+	def test_a_label_from_another_branch_is_refused(self):
+		code, _exc = self.refusal(self.submit, FULL_LABEL_LINES + [{"label": "JLBL-99", "qty": 1}])
+		self.assertEqual(code, "unknown_items")
+
+	def test_label_counts_are_whole_numbers(self):
+		for bad in (-1, 1.5, "x", None, True):
+			lines = [{"label": "JLBL-1", "qty": bad}] + FULL_LABEL_LINES[1:]
+			code, _exc = self.refusal(self.submit, lines)
+			self.assertEqual(code, "invalid_qty", bad)
+
+	def test_an_approver_submit_posts_label_adjustments(self):
+		type(self).approver = True
+		self.addCleanup(setattr, type(self), "approver", False)
+
+		self.submit(json.dumps(FULL_LABEL_LINES))
+
+		posted = {c.kwargs["label"]: c.kwargs for c in self.post.call_args_list}
+		self.assertEqual(sorted(posted), ["JLBL-2", "JLBL-3"])
+		self.assertEqual(posted["JLBL-2"]["qty"], -3)
+		self.assertEqual(posted["JLBL-3"]["qty"], 6)
+		for kwargs in posted.values():
+			self.assertEqual(kwargs["movement_type"], "Adjustment")
+			self.assertEqual(kwargs["posting_date"], "2026-10-20")
+			self.assertEqual(kwargs["reference_doctype"], "Branch Weekly Count")
+		self.assertEqual({r.label: getattr(r, "movement", None) for r in self.docs[0].labels}["JLBL-3"], "JLMV-JLBL-3")
+		# Every counted label is stamped, including the one that matched.
+		self.assertEqual(
+			sorted(c.args[1] for c in self.set_value.call_args_list if c.args[2] == "last_counted_on"),
+			["JLBL-1", "JLBL-2", "JLBL-3"],
+		)
+
+	def test_approval_judges_labels_against_the_ledger_at_counted_at(self):
+		type(self).approver = True
+		self.addCleanup(setattr, type(self), "approver", False)
+		self.user = "boss@jarz.test"
+		self.patch(bwc.frappe, "session", new=SimpleNamespace(user=self.user), create=True)
+		doc = _pending_doc()
+		doc.labels = [_LabelRow(label="JLBL-2", counted_qty=1)]
+		self.patch(bwc.frappe.db, "exists", return_value="BWC-2026-00007", create=True)
+		self.patch(bwc.frappe, "get_doc", side_effect=lambda *a, **k: doc)
+
+		bwc.approve_weekly_count("BWC-2026-00007")
+
+		self.on_hand_at.assert_called_once_with("JLBL-2", "2026-10-19 20:15:00")
+		self.assertEqual(self.post.call_args.kwargs["qty"], -3)
+		self.assertEqual(self.post.call_args.kwargs["posting_date"], "2026-10-19")
+		self.assertEqual(doc.labels[0].movement, "JLMV-JLBL-2")
+
+	def test_reads_hide_label_ledger_figures_from_staff(self):
+		doc = _pending_doc()
+		doc.labels = [
+			_LabelRow(
+				label="JLBL-2",
+				customer="CUST-LUC",
+				customer_name="Lucaffe",
+				item_code="JAR-L-TIR",
+				item_name="Tiramisu Large",
+				counted_qty=1,
+				system_qty=4,
+				difference=-3,
+			)
+		]
+		self.patch(bwc.frappe.db, "exists", return_value="BWC-2026-00007", create=True)
+		self.patch(bwc.frappe, "get_doc", side_effect=lambda *a, **k: doc)
+		result = bwc.get_weekly_count("BWC-2026-00007")
+		self.assertEqual(result["label_lines"][0]["counted_qty"], 1)
+		self.assertIsNone(result["label_lines"][0]["system_qty"])
+		self.assertIsNone(result["label_lines"][0]["difference"])
+
+
 if __name__ == "__main__":
 	unittest.main()

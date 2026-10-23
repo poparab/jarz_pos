@@ -1,0 +1,102 @@
+{
+ "actions": [],
+ "autoname": "hash",
+ "creation": "2026-10-23 00:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "label",
+  "customer",
+  "customer_name",
+  "item_code",
+  "item_name",
+  "counted_qty",
+  "system_qty",
+  "difference",
+  "movement"
+ ],
+ "fields": [
+  {
+   "fieldname": "label",
+   "fieldtype": "Link",
+   "label": "Label",
+   "options": "Jarz Customer Label",
+   "reqd": 1,
+   "in_list_view": 1,
+   "bold": 1
+  },
+  {
+   "fieldname": "customer",
+   "fieldtype": "Link",
+   "label": "Customer",
+   "options": "Customer",
+   "read_only": 1
+  },
+  {
+   "fieldname": "customer_name",
+   "fieldtype": "Data",
+   "label": "Customer Name",
+   "read_only": 1,
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "item_code",
+   "fieldtype": "Link",
+   "label": "Item Code",
+   "options": "Item",
+   "read_only": 1
+  },
+  {
+   "fieldname": "item_name",
+   "fieldtype": "Data",
+   "label": "Item Name",
+   "read_only": 1,
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "counted_qty",
+   "fieldtype": "Int",
+   "label": "Counted Qty",
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "system_qty",
+   "fieldtype": "Int",
+   "label": "System Qty",
+   "read_only": 1,
+   "in_list_view": 1,
+   "description": "Label ledger quantity when the count was submitted."
+  },
+  {
+   "fieldname": "difference",
+   "fieldtype": "Int",
+   "label": "Difference",
+   "read_only": 1,
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "movement",
+   "fieldtype": "Link",
+   "label": "Movement",
+   "options": "Jarz Label Movement",
+   "read_only": 1,
+   "description": "The Adjustment posted on approval."
+  }
+ ],
+ "grid_page_length": 50,
+ "index_web_pages_for_search": 1,
+ "istable": 1,
+ "links": [],
+ "modified": "2026-10-23 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "jarz pos",
+ "name": "Branch Weekly Count Label",
+ "naming_rule": "Random",
+ "owner": "Administrator",
+ "permissions": [],
+ "row_format": "Dynamic",
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}

@@ -26,7 +26,9 @@
   "differences_count",
   "client_request_id",
   "section_items",
-  "items"
+  "items",
+  "section_labels",
+  "labels"
  ],
  "fields": [
   {
@@ -182,11 +184,23 @@
    "fieldtype": "Table",
    "label": "Items",
    "options": "Branch Weekly Count Item"
+  },
+  {
+   "fieldname": "section_labels",
+   "fieldtype": "Section Break",
+   "label": "Counted B2B Labels",
+   "collapsible": 1
+  },
+  {
+   "fieldname": "labels",
+   "fieldtype": "Table",
+   "label": "Labels",
+   "options": "Branch Weekly Count Label"
   }
  ],
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2026-10-20 12:00:00.000000",
+ "modified": "2026-10-23 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "jarz pos",
  "name": "Branch Weekly Count",
