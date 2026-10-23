@@ -180,6 +180,8 @@ class TypedNumberTest(unittest.TestCase):
 		self.assertEqual(d.typed_number_warnings("2 jars and 3 spoons"), [])
 		self.assertEqual(d.typed_number_warnings("الجار 250 جرام"), [])
 		self.assertEqual(d.typed_number_warnings("ready in 45 minutes"), [])
+		self.assertEqual(d.typed_number_warnings("Mango: الوسط 310 سعرة، الكبير 405 سعرة"), [])
+		self.assertEqual(d.typed_number_warnings("about 510 kcal"), [])
 		self.assertEqual(d.typed_number_warnings(""), [])
 
 

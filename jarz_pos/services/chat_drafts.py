@@ -65,7 +65,8 @@ _CURRENCY_AFTER = re.compile(r"(\d+(?:[.,]\d+)?)\s*" + _CURRENCY, re.IGNORECASE)
 _CURRENCY_BEFORE = re.compile(_CURRENCY + r"\s*(\d+(?:[.,]\d+)?)", re.IGNORECASE)
 _UNIT_AFTER = re.compile(
 	r"^\s*(?:%|جرام|جم|غرام|g\b|gm|gr|kg|كيلو|ml|مل|لتر|دقيقة|دقايق|دقائق|ساعة|ساعات|"
-	r"min|mins|minutes?|hours?|hrs?|يوم|أيام|ايام|days?|قطعة|قطع|حبة|pcs|pieces?)",
+	r"min|mins|minutes?|hours?|hrs?|يوم|أيام|ايام|days?|قطعة|قطع|حبة|pcs|pieces?|"
+	r"سعرة|سعرات|سعر حراري|كالوري|kcal|calories?|cal\b)",
 	re.IGNORECASE,
 )
 
