@@ -61,3 +61,6 @@ jarz_pos.Patches.v1_9.seed_meta_capi_settings
 # JARZ prints every customer label (owner, 2026-10-22): the we_print flag is now
 # hidden and forced to 1, so flip any row saved with 0. Idempotent.
 jarz_pos.Patches.v1_9.label_we_print_always
+# The day-7 message step was removed (owner, 2026-10-24). Any still-Pending day7
+# touch is cancelled so nobody sends it. Idempotent.
+jarz_pos.Patches.v1_9.cancel_day7_followups

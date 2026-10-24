@@ -8,6 +8,8 @@ Methods (all under ``jarz_pos.api.customer_followups``):
 * ``get_followup_stats(from_date=None, to_date=None)`` -> outcome numbers
 * ``run_generator_now()`` -> ``{enabled, invoices, touches, errors}`` (manager)
 * ``get_followup_settings()`` -> the settings the screen needs (no secrets)
+* ``draft_followup_message(name, refresh=0)`` -> Claude-written WhatsApp text (template fallback)
+* ``get_call_brief(name, refresh=0)`` -> Claude-written briefing for a call (code fallback)
 
 Business rules live in ``jarz_pos.services.customer_followups``.
 Access: JARZ Manager, line managers, System Manager.
@@ -95,3 +97,21 @@ def get_followup_settings():
 		"apology_discount_percent": s["apology_discount_percent"],
 		"high_value_order_min": s["high_value_order_min"],
 	}
+
+
+@frappe.whitelist(methods=["POST"])
+def draft_followup_message(name, refresh=0):
+	"""Claude-written WhatsApp text for a message touch (cached; template on failure)."""
+	_gate()
+	from jarz_pos.services import customer_followups as svc
+
+	return svc.draft_message(name, refresh=frappe.utils.cint(refresh) == 1)
+
+
+@frappe.whitelist(methods=["POST"])
+def get_call_brief(name, refresh=0):
+	"""Claude-written briefing for a call touch (cached; code-built text on failure)."""
+	_gate()
+	from jarz_pos.services import customer_followups as svc
+
+	return svc.call_brief(name, refresh=frappe.utils.cint(refresh) == 1)

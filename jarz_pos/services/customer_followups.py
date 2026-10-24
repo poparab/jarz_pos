@@ -1,7 +1,7 @@
 """Follow-up cycle for delivered retail orders ("Jarz Follow-up Touch").
 
 After a retail order is delivered the customer gets a short, fixed sequence of
-messages and calls (3 hours, day 2, 7, 30, 32, 45, 50). Each step is one
+messages and calls (3 hours, day 2, 30, 32, 45, 50). Each step is one
 ``Jarz Follow-up Touch`` row that a person works through the follow-up screen.
 
 Layout of this module
@@ -14,6 +14,9 @@ Layout of this module
   run must not break the scheduler tick it shares with unrelated jobs.
 * **API-facing operations**: :func:`log_touch`, :func:`skip_touch`,
   :func:`get_due_touches`, :func:`get_followup_stats`.
+* **Claude helpers** (best effort, never raise): :func:`draft_message` writes the
+  WhatsApp text of a message touch, :func:`call_brief` the briefing for a call.
+  Both cache on the Touch row and fall back to code-built text.
 
 Retail scope is the one defined in ``rfm_segmentation`` (no B2B, no samples or
 staff orders, website orders only while the segmentation setting says so).
@@ -58,7 +61,6 @@ _PLAN = (
 	("3h", MESSAGE, ("hours", 3), "all", None),
 	("3h", CALL, ("hours", 3), "high", None),
 	("day2", CALL, ("days", 2), "all", "3h"),
-	("day7", MESSAGE, ("days", 7), "all", None),
 	("day30", CALL, ("days", 30), "repeat", None),
 	("day32", MESSAGE, ("days", 32), "all", "day30"),
 	("day45", CALL, ("days", 45), "repeat_high", None),
@@ -667,6 +669,8 @@ def _touch_row(t: dict[str, Any], cust: dict[str, Any], settings: dict[str, Any]
 		order_no,
 		settings.get("offer_text") or "",
 	)
+	ai_message = str(t.get("ai_message") or "")
+	ai_brief = str(t.get("ai_brief") or "")
 	due_at = t.get("due_at")
 	is_overdue = bool(due_at) and getdate(due_at) < getdate(nowdate())
 	return {
@@ -675,7 +679,10 @@ def _touch_row(t: dict[str, Any], cust: dict[str, Any], settings: dict[str, Any]
 		"customer_name": customer_name,
 		"phone": phone,
 		"whatsapp_msisdn": whatsapp_msisdn(phone),
-		"message_text": text,
+		"message_text": ai_message or text,
+		"template_text": text,
+		"ai_message": ai_message,
+		"ai_brief": ai_brief,
 		"step": t.get("step"),
 		"channel": t.get("channel"),
 		"status": t.get("status"),
@@ -733,6 +740,8 @@ def get_due_touches(user: str | None = None) -> dict[str, Any]:
 			"value_band",
 			"order_value",
 			"lifetime_orders",
+			"ai_message",
+			"ai_brief",
 		],
 		order_by="due_at asc, name asc",
 		limit_page_length=1000,
@@ -816,6 +825,335 @@ def get_followup_stats(from_date: str | None = None, to_date: str | None = None)
 		"reordered_customers": reordered,
 		"reorder_rate": round(reordered / touched, 4) if touched else 0,
 	}
+
+
+# ---------------------------------------------------------------------------
+# Claude: message text and call brief (best effort, never raises)
+# ---------------------------------------------------------------------------
+
+#: Steps whose text may quote the offer (and only when offer_text is set).
+OFFER_STEPS = ("day45", "day50")
+
+_STEP_PURPOSE = {
+	"3h": "Thank the customer for the order and ask how the order was.",
+	"day32": "We miss the customer: a warm check-in, no pressure.",
+	"day50": "A warm check-in that also includes the offer (only if one is given).",
+}
+_DEFAULT_PURPOSE = "A short, warm check-in."
+
+_MESSAGE_SYSTEM = (
+	"You write ONE WhatsApp message from Jarz (a dessert-jar bakery in Egypt) to a customer, "
+	"in Egyptian colloquial Arabic. Warm and short: at most 350 characters, at most one emoji, "
+	"address the customer as «حضرتك», sign off as Jarz on the same line. "
+	"Mention at most one item from the order by name, never a list of items. "
+	"Use the first name only if it looks like a real name (3+ letters); otherwise greet with «يا فندم». "
+	"Hard rules: never write a price, discount or promise that is not given in the context; "
+	"mention the offer ONLY when the context has an 'Offer' line, quoting it exactly as given; "
+	"no links; output just the message text, nothing else."
+)
+
+_BRIEF_SYSTEM = (
+	"You prepare a short briefing, in Egyptian colloquial Arabic, for a Jarz (dessert-jar bakery) "
+	"team member who is about to phone a customer. At most 8 short lines: one line on who the "
+	"customer is, what they usually order, how the last order went or any past complaint, then a "
+	"line starting with «ابدأ المكالمة بـ:» followed by one suggested opening sentence, then 2 short "
+	"talking points. "
+	"Speak about the customer gender-neutrally (use «العميل» / «حضرتك», never «ه/ها» slashes). "
+	"Use the first name only if it looks like a real name (3+ letters); otherwise write «العميل». "
+	"Hard rules: never write a price, discount or promise that is not given in the context; "
+	"mention the offer ONLY when the context has an 'Offer' line, quoting it exactly as given; "
+	"no links; output just the briefing text."
+)
+
+
+def _claude_text(system: str, context_text: str) -> str:
+	"""One Claude call -> the text. Raises on any problem (callers fall back)."""
+	from jarz_pos.services.chat_settings import get_chat_settings
+
+	settings = get_chat_settings() or {}
+	api_key = settings.get("anthropic_api_key")
+	if not api_key:
+		raise RuntimeError("no Anthropic API key configured")
+	model = settings.get("draft_model") or "claude-sonnet-5-5"
+
+	import anthropic
+
+	client = anthropic.Anthropic(api_key=api_key, timeout=45.0, max_retries=1)
+	resp = client.messages.create(
+		model=model,
+		max_tokens=600,
+		system=[{"type": "text", "text": system}],
+		messages=[{"role": "user", "content": context_text}],
+		extra_body={"output_config": {"effort": "low"}},
+	)
+	texts = [
+		str(getattr(b, "text", "") or "")
+		for b in (getattr(resp, "content", None) or [])
+		if getattr(b, "type", None) == "text"
+	]
+	text = "\n".join(t.strip() for t in texts if t.strip()).strip()
+	if not text:
+		raise RuntimeError("Claude returned no text")
+	return text
+
+
+def _log_ai_failure(what: str, name: str, reason: str) -> None:
+	try:  # log_error itself can raise
+		frappe.log_error("%s for %s failed: %s" % (what, name, reason), "followups: Claude %s" % what)
+	except Exception:
+		pass
+
+
+def _load_touch_for_ai(name: str) -> dict[str, Any] | None:
+	try:
+		return frappe.db.get_value(TOUCH_DOCTYPE, name, "*", as_dict=True)
+	except Exception:
+		return None
+
+
+def _delivered_items(invoice: str | None) -> list[str]:
+	if not invoice:
+		return []
+	try:
+		rows = frappe.get_all(
+			"Sales Invoice Item",
+			filters={"parent": invoice, "parenttype": "Sales Invoice"},
+			fields=["item_name", "qty"],
+			order_by="idx asc",
+			limit_page_length=30,
+			ignore_permissions=True,
+		)
+	except Exception:
+		return []
+	out = []
+	for r in rows:
+		label = str(r.get("item_name") or "").strip()
+		if label:
+			qty = float(r.get("qty") or 0)
+			out.append("%s x%g" % (label, qty) if qty > 1 else label)
+	return out
+
+
+def _first_order_date(customer: str | None) -> str | None:
+	try:
+		row = frappe.db.sql(
+			"SELECT MIN(posting_date) FROM `tabSales Invoice` "
+			"WHERE customer = %s AND docstatus = 1 AND IFNULL(is_return, 0) = 0",
+			(customer,),
+		)
+		return str(row[0][0]) if row and row[0][0] else None
+	except Exception:
+		return None
+
+
+def _offer_for(step: str | None, settings: dict[str, Any]) -> str:
+	"""The offer text, only for the steps allowed to mention it."""
+	if step in OFFER_STEPS:
+		return str(settings.get("offer_text") or "").strip()
+	return ""
+
+
+def build_message_context(t: dict[str, Any], card: dict[str, Any], items: list[str], offer: str) -> str:
+	"""The user-side context text for the message call. Pure."""
+	lines = [
+		"Customer first name: %s" % (first_name_of(t.get("customer_name") or card.get("customer_name")) or "-"),
+		"Step: %s" % t.get("step"),
+		"Channel: %s" % t.get("channel"),
+		"Purpose: %s" % _STEP_PURPOSE.get(str(t.get("step")), _DEFAULT_PURPOSE),
+		"Order number: %s" % (t.get("woo_order_id") or t.get("invoice") or "-"),
+		"Order value: %g EGP" % float(t.get("order_value") or 0),
+		"Items in the delivered order: %s" % (", ".join(items) if items else "-"),
+		"Lifetime orders: %s" % (t.get("lifetime_orders") or card.get("total_orders") or 0),
+		"Customer facts: %s orders, last order %s, usually orders: %s"
+		% (
+			card.get("total_orders") or 0,
+			card.get("last_order_date") or "-",
+			", ".join(card.get("recent_items") or []) or "-",
+		),
+	]
+	if offer:
+		lines.append("Offer: %s" % offer)
+	return "\n".join(lines)
+
+
+def _previous_touches(customer: str | None, exclude: str | None) -> list[dict[str, Any]]:
+	try:
+		return frappe.get_all(
+			TOUCH_DOCTYPE,
+			filters={"customer": customer, "status": "Done", "name": ["!=", exclude or ""]},
+			fields=["step", "channel", "reached", "outcome", "notes"],
+			order_by="done_at desc",
+			limit_page_length=10,
+			ignore_permissions=True,
+		)
+	except Exception:
+		return []
+
+
+def _brief_facts(
+	t: dict[str, Any], card: dict[str, Any], history: list[dict[str, Any]], top: list[str]
+) -> dict[str, Any]:
+	return {
+		"first_name": first_name_of(t.get("customer_name") or card.get("customer_name")),
+		"total_orders": int(card.get("total_orders") or t.get("lifetime_orders") or 0),
+		"first_order_date": card.get("first_order_date"),
+		"last_order_date": card.get("last_order_date"),
+		"last_order_total": card.get("last_order_total"),
+		"lifetime_value": card.get("lifetime_value"),
+		"top_items": top or list(card.get("recent_items") or []),
+		"segment": card.get("customer_segment"),
+		"is_regular": int(card.get("rfm_is_regular") or 0),
+		"territory": card.get("territory"),
+		"step": t.get("step"),
+		"channel": t.get("channel"),
+		"order_no": t.get("woo_order_id") or t.get("invoice") or "",
+		"order_value": float(t.get("order_value") or 0),
+		"history": history,
+	}
+
+
+def build_brief_context(facts: dict[str, Any], offer: str) -> str:
+	"""The user-side context text for the brief call. Pure."""
+	last_total = facts.get("last_order_total")
+	ltv = facts.get("lifetime_value")
+	lines = [
+		"Customer first name: %s" % (facts.get("first_name") or "-"),
+		"Total orders: %s, first order %s, last order %s (total %s), lifetime value %s"
+		% (
+			facts.get("total_orders"),
+			facts.get("first_order_date") or "-",
+			facts.get("last_order_date") or "-",
+			last_total if last_total is not None else "-",
+			ltv if ltv is not None else "-",
+		),
+		"Top items: %s" % (", ".join(facts.get("top_items") or []) or "-"),
+		"Segment: %s, regular customer: %s, territory: %s"
+		% (facts.get("segment") or "-", "yes" if facts.get("is_regular") else "no", facts.get("territory") or "-"),
+		"This touch: step %s, channel %s, order %s, value %g EGP"
+		% (facts.get("step"), facts.get("channel"), facts.get("order_no") or "-", float(facts.get("order_value") or 0)),
+	]
+	hist = facts.get("history") or []
+	if hist:
+		lines.append("Earlier follow-ups (newest first):")
+		for h in hist:
+			lines.append(
+				"- %s %s | reached: %s | outcome: %s | notes: %s"
+				% (
+					h.get("step"),
+					h.get("channel"),
+					h.get("reached") or "-",
+					h.get("outcome") or "-",
+					h.get("notes") or "-",
+				)
+			)
+	else:
+		lines.append("Earlier follow-ups: none")
+	if offer:
+		lines.append("Offer: %s" % offer)
+	return "\n".join(lines)
+
+
+def fallback_brief(facts: dict[str, Any], offer: str = "") -> str:
+	"""A plain Arabic brief built from the facts by code (no AI). Pure."""
+	name = facts.get("first_name") or "العميل"
+	lines = ["العميل: %s — عدد طلباته: %s" % (name, facts.get("total_orders") or 0)]
+	if facts.get("first_order_date") or facts.get("last_order_date"):
+		lines.append(
+			"أول طلب: %s — آخر طلب: %s" % (facts.get("first_order_date") or "-", facts.get("last_order_date") or "-")
+		)
+	if facts.get("top_items"):
+		lines.append("بيطلب عادة: %s" % "، ".join(facts["top_items"]))
+	complaints = [h for h in facts.get("history") or [] if h.get("outcome") in ("Quality", "Delivery")]
+	if complaints:
+		lines.append("ملاحظة سابقة: %s" % (complaints[0].get("notes") or complaints[0].get("outcome")))
+	lines.append("ابدأ المكالمة بـ: أهلاً %s، معاك من Jarz، حبيت أطمن على طلبك." % name)
+	lines.append("اسأل عن الطعم والتغليف والتوصيل.")
+	if offer:
+		lines.append("العرض: %s" % offer)
+	return "\n".join(lines)
+
+
+def _template_text_for(t: dict[str, Any], settings: dict[str, Any]) -> str:
+	# nosemgrep: frappe-ssti -- render_template here is this module's own str.replace placeholder filler, not Jinja
+	return render_template(
+		settings.get("templates", {}).get(template_key(t.get("step"), t.get("channel")), ""),
+		first_name_of(t.get("customer_name")),
+		t.get("woo_order_id") or t.get("invoice") or "",
+		settings.get("offer_text") or "",
+	)
+
+
+def draft_message(name: str, refresh: bool = False) -> dict[str, Any]:
+	"""Claude-written WhatsApp text for a touch, cached on the row. Never raises."""
+	settings: dict[str, Any] = {}
+	touch: dict[str, Any] | None = None
+	try:
+		touch = _load_touch_for_ai(name)
+		if not touch:
+			return {"name": name, "message_text": "", "source": "template", "error": "touch not found"}
+		if touch.get("ai_message") and not refresh:
+			return {"name": name, "message_text": touch["ai_message"], "source": "claude", "cached": True}
+
+		from jarz_pos.services import chat_common as cc
+
+		settings = load_settings()
+		card = cc.customer_card(touch.get("customer")) or {}
+		context = build_message_context(
+			touch, card, _delivered_items(touch.get("invoice")), _offer_for(touch.get("step"), settings)
+		)
+		text = _claude_text(_MESSAGE_SYSTEM, context)
+		frappe.db.set_value(
+			TOUCH_DOCTYPE,
+			name,
+			{"ai_message": text, "ai_generated_at": frappe.utils.now_datetime()},
+			update_modified=False,
+		)
+		return {"name": name, "message_text": text, "source": "claude", "cached": False}
+	except Exception as exc:
+		reason = (str(exc) or type(exc).__name__)[:200]
+		_log_ai_failure("message", name, reason)
+		try:
+			fallback = _template_text_for(touch or {}, settings or load_settings())
+		except Exception:
+			fallback = ""
+		return {"name": name, "message_text": fallback, "source": "template", "error": reason}
+
+
+def call_brief(name: str, refresh: bool = False) -> dict[str, Any]:
+	"""Claude-written briefing for a call touch, cached on the row. Never raises."""
+	facts: dict[str, Any] = {}
+	offer = ""
+	try:
+		touch = _load_touch_for_ai(name)
+		if not touch:
+			return {"name": name, "brief": "", "source": "template", "error": "touch not found"}
+		if touch.get("ai_brief") and not refresh:
+			return {"name": name, "brief": touch["ai_brief"], "source": "claude", "cached": True}
+
+		from jarz_pos.services import chat_common as cc
+
+		settings = load_settings()
+		customer = touch.get("customer")
+		# The brief only carries the offer on the day-45 call.
+		offer = _offer_for("day45", settings) if touch.get("step") == "day45" else ""
+		card = dict(cc.customer_card(customer) or {})
+		card["first_order_date"] = _first_order_date(customer)
+		extra = _customer_info([customer]).get(customer) or {}
+		card["customer_segment"] = extra.get("customer_segment")
+		card["rfm_is_regular"] = extra.get("rfm_is_regular")
+		facts = _brief_facts(touch, card, _previous_touches(customer, name), cc.top_items(customer, 3))
+		text = _claude_text(_BRIEF_SYSTEM, build_brief_context(facts, offer))
+		frappe.db.set_value(
+			TOUCH_DOCTYPE,
+			name,
+			{"ai_brief": text, "ai_generated_at": frappe.utils.now_datetime()},
+			update_modified=False,
+		)
+		return {"name": name, "brief": text, "source": "claude", "cached": False}
+	except Exception as exc:
+		reason = (str(exc) or type(exc).__name__)[:200]
+		_log_ai_failure("brief", name, reason)
+		return {"name": name, "brief": fallback_brief(facts, offer), "source": "template", "error": reason}
 
 
 # ---------------------------------------------------------------------------

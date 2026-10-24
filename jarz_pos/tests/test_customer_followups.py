@@ -10,6 +10,7 @@ import sys
 import types
 import unittest
 from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 try:  # pragma: no cover - depends on the environment
 	import frappe
@@ -68,7 +69,6 @@ class PlanTouchesTest(unittest.TestCase):
 				[
 					("3h", "Message"),
 					("day2", "Call"),
-					("day7", "Message"),
 					("day32", "Message"),
 					("day50", "Message"),
 				]
@@ -87,7 +87,7 @@ class PlanTouchesTest(unittest.TestCase):
 
 	def test_repeat_high_value_gets_everything(self):
 		rows = plan(D(2026, 10, 15, 14, 0), value=1000, repeat=True)
-		self.assertEqual(len(rows), 8)
+		self.assertEqual(len(rows), 7)
 		self.assertIn(("day45", "Call"), keys(rows))
 
 	def test_high_value_boundary(self):
@@ -117,7 +117,6 @@ class PlanTouchesTest(unittest.TestCase):
 	def test_day_offsets_use_calendar_days(self):
 		rows = plan(D(2026, 10, 15, 14, 0), value=2000, repeat=True)
 		self.assertEqual(due(rows, "day2", "Call"), D(2026, 10, 17, 12, 0))
-		self.assertEqual(due(rows, "day7", "Message"), D(2026, 10, 22, 11, 0))
 		self.assertEqual(due(rows, "day30", "Call"), D(2026, 11, 14, 12, 0))
 		self.assertEqual(due(rows, "day50", "Message"), D(2026, 12, 4, 11, 0))
 
@@ -178,7 +177,7 @@ class LogEffectsTest(unittest.TestCase):
 			f.decide_log_effects("Message", "3h", None, "Banana")
 
 	def test_message_outcome_without_reached_is_fine(self):
-		e = f.decide_log_effects("Message", "day7", None, "Happy")
+		e = f.decide_log_effects("Message", "day32", None, "Happy")
 		self.assertIsNone(e["skip_followers_of"])
 
 
@@ -236,6 +235,194 @@ class RetailScopeTest(unittest.TestCase):
 			rfm.compute_flags(3, 1000, 4, 1000), {"rfm_is_regular": 0, "rfm_has_high_value_order": 1}
 		)
 		self.assertEqual(rfm.compute_flags(0, 0, 0, 0), {"rfm_is_regular": 0, "rfm_has_high_value_order": 0})
+
+
+
+class Day7RemovedTest(unittest.TestCase):
+	def test_day7_not_planned_for_anyone(self):
+		for repeat in (False, True):
+			steps = {r["step"] for r in plan(D(2026, 10, 15, 14, 0), value=2000, repeat=repeat)}
+			self.assertNotIn("day7", steps)
+
+	def test_day7_has_no_template_key(self):
+		self.assertNotIn("tpl_msg_day7", [f.template_key(s, c) for s, c, _o, _r, _k in f._PLAN])
+
+
+TOUCH = {
+	"name": "FUT-00001",
+	"customer": "CUST-1",
+	"customer_name": "Mona Ahmed",
+	"invoice": "SINV-1",
+	"woo_order_id": 17900,
+	"step": "day50",
+	"channel": "Message",
+	"order_value": 450,
+	"lifetime_orders": 3,
+	"ai_message": "",
+	"ai_brief": "",
+}
+LOADED_SETTINGS = {
+	"offer_text": "خصم على طلبك الجاي",
+	"templates": {"tpl_msg_day50": "أهلاً {first_name}، طلب {order_no}. {offer}"},
+}
+
+
+class DraftMessageTest(unittest.TestCase):
+	def test_returns_cached_ai_message(self):
+		touch = dict(TOUCH, ai_message="رسالة جاهزة")
+		with patch.object(f, "_load_touch_for_ai", return_value=touch), patch.object(
+			f, "_claude_text"
+		) as call:
+			out = f.draft_message("FUT-00001")
+		call.assert_not_called()
+		self.assertEqual(out["message_text"], "رسالة جاهزة")
+		self.assertEqual(out["source"], "claude")
+		self.assertTrue(out["cached"])
+
+	def test_refresh_calls_claude_and_saves(self):
+		touch = dict(TOUCH, ai_message="قديمة")
+		db = SimpleNamespace(set_value=MagicMock())
+		fake_cc = SimpleNamespace(customer_card=lambda c: {"total_orders": 3}, top_items=lambda c, n: [])
+		with patch.object(f, "_load_touch_for_ai", return_value=touch), patch.object(
+			f, "load_settings", return_value=LOADED_SETTINGS
+		), patch.object(f, "_delivered_items", return_value=["Tiramisu"]), patch.object(
+			f, "_claude_text", return_value="رسالة جديدة"
+		), patch.object(f.frappe, "db", db, create=True), patch.dict(
+			sys.modules, {"jarz_pos.services.chat_common": fake_cc}
+		):
+			out = f.draft_message("FUT-00001", refresh=True)
+		self.assertEqual(
+			out, {"name": "FUT-00001", "message_text": "رسالة جديدة", "source": "claude", "cached": False}
+		)
+		args = db.set_value.call_args
+		self.assertEqual(args.args[:2], (f.TOUCH_DOCTYPE, "FUT-00001"))
+		self.assertEqual(args.args[2]["ai_message"], "رسالة جديدة")
+		self.assertIs(args.kwargs["update_modified"], False)
+
+	def test_no_api_key_falls_back_to_template(self):
+		fake_cc = SimpleNamespace(customer_card=lambda c: {}, top_items=lambda c, n: [])
+		fake_settings = SimpleNamespace(get_chat_settings=lambda: {})
+		with patch.object(f, "_load_touch_for_ai", return_value=dict(TOUCH)), patch.object(
+			f, "load_settings", return_value=LOADED_SETTINGS
+		), patch.object(f, "_delivered_items", return_value=[]), patch.object(
+			f.frappe, "log_error", MagicMock()
+		) as log, patch.dict(
+			sys.modules,
+			{"jarz_pos.services.chat_common": fake_cc, "jarz_pos.services.chat_settings": fake_settings},
+		):
+			out = f.draft_message("FUT-00001")
+		self.assertEqual(out["source"], "template")
+		self.assertIn("API key", out["error"])
+		self.assertEqual(out["message_text"], "أهلاً Mona، طلب 17900. خصم على طلبك الجاي")
+		log.assert_called_once()
+
+	def test_failing_log_error_never_escapes(self):
+		with patch.object(f, "_load_touch_for_ai", side_effect=RuntimeError("boom")), patch.object(
+			f, "load_settings", return_value=LOADED_SETTINGS
+		), patch.object(f.frappe, "log_error", side_effect=RuntimeError("log failed")):
+			out = f.draft_message("FUT-00001")
+		self.assertEqual(out["source"], "template")
+
+	def test_claude_text_reads_text_blocks(self):
+		block = SimpleNamespace(type="text", text="  أهلاً  ")
+		client = MagicMock()
+		client.messages.create.return_value = SimpleNamespace(content=[SimpleNamespace(type="thinking"), block])
+		fake_anthropic = SimpleNamespace(Anthropic=MagicMock(return_value=client))
+		fake_settings = SimpleNamespace(
+			get_chat_settings=lambda: {"anthropic_api_key": "k", "draft_model": "claude-sonnet-5-5"}
+		)
+		with patch.dict(
+			sys.modules, {"anthropic": fake_anthropic, "jarz_pos.services.chat_settings": fake_settings}
+		):
+			text = f._claude_text("sys", "ctx")
+		self.assertEqual(text, "أهلاً")
+		fake_anthropic.Anthropic.assert_called_once_with(api_key="k", timeout=45.0, max_retries=1)
+		kw = client.messages.create.call_args.kwargs
+		self.assertEqual(kw["model"], "claude-sonnet-5-5")
+		self.assertEqual(kw["extra_body"], {"output_config": {"effort": "low"}})
+		self.assertNotIn("tools", kw)
+
+	def test_empty_text_raises(self):
+		client = MagicMock()
+		client.messages.create.return_value = SimpleNamespace(content=[])
+		fake_anthropic = SimpleNamespace(Anthropic=MagicMock(return_value=client))
+		fake_settings = SimpleNamespace(get_chat_settings=lambda: {"anthropic_api_key": "k"})
+		with patch.dict(
+			sys.modules, {"anthropic": fake_anthropic, "jarz_pos.services.chat_settings": fake_settings}
+		):
+			with self.assertRaises(RuntimeError):
+				f._claude_text("sys", "ctx")
+
+
+class OfferGatingTest(unittest.TestCase):
+	def test_offer_only_for_day45_and_day50(self):
+		s = {"offer_text": "  عرض خاص  "}
+		self.assertEqual(f._offer_for("day45", s), "عرض خاص")
+		self.assertEqual(f._offer_for("day50", s), "عرض خاص")
+		for step in ("3h", "day2", "day30", "day32"):
+			self.assertEqual(f._offer_for(step, s), "")
+
+	def test_blank_offer_is_dropped(self):
+		self.assertEqual(f._offer_for("day50", {"offer_text": "  "}), "")
+
+	def test_context_carries_offer_line_only_when_given(self):
+		card = {"total_orders": 3}
+		with_offer = f.build_message_context(dict(TOUCH), card, ["Tiramisu"], "عرض خاص")
+		without = f.build_message_context(dict(TOUCH, step="3h"), card, ["Tiramisu"], "")
+		self.assertIn("Offer: عرض خاص", with_offer)
+		self.assertNotIn("Offer:", without)
+		self.assertIn("Customer first name: Mona", with_offer)
+		self.assertIn("Order number: 17900", with_offer)
+
+
+class CallBriefTest(unittest.TestCase):
+	FACTS = {
+		"first_name": "Mona",
+		"total_orders": 4,
+		"first_order_date": "2026-01-02",
+		"last_order_date": "2026-10-20",
+		"top_items": ["Tiramisu", "Lotus"],
+		"history": [{"step": "3h", "channel": "Call", "outcome": "Quality", "notes": "الكريمة سايحة"}],
+	}
+
+	def test_fallback_brief_contains_order_count_and_opening(self):
+		text = f.fallback_brief(self.FACTS)
+		self.assertIn("عدد طلباته: 4", text)
+		self.assertIn("ابدأ المكالمة بـ:", text)
+		self.assertIn("Tiramisu", text)
+		self.assertIn("الكريمة سايحة", text)
+		self.assertNotIn("العرض", text)
+
+	def test_fallback_brief_adds_offer_when_given(self):
+		self.assertIn("العرض: عرض خاص", f.fallback_brief(self.FACTS, "عرض خاص"))
+
+	def test_call_brief_falls_back_without_claude(self):
+		touch = dict(TOUCH, step="day45", channel="Call")
+		fake_cc = SimpleNamespace(
+			customer_card=lambda c: {"total_orders": 5, "last_order_date": "2026-10-20"},
+			top_items=lambda c, n: ["Tiramisu"],
+		)
+		with patch.object(f, "_load_touch_for_ai", return_value=touch), patch.object(
+			f, "load_settings", return_value=LOADED_SETTINGS
+		), patch.object(f, "_first_order_date", return_value="2026-01-02"), patch.object(
+			f, "_customer_info", return_value={"CUST-1": {"customer_segment": "Loyal"}}
+		), patch.object(f, "_previous_touches", return_value=[]), patch.object(
+			f, "_claude_text", side_effect=RuntimeError("no key")
+		), patch.object(f.frappe, "log_error", MagicMock()), patch.dict(
+			sys.modules, {"jarz_pos.services.chat_common": fake_cc}
+		):
+			out = f.call_brief("FUT-00001")
+		self.assertEqual(out["source"], "template")
+		self.assertEqual(out["error"], "no key")
+		self.assertIn("عدد طلباته: 5", out["brief"])
+		self.assertIn("العرض: خصم على طلبك الجاي", out["brief"])
+
+	def test_call_brief_returns_cache(self):
+		touch = dict(TOUCH, channel="Call", ai_brief="ملخص")
+		with patch.object(f, "_load_touch_for_ai", return_value=touch):
+			out = f.call_brief("FUT-00001")
+		self.assertEqual(out["brief"], "ملخص")
+		self.assertTrue(out["cached"])
 
 
 if __name__ == "__main__":

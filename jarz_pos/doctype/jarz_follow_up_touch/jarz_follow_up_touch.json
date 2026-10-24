@@ -31,7 +31,11 @@
   "done_at",
   "cancel_reason",
   "apology_code",
-  "escalation_task"
+  "escalation_task",
+  "section_claude",
+  "ai_message",
+  "ai_brief",
+  "ai_generated_at"
  ],
  "fields": [
   {
@@ -205,11 +209,35 @@
    "fieldtype": "Link",
    "label": "Escalation Task",
    "options": "Jarz Task"
+  },
+  {
+   "fieldname": "section_claude",
+   "fieldtype": "Section Break",
+   "label": "Claude",
+   "collapsible": 1
+  },
+  {
+   "fieldname": "ai_message",
+   "fieldtype": "Small Text",
+   "label": "AI Message",
+   "read_only": 1
+  },
+  {
+   "fieldname": "ai_brief",
+   "fieldtype": "Text",
+   "label": "AI Call Brief",
+   "read_only": 1
+  },
+  {
+   "fieldname": "ai_generated_at",
+   "fieldtype": "Datetime",
+   "label": "AI Generated At",
+   "read_only": 1
   }
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-10-12 12:00:00.000000",
+ "modified": "2026-10-24 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "jarz pos",
  "name": "Jarz Follow-up Touch",
