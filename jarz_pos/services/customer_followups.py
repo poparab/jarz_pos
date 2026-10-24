@@ -47,9 +47,12 @@ OUTCOMES = ("Happy", "Quality", "Delivery", "No Reply", "Opted Out")
 #: day after switching on, or after an outage) drains over a few runs instead
 #: of holding one scheduler worker.
 MAX_INVOICES_PER_RUN = 300
-#: Only orders delivered inside this many days start a cycle: a cycle for an
-#: order delivered a fortnight ago would open with a stale "3 hours" message.
+#: Only orders delivered inside this many days start a cycle on their own. Older
+#: orders are reached once, by hand, through ``backfill_old_cycles``.
 MAX_DELIVERED_AGE_DAYS = 7
+#: How far back ``backfill_old_cycles`` reaches: the longest step the owner asked
+#: to cover for old orders (day45). Day50 still follows a backfilled cycle.
+BACKFILL_MAX_AGE_DAYS = 45
 
 DEFAULT_QUIET_START = _dt.time(22, 0)
 DEFAULT_QUIET_END = _dt.time(11, 0)
@@ -58,10 +61,9 @@ DEFAULT_CALL_END = _dt.time(16, 0)
 
 #: (step, channel, relative_offset_hours | day offset, audience rule, skip_if_reached)
 #: Rules: "all" | "high" | "repeat" | "repeat_high".
+#: The 3-hour thank-you is sent by WooCommerce, not from here (owner, 2026-10-24).
 _PLAN = (
-	("3h", MESSAGE, ("hours", 3), "all", None),
-	("3h", CALL, ("hours", 3), "high", None),
-	("day2", CALL, ("days", 2), "all", "3h"),
+	("day2", CALL, ("days", 2), "all", None),
 	("day30", CALL, ("days", 30), "repeat", None),
 	("day32", MESSAGE, ("days", 32), "all", "day30"),
 	("day45", CALL, ("days", 45), "repeat_high", None),
@@ -334,10 +336,17 @@ def _earlier_retail_orders(customer: str, inv: Any, scope: str) -> int:
 	return int(row[0][0] or 0) if row else 0
 
 
-def _insert_cycle(inv: Any, settings: dict[str, Any], scope: str) -> int:
+def _insert_cycle(
+	inv: Any, settings: dict[str, Any], scope: str, not_before: _dt.datetime | None = None, dry_run: bool = False
+) -> list[dict[str, Any]]:
+	"""Plan and insert *inv*'s cycle; *not_before* drops touches due earlier. Returns the plan."""
 	earlier = _earlier_retail_orders(inv.customer, inv, scope)
 	is_repeat = earlier >= 1
 	plan = plan_touches(inv.delivered_at, inv.grand_total, is_repeat, settings)
+	if not_before is not None:
+		plan = [p for p in plan if p["due_at"] >= not_before]
+	if dry_run or not plan:
+		return plan
 
 	# A newer order replaces the old cycle: do not chase someone who just bought.
 	_cancel_pending(
@@ -368,7 +377,7 @@ def _insert_cycle(inv: Any, settings: dict[str, Any], scope: str) -> int:
 				"lifetime_orders": earlier + 1,
 			}
 		).insert(ignore_permissions=True)
-	return len(plan)
+	return plan
 
 
 def _cancel_superseded(scope_inv_conds: list[str]) -> None:
@@ -447,7 +456,7 @@ def generate_touches() -> dict[str, Any]:
 		for inv in invoices:
 			try:
 				frappe.db.savepoint("followup_invoice")
-				result["touches"] += _insert_cycle(inv, settings, scope)
+				result["touches"] += len(_insert_cycle(inv, settings, scope))
 				result["invoices"] += 1
 			except Exception:
 				result["errors"] += 1
@@ -467,6 +476,99 @@ def generate_touches() -> dict[str, Any]:
 			frappe.log_error(frappe.get_traceback(), "followups: generate_touches failed")
 		except Exception:
 			pass
+	return result
+
+
+def backfill_old_cycles(from_date: Any = None, dry_run: bool = True) -> dict[str, Any]:
+	"""Open the rest of the cycle for orders delivered before the generator reached them.
+
+	Run by hand (bench console). For every retail customer whose latest retail
+	order is Delivered, was delivered 1..BACKFILL_MAX_AGE_DAYS days before
+	*from_date* (default tomorrow) and has no touch yet, plans the cycle as if it
+	had started at delivery and inserts only the touches due on or after
+	*from_date*. A customer who ordered again, or opted out, is left alone.
+	Re-running adds nothing: the invoice then has touches. *dry_run* inserts
+	nothing and returns what would be made.
+	"""
+	from frappe.utils import add_days, getdate, nowdate
+
+	from jarz_pos.services import rfm_segmentation as rfm
+
+	start = getdate(from_date) if from_date else getdate(add_days(nowdate(), 1))
+	not_before = _at(start, _dt.time(0, 0))
+	oldest = start - _dt.timedelta(days=BACKFILL_MAX_AGE_DAYS)
+	result: dict[str, Any] = {
+		"from_date": str(start),
+		"dry_run": int(bool(dry_run)),
+		"invoices": 0,
+		"touches": 0,
+		"by_step": {},
+		"due_on_from_date": {},
+		"errors": 0,
+	}
+	settings = load_settings()
+	if not frappe.db.has_column("Sales Invoice", "custom_sales_invoice_state"):
+		return result
+
+	website_only = rfm.website_only_enabled()
+	scope = rfm.retail_scope_sql(website_only)
+	newer = " AND ".join(rfm.retail_invoice_conditions(website_only, "n"))
+	opt_out = ""
+	if frappe.db.has_column("Customer", CUSTOMER_OPT_OUT_FIELD):
+		opt_out = "AND IFNULL(c.%s, 0) = 0" % CUSTOMER_OPT_OUT_FIELD
+	# An old order's `modified` moves on every later save, so fall back to its posting date.
+	delivered_expr = (
+		"COALESCE(si.custom_delivered_at, TIMESTAMP(si.posting_date))"
+		if frappe.db.has_column("Sales Invoice", "custom_delivered_at")
+		else "TIMESTAMP(si.posting_date)"
+	)
+	woo_col = "si.woo_order_id" if frappe.db.has_column("Sales Invoice", "woo_order_id") else "0"
+
+	# nosemgrep: frappe-sql-format-injection -- woo_col, delivered_expr, scope, newer and opt_out are fixed fragments from has_column checks and module constants; values are bound
+	invoices = frappe.db.sql(
+		f"""
+        SELECT si.name, si.customer, si.grand_total, si.posting_date, si.creation,
+               {woo_col} AS woo_order_id, {delivered_expr} AS delivered_at, c.mobile_no
+        FROM `tabSales Invoice` si
+        INNER JOIN `tabCustomer` c ON c.name = si.customer
+        WHERE si.custom_sales_invoice_state = 'Delivered'
+          AND si.posting_date >= DATE_SUB(%(oldest)s, INTERVAL 2 DAY)
+          AND {delivered_expr} >= %(oldest)s AND {delivered_expr} < %(start)s
+          AND {scope} {opt_out}
+          AND NOT EXISTS (SELECT 1 FROM `tabJarz Follow-up Touch` t WHERE t.invoice = si.name)
+          AND NOT EXISTS (
+              SELECT 1 FROM `tabSales Invoice` n
+              WHERE n.customer = si.customer AND n.name != si.name AND {newer}
+                AND (n.posting_date > si.posting_date
+                     OR (n.posting_date = si.posting_date AND n.creation > si.creation))
+          )
+        ORDER BY {delivered_expr} ASC
+        """,
+		{"oldest": str(oldest), "start": str(start)},
+		as_dict=True,
+	)
+
+	for inv in invoices:
+		try:
+			if not dry_run:
+				frappe.db.savepoint("followup_backfill")
+			plan = _insert_cycle(inv, settings, scope, not_before=not_before, dry_run=dry_run)
+		except Exception:
+			result["errors"] += 1
+			if not dry_run:
+				frappe.db.rollback(save_point="followup_backfill")
+			frappe.log_error(frappe.get_traceback(), "followups: backfill for %s failed" % inv.name)
+			continue
+		if not plan:
+			continue
+		result["invoices"] += 1
+		result["touches"] += len(plan)
+		for p in plan:
+			result["by_step"][p["step"]] = result["by_step"].get(p["step"], 0) + 1
+			if p["due_at"].date() == start:
+				result["due_on_from_date"][p["step"]] = result["due_on_from_date"].get(p["step"], 0) + 1
+	if not dry_run:
+		frappe.db.commit()
 	return result
 
 
@@ -626,7 +728,12 @@ def log_touch(
 	if effects["opt_out"] and frappe.db.has_column("Customer", CUSTOMER_OPT_OUT_FIELD):
 		frappe.db.set_value("Customer", doc.customer, CUSTOMER_OPT_OUT_FIELD, 1, update_modified=False)
 
-	return _touch_row(doc.as_dict(), _customer_info([doc.customer]).get(doc.customer, {}), settings)
+	return _touch_row(
+		doc.as_dict(),
+		_customer_info([doc.customer]).get(doc.customer, {}),
+		settings,
+		_items_by_invoice([doc.invoice]).get(doc.invoice, []),
+	)
 
 
 def skip_touch(name: str, reason: str | None = None, user: str | None = None) -> dict[str, Any]:
@@ -636,7 +743,12 @@ def skip_touch(name: str, reason: str | None = None, user: str | None = None) ->
 	doc.done_by = user or frappe.session.user
 	doc.done_at = frappe.utils.now_datetime()
 	doc.save(ignore_permissions=True)
-	return _touch_row(doc.as_dict(), _customer_info([doc.customer]).get(doc.customer, {}), load_settings())
+	return _touch_row(
+		doc.as_dict(),
+		_customer_info([doc.customer]).get(doc.customer, {}),
+		load_settings(),
+		_items_by_invoice([doc.invoice]).get(doc.invoice, []),
+	)
 
 
 # ---------------------------------------------------------------------------
@@ -655,7 +767,51 @@ def _customer_info(customers: Iterable[str]) -> dict[str, dict[str, Any]]:
 	return {r["name"]: r for r in rows}
 
 
-def _touch_row(t: dict[str, Any], cust: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
+def why_due(cycle_start: Any, today: _dt.date, lifetime_orders: Any = 0, items: Iterable[str] = ()) -> str:
+	"""One Arabic line saying why this customer is on today's list. Pure."""
+	parts = []
+	if cycle_start:
+		day = _to_datetime(cycle_start).date()
+		ago = (today - day).days
+		parts.append("آخر طلب %d/%d (من %d يوم)" % (day.day, day.month, ago))
+	count = int(lifetime_orders or 0)
+	if count == 1:
+		parts.append("أول طلب ليه")
+	elif count > 1:
+		parts.append("طلبه رقم %d" % count)
+	items = [i for i in items if i]
+	if items:
+		parts.append("، ".join(items[:4]) + (" …" if len(items) > 4 else ""))
+	return " · ".join(parts)
+
+
+def _items_by_invoice(invoices: Iterable[str]) -> dict[str, list[str]]:
+	names = sorted({i for i in invoices if i})
+	if not names:
+		return {}
+	out: dict[str, list[str]] = {}
+	try:
+		rows = frappe.get_all(
+			"Sales Invoice Item",
+			filters={"parent": ["in", names], "parenttype": "Sales Invoice"},
+			fields=["parent", "item_name", "qty"],
+			order_by="parent asc, idx asc",
+			limit_page_length=0,
+			ignore_permissions=True,
+		)
+	except Exception:
+		return {}
+	for r in rows:
+		label = str(r.get("item_name") or "").strip()
+		if label:
+			qty = float(r.get("qty") or 0)
+			out.setdefault(r.get("parent"), []).append("%s x%g" % (label, qty) if qty > 1 else label)
+	return out
+
+
+def _touch_row(
+	t: dict[str, Any], cust: dict[str, Any], settings: dict[str, Any], items: Iterable[str] = ()
+) -> dict[str, Any]:
 	from frappe.utils import getdate, nowdate
 
 	from jarz_pos.utils.phone import whatsapp_msisdn
@@ -701,6 +857,7 @@ def _touch_row(t: dict[str, Any], cust: dict[str, Any], settings: dict[str, Any]
 		"reached": t.get("reached") or "",
 		"outcome": t.get("outcome") or "",
 		"notes": t.get("notes") or "",
+		"reason": why_due(t.get("cycle_start"), getdate(nowdate()), t.get("lifetime_orders"), items),
 		"apology_code": t.get("apology_code"),
 		"escalation_task": t.get("escalation_task"),
 	}
@@ -741,6 +898,7 @@ def get_due_touches(user: str | None = None) -> dict[str, Any]:
 			"value_band",
 			"order_value",
 			"lifetime_orders",
+			"cycle_start",
 			"ai_message",
 			"ai_brief",
 		],
@@ -749,7 +907,10 @@ def get_due_touches(user: str | None = None) -> dict[str, Any]:
 	)
 	cust = _customer_info(r["customer"] for r in rows)
 	settings = load_settings()
-	items = [_touch_row(r, cust.get(r["customer"], {}), settings) for r in rows]
+	bought = _items_by_invoice(r.get("invoice") for r in rows)
+	items = [
+		_touch_row(r, cust.get(r["customer"], {}), settings, bought.get(r.get("invoice"), [])) for r in rows
+	]
 	summary = {
 		"due": len(items),
 		"overdue": sum(1 for i in items if i["is_overdue"]),
@@ -836,7 +997,7 @@ def get_followup_stats(from_date: str | None = None, to_date: str | None = None)
 OFFER_STEPS = ("day45", "day50")
 
 _STEP_PURPOSE = {
-	"3h": "Thank the customer for the order and ask how the order was.",
+	"day2": "Ask how the order was (taste, packaging, delivery).",
 	"day32": "We miss the customer: a warm check-in, no pressure.",
 	"day50": "A warm check-in that also includes the offer (only if one is given).",
 }

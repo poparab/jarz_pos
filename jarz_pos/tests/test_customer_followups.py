@@ -65,20 +65,11 @@ class PlanTouchesTest(unittest.TestCase):
 		rows = plan(D(2026, 10, 15, 14, 0))
 		self.assertEqual(
 			sorted(keys(rows)),
-			sorted(
-				[
-					("3h", "Message"),
-					("day2", "Call"),
-					("day32", "Message"),
-					("day50", "Message"),
-				]
-			),
+			sorted([("day2", "Call"), ("day32", "Message"), ("day50", "Message")]),
 		)
 
-	def test_new_high_value_adds_3h_call(self):
-		rows = plan(D(2026, 10, 15, 14, 0), value=1200)
-		self.assertIn(("3h", "Call"), keys(rows))
-		self.assertNotIn(("day30", "Call"), keys(rows))
+	def test_high_value_new_customer_gets_no_extra_touch(self):
+		self.assertEqual(sorted(keys(plan(D(2026, 10, 15, 14, 0), value=1200))), sorted(keys(plan(D(2026, 10, 15, 14, 0)))))
 
 	def test_repeat_low_value_adds_day30_call(self):
 		rows = plan(D(2026, 10, 15, 14, 0), repeat=True)
@@ -87,58 +78,99 @@ class PlanTouchesTest(unittest.TestCase):
 
 	def test_repeat_high_value_gets_everything(self):
 		rows = plan(D(2026, 10, 15, 14, 0), value=1000, repeat=True)
-		self.assertEqual(len(rows), 7)
+		self.assertEqual(len(rows), 5)
 		self.assertIn(("day45", "Call"), keys(rows))
 
 	def test_high_value_boundary(self):
-		self.assertNotIn(("3h", "Call"), keys(plan(D(2026, 10, 15, 14, 0), value=999.99)))
-		self.assertIn(("3h", "Call"), keys(plan(D(2026, 10, 15, 14, 0), value=1000)))
-
-	def test_three_hours_inside_awake_hours_is_exact(self):
-		self.assertEqual(due(plan(D(2026, 10, 15, 13, 0)), "3h", "Message"), D(2026, 10, 15, 16, 0))
-
-	def test_late_delivery_message_moves_to_next_morning(self):
-		# +3h = 00:30 next day, inside quiet hours
-		self.assertEqual(due(plan(D(2026, 10, 15, 21, 30)), "3h", "Message"), D(2026, 10, 16, 11, 0))
-
-	def test_message_due_just_after_quiet_start_same_evening(self):
-		# +3h = 22:30
-		self.assertEqual(due(plan(D(2026, 10, 15, 19, 30)), "3h", "Message"), D(2026, 10, 16, 11, 0))
-
-	def test_early_morning_message_waits_until_eleven_same_day(self):
-		# +3h = 06:00
-		self.assertEqual(due(plan(D(2026, 10, 15, 3, 0)), "3h", "Message"), D(2026, 10, 15, 11, 0))
-
-	def test_call_window_shift(self):
-		self.assertEqual(due(plan(D(2026, 10, 15, 9, 0), value=2000), "3h", "Call"), D(2026, 10, 15, 12, 0))
-		self.assertEqual(due(plan(D(2026, 10, 15, 14, 30), value=2000), "3h", "Call"), D(2026, 10, 16, 12, 0))
-		self.assertEqual(due(plan(D(2026, 10, 15, 6, 0), value=2000), "3h", "Call"), D(2026, 10, 15, 12, 0))
+		self.assertNotIn(("day45", "Call"), keys(plan(D(2026, 10, 15, 14, 0), value=999.99, repeat=True)))
+		self.assertIn(("day45", "Call"), keys(plan(D(2026, 10, 15, 14, 0), value=1000, repeat=True)))
 
 	def test_day_offsets_use_calendar_days(self):
 		rows = plan(D(2026, 10, 15, 14, 0), value=2000, repeat=True)
 		self.assertEqual(due(rows, "day2", "Call"), D(2026, 10, 17, 12, 0))
 		self.assertEqual(due(rows, "day30", "Call"), D(2026, 11, 14, 12, 0))
+		self.assertEqual(due(rows, "day32", "Message"), D(2026, 11, 16, 11, 0))
 		self.assertEqual(due(rows, "day50", "Message"), D(2026, 12, 4, 11, 0))
+
+	def test_late_delivery_keeps_the_calendar_day(self):
+		self.assertEqual(due(plan(D(2026, 10, 15, 23, 50)), "day2", "Call"), D(2026, 10, 17, 12, 0))
 
 	def test_skip_links_and_order(self):
 		rows = plan(D(2026, 10, 15, 14, 0), value=2000, repeat=True)
 		link = {(r["step"], r["channel"]): r["skip_if_reached"] for r in rows}
-		self.assertEqual(link[("day2", "Call")], "3h")
+		self.assertIsNone(link[("day2", "Call")])
 		self.assertEqual(link[("day32", "Message")], "day30")
 		self.assertEqual(link[("day50", "Message")], "day45")
-		self.assertIsNone(link[("3h", "Message")])
 		dues = [r["due_at"] for r in rows]
 		self.assertEqual(dues, sorted(dues))
 
 	def test_settings_accept_timedelta_and_strings(self):
-		s = dict(SETTINGS, quiet_start=datetime.timedelta(hours=23), quiet_end="10:00:00")
-		# +3h = 00:30, inside 23:00-10:00
-		self.assertEqual(
-			due(plan(D(2026, 10, 15, 21, 30), settings=s), "3h", "Message"), D(2026, 10, 16, 10, 0)
-		)
+		s = dict(SETTINGS, quiet_end="10:00:00", call_window_start=datetime.timedelta(hours=13))
+		rows = plan(D(2026, 10, 15, 14, 0), settings=s)
+		self.assertEqual(due(rows, "day32", "Message"), D(2026, 11, 16, 10, 0))
+		self.assertEqual(due(rows, "day2", "Call"), D(2026, 10, 17, 13, 0))
 
 	def test_string_delivered_at(self):
-		self.assertEqual(due(plan("2026-10-15 14:00:00"), "3h", "Message"), D(2026, 10, 15, 17, 0))
+		self.assertEqual(due(plan("2026-10-15 14:00:00"), "day2", "Call"), D(2026, 10, 17, 12, 0))
+
+
+class ThreeHourRemovedTest(unittest.TestCase):
+	def test_3h_not_planned_for_anyone(self):
+		for repeat in (False, True):
+			for value in (100, 5000):
+				steps = {r["step"] for r in plan(D(2026, 10, 15, 14, 0), value=value, repeat=repeat)}
+				self.assertNotIn("3h", steps)
+
+	def test_3h_has_no_template_key(self):
+		keys_ = [f.template_key(s, c) for s, c, _o, _r, _k in f._PLAN]
+		self.assertNotIn("tpl_msg_3h", keys_)
+		self.assertNotIn("tpl_call_3h", keys_)
+
+
+class BackfillPlanTest(unittest.TestCase):
+	"""The backfill keeps only the touches still ahead of the start day."""
+
+	def kept(self, delivered, start, **kw):
+		not_before = D(start.year, start.month, start.day)
+		return [(r["step"], r["due_at"].date()) for r in plan(delivered, **kw) if r["due_at"] >= not_before]
+
+	def test_steps_due_tomorrow(self):
+		start = datetime.date(2026, 10, 25)
+		self.assertIn(("day2", start), self.kept(D(2026, 10, 23, 15, 0), start))
+		self.assertIn(("day30", start), self.kept(D(2026, 9, 25, 15, 0), start, repeat=True))
+		self.assertIn(("day32", start), self.kept(D(2026, 9, 23, 15, 0), start))
+		self.assertIn(("day45", start), self.kept(D(2026, 9, 10, 15, 0), start, value=1500, repeat=True))
+
+	def test_past_steps_dropped_later_ones_kept(self):
+		start = datetime.date(2026, 10, 25)
+		kept = dict(self.kept(D(2026, 9, 25, 15, 0), start, value=1500, repeat=True))
+		self.assertNotIn("day2", kept)
+		self.assertEqual(kept["day32"], datetime.date(2026, 10, 27))
+		self.assertEqual(kept["day50"], datetime.date(2026, 11, 14))
+
+	def test_reach_is_day45(self):
+		self.assertEqual(f.BACKFILL_MAX_AGE_DAYS, 45)
+
+
+class WhyDueTest(unittest.TestCase):
+	def test_full_line(self):
+		line = f.why_due(D(2026, 9, 25, 15, 0), datetime.date(2026, 10, 25), 3, ["Tiramisu", "Lotus x2"])
+		self.assertIn("25/9", line)
+		self.assertIn("30", line)
+		self.assertIn("3", line)
+		self.assertIn("Tiramisu", line)
+
+	def test_first_order_and_no_items(self):
+		line = f.why_due("2026-10-23 10:00:00", datetime.date(2026, 10, 25), 1, [])
+		self.assertIn("23/10", line)
+		self.assertIn("أول طلب", line)
+
+	def test_empty(self):
+		self.assertEqual(f.why_due(None, datetime.date(2026, 10, 25), 0, []), "")
+
+	def test_long_item_list_is_cut(self):
+		line = f.why_due(None, datetime.date(2026, 10, 25), 0, ["a", "b", "c", "d", "e", "f"])
+		self.assertNotIn("e", line.split("·")[-1].replace("…", ""))
 
 
 class LogEffectsTest(unittest.TestCase):

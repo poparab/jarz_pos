@@ -64,3 +64,6 @@ jarz_pos.Patches.v1_9.label_we_print_always
 # The day-7 message step was removed (owner, 2026-10-24). Any still-Pending day7
 # touch is cancelled so nobody sends it. Idempotent.
 jarz_pos.Patches.v1_9.cancel_day7_followups
+# The 3-hour step was removed: WooCommerce sends that thank-you (owner, 2026-10-24).
+# Any still-Pending 3h touch is cancelled so nobody sends it twice. Idempotent.
+jarz_pos.Patches.v1_9.cancel_3h_followups
