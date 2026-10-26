@@ -1161,17 +1161,30 @@ def get_purchase_invoices(
 	from_date: str | None = None,
 	to_date: str | None = None,
 	search: str | None = None,
+	item_code: str | None = None,
 ) -> dict[str, Any]:
 	"""Return recent Purchase Invoices for the history tab.
 
 	Filters are all optional and combine with AND. ``search`` matches the
-	invoice name or the supplier's bill number.
+	invoice name or the supplier's bill number; ``item_code`` keeps only the
+	invoices with at least one line of that item.
 	"""
 	_ensure_manager_access()
 	limit = max(1, min(int(limit or 50), 200))
 	start = max(0, int(page or 0)) * limit
 
 	filters: dict[str, Any] = {}
+	if item_code:
+		parents = frappe.get_all(
+			"Purchase Invoice Item",
+			filters={"item_code": item_code, "parenttype": "Purchase Invoice"},
+			pluck="parent",
+			distinct=True,
+			limit_page_length=0,
+		)
+		if not parents:
+			return {"invoices": [], "total": 0}
+		filters["name"] = ["in", parents]
 	if supplier:
 		filters["supplier"] = supplier
 	if status:
