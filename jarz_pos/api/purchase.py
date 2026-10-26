@@ -578,6 +578,9 @@ def _get_item_prices(item_code: str) -> list[dict[str, Any]]:
 def get_item_details(item_code: str) -> dict[str, Any]:
 	_ensure_manager_access()
 	item = frappe.get_doc("Item", item_code)
+	# The same last-paid fields search_items carries, so a line refilled by
+	# Reorder starts at today's price, not at the old invoice's.
+	last = last_paid_details_bulk([item.name]).get(item.name) or {}
 	return {
 		"item_code": item.name,
 		"item_name": item.item_name,
@@ -585,6 +588,9 @@ def get_item_details(item_code: str) -> dict[str, Any]:
 		"uoms": _get_item_uoms(item.name),
 		"prices": _get_item_prices(item.name),
 		"item_tax_template": _item_tax_templates_bulk([item.name]).get(item.name),
+		"last_purchase_rate": last.get("rate") or 0,
+		"last_purchase_uom": last.get("uom"),
+		"last_purchase_uom_rate": last.get("uom_rate") or 0,
 	}
 
 
