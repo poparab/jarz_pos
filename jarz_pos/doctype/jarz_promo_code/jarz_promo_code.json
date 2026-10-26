@@ -13,6 +13,7 @@
   "discount_value",
   "max_discount_amount",
   "min_order_amount",
+  "min_on_whole_order",
   "section_break_scope",
   "applies_to",
   "item_scope",
@@ -30,8 +31,14 @@
   "section_break_schedule",
   "active_from",
   "active_to",
+  "section_break_customer",
+  "customer",
+  "customer_phone",
+  "follow_up_touch",
   "section_break_woo",
   "woo_coupon_code",
+  "sync_to_woo",
+  "woo_coupon_id",
   "description"
  ],
  "fields": [
@@ -89,6 +96,13 @@
    "fieldtype": "Currency",
    "label": "Min Order Amount",
    "options": "currency"
+  },
+  {
+   "default": "0",
+   "description": "Check the minimum against the whole order, not only the items in scope",
+   "fieldname": "min_on_whole_order",
+   "fieldtype": "Check",
+   "label": "Minimum On Whole Order"
   },
   {
    "fieldname": "section_break_scope",
@@ -194,6 +208,31 @@
    "label": "Active To"
   },
   {
+   "fieldname": "section_break_customer",
+   "fieldtype": "Section Break",
+   "label": "Customer Lock"
+  },
+  {
+   "description": "Only this customer may use the code",
+   "fieldname": "customer",
+   "fieldtype": "Link",
+   "label": "Customer",
+   "options": "Customer"
+  },
+  {
+   "description": "Also accepted when the order's customer has this phone (duplicate customer records)",
+   "fieldname": "customer_phone",
+   "fieldtype": "Data",
+   "label": "Customer Phone"
+  },
+  {
+   "fieldname": "follow_up_touch",
+   "fieldtype": "Link",
+   "label": "Follow-up Touch",
+   "options": "Jarz Follow-up Touch",
+   "read_only": 1
+  },
+  {
    "fieldname": "section_break_woo",
    "fieldtype": "Section Break",
    "label": "WooCommerce & Notes"
@@ -205,6 +244,20 @@
    "label": "Woo Coupon Code"
   },
   {
+   "default": "0",
+   "description": "Mirror this code as a WooCommerce coupon and remove it there when it expires or is used",
+   "fieldname": "sync_to_woo",
+   "fieldtype": "Check",
+   "label": "Sync To WooCommerce"
+  },
+  {
+   "fieldname": "woo_coupon_id",
+   "fieldtype": "Data",
+   "label": "Woo Coupon ID",
+   "read_only": 1,
+   "no_copy": 1
+  },
+  {
    "fieldname": "description",
    "fieldtype": "Small Text",
    "label": "Description"
@@ -212,7 +265,7 @@
  ],
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2026-06-29 00:00:00.000000",
+ "modified": "2026-10-27 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "jarz pos",
  "name": "Jarz Promo Code",

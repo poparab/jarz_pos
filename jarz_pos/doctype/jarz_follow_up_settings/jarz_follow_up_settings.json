@@ -7,6 +7,9 @@
   "enabled",
   "start_date",
   "offer_text",
+  "offer_codes_enabled",
+  "free_jar_item_group",
+  "free_jar_value",
   "column_break_a",
   "quality_escalation_user",
   "apology_discount_percent",
@@ -49,6 +52,29 @@
    "fieldtype": "Data",
    "label": "Offer Text",
    "description": "Fills {offer} in the day-45 call and day-50 message. Leave blank until an offer exists."
+  },
+  {
+   "default": "0",
+   "description": "Give each day-45/day-50 customer a one-time BACK- code picked from their order history (VIP / Loyal / Repeat / One-time). When off, Offer Text is used.",
+   "fieldname": "offer_codes_enabled",
+   "fieldtype": "Check",
+   "label": "Personal Offer Codes"
+  },
+  {
+   "default": "Large",
+   "depends_on": "offer_codes_enabled",
+   "fieldname": "free_jar_item_group",
+   "fieldtype": "Link",
+   "label": "Free Jar Item Group",
+   "options": "Item Group"
+  },
+  {
+   "default": "160",
+   "depends_on": "offer_codes_enabled",
+   "description": "Most a free-jar code takes off",
+   "fieldname": "free_jar_value",
+   "fieldtype": "Currency",
+   "label": "Free Jar Value"
   },
   {
    "fieldname": "column_break_a",
@@ -171,7 +197,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-10-24 12:00:00.000000",
+ "modified": "2026-10-27 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "jarz pos",
  "name": "Jarz Follow-up Settings",

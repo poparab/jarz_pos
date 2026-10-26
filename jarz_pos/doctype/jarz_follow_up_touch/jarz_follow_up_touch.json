@@ -31,6 +31,7 @@
   "done_at",
   "cancel_reason",
   "apology_code",
+  "offer_code",
   "escalation_task",
   "section_claude",
   "ai_message",
@@ -205,6 +206,14 @@
    "label": "Apology Code"
   },
   {
+   "description": "One-time BACK- code offered on the day-45 call / day-50 message of this cycle",
+   "fieldname": "offer_code",
+   "fieldtype": "Link",
+   "label": "Offer Code",
+   "options": "Jarz Promo Code",
+   "read_only": 1
+  },
+  {
    "fieldname": "escalation_task",
    "fieldtype": "Link",
    "label": "Escalation Task",
@@ -237,7 +246,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-10-24 12:00:00.000000",
+ "modified": "2026-10-27 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "jarz pos",
  "name": "Jarz Follow-up Touch",

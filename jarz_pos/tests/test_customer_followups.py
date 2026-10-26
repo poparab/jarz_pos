@@ -409,6 +409,51 @@ class OfferGatingTest(unittest.TestCase):
 		self.assertIn("Order number: 17900", with_offer)
 
 
+class OfferTierTest(unittest.TestCase):
+	def test_tiers(self):
+		self.assertEqual(f.offer_tier(7, 0, 300), "vip")
+		self.assertEqual(f.offer_tier(2, 5000, 300), "vip")
+		self.assertEqual(f.offer_tier(4, 0, 300), "loyal")
+		self.assertEqual(f.offer_tier(6, 4999, 300), "loyal")
+		self.assertEqual(f.offer_tier(2, 0, 300), "repeat")
+		self.assertEqual(f.offer_tier(3, 0, 2000), "repeat")
+		self.assertEqual(f.offer_tier(1, 0, 1000), "one_big")
+		self.assertEqual(f.offer_tier(1, 0, 999), "one")
+		self.assertEqual(f.offer_tier(0, None, None), "one")
+
+	def test_sentences(self):
+		until = D(2026, 11, 9, 14, 0)
+		self.assertEqual(f.offer_sentence("vip", "BACK-AB23CD", until), "عاملينلك جار لارج هدية بالكود BACK-AB23CD لحد 9 نوفمبر.")
+		self.assertEqual(
+			f.offer_sentence("loyal", "BACK-X", until), "جار لارج هدية مع طلبك فوق 600 جنيه بالكود BACK-X لحد 9 نوفمبر."
+		)
+		self.assertEqual(
+			f.offer_sentence("repeat", "BACK-X", until), "خصم 15% لحد 150 جنيه على طلب 500+ بالكود BACK-X لحد 9 نوفمبر."
+		)
+		self.assertIn("لحد 200 جنيه على طلب 400+", f.offer_sentence("one_big", "BACK-X", until))
+		self.assertIn("لحد 100 جنيه على طلب 400+", f.offer_sentence("one", "BACK-X", until))
+
+	def test_codes_on_uses_the_touch_code_not_offer_text(self):
+		s = {"offer_text": "عرض عام", "offer_codes_enabled": 1}
+		with patch.object(f, "offer_text_for_code", return_value="خصم بالكود BACK-X") as m:
+			self.assertEqual(f._offer_for("day50", s, {"offer_code": "BACK-X"}), "خصم بالكود BACK-X")
+			m.assert_called_with("BACK-X")
+		with patch.object(f, "offer_text_for_code", return_value=""):
+			self.assertEqual(f._offer_for("day45", s, {}), "")
+		self.assertEqual(f._offer_for("day30", s, {"offer_code": "BACK-X"}), "")
+
+	def test_ensure_skips_when_off_or_wrong_step(self):
+		doc = SimpleNamespace(step="day45", get=lambda k: None)
+		self.assertIsNone(f.ensure_offer_code(doc, {"offer_codes_enabled": 0}))
+		doc = SimpleNamespace(step="day32", get=lambda k: None)
+		self.assertIsNone(f.ensure_offer_code(doc, {"offer_codes_enabled": 1}))
+
+	def test_tier_from_title(self):
+		self.assertEqual(f._tier_of_code(SimpleNamespace(title="Win-back loyal - Mona")), "loyal")
+		self.assertEqual(f._tier_of_code(SimpleNamespace(title="Apology - Mona")), "")
+		self.assertEqual(f._tier_of_code(SimpleNamespace(title="Win-back bogus - Mona")), "")
+
+
 class CallBriefTest(unittest.TestCase):
 	FACTS = {
 		"first_name": "Mona",

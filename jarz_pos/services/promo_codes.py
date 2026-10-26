@@ -11,6 +11,7 @@ Public surface
 * ``apply_promo_codes_before_validate(doc, ..)``— before_validate hook (Woo/Desk)
 * ``record_redemptions_on_submit(doc, ..)``     — on_submit hook
 * ``reverse_redemptions_on_cancel(doc, ..)``    — on_cancel hook
+* ``expire_promo_codes()``                       — hourly: disable codes past active_to
 """
 
 from __future__ import annotations
@@ -180,6 +181,34 @@ def _allowed_channels(promo) -> set[str]:
 	}
 
 
+def _phone_key(value) -> str:
+	from jarz_pos.utils.phone import normalize_phone
+
+	digits = "".join(ch for ch in normalize_phone(value) if ch.isdigit())
+	return digits[-10:]
+
+
+def _customer_lock_ok(promo, invoice_doc, customer) -> bool:
+	"""A code locked to one customer is valid for that customer, or for any
+	customer record carrying the locked phone (Woo checkouts can fork a
+	duplicate Customer for the same person)."""
+	locked_customer = (getattr(promo, "customer", None) or "").strip()
+	locked_phone = _phone_key(getattr(promo, "customer_phone", None))
+	if not locked_customer and not locked_phone:
+		return True
+	if locked_customer and customer and customer == locked_customer:
+		return True
+	if not locked_phone:
+		return False
+	phones = [getattr(invoice_doc, "contact_mobile", None)]
+	if customer:
+		try:
+			phones.append(frappe.db.get_value("Customer", customer, "mobile_no"))
+		except Exception:
+			pass
+	return any(_phone_key(p) == locked_phone for p in phones if p)
+
+
 def _active_redemption_count(code: str, *, exclude_invoice=None, customer=None) -> int:
 	filters = {"promo_code": code, "status": "Active"}
 	if customer:
@@ -266,15 +295,22 @@ def evaluate_promo_codes(
 			result.reason = "not valid for this company"
 			continue
 
+		# Customer lock (personal codes)
+		if not _customer_lock_ok(promo, invoice_doc, customer):
+			result.reason = "not valid for this customer"
+			continue
+
 		# Eligible net for this code's scope
 		eligible_net = _eligible_net_for(promo, invoice_doc)
 		if eligible_net <= 0:
 			result.reason = "no eligible items in cart"
 			continue
 
-		# Min order amount (against the code's scoped eligible net)
+		# Min order amount (against the code's scoped eligible net, or the
+		# whole order when the code says so: "free jar on orders over 600")
 		min_order = float(getattr(promo, "min_order_amount", 0) or 0)
-		if min_order > 0 and eligible_net < min_order:
+		min_base = whole_net if int(getattr(promo, "min_on_whole_order", 0) or 0) else eligible_net
+		if min_order > 0 and min_base < min_order:
 			result.reason = f"order below minimum ({min_order:.2f})"
 			continue
 
@@ -585,3 +621,33 @@ def reverse_redemptions_on_cancel(doc, method=None):
 			title="promo: reverse_redemptions_on_cancel failed",
 			message=frappe.get_traceback(),
 		)
+
+
+def expire_promo_codes() -> int:
+	"""Hourly: switch off enabled codes whose active_to has passed. Never raises.
+
+	Saved through the document (not db.set_value) so other apps' doc_events see
+	the change -- the WooCommerce app deletes the mirrored coupon on it.
+	"""
+	try:
+		names = frappe.get_all(
+			"Jarz Promo Code",
+			filters={"enabled": 1, "active_to": ["<", frappe.utils.now_datetime()]},
+			pluck="name",
+			limit_page_length=500,
+		)
+	except Exception:
+		frappe.log_error(title="promo: expire_promo_codes failed", message=frappe.get_traceback())
+		return 0
+	done = 0
+	for name in names:
+		try:
+			doc = frappe.get_doc("Jarz Promo Code", name)
+			doc.enabled = 0
+			doc.save(ignore_permissions=True)
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- one code per commit so one bad row cannot roll back the rest
+			done += 1
+		except Exception:
+			frappe.db.rollback()
+			frappe.log_error(title="promo: expire %s failed" % name, message=frappe.get_traceback())
+	return done

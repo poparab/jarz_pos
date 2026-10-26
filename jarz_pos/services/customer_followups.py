@@ -273,6 +273,10 @@ def load_settings() -> dict[str, Any]:
 		"enabled": int(_get(doc, "enabled", 0) or 0),
 		"start_date": _get(doc, "start_date", "2026-10-15"),
 		"offer_text": _get(doc, "offer_text", ""),
+		"offer_codes_enabled": int(_get(doc, "offer_codes_enabled", 0) or 0),
+		# Singles ignore new field defaults, so fall back here too.
+		"free_jar_item_group": _get(doc, "free_jar_item_group") or "Large",
+		"free_jar_value": float(_get(doc, "free_jar_value", 0) or 0) or 160.0,
 		"quality_escalation_user": _get(doc, "quality_escalation_user"),
 		"apology_discount_percent": float(_get(doc, "apology_discount_percent", 0) or 0),
 		"apology_code_valid_days": int(_get(doc, "apology_code_valid_days", 30) or 30),
@@ -621,6 +625,235 @@ def _create_apology_code(doc: Any, settings: dict[str, Any]) -> str | None:
 	return code
 
 
+#: Win-back offer per tier. "jar" = one free item from the free-jar group
+#: (100% off that group, capped at the jar's price); "pct" = percent off the order.
+OFFER_TIERS: dict[str, dict[str, Any]] = {
+	"vip": {"kind": "jar", "min": 0, "days": 14},
+	"loyal": {"kind": "jar", "min": 600, "days": 10},
+	"repeat": {"kind": "pct", "pct": 15, "min": 500, "cap": 150, "days": 7},
+	"one_big": {"kind": "pct", "pct": 15, "min": 400, "cap": 200, "days": 7},
+	"one": {"kind": "pct", "pct": 15, "min": 400, "cap": 100, "days": 7},
+}
+VIP_MIN_ORDERS = 7
+VIP_MIN_SPEND = 5000.0
+BIG_ONE_ORDER_MIN = 1000.0
+
+_AR_MONTHS = (
+	"يناير",
+	"فبراير",
+	"مارس",
+	"أبريل",
+	"مايو",
+	"يونيو",
+	"يوليو",
+	"أغسطس",
+	"سبتمبر",
+	"أكتوبر",
+	"نوفمبر",
+	"ديسمبر",
+)
+
+
+def offer_tier(lifetime_orders: Any, lifetime_spend: Any, order_value: Any) -> str:
+	"""Which OFFER_TIERS key a customer gets. Pure."""
+	orders = int(lifetime_orders or 0)
+	if orders >= VIP_MIN_ORDERS or float(lifetime_spend or 0) >= VIP_MIN_SPEND:
+		return "vip"
+	if orders >= 4:
+		return "loyal"
+	if orders >= 2:
+		return "repeat"
+	if float(order_value or 0) >= BIG_ONE_ORDER_MIN:
+		return "one_big"
+	return "one"
+
+
+def arabic_date(value: Any) -> str:
+	"""'9 نوفمبر'. Pure."""
+	d = _to_datetime(value)
+	return "%d %s" % (d.day, _AR_MONTHS[d.month - 1])
+
+
+def offer_sentence(tier: str, code: str, valid_to: Any) -> str:
+	"""The Arabic offer line that fills {{2}}. Pure."""
+	t = OFFER_TIERS[tier]
+	until = arabic_date(valid_to)
+	if tier == "vip":
+		return "عاملينلك جار لارج هدية بالكود %s لحد %s." % (code, until)
+	if t["kind"] == "jar":
+		return "جار لارج هدية مع طلبك فوق %g جنيه بالكود %s لحد %s." % (t["min"], code, until)
+	return "خصم %g%% لحد %g جنيه على طلب %g+ بالكود %s لحد %s." % (t["pct"], t["cap"], t["min"], code, until)
+
+
+def _lifetime_spend(customer: str | None) -> float:
+	try:
+		row = frappe.db.sql(
+			"SELECT SUM(grand_total) FROM `tabSales Invoice` "
+			"WHERE customer = %s AND docstatus = 1 AND IFNULL(is_return, 0) = 0",
+			(customer,),
+		)
+		return float(row[0][0] or 0) if row else 0.0
+	except Exception:
+		return 0.0
+
+
+def _usable_code(code: str | None) -> bool:
+	"""Still enabled, unused and not expired."""
+	from frappe.utils import now_datetime
+
+	if not code:
+		return False
+	row = frappe.db.get_value(
+		"Jarz Promo Code", code, ["enabled", "times_used", "usage_limit", "active_to"], as_dict=True
+	)
+	if not row or not int(row.enabled or 0):
+		return False
+	if int(row.usage_limit or 0) and int(row.times_used or 0) >= int(row.usage_limit):
+		return False
+	return not row.active_to or _to_datetime(row.active_to) > now_datetime()
+
+
+def _sibling_code(doc: Any) -> str | None:
+	"""A usable code already made for another touch of the same cycle (day 45 -> day 50)."""
+	rows = frappe.get_all(
+		TOUCH_DOCTYPE,
+		filters={
+			"customer": doc.customer,
+			"cycle_start": doc.cycle_start,
+			"name": ["!=", doc.name],
+			"offer_code": ["is", "set"],
+		},
+		pluck="offer_code",
+		order_by="creation desc",
+		limit_page_length=5,
+		ignore_permissions=True,
+	)
+	return next((c for c in rows if _usable_code(c)), None)
+
+
+def _tier_of_code(promo: Any) -> str:
+	"""Tier key stored in a BACK- code's title ("Win-back <tier> - <name>")."""
+	parts = str(promo.title or "").split(" ")
+	return parts[1] if len(parts) > 1 and parts[0] == "Win-back" and parts[1] in OFFER_TIERS else ""
+
+
+def ensure_offer_code(doc: Any, settings: dict[str, Any]) -> str | None:
+	"""The touch's BACK- code, made (or reused from its cycle) on first need.
+
+	Locked to the customer and phone, single use, expiring per tier. The
+	WooCommerce app mirrors it as a store coupon (sync_to_woo). None when
+	offer codes are off or this step carries no offer.
+	"""
+	from frappe.utils import add_days, now_datetime
+
+	if not settings.get("offer_codes_enabled") or doc.step not in OFFER_STEPS:
+		return None
+	if _usable_code(doc.get("offer_code")):
+		return doc.offer_code
+	code = _sibling_code(doc)
+	if not code:
+		tier = offer_tier(doc.lifetime_orders, _lifetime_spend(doc.customer), doc.order_value)
+		spec = OFFER_TIERS[tier]
+		alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # no 0/O/1/I to dictate by phone
+		for _ in range(5):
+			code = "BACK-" + "".join(secrets.choice(alphabet) for _ in range(6))
+			if not frappe.db.exists("Jarz Promo Code", code):
+				break
+		else:
+			return None
+		now = now_datetime()
+		values: dict[str, Any] = {
+			"doctype": "Jarz Promo Code",
+			"code": code,
+			"title": "Win-back %s - %s" % (tier, doc.customer_name or doc.customer),
+			"enabled": 1,
+			"discount_type": "Percentage",
+			"usage_limit": 1,
+			"per_customer_limit": 1,
+			"active_from": now,
+			"active_to": add_days(now, spec["days"]),
+			"customer": doc.customer,
+			"customer_phone": doc.phone or "",
+			"follow_up_touch": doc.name,
+			"sync_to_woo": 1,
+			"description": "Win-back offer (%s) for %s, follow-up %s." % (tier, doc.customer, doc.name),
+		}
+		if spec["kind"] == "jar":
+			group = settings.get("free_jar_item_group") or "Large"
+			values.update(
+				{
+					"discount_value": 100,
+					"applies_to": "Item Groups",
+					"item_scope": [{"scope_type": "Item Group", "item_group": group}],
+					"max_discount_amount": float(settings.get("free_jar_value") or 160),
+					"min_order_amount": spec["min"],
+					"min_on_whole_order": 1,
+				}
+			)
+		else:
+			values.update(
+				{
+					"discount_value": spec["pct"],
+					"applies_to": "Whole Order",
+					"max_discount_amount": spec["cap"],
+					"min_order_amount": spec["min"],
+				}
+			)
+		frappe.get_doc(values).insert(ignore_permissions=True)
+	frappe.db.set_value(TOUCH_DOCTYPE, doc.name, "offer_code", code, update_modified=False)
+	doc.offer_code = code
+	return code
+
+
+def offer_text_for_code(code: str | None) -> str:
+	"""The offer sentence for an existing BACK- code, '' when it is not usable."""
+	if not _usable_code(code):
+		return ""
+	promo = frappe.get_doc("Jarz Promo Code", code)
+	tier = _tier_of_code(promo)
+	return offer_sentence(tier, code, promo.active_to) if tier else ""
+
+
+def ensure_due_offer_codes() -> dict[str, Any]:
+	"""Hourly: make the BACK- code for every offer touch due by end of today. Never raises.
+
+	Runs in the scheduler, not in the GET that lists touches: GET requests are
+	not committed.
+	"""
+	from frappe.utils import add_days, nowdate
+
+	result = {"made": 0, "errors": 0}
+	try:
+		settings = load_settings()
+		if not settings.get("enabled") or not settings.get("offer_codes_enabled"):
+			return result
+		names = frappe.get_all(
+			TOUCH_DOCTYPE,
+			filters={
+				"status": "Pending",
+				"step": ["in", list(OFFER_STEPS)],
+				"due_at": ["<", "%s 00:00:00" % add_days(nowdate(), 1)],
+			},
+			pluck="name",
+			limit_page_length=500,
+		)
+		for name in names:
+			try:
+				doc = frappe.get_doc(TOUCH_DOCTYPE, name)
+				before = doc.get("offer_code")
+				if ensure_offer_code(doc, settings) and doc.offer_code != before:
+					result["made"] += 1
+				frappe.db.commit()  # nosemgrep: frappe-manual-commit -- one touch per commit so one bad row cannot roll back the rest
+			except Exception:
+				result["errors"] += 1
+				frappe.db.rollback()
+				frappe.log_error(frappe.get_traceback(), "followups: offer code for %s failed" % name)
+	except Exception:
+		result["errors"] += 1
+		frappe.log_error(frappe.get_traceback(), "followups: ensure_due_offer_codes failed")
+	return result
+
+
 def _create_quality_task(doc: Any, settings: dict[str, Any], user: str, notes: str | None) -> str | None:
 	"""A Task Board card for the quality owner, due today. None when not possible."""
 	from frappe.utils import nowdate
@@ -824,7 +1057,7 @@ def _touch_row(
 		settings.get("templates", {}).get(template_key(t.get("step"), t.get("channel")), ""),
 		first_name_of(customer_name),
 		order_no,
-		settings.get("offer_text") or "",
+		_offer_for(t.get("step"), settings, t) if t.get("step") in OFFER_STEPS else settings.get("offer_text") or "",
 	)
 	ai_message = str(t.get("ai_message") or "")
 	ai_brief = str(t.get("ai_brief") or "")
@@ -859,6 +1092,7 @@ def _touch_row(
 		"notes": t.get("notes") or "",
 		"reason": why_due(t.get("cycle_start"), getdate(nowdate()), t.get("lifetime_orders"), items),
 		"apology_code": t.get("apology_code"),
+		"offer_code": t.get("offer_code"),
 		"escalation_task": t.get("escalation_task"),
 	}
 
@@ -901,6 +1135,7 @@ def get_due_touches(user: str | None = None) -> dict[str, Any]:
 			"cycle_start",
 			"ai_message",
 			"ai_brief",
+			"offer_code",
 		],
 		order_by="due_at asc, name asc",
 		limit_page_length=1000,
@@ -1177,11 +1412,20 @@ def _first_order_date(customer: str | None) -> str | None:
 		return None
 
 
-def _offer_for(step: str | None, settings: dict[str, Any]) -> str:
-	"""The offer text, only for the steps allowed to mention it."""
-	if step in OFFER_STEPS:
-		return str(settings.get("offer_text") or "").strip()
-	return ""
+def _offer_for(step: str | None, settings: dict[str, Any], touch: dict[str, Any] | None = None) -> str:
+	"""The offer text, only for the steps allowed to mention it.
+
+	With offer codes on, it is the touch's own BACK- code sentence; no code yet
+	(the hourly job has not made it) means no offer rather than a generic one.
+	"""
+	if step not in OFFER_STEPS:
+		return ""
+	if settings.get("offer_codes_enabled"):
+		try:
+			return offer_text_for_code((touch or {}).get("offer_code"))
+		except Exception:
+			return ""
+	return str(settings.get("offer_text") or "").strip()
 
 
 def build_message_context(t: dict[str, Any], card: dict[str, Any], items: list[str], offer: str) -> str:
@@ -1316,7 +1560,7 @@ def _template_text_for(t: dict[str, Any], settings: dict[str, Any]) -> str:
 		settings.get("templates", {}).get(template_key(t.get("step"), t.get("channel")), ""),
 		first_name_of(t.get("customer_name")),
 		t.get("woo_order_id") or t.get("invoice") or "",
-		settings.get("offer_text") or "",
+		_offer_for(t.get("step"), settings, t) if t.get("step") in OFFER_STEPS else settings.get("offer_text") or "",
 	)
 
 
@@ -1336,7 +1580,7 @@ def draft_message(name: str, refresh: bool = False) -> dict[str, Any]:
 		from jarz_pos.services import chat_common as cc
 
 		settings = load_settings()
-		offer = _offer_for(touch.get("step"), settings)
+		offer = _offer_for(touch.get("step"), settings, touch)
 		card = cc.customer_card(touch.get("customer")) or {}
 		context = build_message_context(touch, card, _delivered_items(touch.get("invoice")), offer)
 		text = _claude_text(_MESSAGE_SYSTEM, context)
@@ -1377,7 +1621,7 @@ def call_brief(name: str, refresh: bool = False) -> dict[str, Any]:
 		settings = load_settings()
 		customer = touch.get("customer")
 		# The brief only carries the offer on the day-45 call.
-		offer = _offer_for("day45", settings) if touch.get("step") == "day45" else ""
+		offer = _offer_for("day45", settings, touch) if touch.get("step") == "day45" else ""
 		card = dict(cc.customer_card(customer) or {})
 		card["first_order_date"] = _first_order_date(customer)
 		extra = _customer_info([customer]).get(customer) or {}

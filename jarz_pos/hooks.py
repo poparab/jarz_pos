@@ -623,6 +623,9 @@ scheduler_events = {
 		"jarz_pos.tasks.run_weekly_velocity_update",
 	],
 	"hourly": [
+		# Disable promo codes past active_to. Saved through the document so the
+		# WooCommerce app's doc_event removes the mirrored coupon too.
+		"jarz_pos.services.promo_codes.expire_promo_codes",
 		# Re-align every Awaiting Payment order with its ledger BEFORE escalating,
 		# so an order that has already been paid through another route is neither
 		# chased nor left sitting in the reconciliation queue. Must stay ahead of
@@ -649,6 +652,8 @@ scheduler_events = {
 		# enabled; idempotent per invoice; never raises. See
 		# jarz_pos.services.customer_followups.
 		"jarz_pos.services.customer_followups.generate_touches",
+		# BACK- win-back code for each day-45/50 touch due today (offer_codes_enabled).
+		"jarz_pos.services.customer_followups.ensure_due_offer_codes",
 		# Meta Conversions API: log every newly delivered chat (flutter) order as
 		# Pending Approval / Held / Approved / Skipped, then send the approved
 		# ones as Purchase. Delivered website orders are sent too once Send
