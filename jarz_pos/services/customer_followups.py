@@ -883,6 +883,8 @@ def ensure_offer_code(doc: Any, settings: dict[str, Any]) -> str | None:
 			"discount_type": "Percentage",
 			"usage_limit": 1,
 			"per_customer_limit": 1,
+			# A win-back offer never stacks with another code (Woo individual_use).
+			"stackable": 0,
 			"active_from": now,
 			"active_to": add_days(now, spec["days"]),
 			"customer": doc.customer,
