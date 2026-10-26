@@ -58,6 +58,10 @@ DEFAULT_QUIET_START = _dt.time(22, 0)
 DEFAULT_QUIET_END = _dt.time(11, 0)
 DEFAULT_CALL_START = _dt.time(12, 0)
 DEFAULT_CALL_END = _dt.time(16, 0)
+#: A late-night customer's message goes this long before quiet hours start.
+LAST_SEND_MARGIN = _dt.timedelta(minutes=30)
+#: How many recent orders decide a customer's usual order time.
+USUAL_TIME_ORDERS = 20
 
 #: (step, channel, relative_offset_hours | day offset, audience rule, skip_if_reached)
 #: Rules: "all" | "high" | "repeat" | "repeat_high".
@@ -161,11 +165,51 @@ def shift_call_time(due: _dt.datetime, win_start: _dt.time, win_end: _dt.time) -
 	return due
 
 
-def plan_touches(delivered_at: Any, order_value: Any, is_repeat: bool, settings: Any) -> list[dict[str, Any]]:
+def usual_order_time(times: Any) -> _dt.time | None:
+	"""Median time of day of *times* (datetime / time / timedelta / 'HH:MM:SS'). Pure.
+
+	The customer's habit: someone who orders in the evening hears from us in
+	the evening, not in the morning batch. ``None`` when nothing is usable.
+	"""
+	minutes = []
+	for value in times or ():
+		t = _to_time(value, None)
+		if t is not None:
+			minutes.append(t.hour * 60 + t.minute)
+	if not minutes:
+		return None
+	minutes.sort()
+	half = len(minutes) // 2
+	mid = minutes[half] if len(minutes) % 2 else (minutes[half - 1] + minutes[half]) // 2
+	return _dt.time(mid // 60, mid % 60)
+
+
+def message_time_of_day(preferred: _dt.time | None, quiet_start: _dt.time, quiet_end: _dt.time) -> _dt.time:
+	"""The send time for a day-N message: the customer's usual hour, kept on its day. Pure.
+
+	A late-night habit lands just before quiet hours start, an early one at
+	``quiet_end``, so the message never slides to the next calendar day.
+	"""
+	if preferred is None:
+		return quiet_end
+	t = preferred.replace(second=0, microsecond=0)
+	if not _in_quiet(t, quiet_start, quiet_end):
+		return t
+	if quiet_start > quiet_end and t >= quiet_start:
+		last = _at(_dt.date(2000, 1, 2), quiet_start) - LAST_SEND_MARGIN
+		return last.time()
+	return quiet_end
+
+
+def plan_touches(
+	delivered_at: Any, order_value: Any, is_repeat: bool, settings: Any, preferred_time: _dt.time | None = None
+) -> list[dict[str, Any]]:
 	"""The touches one delivered order produces. Pure.
 
 	*settings* is a dict or Document with ``high_value_order_min``,
 	``quiet_start``, ``quiet_end``, ``call_window_start``, ``call_window_end``.
+	*preferred_time* is the customer's usual order time (:func:`usual_order_time`);
+	messages are timed to it, calls stay at the start of the call window.
 	Returns ``[{step, channel, due_at, skip_if_reached}]`` ordered by due time.
 	"""
 	delivered = _to_datetime(delivered_at)
@@ -189,10 +233,13 @@ def plan_touches(delivered_at: Any, order_value: Any, is_repeat: bool, settings:
 		if unit == "hours":
 			due = delivered + _dt.timedelta(hours=amount)
 		else:
-			# Day-N touches are due on the calendar day, at the start of the
-			# window their channel is allowed in.
+			# Day-N touches are due on the calendar day: a message at the
+			# customer's usual order time, a call at the start of the call window.
 			day = delivered.date() + _dt.timedelta(days=amount)
-			due = _at(day, quiet_end if channel == MESSAGE else call_start)
+			if channel == MESSAGE:
+				due = _at(day, message_time_of_day(preferred_time, quiet_start, quiet_end))
+			else:
+				due = _at(day, call_start)
 
 		if channel == MESSAGE:
 			due = shift_message_time(due, quiet_start, quiet_end)
@@ -340,13 +387,69 @@ def _earlier_retail_orders(customer: str, inv: Any, scope: str) -> int:
 	return int(row[0][0] or 0) if row else 0
 
 
+def customer_order_time(customer: str) -> _dt.time | None:
+	"""The customer's usual order time from their recent submitted invoices.
+
+	``posting_time`` is the order time: POS orders post when taken, and Woo
+	orders (live or historical) carry the shop's order time.
+	"""
+	try:
+		rows = frappe.db.sql(
+			"""
+            SELECT posting_time FROM `tabSales Invoice`
+            WHERE customer = %(customer)s AND docstatus = 1 AND IFNULL(is_return, 0) = 0
+            ORDER BY posting_date DESC, creation DESC
+            LIMIT %(limit)s
+            """,
+			{"customer": customer, "limit": USUAL_TIME_ORDERS},
+		)
+	except Exception:
+		return None
+	return usual_order_time(r[0] for r in rows or ())
+
+
+def retime_pending_messages(dry_run: bool = True) -> dict[str, Any]:
+	"""Move every Pending message touch to its customer's usual order time, same day.
+
+	Run by hand (bench console) once, for the touches planned before messages
+	were timed per customer. *dry_run* changes nothing and returns the counts.
+	"""
+	settings = load_settings()
+	quiet_start, quiet_end = settings["quiet_start"], settings["quiet_end"]
+	rows = frappe.get_all(
+		TOUCH_DOCTYPE,
+		filters={"status": "Pending", "channel": MESSAGE},
+		fields=["name", "customer", "due_at"],
+		limit_page_length=0,
+	)
+	result: dict[str, Any] = {"dry_run": int(bool(dry_run)), "touches": len(rows), "moved": 0, "by_hour": {}}
+	cache: dict[str, Any] = {}
+	for r in rows:
+		if r.customer not in cache:
+			cache[r.customer] = customer_order_time(r.customer)
+		due = _to_datetime(r.due_at)
+		new_due = _at(due.date(), message_time_of_day(cache[r.customer], quiet_start, quiet_end))
+		hour = "%02d" % new_due.hour
+		result["by_hour"][hour] = result["by_hour"].get(hour, 0) + 1
+		if new_due == due:
+			continue
+		result["moved"] += 1
+		if not dry_run:
+			frappe.db.set_value(TOUCH_DOCTYPE, r.name, "due_at", new_due, update_modified=False)
+	if not dry_run:
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- one-off maintenance run from bench console
+	return result
+
+
 def _insert_cycle(
 	inv: Any, settings: dict[str, Any], scope: str, not_before: _dt.datetime | None = None, dry_run: bool = False
 ) -> list[dict[str, Any]]:
 	"""Plan and insert *inv*'s cycle; *not_before* drops touches due earlier. Returns the plan."""
 	earlier = _earlier_retail_orders(inv.customer, inv, scope)
 	is_repeat = earlier >= 1
-	plan = plan_touches(inv.delivered_at, inv.grand_total, is_repeat, settings)
+	plan = plan_touches(
+		inv.delivered_at, inv.grand_total, is_repeat, settings, preferred_time=customer_order_time(inv.customer)
+	)
 	if not_before is not None:
 		plan = [p for p in plan if p["due_at"] >= not_before]
 	if dry_run or not plan:
@@ -1097,21 +1200,40 @@ def _touch_row(
 	}
 
 
+def is_ready_now(channel: str, due_at: Any, now: _dt.datetime) -> bool:
+	"""Whether a touch due today belongs on the list yet. Pure.
+
+	Calls show for the whole day; a message waits for its hour, so it goes out
+	when this customer usually orders rather than in one morning batch.
+	"""
+	if channel != MESSAGE or not due_at:
+		return True
+	return _to_datetime(due_at) <= now
+
+
 def count_due_today() -> int:
-	from frappe.utils import add_days, nowdate
+	from frappe.utils import add_days, now_datetime, nowdate
 
 	end = "%s 00:00:00" % add_days(nowdate(), 1)
 	return int(
 		frappe.db.sql(
-			"SELECT COUNT(*) FROM `tabJarz Follow-up Touch` WHERE status = 'Pending' AND due_at < %s", (end,)
+			"""
+            SELECT COUNT(*) FROM `tabJarz Follow-up Touch`
+            WHERE status = 'Pending' AND due_at < %(end)s
+              AND (channel != %(message)s OR due_at <= %(now)s)
+            """,
+			{"end": end, "message": MESSAGE, "now": now_datetime()},
 		)[0][0]
 		or 0
 	)
 
 
 def get_due_touches(user: str | None = None) -> dict[str, Any]:
-	"""Pending touches due by the end of today, oldest first, with a summary."""
-	from frappe.utils import add_days, nowdate
+	"""Pending touches due by the end of today, oldest first, with a summary.
+
+	A message joins the list only once its hour has come (:func:`is_ready_now`).
+	"""
+	from frappe.utils import add_days, now_datetime, nowdate
 
 	end = "%s 00:00:00" % add_days(nowdate(), 1)
 	rows = frappe.get_all(
@@ -1140,6 +1262,8 @@ def get_due_touches(user: str | None = None) -> dict[str, Any]:
 		order_by="due_at asc, name asc",
 		limit_page_length=1000,
 	)
+	now = now_datetime()
+	rows = [r for r in rows if is_ready_now(r.get("channel"), r.get("due_at"), now)]
 	cust = _customer_info(r["customer"] for r in rows)
 	settings = load_settings()
 	bought = _items_by_invoice(r.get("invoice") for r in rows)

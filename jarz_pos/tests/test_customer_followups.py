@@ -114,6 +114,57 @@ class PlanTouchesTest(unittest.TestCase):
 		self.assertEqual(due(plan("2026-10-15 14:00:00"), "day2", "Call"), D(2026, 10, 17, 12, 0))
 
 
+class UsualOrderTimeTest(unittest.TestCase):
+	"""Messages go out at the hour the customer usually orders (owner, 2026-10-27)."""
+
+	def test_median_of_mixed_inputs(self):
+		times = [datetime.timedelta(hours=19, minutes=10), "20:30:00", T(19, 50), D(2026, 9, 1, 8, 0), "21:00"]
+		self.assertEqual(f.usual_order_time(times), T(19, 50))
+
+	def test_even_count_averages_the_middle_pair(self):
+		self.assertEqual(f.usual_order_time(["13:00:00", "15:00:00"]), T(14, 0))
+
+	def test_nothing_usable(self):
+		self.assertIsNone(f.usual_order_time([]))
+		self.assertIsNone(f.usual_order_time([None, "", "garbage"]))
+
+	def test_message_time_keeps_an_allowed_hour(self):
+		self.assertEqual(f.message_time_of_day(T(19, 45, 30), T(22, 0), T(11, 0)), T(19, 45))
+		self.assertEqual(f.message_time_of_day(T(11, 0), T(22, 0), T(11, 0)), T(11, 0))
+
+	def test_message_time_late_night_stays_on_its_day(self):
+		self.assertEqual(f.message_time_of_day(T(23, 30), T(22, 0), T(11, 0)), T(21, 30))
+		self.assertEqual(f.message_time_of_day(T(22, 0), T(22, 0), T(11, 0)), T(21, 30))
+
+	def test_message_time_early_morning_waits_for_quiet_end(self):
+		self.assertEqual(f.message_time_of_day(T(2, 0), T(22, 0), T(11, 0)), T(11, 0))
+		self.assertEqual(f.message_time_of_day(T(9, 0), T(22, 0), T(11, 0)), T(11, 0))
+
+	def test_message_time_without_habit(self):
+		self.assertEqual(f.message_time_of_day(None, T(22, 0), T(11, 0)), T(11, 0))
+
+	def test_plan_times_messages_not_calls(self):
+		rows = f.plan_touches(D(2026, 10, 15, 14, 0), 2000, True, SETTINGS, preferred_time=T(20, 15))
+		self.assertEqual(due(rows, "day32", "Message"), D(2026, 11, 16, 20, 15))
+		self.assertEqual(due(rows, "day50", "Message"), D(2026, 12, 4, 20, 15))
+		self.assertEqual(due(rows, "day2", "Call"), D(2026, 10, 17, 12, 0))
+		self.assertEqual(due(rows, "day45", "Call"), D(2026, 11, 29, 12, 0))
+
+	def test_plan_spreads_customers_across_the_day(self):
+		morning = f.plan_touches(D(2026, 10, 15, 14, 0), 500, False, SETTINGS, preferred_time=T(11, 30))
+		evening = f.plan_touches(D(2026, 10, 15, 14, 0), 500, False, SETTINGS, preferred_time=T(21, 0))
+		self.assertEqual(due(morning, "day32", "Message").time(), T(11, 30))
+		self.assertEqual(due(evening, "day32", "Message").time(), T(21, 0))
+		self.assertEqual(due(morning, "day32", "Message").date(), due(evening, "day32", "Message").date())
+
+	def test_message_waits_for_its_hour_on_the_list(self):
+		now = D(2026, 11, 16, 15, 0)
+		self.assertFalse(f.is_ready_now("Message", D(2026, 11, 16, 20, 15), now))
+		self.assertTrue(f.is_ready_now("Message", "2026-11-16 14:59:00", now))
+		self.assertTrue(f.is_ready_now("Message", D(2026, 11, 15, 22, 0), now))  # overdue stays
+		self.assertTrue(f.is_ready_now("Call", D(2026, 11, 16, 23, 0), now))
+
+
 class ThreeHourRemovedTest(unittest.TestCase):
 	def test_3h_not_planned_for_anyone(self):
 		for repeat in (False, True):
