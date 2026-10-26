@@ -121,8 +121,14 @@ class UsualOrderTimeTest(unittest.TestCase):
 		times = [datetime.timedelta(hours=19, minutes=10), "20:30:00", T(19, 50), D(2026, 9, 1, 8, 0), "21:00"]
 		self.assertEqual(f.usual_order_time(times), T(19, 50))
 
-	def test_even_count_averages_the_middle_pair(self):
-		self.assertEqual(f.usual_order_time(["13:00:00", "15:00:00"]), T(14, 0))
+	def test_even_count_takes_a_real_order_time(self):
+		self.assertEqual(f.usual_order_time(["13:00:00", "15:00:00"]), T(15, 0))
+		# Never invents 10:15 out of an evening and a night order.
+		self.assertEqual(f.usual_order_time(["18:14:00", "21:00:00"]), T(21, 0))
+
+	def test_after_midnight_counts_as_the_night_before(self):
+		self.assertEqual(f.usual_order_time(["23:30", "00:30", "01:00"]), T(0, 30))
+		self.assertEqual(f.usual_order_time(["18:14", "02:16"]), T(2, 16))
 
 	def test_nothing_usable(self):
 		self.assertIsNone(f.usual_order_time([]))
@@ -136,8 +142,12 @@ class UsualOrderTimeTest(unittest.TestCase):
 		self.assertEqual(f.message_time_of_day(T(23, 30), T(22, 0), T(11, 0)), T(21, 30))
 		self.assertEqual(f.message_time_of_day(T(22, 0), T(22, 0), T(11, 0)), T(21, 30))
 
+	def test_message_time_night_owl_gets_the_evening(self):
+		self.assertEqual(f.message_time_of_day(T(0, 30), T(22, 0), T(11, 0)), T(21, 30))
+		self.assertEqual(f.message_time_of_day(T(4, 59), T(22, 0), T(11, 0)), T(21, 30))
+
 	def test_message_time_early_morning_waits_for_quiet_end(self):
-		self.assertEqual(f.message_time_of_day(T(2, 0), T(22, 0), T(11, 0)), T(11, 0))
+		self.assertEqual(f.message_time_of_day(T(5, 0), T(22, 0), T(11, 0)), T(11, 0))
 		self.assertEqual(f.message_time_of_day(T(9, 0), T(22, 0), T(11, 0)), T(11, 0))
 
 	def test_message_time_without_habit(self):

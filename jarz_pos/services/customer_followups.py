@@ -60,6 +60,8 @@ DEFAULT_CALL_START = _dt.time(12, 0)
 DEFAULT_CALL_END = _dt.time(16, 0)
 #: A late-night customer's message goes this long before quiet hours start.
 LAST_SEND_MARGIN = _dt.timedelta(minutes=30)
+#: An order placed before this time of day belongs to the night before.
+DAY_ROLLOVER = _dt.time(5, 0)
 #: How many recent orders decide a customer's usual order time.
 USUAL_TIME_ORDERS = 20
 
@@ -169,33 +171,38 @@ def usual_order_time(times: Any) -> _dt.time | None:
 	"""Median time of day of *times* (datetime / time / timedelta / 'HH:MM:SS'). Pure.
 
 	The customer's habit: someone who orders in the evening hears from us in
-	the evening, not in the morning batch. ``None`` when nothing is usable.
+	the evening, not in the morning batch. An order before ``DAY_ROLLOVER``
+	counts as the night before, so 23:30 and 00:30 average to midnight, not
+	noon. With an even count the later middle order wins: averaging 18:00 and
+	02:00 would invent a time nobody orders at. ``None`` when nothing is usable.
 	"""
+	rollover = DAY_ROLLOVER.hour * 60 + DAY_ROLLOVER.minute
 	minutes = []
 	for value in times or ():
 		t = _to_time(value, None)
 		if t is not None:
-			minutes.append(t.hour * 60 + t.minute)
+			m = t.hour * 60 + t.minute
+			minutes.append(m + 1440 if m < rollover else m)
 	if not minutes:
 		return None
 	minutes.sort()
-	half = len(minutes) // 2
-	mid = minutes[half] if len(minutes) % 2 else (minutes[half - 1] + minutes[half]) // 2
+	mid = minutes[len(minutes) // 2] % 1440
 	return _dt.time(mid // 60, mid % 60)
 
 
 def message_time_of_day(preferred: _dt.time | None, quiet_start: _dt.time, quiet_end: _dt.time) -> _dt.time:
 	"""The send time for a day-N message: the customer's usual hour, kept on its day. Pure.
 
-	A late-night habit lands just before quiet hours start, an early one at
-	``quiet_end``, so the message never slides to the next calendar day.
+	A late-night habit (up to ``DAY_ROLLOVER``) lands just before quiet hours
+	start, an early-morning one at ``quiet_end``, so the message never slides
+	to the next calendar day.
 	"""
 	if preferred is None:
 		return quiet_end
 	t = preferred.replace(second=0, microsecond=0)
 	if not _in_quiet(t, quiet_start, quiet_end):
 		return t
-	if quiet_start > quiet_end and t >= quiet_start:
+	if quiet_start > quiet_end and (t >= quiet_start or t < DAY_ROLLOVER):
 		last = _at(_dt.date(2000, 1, 2), quiet_start) - LAST_SEND_MARGIN
 		return last.time()
 	return quiet_end
@@ -390,14 +397,17 @@ def _earlier_retail_orders(customer: str, inv: Any, scope: str) -> int:
 def customer_order_time(customer: str) -> _dt.time | None:
 	"""The customer's usual order time from their recent submitted invoices.
 
-	``posting_time`` is the order time: POS orders post when taken, and Woo
-	orders (live or historical) carry the shop's order time.
+	``posting_time`` is the order time only for an order recorded the day it
+	was placed (POS orders, live Woo orders). A historical Woo import keeps the
+	order's date but stamps the import's time, and a backdated entry carries
+	whatever time it was typed in, so both are left out.
 	"""
 	try:
 		rows = frappe.db.sql(
 			"""
             SELECT posting_time FROM `tabSales Invoice`
             WHERE customer = %(customer)s AND docstatus = 1 AND IFNULL(is_return, 0) = 0
+              AND DATE(creation) = posting_date
             ORDER BY posting_date DESC, creation DESC
             LIMIT %(limit)s
             """,
