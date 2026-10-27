@@ -116,7 +116,7 @@
    "fieldname": "quiet_end",
    "fieldtype": "Time",
    "label": "Messages Quiet Until",
-   "default": "11:00:00"
+   "default": "12:30:00"
   },
   {
    "fieldname": "column_break_b",
@@ -197,7 +197,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-10-27 12:00:00.000000",
+ "modified": "2026-10-27 14:00:00.000000",
  "modified_by": "Administrator",
  "module": "jarz pos",
  "name": "Jarz Follow-up Settings",

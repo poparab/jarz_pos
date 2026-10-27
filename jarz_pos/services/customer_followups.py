@@ -55,7 +55,7 @@ MAX_DELIVERED_AGE_DAYS = 7
 BACKFILL_MAX_AGE_DAYS = 45
 
 DEFAULT_QUIET_START = _dt.time(22, 0)
-DEFAULT_QUIET_END = _dt.time(11, 0)
+DEFAULT_QUIET_END = _dt.time(12, 30)  # messages start after noon
 DEFAULT_CALL_START = _dt.time(12, 0)
 DEFAULT_CALL_END = _dt.time(16, 0)
 #: A late-night customer's message goes this long before quiet hours start.
@@ -144,7 +144,7 @@ def _in_quiet(t: _dt.time, quiet_start: _dt.time, quiet_end: _dt.time) -> bool:
 		return False
 	if quiet_start < quiet_end:
 		return quiet_start <= t < quiet_end
-	return t >= quiet_start or t < quiet_end  # wraps midnight (22:00 - 11:00)
+	return t >= quiet_start or t < quiet_end  # wraps midnight (22:00 - 12:30)
 
 
 def shift_message_time(due: _dt.datetime, quiet_start: _dt.time, quiet_end: _dt.time) -> _dt.datetime:

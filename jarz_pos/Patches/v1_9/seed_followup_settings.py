@@ -22,7 +22,7 @@ FOLLOWUP_DEFAULTS = {
 	"apology_discount_percent": 0,
 	"apology_code_valid_days": 30,
 	"quiet_start": "22:00:00",
-	"quiet_end": "11:00:00",
+	"quiet_end": "12:30:00",
 	"call_window_start": "12:00:00",
 	"call_window_end": "16:00:00",
 	"tpl_msg_3h": "أهلاً {first_name}، معاك Jarz 🍰 اطلبك رقم {order_no} وصلك من شوية. يا رب يكون عجبك، ولو في أي حاجة مش مظبوطة قولنا وهنظبطها فوراً.",
