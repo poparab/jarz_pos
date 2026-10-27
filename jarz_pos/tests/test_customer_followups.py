@@ -165,6 +165,23 @@ class UsualOrderTimeTest(unittest.TestCase):
 		self.assertEqual(f.message_time_of_day(T(5, 0), T(22, 0), T(11, 0)), T(11, 0))
 		self.assertEqual(f.message_time_of_day(T(9, 0), T(22, 0), T(11, 0)), T(11, 0))
 
+	def test_send_cutoff_is_now_mid_day(self):
+		now = datetime.datetime(2026, 10, 27, 18, 1)
+		self.assertEqual(f.send_cutoff(now, T(22, 0), T(12, 30)), now)
+
+	def test_send_cutoff_last_run_takes_the_late_slots(self):
+		# The 21:00 run sends a 21:30 message; the 22:00 run is quiet.
+		now = datetime.datetime(2026, 10, 27, 21, 2)
+		self.assertEqual(f.send_cutoff(now, T(22, 0), T(12, 30)), datetime.datetime(2026, 10, 27, 22, 0))
+
+	def test_send_cutoff_quiet_after_midnight(self):
+		now = datetime.datetime(2026, 10, 27, 23, 30)
+		self.assertEqual(f.send_cutoff(now, T(0, 10), T(8, 0)), datetime.datetime(2026, 10, 28, 0, 10))
+
+	def test_send_cutoff_without_quiet_hours(self):
+		now = datetime.datetime(2026, 10, 27, 21, 2)
+		self.assertEqual(f.send_cutoff(now, T(22, 0), T(22, 0)), now)
+
 	def test_message_time_without_habit(self):
 		self.assertEqual(f.message_time_of_day(None, T(22, 0), T(11, 0)), T(11, 0))
 

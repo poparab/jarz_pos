@@ -60,6 +60,8 @@ DEFAULT_CALL_START = _dt.time(12, 0)
 DEFAULT_CALL_END = _dt.time(16, 0)
 #: A late-night customer's message goes this long before quiet hours start.
 LAST_SEND_MARGIN = _dt.timedelta(minutes=30)
+#: How often the scheduler runs send_due_template_messages ("hourly").
+SEND_CADENCE = _dt.timedelta(hours=1)
 #: An order placed before this time of day belongs to the night before.
 DAY_ROLLOVER = _dt.time(5, 0)
 #: How many recent orders decide a customer's usual order time.
@@ -162,6 +164,21 @@ def shift_message_time(due: _dt.datetime, quiet_start: _dt.time, quiet_end: _dt.
 	if quiet_start > quiet_end and t >= quiet_start:
 		return _at(due.date() + _dt.timedelta(days=1), quiet_end)
 	return _at(due.date(), quiet_end)
+
+
+def send_cutoff(now: _dt.datetime, quiet_start: _dt.time, quiet_end: _dt.time) -> _dt.datetime:
+	"""The latest ``due_at`` the sender run at *now* sends. Pure.
+
+	Normally *now*. On the last run before quiet hours it is the start of quiet
+	hours: the run at 21:00 also sends what is due at 21:30, which the next
+	run (22:00, quiet) would push to the following afternoon.
+	"""
+	if not _in_quiet((now + SEND_CADENCE).time(), quiet_start, quiet_end):
+		return now
+	end = _at(now.date(), quiet_start)
+	if end <= now:
+		end += _dt.timedelta(days=1)
+	return end
 
 
 def shift_call_time(due: _dt.datetime, win_start: _dt.time, win_end: _dt.time) -> _dt.datetime:
@@ -2334,7 +2351,7 @@ def send_due_template_messages() -> dict[str, Any]:
 				"status": "Pending",
 				"channel": MESSAGE,
 				"step": ["in", list(AUTO_TEMPLATE_STEPS)],
-				"due_at": ["<=", now],
+				"due_at": ["<=", send_cutoff(now, settings["quiet_start"], settings["quiet_end"])],
 			},
 			fields=["name", "customer", "customer_name", "phone", "step", "channel", "offer_code", "wa_send_error"],
 			order_by="due_at asc, name asc",
