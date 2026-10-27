@@ -2222,10 +2222,11 @@ def get_sent_report(from_date: str | None = None, to_date: str | None = None, li
 
 	to_d = getdate(to_date) if to_date else getdate(nowdate())
 	from_d = getdate(from_date) if from_date else add_days(to_d, -6)
+	# The limit caps only the items list; totals count every message in the range.
+	item_limit = max(1, min(int(limit or 200), 1000))
 	params = {
 		"from_d": "%s 00:00:00" % from_d,
 		"to_d": "%s 00:00:00" % add_days(to_d, 1),
-		"limit": max(1, min(int(limit or 200), 1000)),
 	}
 	newer = " AND ".join(rfm.retail_invoice_conditions(rfm.website_only_enabled(), "n"))
 	status_col = "t.wa_status" if frappe.db.has_column(TOUCH_DOCTYPE, "wa_status") else "''"
@@ -2248,7 +2249,6 @@ def get_sent_report(from_date: str | None = None, to_date: str | None = None, li
         WHERE t.status = 'Done' AND IFNULL(t.wa_message_id, '') != ''
           AND t.done_at >= %(from_d)s AND t.done_at < %(to_d)s
         ORDER BY t.done_at DESC
-        LIMIT %(limit)s
         """,
 		params,
 		as_dict=True,
@@ -2273,6 +2273,8 @@ def get_sent_report(from_date: str | None = None, to_date: str | None = None, li
 		step["reordered"] += int(bool(r.reorder_invoice))
 		day = str(r.done_at)[:10]
 		by_day[day] = by_day.get(day, 0) + 1
+		if len(items) >= item_limit:
+			continue
 		items.append(
 			{
 				"name": r.name,
@@ -2315,6 +2317,7 @@ def get_sent_report(from_date: str | None = None, to_date: str | None = None, li
 		),
 		"refused_waiting_for_staff": failed_pending,
 		"items": items,
+		"items_total": len(rows),
 	}
 
 
