@@ -725,5 +725,28 @@ class AutoSendTest(unittest.TestCase):
 			f.template_components("day50", "Mona", "", "")
 
 
+class StopRepliesTest(unittest.TestCase):
+	def test_button_text_in_both_languages(self):
+		self.assertTrue(f.is_stop_reply("Stop messages"))
+		self.assertTrue(f.is_stop_reply("إيقاف الرسائل"))
+
+	def test_case_spacing_and_alef_forms_do_not_matter(self):
+		self.assertTrue(f.is_stop_reply("  STOP   Messages "))
+		self.assertTrue(f.is_stop_reply("ايقاف  الرسائل"))
+		self.assertTrue(f.is_stop_reply("إلغاء الاشتراك"))
+		self.assertTrue(f.is_stop_reply("stop"))
+
+	def test_ordinary_messages_are_not_stops(self):
+		for text in ("", None, "I want to order", "stop by tomorrow?", "مش عايز الرسائل دي بس عايز اطلب"):
+			self.assertFalse(f.is_stop_reply(text), text)
+
+	def test_opted_out_touches_are_cancelled_and_dropped(self):
+		rows = [{"name": "FUT-1", "customer": "C-OUT"}, {"name": "FUT-2", "customer": "C-IN"}]
+		with patch.object(f, "_opted_out", return_value={"C-OUT"}), patch.object(f, "_cancel_pending") as cancel:
+			kept = f._drop_opted_out(rows)
+		self.assertEqual([r["name"] for r in kept], ["FUT-2"])
+		cancel.assert_called_once_with("name = %(name)s", {"name": "FUT-1"}, f.STOP_REASON)
+
+
 if __name__ == "__main__":
 	unittest.main()

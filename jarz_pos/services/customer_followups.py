@@ -1916,6 +1916,71 @@ def _sent_today() -> int:
 	)
 
 
+def _opted_out(customers: Iterable[str]) -> set[str]:
+	names = sorted({c for c in customers if c})
+	if not names or not frappe.db.has_column("Customer", CUSTOMER_OPT_OUT_FIELD):
+		return set()
+	return set(
+		frappe.get_all("Customer", filters={"name": ["in", names], CUSTOMER_OPT_OUT_FIELD: 1}, pluck="name")
+	)
+
+
+def _drop_opted_out(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+	"""Cancel the touches of customers who opted out since the cycle planned them; keep the rest."""
+	opted = _opted_out(r["customer"] for r in rows)
+	for r in rows:
+		if r["customer"] in opted:
+			_cancel_pending("name = %(name)s", {"name": r["name"]}, STOP_REASON)
+	return [r for r in rows if r["customer"] not in opted]
+
+
+# ---------------------------------------------------------------------------
+# "Stop messages" (the templates' quick-reply button)
+# ---------------------------------------------------------------------------
+
+#: Whole-message replies that stop follow-ups: the template button's text in
+#: both languages, plus the same words typed by hand. Compared after
+#: :func:`_stop_key`, so case, spacing and alef forms do not matter.
+STOP_REPLIES = frozenset({"stop", "stop messages", "ايقاف", "ايقاف الرسائل", "الغاء الاشتراك"})
+STOP_REASON = "Customer tapped Stop messages"
+STOP_CONFIRMATION = "تمام، مش هنبعتلك رسائل متابعة تاني من Jarz. لو حبيت تطلب، احنا موجودين في أي وقت 🍰"
+
+
+def _stop_key(text: Any) -> str:
+	key = " ".join(str(text or "").split()).strip().lower()
+	return key.translate(str.maketrans({"أ": "ا", "إ": "ا", "آ": "ا", "ى": "ي"}))
+
+
+def is_stop_reply(text: Any) -> bool:
+	"""Whether a WhatsApp message (its text or button payload) asks to stop. Pure."""
+	return _stop_key(text) in STOP_REPLIES
+
+
+def opt_out_phone(phone: str | None) -> dict[str, Any]:
+	"""Stop every follow-up to the customer(s) on *phone*. Idempotent.
+
+	Sets ``custom_followup_opt_out`` (new cycles skip them) and cancels their
+	pending touches, calls included, so the worklist stops showing them too.
+	"""
+	from jarz_pos.utils.phone import phone_variants
+
+	variants = phone_variants(phone)
+	if not variants:
+		return {"customers": [], "cancelled": 0}
+	customers = frappe.get_all("Customer", filters={"mobile_no": ["in", variants]}, pluck="name")
+	if customers and frappe.db.has_column("Customer", CUSTOMER_OPT_OUT_FIELD):
+		for name in customers:
+			frappe.db.set_value("Customer", name, CUSTOMER_OPT_OUT_FIELD, 1, update_modified=False)
+	where = "phone IN %(phones)s" + (" OR customer IN %(customers)s" if customers else "")
+	params: dict[str, Any] = {"phones": tuple(variants), "customers": tuple(customers)}
+	# nosemgrep: frappe-sql-format-injection -- where is built from literal fragments; values are bound
+	cancelled = frappe.db.sql(
+		"SELECT COUNT(*) FROM `tabJarz Follow-up Touch` WHERE status = 'Pending' AND (%s)" % where, params
+	)[0][0]
+	_cancel_pending("(%s)" % where, params, STOP_REASON)
+	return {"customers": customers, "cancelled": int(cancelled or 0)}
+
+
 def _mark_send_error(name: str, error: str) -> None:
 	frappe.db.set_value(TOUCH_DOCTYPE, name, "wa_send_error", str(error)[:500], update_modified=False)
 
@@ -1964,7 +2029,7 @@ def send_due_template_messages() -> dict[str, Any]:
 			order_by="due_at asc, name asc",
 			limit_page_length=500,
 		)
-		rows = [r for r in rows if auto_sendable(r, settings)][:room]
+		rows = _drop_opted_out([r for r in rows if auto_sendable(r, settings)])[:room]
 		cust = _customer_info(r["customer"] for r in rows)
 		result["status"] = "ran"
 		for r in rows:

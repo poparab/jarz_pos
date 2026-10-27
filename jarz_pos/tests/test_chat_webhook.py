@@ -233,6 +233,20 @@ class WhatsAppParseTest(unittest.TestCase):
 			[(e["message_type"], e["body"]) for e in events], [("text", "Yes"), ("text", "Nutella")]
 		)
 
+	def test_quick_reply_keeps_its_payload(self):
+		e = ing.parse_webhook(
+			wa_messages(
+				{
+					"from": "201111034268",
+					"id": "wamid.8",
+					"timestamp": "1",
+					"type": "button",
+					"button": {"text": "إيقاف الرسائل", "payload": "إيقاف الرسائل"},
+				}
+			)
+		)[0]
+		self.assertEqual((e["body"], e["button_payload"]), ("إيقاف الرسائل", "إيقاف الرسائل"))
+
 	def test_unknown_type_is_unsupported_with_raw(self):
 		msg = {"from": "201111034268", "id": "wamid.8", "timestamp": "1", "type": "contacts", "contacts": []}
 		e = ing.parse_webhook(wa_messages(msg))[0]

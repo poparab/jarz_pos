@@ -221,7 +221,10 @@ def _wa_message_content(msg: dict[str, Any]) -> dict[str, Any]:
 		out["message_type"] = "reaction"
 		out["body"] = str(reaction.get("emoji") or "")
 	elif mtype == "button":
-		out["body"] = str((msg.get("button") or {}).get("text") or "")
+		# A template quick-reply tap; a static button's payload is its text.
+		button = msg.get("button") or {}
+		out["body"] = str(button.get("text") or "")
+		out["button_payload"] = str(button.get("payload") or "") or None
 	elif mtype == "interactive":
 		inter = msg.get("interactive") or {}
 		reply = inter.get("button_reply") or inter.get("list_reply") or {}
@@ -1176,6 +1179,7 @@ def _persist_message(
 
 	superseded: list[str] = []
 	mtype = event.get("message_type")
+	stop = inbound and event["channel"] == cc.WHATSAPP and _apply_stop_reply(event, conv, body)
 	if inbound:
 		updates["unread_count"] = int(conv.get("unread_count") or 0) + 1
 		last_in = cc.to_dt(conv.get("last_inbound_at"))
@@ -1225,13 +1229,28 @@ def _persist_message(
 	return {
 		"conversation": conv.name,
 		"message": msg.name,
-		"draft": bool(settings.get("auto_draft")) and should_draft(event),
+		"draft": bool(settings.get("auto_draft")) and should_draft(event) and not stop,
 		"media": bool(event.get("media_id") or media_url)
 		and mtype in ("image", "audio", "video", "document", "sticker"),
 		"media_url": media_url if media_url and not stored_url else None,
 		"superseded": bool(superseded),
-		"push": inbound and mtype != "reaction",
+		"push": inbound and mtype != "reaction" and not stop,
+		"stop_reply": bool(stop),
 	}
+
+
+def _apply_stop_reply(event: dict[str, Any], conv: Any, body: str) -> bool:
+	"""Opt the sender out of follow-ups when they tapped "Stop messages". Never raises."""
+	from jarz_pos.services import customer_followups as followups
+
+	if not (followups.is_stop_reply(event.get("button_payload")) or followups.is_stop_reply(body)):
+		return False
+	try:
+		followups.opt_out_phone(conv.get("phone") or event.get("phone") or event.get("external_id"))
+		return True
+	except Exception:
+		cc.safe_log_error("chat: stop-messages opt-out failed")
+		return False
 
 
 def process_webhook(payload: Any = None) -> dict[str, Any]:
@@ -1317,6 +1336,18 @@ def _note_history_progress(text: Any) -> None:
 		pass
 
 
+def _confirm_stop(conversation: str) -> None:
+	# One free-text reply inside the 24h window the tap just opened; it lands
+	# in the inbox as an outbound message, so the thread reads Answered.
+	from jarz_pos.services import chat_send
+	from jarz_pos.services.customer_followups import STOP_CONFIRMATION
+
+	try:
+		chat_send.send_text(conversation, STOP_CONFIRMATION, "Administrator")
+	except Exception:
+		cc.safe_log_error("chat: stop-messages confirmation failed")
+
+
 def _after_commit(actions: list[dict[str, Any]], status_conversations: set[str]) -> None:
 	for action in actions:
 		try:
@@ -1345,6 +1376,8 @@ def _after_commit(actions: list[dict[str, Any]], status_conversations: set[str])
 				)
 		except Exception:
 			cc.safe_log_error("chat: post-commit action failed")
+		if action.get("stop_reply"):
+			_confirm_stop(action["conversation"])
 		if action.get("push"):
 			from jarz_pos.services.chat_alerts import push_new_message
 
