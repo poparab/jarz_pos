@@ -1063,7 +1063,8 @@ def ensure_offer_code(doc: Any, settings: dict[str, Any]) -> str | None:
 		spec = OFFER_TIERS[tier]
 		alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # no 0/O/1/I to dictate by phone
 		for _ in range(5):
-			code = "BACK-" + "".join(secrets.choice(alphabet) for _ in range(6))
+			# Letters and digits only: WhatsApp's copy-code button refuses a hyphen (132018).
+			code = "BACK" + "".join(secrets.choice(alphabet) for _ in range(6))
 			if not frappe.db.exists("Jarz Promo Code", code):
 				break
 		else:
@@ -2060,6 +2061,10 @@ def auto_sendable(t: dict[str, Any], settings: dict[str, Any]) -> bool:
 	return True
 
 
+#: Longest value WhatsApp accepts in a copy-code button.
+COPY_CODE_MAX = 15
+
+
 def _param(text: Any) -> str:
 	# Meta refuses a body parameter with a newline, a tab or 4+ spaces in a row.
 	return " ".join(str(text or "").split())
@@ -2068,13 +2073,17 @@ def _param(text: Any) -> str:
 def template_components(step: str, first_name: str, offer: str = "", code: str = "") -> list[dict[str, Any]]:
 	"""Components for the jarz_followup_<step> template. Pure.
 
-	Raises ``ValueError`` when day 50 has no offer to fill {{2}} and its button.
+	Raises ``ValueError`` when day 50 has no offer to fill {{2}} and its button,
+	or a code the copy-code button would refuse: Meta answers that with 132018,
+	which stops the whole run instead of failing this one touch.
 	"""
 	body = [{"type": "text", "text": _param(first_name) or TEMPLATE_NAME_FALLBACK}]
 	if step != "day50":
 		return [{"type": "body", "parameters": body}]
 	if not offer or not code:
 		raise ValueError("day50 needs an offer code")
+	if not str(code).isascii() or not str(code).isalnum() or len(str(code)) > COPY_CODE_MAX:
+		raise ValueError("offer code %s is not a valid copy-code value (letters and digits, up to %d)" % (code, COPY_CODE_MAX))
 	body.append({"type": "text", "text": _param(offer)})
 	return [
 		{"type": "body", "parameters": body},

@@ -751,12 +751,18 @@ class AutoSendTest(unittest.TestCase):
 		self.assertEqual(f.template_components("day32", "")[0]["parameters"][0]["text"], f.TEMPLATE_NAME_FALLBACK)
 
 	def test_day50_components_fill_offer_and_copy_code(self):
-		c = f.template_components("day50", "Mona", "line one\nline   two", "BACK-ABC123")
+		c = f.template_components("day50", "Mona", "line one\nline   two", "BACKABC123")
 		self.assertEqual(c[0]["parameters"][1]["text"], "line one line two")
 		self.assertEqual(c[1]["sub_type"], "copy_code")
-		self.assertEqual(c[1]["parameters"][0], {"type": "coupon_code", "coupon_code": "BACK-ABC123"})
+		self.assertEqual(c[1]["parameters"][0], {"type": "coupon_code", "coupon_code": "BACKABC123"})
 		with self.assertRaises(ValueError):
 			f.template_components("day50", "Mona", "", "")
+
+	def test_day50_refuses_a_code_the_copy_button_rejects(self):
+		# A hyphen got 132018 from Meta on 2026-10-27 and stopped the whole run.
+		for bad in ("BACK-ABC123", "BACK ABC", "BACKABCDEFGHIJKL", "BACKأ12"):
+			with self.assertRaises(ValueError):
+				f.template_components("day50", "Mona", "offer", bad)
 
 
 class StopRepliesTest(unittest.TestCase):
