@@ -32,6 +32,8 @@
   "cancel_reason",
   "apology_code",
   "offer_code",
+  "wa_message_id",
+  "wa_send_error",
   "escalation_task",
   "section_claude",
   "ai_message",
@@ -214,6 +216,18 @@
    "read_only": 1
   },
   {
+   "fieldname": "wa_message_id",
+   "fieldtype": "Data",
+   "label": "WhatsApp Message ID",
+   "read_only": 1
+  },
+  {
+   "fieldname": "wa_send_error",
+   "fieldtype": "Small Text",
+   "label": "WhatsApp Send Error",
+   "read_only": 1
+  },
+  {
    "fieldname": "escalation_task",
    "fieldtype": "Link",
    "label": "Escalation Task",
@@ -246,7 +260,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-10-27 12:00:00.000000",
+ "modified": "2026-10-27 16:00:00.000000",
  "modified_by": "Administrator",
  "module": "jarz pos",
  "name": "Jarz Follow-up Touch",

@@ -125,6 +125,30 @@ def wa_send_text(to: str, text: str) -> str:
 	return str(wamid)
 
 
+def wa_send_template(to: str, name: str, language: str, components: list[dict[str, Any]]) -> str:
+	"""Send an approved template (opens a conversation outside the 24h window). Returns the wamid."""
+	phone_id = _settings().get("whatsapp_phone_number_id")
+	if not phone_id:
+		raise MetaApiError("WhatsApp phone number id is not configured", "config")
+	data = _request(
+		"POST",
+		f"{phone_id}/messages",
+		_wa_token(),
+		json_body={
+			"messaging_product": "whatsapp",
+			"recipient_type": "individual",
+			"to": str(to or "").lstrip("+"),
+			"type": "template",
+			"template": {"name": name, "language": {"code": language}, "components": components},
+		},
+	)
+	messages = data.get("messages") or []
+	wamid = (messages[0] or {}).get("id") if messages else None
+	if not wamid:
+		raise MetaApiError("WhatsApp accepted the call but returned no message id", "no_id")
+	return str(wamid)
+
+
 def wa_mark_read(wamid: str) -> bool:
 	"""Blue ticks for one inbound message. Best effort: returns False on failure."""
 	phone_id = _settings().get("whatsapp_phone_number_id")

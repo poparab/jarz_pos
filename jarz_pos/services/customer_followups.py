@@ -76,6 +76,13 @@ _PLAN = (
 	("day50", MESSAGE, ("days", 50), "all", "day45"),
 )
 
+#: Steps sent as an approved WhatsApp template by :func:`send_due_template_messages`.
+AUTO_TEMPLATE_STEPS = ("day32", "day50")
+TEMPLATE_LANGUAGE = "ar_EG"
+#: Fills {{1}} when the customer has no usable first name.
+TEMPLATE_NAME_FALLBACK = "عميلنا"
+DEFAULT_AUTO_SEND_CAP = 100
+
 REASON_NEW_ORDER = "New order"
 REASON_QUALITY = "Quality complaint"
 REASON_OPT_OUT = "Opted out"
@@ -338,6 +345,8 @@ def load_settings() -> dict[str, Any]:
 		"quiet_end": _to_time(_get(doc, "quiet_end"), DEFAULT_QUIET_END),
 		"call_window_start": _to_time(_get(doc, "call_window_start"), DEFAULT_CALL_START),
 		"call_window_end": _to_time(_get(doc, "call_window_end"), DEFAULT_CALL_END),
+		"auto_send_whatsapp": int(_get(doc, "auto_send_whatsapp", 0) or 0),
+		"auto_send_daily_cap": int(_get(doc, "auto_send_daily_cap", 0) or 0) or DEFAULT_AUTO_SEND_CAP,
 		"high_value_order_min": rfm.high_value_threshold(),
 		"sender_users": [],
 		"templates": {},
@@ -1270,14 +1279,19 @@ def get_due_touches(user: str | None = None) -> dict[str, Any]:
 			"ai_message",
 			"ai_brief",
 			"offer_code",
+			"wa_send_error",
 		],
 		order_by="due_at asc, name asc",
 		limit_page_length=1000,
 	)
 	now = now_datetime()
-	rows = [r for r in rows if is_ready_now(r.get("channel"), r.get("due_at"), now)]
-	cust = _customer_info(r["customer"] for r in rows)
 	settings = load_settings()
+	rows = [
+		r
+		for r in rows
+		if is_ready_now(r.get("channel"), r.get("due_at"), now) and not auto_sendable(r, settings)
+	]
+	cust = _customer_info(r["customer"] for r in rows)
 	bought = _items_by_invoice(r.get("invoice") for r in rows)
 	items = [
 		_touch_row(r, cust.get(r["customer"], {}), settings, bought.get(r.get("invoice"), [])) for r in rows
@@ -1829,6 +1843,178 @@ def send_daily_sender_push() -> dict[str, Any]:
 		result["status"] = "failed_exception"
 		try:
 			frappe.log_error(frappe.get_traceback(), "followups: daily push failed")
+		except Exception:
+			pass
+	return result
+
+
+# ---------------------------------------------------------------------------
+# WhatsApp template sender (hourly, auto_send_whatsapp)
+# ---------------------------------------------------------------------------
+
+#: Meta errors about one recipient: mark that touch and carry on. Any other
+#: error (token, payment method, rate limit, template) stops the run.
+_PER_RECIPIENT_ERRORS = ("100", "131008", "131009", "131021", "131026", "131049", "131050", "132000", "132012")
+
+
+def auto_sendable(t: dict[str, Any], settings: dict[str, Any]) -> bool:
+	"""Whether the hourly sender owns this touch, so staff do not also send it. Pure.
+
+	A day-50 message needs its BACK- code (the template has a copy-code button);
+	without one, or after a failed send, it stays on the staff worklist.
+	"""
+	if not settings.get("auto_send_whatsapp"):
+		return False
+	if t.get("channel") != MESSAGE or t.get("step") not in AUTO_TEMPLATE_STEPS:
+		return False
+	if t.get("wa_send_error"):
+		return False
+	if t.get("step") == "day50":
+		return bool(settings.get("offer_codes_enabled") and t.get("offer_code"))
+	return True
+
+
+def _param(text: Any) -> str:
+	# Meta refuses a body parameter with a newline, a tab or 4+ spaces in a row.
+	return " ".join(str(text or "").split())
+
+
+def template_components(step: str, first_name: str, offer: str = "", code: str = "") -> list[dict[str, Any]]:
+	"""Components for the jarz_followup_<step> template. Pure.
+
+	Raises ``ValueError`` when day 50 has no offer to fill {{2}} and its button.
+	"""
+	body = [{"type": "text", "text": _param(first_name) or TEMPLATE_NAME_FALLBACK}]
+	if step != "day50":
+		return [{"type": "body", "parameters": body}]
+	if not offer or not code:
+		raise ValueError("day50 needs an offer code")
+	body.append({"type": "text", "text": _param(offer)})
+	return [
+		{"type": "body", "parameters": body},
+		{
+			"type": "button",
+			"sub_type": "copy_code",
+			"index": "0",
+			"parameters": [{"type": "coupon_code", "coupon_code": str(code)}],
+		},
+	]
+
+
+def _sent_today() -> int:
+	from frappe.utils import nowdate
+
+	return int(
+		frappe.db.sql(
+			"""
+            SELECT COUNT(*) FROM `tabJarz Follow-up Touch`
+            WHERE IFNULL(wa_message_id, '') != '' AND done_at >= %(today)s
+            """,
+			{"today": "%s 00:00:00" % nowdate()},
+		)[0][0]
+		or 0
+	)
+
+
+def _mark_send_error(name: str, error: str) -> None:
+	frappe.db.set_value(TOUCH_DOCTYPE, name, "wa_send_error", str(error)[:500], update_modified=False)
+
+
+def send_due_template_messages() -> dict[str, Any]:
+	"""Hourly: send each due day-32 / day-50 message as its approved template. Never raises.
+
+	Off until Jarz Follow-up Settings has both enabled and auto_send_whatsapp.
+	Sends only between quiet_end and quiet_start (so an overdue backlog never
+	goes out at night), at most auto_send_daily_cap a day, oldest due first.
+	A sent touch is Done with its wamid; a refused one keeps its error and
+	falls back to the staff worklist.
+	"""
+	from frappe.utils import now_datetime
+
+	from jarz_pos.services import chat_meta_client as meta
+	from jarz_pos.utils.phone import whatsapp_msisdn
+
+	result: dict[str, Any] = {"status": "skipped", "sent": 0, "failed": 0}
+	try:
+		settings = load_settings()
+		if not settings.get("enabled") or not settings.get("auto_send_whatsapp"):
+			return result
+		from jarz_pos.api import notifications as n
+
+		if n.outbound_alerts_suppressed("followup_auto_send"):
+			result["status"] = "suppressed_test_run"
+			return result
+		now = now_datetime()
+		if _in_quiet(now.time(), settings["quiet_start"], settings["quiet_end"]):
+			result["status"] = "quiet_hours"
+			return result
+		room = int(settings["auto_send_daily_cap"]) - _sent_today()
+		if room <= 0:
+			result["status"] = "daily_cap"
+			return result
+		rows = frappe.get_all(
+			TOUCH_DOCTYPE,
+			filters={
+				"status": "Pending",
+				"channel": MESSAGE,
+				"step": ["in", list(AUTO_TEMPLATE_STEPS)],
+				"due_at": ["<=", now],
+			},
+			fields=["name", "customer", "customer_name", "phone", "step", "channel", "offer_code", "wa_send_error"],
+			order_by="due_at asc, name asc",
+			limit_page_length=500,
+		)
+		rows = [r for r in rows if auto_sendable(r, settings)][:room]
+		cust = _customer_info(r["customer"] for r in rows)
+		result["status"] = "ran"
+		for r in rows:
+			name = r["name"]
+			c = cust.get(r["customer"], {})
+			msisdn = whatsapp_msisdn(r.get("phone") or c.get("mobile_no") or "")
+			try:
+				if not msisdn:
+					raise ValueError("no WhatsApp number")
+				code = r.get("offer_code") or ""
+				offer = offer_text_for_code(code) if r["step"] == "day50" else ""
+				components = template_components(
+					r["step"], first_name_of(r.get("customer_name") or c.get("customer_name")), offer, code
+				)
+			except ValueError as exc:
+				_mark_send_error(name, str(exc))
+				result["failed"] += 1
+				frappe.db.commit()  # nosemgrep: frappe-manual-commit -- one touch per commit
+				continue
+			try:
+				wamid = meta.wa_send_template(msisdn, "jarz_followup_%s" % r["step"], TEMPLATE_LANGUAGE, components)
+			except meta.MetaApiError as exc:
+				if str(exc.code).split("/")[0] in _PER_RECIPIENT_ERRORS:
+					_mark_send_error(name, str(exc))
+					result["failed"] += 1
+					frappe.db.commit()  # nosemgrep: frappe-manual-commit -- one touch per commit
+					continue
+				result["status"] = "stopped"
+				result["error"] = str(exc)
+				frappe.log_error("followups: WhatsApp template send stopped: %s" % exc, "followups: auto send")
+				break
+			frappe.db.set_value(
+				TOUCH_DOCTYPE,
+				name,
+				{
+					"status": "Done",
+					"wa_message_id": wamid,
+					"wa_send_error": "",
+					"done_by": "Administrator",
+					"done_at": now_datetime(),
+					"notes": "Sent by WhatsApp template jarz_followup_%s" % r["step"],
+				},
+			)
+			result["sent"] += 1
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- a sent message must stay recorded even if a later row fails
+	except Exception:
+		result["status"] = "failed_exception"
+		try:
+			frappe.db.rollback()
+			frappe.log_error(frappe.get_traceback(), "followups: send_due_template_messages failed")
 		except Exception:
 			pass
 	return result

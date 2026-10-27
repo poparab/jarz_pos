@@ -20,6 +20,8 @@
   "column_break_b",
   "call_window_start",
   "call_window_end",
+  "auto_send_whatsapp",
+  "auto_send_daily_cap",
   "section_senders",
   "sender_users",
   "section_msgs",
@@ -136,6 +138,20 @@
    "default": "16:00:00"
   },
   {
+   "fieldname": "auto_send_whatsapp",
+   "fieldtype": "Check",
+   "label": "Auto-send WhatsApp Templates",
+   "default": "0",
+   "description": "Send due day-32 / day-50 messages from the Jarz WhatsApp number as the approved jarz_followup templates (paid by Meta per message). Off = staff send them by hand."
+  },
+  {
+   "fieldname": "auto_send_daily_cap",
+   "fieldtype": "Int",
+   "label": "Auto-send Daily Cap",
+   "default": "100",
+   "description": "Most template messages sent per day (the number's Meta limit is 250 new customers a day)."
+  },
+  {
    "fieldname": "section_senders",
    "fieldtype": "Section Break",
    "label": "Daily Push"
@@ -197,7 +213,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-10-27 14:00:00.000000",
+ "modified": "2026-10-27 16:00:00.000000",
  "modified_by": "Administrator",
  "module": "jarz pos",
  "name": "Jarz Follow-up Settings",

@@ -691,5 +691,39 @@ class DataFramingTest(unittest.TestCase):
 		self.assertIn("<customer_data>", f._BRIEF_SYSTEM)
 
 
+class AutoSendTest(unittest.TestCase):
+	ON = {"auto_send_whatsapp": 1, "offer_codes_enabled": 1}
+
+	def test_off_by_default(self):
+		self.assertFalse(f.auto_sendable({"channel": "Message", "step": "day32"}, {}))
+
+	def test_only_template_steps_and_messages(self):
+		self.assertTrue(f.auto_sendable({"channel": "Message", "step": "day32"}, self.ON))
+		self.assertFalse(f.auto_sendable({"channel": "Call", "step": "day32"}, self.ON))
+		self.assertFalse(f.auto_sendable({"channel": "Message", "step": "3h"}, self.ON))
+
+	def test_day50_needs_its_code(self):
+		self.assertFalse(f.auto_sendable({"channel": "Message", "step": "day50"}, self.ON))
+		self.assertTrue(f.auto_sendable({"channel": "Message", "step": "day50", "offer_code": "BACK-ABC123"}, self.ON))
+		no_codes = dict(self.ON, offer_codes_enabled=0)
+		self.assertFalse(f.auto_sendable({"channel": "Message", "step": "day50", "offer_code": "BACK-ABC123"}, no_codes))
+
+	def test_failed_send_falls_back_to_staff(self):
+		self.assertFalse(f.auto_sendable({"channel": "Message", "step": "day32", "wa_send_error": "x"}, self.ON))
+
+	def test_day32_components(self):
+		c = f.template_components("day32", "Mona")
+		self.assertEqual(c, [{"type": "body", "parameters": [{"type": "text", "text": "Mona"}]}])
+		self.assertEqual(f.template_components("day32", "")[0]["parameters"][0]["text"], f.TEMPLATE_NAME_FALLBACK)
+
+	def test_day50_components_fill_offer_and_copy_code(self):
+		c = f.template_components("day50", "Mona", "line one\nline   two", "BACK-ABC123")
+		self.assertEqual(c[0]["parameters"][1]["text"], "line one line two")
+		self.assertEqual(c[1]["sub_type"], "copy_code")
+		self.assertEqual(c[1]["parameters"][0], {"type": "coupon_code", "coupon_code": "BACK-ABC123"})
+		with self.assertRaises(ValueError):
+			f.template_components("day50", "Mona", "", "")
+
+
 if __name__ == "__main__":
 	unittest.main()

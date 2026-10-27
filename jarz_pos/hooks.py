@@ -654,6 +654,9 @@ scheduler_events = {
 		"jarz_pos.services.customer_followups.generate_touches",
 		# BACK- win-back code for each day-45/50 touch due today (offer_codes_enabled).
 		"jarz_pos.services.customer_followups.ensure_due_offer_codes",
+		# Send due day-32 / day-50 messages as approved WhatsApp templates
+		# (auto_send_whatsapp, daily cap, never in quiet hours). Never raises.
+		"jarz_pos.services.customer_followups.send_due_template_messages",
 		# Meta Conversions API: log every newly delivered chat (flutter) order as
 		# Pending Approval / Held / Approved / Skipped, then send the approved
 		# ones as Purchase. Delivered website orders are sent too once Send
