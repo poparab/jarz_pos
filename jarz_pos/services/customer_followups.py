@@ -28,7 +28,7 @@ import datetime as _dt
 import re
 import secrets
 from collections.abc import Iterable
-from typing import Any, Optional
+from typing import Any
 
 import frappe
 
@@ -527,6 +527,160 @@ def _cancel_superseded(scope_inv_conds: list[str]) -> None:
 	)
 
 
+# ---------------------------------------------------------------------------
+# Who is out of scope, and orders that changed after delivery
+# ---------------------------------------------------------------------------
+
+#: Customer groups never followed up: business buyers and staff.
+EXCLUDED_CUSTOMER_GROUPS = ("B2B", "Distributor", "Employee")
+CUSTOMER_EMPLOYEE_FIELD = "custom_employee"
+REASON_EXCLUDED = "Excluded: B2B / employee"
+REASON_ORDER_CANCELLED = "Order cancelled"
+REASON_ORDER_RETURNED = "Order returned"
+
+
+def _phone_key(value: Any) -> str:
+	"""The last 10 digits, so 01xxxxxxxxx, +201xxxxxxxxx and 201xxxxxxxxx compare equal."""
+	digits = "".join(ch for ch in str(value or "") if ch.isdigit())
+	return digits[-10:] if len(digits) >= 10 else ""
+
+
+def is_excluded_customer(group: Any, employee: Any, phones: Iterable[Any], staff_phones: set[str]) -> bool:
+	"""Whether a customer is out of follow-up scope. Pure.
+
+	B2B / distributor / employee customer groups, a customer linked to an
+	employee record, or a phone that belongs to an active employee (staff who
+	order on the website under their own number).
+	"""
+	if str(group or "").strip() in EXCLUDED_CUSTOMER_GROUPS:
+		return True
+	if str(employee or "").strip():
+		return True
+	return any(_phone_key(p) and _phone_key(p) in staff_phones for p in phones)
+
+
+def _employee_phones() -> set[str]:
+	try:
+		if not frappe.db.has_column("Employee", "cell_number"):
+			return set()
+		rows = frappe.get_all("Employee", filters={"status": "Active"}, pluck="cell_number", limit_page_length=0)
+	except Exception:
+		return set()
+	return {k for k in (_phone_key(p) for p in rows) if k}
+
+
+def _excluded_customers(rows: list[dict[str, Any]]) -> set[str]:
+	"""The customers of *rows* (dicts with ``customer`` and ``phone``) that are out of scope."""
+	names = sorted({r.get("customer") for r in rows if r.get("customer")})
+	if not names:
+		return set()
+	fields = ["name", "customer_group", "mobile_no"]
+	has_emp = frappe.db.has_column("Customer", CUSTOMER_EMPLOYEE_FIELD)
+	if has_emp:
+		fields.append(CUSTOMER_EMPLOYEE_FIELD)
+	phones: dict[str, list[Any]] = {}
+	for r in rows:
+		phones.setdefault(r.get("customer"), []).append(r.get("phone"))
+	staff = _employee_phones()
+	out = set()
+	for c in frappe.get_all("Customer", filters={"name": ["in", names]}, fields=fields, limit_page_length=0):
+		emp = c.get(CUSTOMER_EMPLOYEE_FIELD) if has_emp else ""
+		if is_excluded_customer(c.get("customer_group"), emp, [c.get("mobile_no"), *phones.get(c.name, [])], staff):
+			out.add(c.name)
+	return out
+
+
+def _drop_excluded(rows: list[dict[str, Any]], cancel: bool = False) -> list[dict[str, Any]]:
+	"""*rows* without out-of-scope customers; *cancel* also cancels their touches."""
+	excluded = _excluded_customers(rows)
+	if cancel:
+		for r in rows:
+			if r["customer"] in excluded:
+				_cancel_pending("name = %(name)s", {"name": r["name"]}, REASON_EXCLUDED)
+	return [r for r in rows if r["customer"] not in excluded]
+
+
+def _row_count() -> int:
+	return int((frappe.db.sql("SELECT ROW_COUNT()") or [[0]])[0][0] or 0)
+
+
+def sweep_changed_orders() -> dict[str, int]:
+	"""Keep Pending touches in step with what happened to their order. Commits nothing.
+
+	* an amended order: its touches move to the replacement invoice, so the
+	  cycle carries on (and the replacement never opens a second one);
+	* a cancelled order with no replacement, or a returned one (state
+	  Returned or a submitted credit note): its Pending touches are cancelled;
+	* a B2B / distributor / employee customer, a staff purpose order, or an
+	  employee's phone: Pending touches are cancelled.
+	"""
+	out = {"repointed": 0, "cancelled": 0, "excluded": 0}
+	for _ in range(5):  # one amendment hop per pass; chains are short
+		frappe.db.sql(
+			"""
+            UPDATE `tabJarz Follow-up Touch` t
+            INNER JOIN `tabSales Invoice` old ON old.name = t.invoice AND old.docstatus = 2
+            INNER JOIN `tabSales Invoice` am ON am.amended_from = old.name AND am.docstatus = 1
+            SET t.invoice = am.name,
+                t.order_value = IF(t.status = 'Pending', am.grand_total, t.order_value),
+                t.modified = NOW()
+            """
+		)
+		moved = _row_count()
+		out["repointed"] += moved
+		if not moved:
+			break
+
+	state = frappe.db.has_column("Sales Invoice", "custom_sales_invoice_state")
+	returned = (
+		"si.custom_sales_invoice_state = 'Returned' OR " if state else ""
+	) + "EXISTS (SELECT 1 FROM `tabSales Invoice` r WHERE r.return_against = si.name AND r.is_return = 1 AND r.docstatus = 1)"
+	cancelled = (
+		"si.custom_sales_invoice_state = 'Cancelled' OR " if state else ""
+	) + "(si.docstatus = 2 AND NOT EXISTS (SELECT 1 FROM `tabSales Invoice` am WHERE am.amended_from = si.name AND am.docstatus < 2))"
+	for cond, reason in ((returned, REASON_ORDER_RETURNED), (cancelled, REASON_ORDER_CANCELLED)):
+		# nosemgrep: frappe-sql-format-injection -- cond is built from module constants and has_column checks; the reason is bound
+		frappe.db.sql(
+			f"""
+            UPDATE `tabJarz Follow-up Touch` t
+            INNER JOIN `tabSales Invoice` si ON si.name = t.invoice
+            SET t.status = 'Cancelled', t.cancel_reason = %(reason)s, t.modified = NOW()
+            WHERE t.status = 'Pending' AND ({cond})
+            """,
+			{"reason": reason},
+		)
+		out["cancelled"] += _row_count()
+
+	conds = ["IFNULL(c.customer_group, '') IN (%s)" % ", ".join("'%s'" % g for g in EXCLUDED_CUSTOMER_GROUPS)]
+	if frappe.db.has_column("Customer", CUSTOMER_EMPLOYEE_FIELD):
+		conds.append("IFNULL(c.%s, '') != ''" % CUSTOMER_EMPLOYEE_FIELD)
+	if frappe.db.has_column("Sales Invoice", "custom_order_purpose"):
+		conds.append("IFNULL(si.custom_order_purpose, '') NOT IN ('', 'Standard')")
+	# nosemgrep: frappe-sql-format-injection -- conds are module constants and has_column checks; the reason is bound
+	frappe.db.sql(
+		f"""
+        UPDATE `tabJarz Follow-up Touch` t
+        INNER JOIN `tabCustomer` c ON c.name = t.customer
+        LEFT JOIN `tabSales Invoice` si ON si.name = t.invoice
+        SET t.status = 'Cancelled', t.cancel_reason = %(reason)s, t.modified = NOW()
+        WHERE t.status = 'Pending' AND ({" OR ".join(conds)})
+        """,
+		{"reason": REASON_EXCLUDED},
+	)
+	out["excluded"] += _row_count()
+
+	staff = _employee_phones()
+	if staff:
+		pending = frappe.get_all(
+			TOUCH_DOCTYPE, filters={"status": "Pending"}, fields=["name", "phone"], limit_page_length=0
+		)
+		for r in pending:
+			if _phone_key(r.phone) in staff:
+				_cancel_pending("name = %(name)s", {"name": r.name}, REASON_EXCLUDED)
+				out["excluded"] += 1
+	return out
+
+
 def generate_touches() -> dict[str, Any]:
 	"""Hourly: open a cycle for every newly delivered retail order. Never raises.
 
@@ -545,11 +699,22 @@ def generate_touches() -> dict[str, Any]:
 		if not frappe.db.has_column("Sales Invoice", "custom_sales_invoice_state"):
 			return result
 
+		try:
+			result["sweep"] = sweep_changed_orders()
+		except Exception:
+			result["errors"] += 1
+			frappe.log_error(frappe.get_traceback(), "followups: changed-order sweep failed")
+
 		website_only = rfm.website_only_enabled()
 		scope = rfm.retail_scope_sql(website_only)
 		opt_out = ""
 		if frappe.db.has_column("Customer", CUSTOMER_OPT_OUT_FIELD):
 			opt_out = "AND IFNULL(c.%s, 0) = 0" % CUSTOMER_OPT_OUT_FIELD
+		opt_out += " AND IFNULL(c.customer_group, '') NOT IN (%s)" % ", ".join(
+			"'%s'" % g for g in EXCLUDED_CUSTOMER_GROUPS
+		)
+		if frappe.db.has_column("Customer", CUSTOMER_EMPLOYEE_FIELD):
+			opt_out += " AND IFNULL(c.%s, '') = ''" % CUSTOMER_EMPLOYEE_FIELD
 		delivered_expr = (
 			"COALESCE(si.custom_delivered_at, si.modified)"
 			if frappe.db.has_column("Sales Invoice", "custom_delivered_at")
@@ -579,7 +744,10 @@ def generate_touches() -> dict[str, Any]:
 			as_dict=True,
 		)
 
+		staff = _employee_phones()
 		for inv in invoices:
+			if _phone_key(inv.mobile_no) in staff:
+				continue
 			try:
 				frappe.db.savepoint("followup_invoice")
 				result["touches"] += len(_insert_cycle(inv, settings, scope))
@@ -1291,6 +1459,7 @@ def get_due_touches(user: str | None = None) -> dict[str, Any]:
 		for r in rows
 		if is_ready_now(r.get("channel"), r.get("due_at"), now) and not auto_sendable(r, settings)
 	]
+	rows = _drop_excluded(rows)
 	cust = _customer_info(r["customer"] for r in rows)
 	bought = _items_by_invoice(r.get("invoice") for r in rows)
 	items = [
@@ -1981,6 +2150,148 @@ def opt_out_phone(phone: str | None) -> dict[str, Any]:
 	return {"customers": customers, "cancelled": int(cancelled or 0)}
 
 
+_WA_STATUS_RANK = {"sent": 1, "delivered": 2, "read": 3}
+
+
+def record_template_status(wamid: str | None, status: str | None, error: str | None = None) -> bool:
+	"""Store Meta's status for a follow-up template message on its touch. Never raises.
+
+	Templates go out without a chat message row, so the webhook's status lands
+	here instead. Statuses only move forward (sent < delivered < read); a
+	failure always wins and is kept with its error.
+	"""
+	try:
+		if not wamid or not status:
+			return False
+		row = frappe.db.get_value(TOUCH_DOCTYPE, {"wa_message_id": wamid}, ["name", "wa_status"], as_dict=True)
+		if not row:
+			return False
+		from frappe.utils import now_datetime
+
+		if status == "failed":
+			values = {"wa_status": "failed", "wa_status_at": now_datetime()}
+			if error:
+				values["wa_send_error"] = str(error)[:500]
+		elif _WA_STATUS_RANK.get(status, 0) > _WA_STATUS_RANK.get(str(row.wa_status or ""), 0) and row.wa_status != "failed":
+			values = {"wa_status": status, "wa_status_at": now_datetime()}
+		else:
+			return False
+		frappe.db.set_value(TOUCH_DOCTYPE, row.name, values, update_modified=False)
+		return True
+	except Exception:
+		return False
+
+
+def get_sent_report(from_date: str | None = None, to_date: str | None = None, limit: int = 200) -> dict[str, Any]:
+	"""What the follow-up sender sent in the range (default: last 7 days), with results.
+
+	Per message: delivered / read as Meta reported it, whether the customer
+	replied on WhatsApp afterwards, and whether they ordered again within 30
+	days. Totals per step and per day, plus the opt-outs and the touches
+	cancelled in the range by reason.
+	"""
+	from frappe.utils import add_days, getdate, nowdate
+
+	from jarz_pos.services import rfm_segmentation as rfm
+
+	to_d = getdate(to_date) if to_date else getdate(nowdate())
+	from_d = getdate(from_date) if from_date else add_days(to_d, -6)
+	params = {
+		"from_d": "%s 00:00:00" % from_d,
+		"to_d": "%s 00:00:00" % add_days(to_d, 1),
+		"limit": max(1, min(int(limit or 200), 1000)),
+	}
+	newer = " AND ".join(rfm.retail_invoice_conditions(rfm.website_only_enabled(), "n"))
+	status_col = "t.wa_status" if frappe.db.has_column(TOUCH_DOCTYPE, "wa_status") else "''"
+	# nosemgrep: frappe-sql-format-injection -- newer is built by rfm.retail_invoice_conditions and status_col by a has_column check (constants only); values are bound
+	rows = frappe.db.sql(
+		f"""
+        SELECT t.name, t.customer, t.customer_name, t.phone, t.step, t.done_at, t.offer_code,
+               t.woo_order_id, t.invoice, {status_col} AS wa_status, t.wa_send_error,
+               EXISTS (
+                   SELECT 1 FROM `tabJarz Chat Message` m
+                   INNER JOIN `tabJarz Chat Conversation` cv ON cv.name = m.conversation
+                   WHERE cv.customer = t.customer AND m.direction = 'Inbound' AND m.timestamp > t.done_at
+                     AND m.timestamp <= DATE_ADD(t.done_at, INTERVAL 7 DAY)
+               ) AS replied,
+               (SELECT MIN(n.name) FROM `tabSales Invoice` n
+                WHERE n.customer = t.customer AND {newer}
+                  AND n.creation > t.done_at AND n.creation <= DATE_ADD(t.done_at, INTERVAL 30 DAY)
+               ) AS reorder_invoice
+        FROM `tabJarz Follow-up Touch` t
+        WHERE t.status = 'Done' AND IFNULL(t.wa_message_id, '') != ''
+          AND t.done_at >= %(from_d)s AND t.done_at < %(to_d)s
+        ORDER BY t.done_at DESC
+        LIMIT %(limit)s
+        """,
+		params,
+		as_dict=True,
+	)
+	totals = {"sent": 0, "delivered": 0, "read": 0, "failed": 0, "replied": 0, "reordered": 0}
+	by_step: dict[str, dict[str, int]] = {}
+	by_day: dict[str, int] = {}
+	items = []
+	for r in rows:
+		st = str(r.wa_status or "")
+		delivered = st in ("delivered", "read")
+		step = by_step.setdefault(r.step, {"sent": 0, "delivered": 0, "read": 0, "reordered": 0})
+		totals["sent"] += 1
+		step["sent"] += 1
+		totals["delivered"] += int(delivered)
+		step["delivered"] += int(delivered)
+		totals["read"] += int(st == "read")
+		step["read"] += int(st == "read")
+		totals["failed"] += int(st == "failed")
+		totals["replied"] += int(bool(r.replied))
+		totals["reordered"] += int(bool(r.reorder_invoice))
+		step["reordered"] += int(bool(r.reorder_invoice))
+		day = str(r.done_at)[:10]
+		by_day[day] = by_day.get(day, 0) + 1
+		items.append(
+			{
+				"name": r.name,
+				"customer": r.customer,
+				"customer_name": r.customer_name or r.customer,
+				"phone": r.phone or "",
+				"step": r.step,
+				"sent_at": str(r.done_at or ""),
+				"offer_code": r.offer_code or "",
+				"order_no": r.woo_order_id or r.invoice or "",
+				"wa_status": st or "sent",
+				"error": r.wa_send_error or "",
+				"replied": int(bool(r.replied)),
+				"reorder_invoice": r.reorder_invoice or "",
+			}
+		)
+	cancelled = {
+		str(r[0] or ""): int(r[1])
+		for r in frappe.db.sql(
+			# nosemgrep: string-concat-in-list -- one SQL statement split over lines on purpose, not a list
+			"SELECT cancel_reason, COUNT(*) FROM `tabJarz Follow-up Touch` "
+			"WHERE status = 'Cancelled' AND modified >= %(from_d)s AND modified < %(to_d)s GROUP BY cancel_reason",
+			params,
+		)
+	}
+	failed_pending = frappe.db.count(
+		TOUCH_DOCTYPE, {"status": "Pending", "channel": MESSAGE, "wa_send_error": ["!=", ""]}
+	)
+	return {
+		"from_date": str(from_d),
+		"to_date": str(to_d),
+		"totals": totals,
+		"by_step": by_step,
+		"by_day": dict(sorted(by_day.items())),
+		"cancelled": cancelled,
+		"opted_out_customers": (
+			frappe.db.count("Customer", {CUSTOMER_OPT_OUT_FIELD: 1})
+			if frappe.db.has_column("Customer", CUSTOMER_OPT_OUT_FIELD)
+			else 0
+		),
+		"refused_waiting_for_staff": failed_pending,
+		"items": items,
+	}
+
+
 def _mark_send_error(name: str, error: str) -> None:
 	frappe.db.set_value(TOUCH_DOCTYPE, name, "wa_send_error", str(error)[:500], update_modified=False)
 
@@ -2029,7 +2340,12 @@ def send_due_template_messages() -> dict[str, Any]:
 			order_by="due_at asc, name asc",
 			limit_page_length=500,
 		)
-		rows = _drop_opted_out([r for r in rows if auto_sendable(r, settings)])[:room]
+		try:
+			sweep_changed_orders()
+		except Exception:
+			frappe.log_error(frappe.get_traceback(), "followups: changed-order sweep failed")
+		rows = [r for r in rows if auto_sendable(r, settings)]
+		rows = _drop_excluded(_drop_opted_out(rows), cancel=True)[:room]
 		cust = _customer_info(r["customer"] for r in rows)
 		result["status"] = "ran"
 		for r in rows:

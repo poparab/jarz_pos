@@ -6,6 +6,7 @@ Methods (all under ``jarz_pos.api.customer_followups``):
 * ``log_touch(name, reached=None, outcome=None, notes=None)`` -> the updated item
 * ``skip_touch(name, reason=None)`` -> the updated item
 * ``get_followup_stats(from_date=None, to_date=None)`` -> outcome numbers
+* ``get_sent_report(from_date=None, to_date=None)`` -> WhatsApp messages sent, read, replied, reordered (manager)
 * ``run_generator_now()`` -> ``{enabled, invoices, touches, errors}`` (manager)
 * ``get_followup_settings()`` -> the settings the screen needs (no secrets)
 * ``draft_followup_message(name, refresh=0)`` -> Claude-written WhatsApp text (template fallback)
@@ -68,6 +69,15 @@ def get_followup_stats(from_date=None, to_date=None):
 	from jarz_pos.services import customer_followups as svc
 
 	return svc.get_followup_stats(from_date, to_date)
+
+
+@frappe.whitelist()
+def get_sent_report(from_date=None, to_date=None):
+	"""Messages the sender sent (default: last 7 days), with delivered / read / reply / reorder."""
+	_gate(_MANAGER_ROLES)
+	from jarz_pos.services import customer_followups as svc
+
+	return svc.get_sent_report(from_date, to_date)
 
 
 @frappe.whitelist(methods=["POST"])

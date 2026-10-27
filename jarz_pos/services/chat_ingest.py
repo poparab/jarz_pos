@@ -819,6 +819,10 @@ def _is_app_echo(conversation: str, body: str, when: _dt.datetime) -> bool:
 def _apply_status(event: dict[str, Any]) -> str | None:
 	name = frappe.db.get_value(cc.MESSAGE, {"external_message_id": event["external_message_id"]}, "name")
 	if not name:
+		# A follow-up template has no chat message row: its status goes on the touch.
+		from jarz_pos.services import customer_followups as followups
+
+		followups.record_template_status(event["external_message_id"], event.get("status"), event.get("error"))
 		return None
 	row = frappe.db.get_value(cc.MESSAGE, name, ["status", "direction", "conversation"], as_dict=True)
 	if not row or row.direction != "Outbound":

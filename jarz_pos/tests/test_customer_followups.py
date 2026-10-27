@@ -34,6 +34,21 @@ except ImportError:  # pragma: no cover
 	sys.modules["frappe.utils"] = _utils
 	_fake.utils = _utils
 
+# Another test module may have registered a thinner stub first (one process runs
+# them all): top up the helpers this module and rfm_segmentation import.
+if not hasattr(sys.modules["frappe"], "get_all"):  # a stub, not the real frappe
+	_stub_utils = sys.modules.get("frappe.utils")
+	for _name, _fn in (
+		("today", lambda: "2026-10-12"),
+		("add_days", lambda d, n: d),
+		("getdate", lambda d=None: d),
+		("get_datetime", lambda d=None: d),
+		("now_datetime", lambda: datetime.datetime(2026, 10, 12, 12, 0)),
+		("nowdate", lambda: "2026-10-12"),
+	):
+		if _stub_utils is not None and not hasattr(_stub_utils, _name):
+			setattr(_stub_utils, _name, _fn)
+
 from jarz_pos.services import customer_followups as f
 from jarz_pos.services import rfm_segmentation as rfm
 
@@ -550,7 +565,9 @@ class CallBriefTest(unittest.TestCase):
 			f, "_claude_text", side_effect=f.AIUnavailable("no key")
 		), patch.object(f.frappe, "log_error", MagicMock()), patch.dict(
 			sys.modules, {"jarz_pos.services.chat_common": fake_cc}
-		):
+		), patch("jarz_pos.services.chat_common", fake_cc, create=True):
+			# The package attribute too: once another test imported chat_common,
+			# ``from jarz_pos.services import chat_common`` reads it, not sys.modules.
 			out = f.call_brief("FUT-00001")
 		self.assertEqual(out["source"], "template")
 		self.assertEqual(out["error"], "no key")
@@ -746,6 +763,33 @@ class StopRepliesTest(unittest.TestCase):
 			kept = f._drop_opted_out(rows)
 		self.assertEqual([r["name"] for r in kept], ["FUT-2"])
 		cancel.assert_called_once_with("name = %(name)s", {"name": "FUT-1"}, f.STOP_REASON)
+
+
+class ExclusionTest(unittest.TestCase):
+	STAFF = {"1001234567"}
+
+	def test_business_and_employee_groups_are_excluded(self):
+		for group in ("B2B", "Distributor", "Employee"):
+			self.assertTrue(f.is_excluded_customer(group, "", [], self.STAFF), group)
+		self.assertFalse(f.is_excluded_customer("Individual", "", ["01112223334"], self.STAFF))
+
+	def test_customer_linked_to_an_employee_is_excluded(self):
+		self.assertTrue(f.is_excluded_customer("Individual", "HR-EMP-0001", [], self.STAFF))
+
+	def test_employee_phone_matches_in_any_spelling(self):
+		for phone in ("01001234567", "+201001234567", "201001234567", "0100 123 4567"):
+			self.assertTrue(f.is_excluded_customer("Individual", "", [phone], self.STAFF), phone)
+		self.assertFalse(f.is_excluded_customer("Individual", "", ["", None, "123"], self.STAFF))
+
+	def test_excluded_touches_are_cancelled_when_asked(self):
+		rows = [{"name": "FUT-1", "customer": "C-B2B"}, {"name": "FUT-2", "customer": "C-IN"}]
+		with patch.object(f, "_excluded_customers", return_value={"C-B2B"}), patch.object(
+			f, "_cancel_pending"
+		) as cancel:
+			self.assertEqual([r["name"] for r in f._drop_excluded(rows)], ["FUT-2"])
+			cancel.assert_not_called()
+			self.assertEqual([r["name"] for r in f._drop_excluded(rows, cancel=True)], ["FUT-2"])
+		cancel.assert_called_once_with("name = %(name)s", {"name": "FUT-1"}, f.REASON_EXCLUDED)
 
 
 if __name__ == "__main__":
