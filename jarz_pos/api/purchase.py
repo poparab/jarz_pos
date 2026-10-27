@@ -484,9 +484,9 @@ def _on_hand_bulk(item_codes: list[str]) -> dict[str, float]:
 def last_paid_details_bulk(item_codes) -> dict[str, dict[str, Any]]:
 	"""The last purchase actually paid for each item, normalised to the stock unit.
 
-	Returns ``{item_code: {"rate", "uom", "uom_rate", "conversion_factor"}}``:
+	Returns ``{item_code: {"rate", "uom", "uom_rate", "conversion_factor", "supplier"}}``:
 	``rate`` is per stock unit; ``uom``/``uom_rate`` are the unit and price of
-	that last line as the supplier billed it.
+	that last line as the supplier billed it; ``supplier`` is who billed it.
 
 	The raw invoice ``rate`` is in the line's own unit. Production, 2026-10-19:
 	butter was last bought as "Carton 10 Kg" at 5500, and that 5500 was offered
@@ -504,7 +504,8 @@ def last_paid_details_bulk(item_codes) -> dict[str, dict[str, Any]]:
 		return {}
 	rows = frappe.db.sql(
 		"""
-		select pii.item_code, pii.uom, pii.rate, pii.conversion_factor, pii.stock_uom_rate
+		select pii.item_code, pii.uom, pii.rate, pii.conversion_factor, pii.stock_uom_rate,
+			pi.supplier
 		from `tabPurchase Invoice Item` pii
 		inner join `tabPurchase Invoice` pi on pi.name = pii.parent
 		where pi.docstatus = 1
@@ -533,6 +534,7 @@ def last_paid_details_bulk(item_codes) -> dict[str, dict[str, Any]]:
 			"uom": row.get("uom"),
 			"uom_rate": uom_rate,
 			"conversion_factor": conversion,
+			"supplier": row.get("supplier"),
 		}
 	return latest
 

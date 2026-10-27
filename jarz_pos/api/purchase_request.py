@@ -713,6 +713,9 @@ def get_open_request_lines(company: str | None = None) -> dict[str, Any]:
 		bucket["last_purchase_rate"] = paid.get("rate", 0.0)
 		bucket["last_purchase_uom"] = paid.get("uom")
 		bucket["last_purchase_uom_rate"] = paid.get("uom_rate", 0.0)
+		# Who that last paid line was billed by, so buying from requests can
+		# start on the same supplier instead of leaving the invoice unsubmittable.
+		bucket["last_supplier"] = paid.get("supplier")
 		bucket["uoms"] = uom_map.get(item_code) or [
 			{"uom": bucket.get("stock_uom"), "conversion_factor": 1}
 		]

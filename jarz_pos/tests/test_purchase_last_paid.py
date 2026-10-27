@@ -52,6 +52,17 @@ class TestLastPaidDetails(unittest.TestCase):
 		self.assertIn("pi.docstatus = 1", query)
 		self.assertEqual(("butter",), captured["values"]["codes"])
 
+	def test_supplier_of_the_latest_line_is_returned(self):
+		# Buying from requests defaults the invoice to whoever we last paid.
+		result, captured = self._run(
+			[
+				{"item_code": "butter", "uom": "Kg", "rate": 154.0, "conversion_factor": 1.0, "supplier": "Lactalis"},
+				{"item_code": "butter", "uom": "Kg", "rate": 136.5, "conversion_factor": 1.0, "supplier": "Older Co"},
+			]
+		)
+		self.assertEqual("Lactalis", result["butter"]["supplier"])
+		self.assertIn("pi.supplier", " ".join(captured["query"].split()))
+
 	def test_missing_conversion_falls_back_to_stock_uom_rate(self):
 		result, _ = self._run(
 			[{"item_code": "butter", "uom": "Box", "rate": 300.0, "conversion_factor": 0, "stock_uom_rate": 100.0}]
