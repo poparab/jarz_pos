@@ -111,6 +111,71 @@ def _call_meta(conv: Any, route: str, tag: str | None, text: str) -> str:
 	return meta.comment_public_reply(conv.external_id, text, instagram=instagram)
 
 
+def record_system_message(
+	external_id: str,
+	body: str,
+	external_message_id: str,
+	*,
+	customer: str | None = None,
+	source: dict[str, Any] | None = None,
+	when: Any = None,
+) -> str | None:
+	"""Show a WhatsApp message Jarz sent automatically (a follow-up template) in its chat.
+
+	The row is Outbound / ``System`` with the template's text, so staff see it
+	and the AI draft reads it. Only into a chat that already exists: most
+	templates are never answered, and a chat each would bury the inbox. When a
+	customer first writes back, ``customer_followups.show_templates_in_new_chat``
+	adds their recent templates to the new chat. An Open chat keeps its status
+	and summary, so a customer who is waiting still looks waiting. Returns the
+	message name, or ``None`` when there is no chat or it was already stored.
+	"""
+	import json
+
+	from jarz_pos.services import chat_ingest as ingest
+
+	if not external_id or not external_message_id:
+		return None
+	if frappe.db.exists(cc.MESSAGE, {"external_message_id": external_message_id}):
+		return None
+	at = cc.to_dt(when) or cc.now()
+	conv = ingest._find_conversation(cc.WHATSAPP, external_id)
+	if conv is None:
+		return None
+	msg = frappe.get_doc(
+		{
+			"doctype": cc.MESSAGE,
+			"conversation": conv.name,
+			"direction": "Outbound",
+			"message_type": "template",
+			"body": body,
+			"sent_via": "System",
+			"status": "sent",
+			"external_message_id": external_message_id,
+			"timestamp": at,
+			"raw_json": json.dumps(source, ensure_ascii=False) if source else None,
+		}
+	)
+	msg.insert(ignore_permissions=True)
+	updates: dict[str, Any] = {}
+	if customer and not conv.get("customer"):
+		updates["customer"] = customer
+	last = cc.to_dt(conv.get("last_message_at"))
+	if conv.get("status") != "Open" and (last is None or at >= last):
+		updates.update(
+			{
+				"last_message_at": at,
+				"last_outbound_at": at,
+				"last_message_preview": cc.preview(body),
+				"last_direction": "Outbound",
+			}
+		)
+	if updates:
+		frappe.db.set_value(cc.CONVERSATION, conv.name, updates, update_modified=True)
+	cc.publish_chat_update(conv.name, "message", message=cc.load_message(msg.name))
+	return msg.name
+
+
 def send_text(conversation: str, text: str, user: str, draft: str | None = None) -> dict[str, Any]:
 	"""Send *text* on *conversation* as *user*. Returns the Message shape.
 

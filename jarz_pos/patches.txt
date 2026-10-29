@@ -67,3 +67,6 @@ jarz_pos.Patches.v1_9.cancel_day7_followups
 # The 3-hour step was removed: WooCommerce sends that thank-you (owner, 2026-10-24).
 # Any still-Pending 3h touch is cancelled so nobody sends it twice. Idempotent.
 jarz_pos.Patches.v1_9.cancel_3h_followups
+# Follow-up templates are now written into the customer's WhatsApp chat when sent.
+# Backfill the last 30 days into chats that already exist (no chat is created). Re-runnable.
+jarz_pos.Patches.v1_9.show_followup_templates_in_chat

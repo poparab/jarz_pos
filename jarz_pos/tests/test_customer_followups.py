@@ -764,6 +764,20 @@ class AutoSendTest(unittest.TestCase):
 			with self.assertRaises(ValueError):
 				f.template_components("day50", "Mona", "offer", bad)
 
+	def test_template_text_is_what_the_customer_sees(self):
+		offer = "عاملينلك جار لارج هدية بالكود BACKXQ33VV لحد 12 نوفمبر."
+		text = f.template_text("day50", f.template_components("day50", "محمود", offer, "BACKXQ33VV"))
+		self.assertEqual(
+			text, "أهلاً محمود، من فترة مطلبتش من Jarz وحبينا نطمن عليك. " + offer + " نورنا في أي وقت 🍰"
+		)
+		day32 = f.template_text("day32", f.template_components("day32", ""))
+		self.assertTrue(day32.startswith("أهلاً " + f.TEMPLATE_NAME_FALLBACK + "، وحشتنا!"))
+		self.assertNotIn("{{", day32)
+		self.assertEqual(f.template_text("day7", []), "")
+
+	def test_every_auto_step_has_a_body(self):
+		self.assertEqual(set(f.AUTO_TEMPLATE_STEPS), set(f.TEMPLATE_BODIES))
+
 
 class StopRepliesTest(unittest.TestCase):
 	def test_button_text_in_both_languages(self):

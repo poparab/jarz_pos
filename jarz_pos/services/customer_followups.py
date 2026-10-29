@@ -83,6 +83,12 @@ AUTO_TEMPLATE_STEPS = ("day32", "day50")
 TEMPLATE_LANGUAGE = "ar_EG"
 #: Fills {{1}} when the customer has no usable first name.
 TEMPLATE_NAME_FALLBACK = "عميلنا"
+#: The approved ar_EG body of each template, copied from Meta, so a sent
+#: template can be shown in the customer's chat thread. Keep in step with Meta.
+TEMPLATE_BODIES = {
+	"day32": "أهلاً {{1}}، وحشتنا! عدّى شهر على آخر طلب من Jarz. جاهزين نظبطلك جارز جديد وقت ما تحب 🍰",
+	"day50": "أهلاً {{1}}، من فترة مطلبتش من Jarz وحبينا نطمن عليك. {{2}} نورنا في أي وقت 🍰",
+}
 DEFAULT_AUTO_SEND_CAP = 100
 #: EGP per delivered follow-up template: Meta's Egypt marketing rate ($0.0644, rate card of
 #: 1 Oct 2026) at ~56 EGP/USD. The settings field `wa_message_cost` overrides it.
@@ -2081,6 +2087,140 @@ def _param(text: Any) -> str:
 	return " ".join(str(text or "").split())
 
 
+def template_text(step: str, components: list[dict[str, Any]]) -> str:
+	"""The text a customer sees for the jarz_followup_<step> template sent with *components*. Pure."""
+	text = TEMPLATE_BODIES.get(step) or ""
+	if not text:
+		return ""
+	body = next((c for c in components if c.get("type") == "body"), {})
+	for i, param in enumerate(body.get("parameters") or [], start=1):
+		text = text.replace("{{%d}}" % i, str(param.get("text") or ""))
+	return text
+
+
+def _template_source(touch: dict[str, Any]) -> dict[str, Any]:
+	return {"source": "followup", "touch": touch.get("name"), "template": "jarz_followup_%s" % touch.get("step")}
+
+
+def _show_in_chat(touch: dict[str, Any], msisdn: str, wamid: str, text: str) -> None:
+	"""Put a sent template in the customer's WhatsApp chat, if they have one. Best effort."""
+	if not text:
+		return
+	try:
+		from jarz_pos.services import chat_send
+
+		if chat_send.record_system_message(
+			msisdn, text, wamid, customer=touch.get("customer"), source=_template_source(touch)
+		):
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- the chat row is separate from the touch commit
+	except Exception:
+		frappe.db.rollback()
+		frappe.log_error(frappe.get_traceback(), "followups: could not show template in chat")
+
+
+_SENT_TOUCH_FIELDS = ["name", "customer", "customer_name", "phone", "step", "offer_code", "wa_message_id", "done_at"]
+
+
+def _sent_touches(days: int, extra: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+	"""Templates sent in the last *days*, oldest first."""
+	from frappe.utils import add_days, now_datetime
+
+	filters = {
+		"status": "Done",
+		"step": ["in", list(AUTO_TEMPLATE_STEPS)],
+		"wa_message_id": ["is", "set"],
+		"done_at": [">=", add_days(now_datetime(), -int(days))],
+	}
+	filters.update(extra or {})
+	return frappe.get_all(
+		TOUCH_DOCTYPE,
+		filters=filters,
+		fields=_SENT_TOUCH_FIELDS,
+		order_by="done_at asc",
+		limit_page_length=0,
+		ignore_permissions=True,
+	)
+
+
+def sent_template_text(touch: dict[str, Any], customer_name: str | None = None) -> str:
+	"""Rebuild the text of a template already sent, '' when it cannot be.
+
+	A day-50 offer is rebuilt from its promo code even when the code has since
+	been used or expired, because that is what the customer was sent; a touch
+	whose code is gone gives '' rather than a message without its offer.
+	"""
+	offer = ""
+	code = touch.get("offer_code") or ""
+	if touch.get("step") == "day50" and code and frappe.db.exists("Jarz Promo Code", code):
+		promo = frappe.get_doc("Jarz Promo Code", code)
+		tier = _tier_of_code(promo)
+		offer = offer_sentence(tier, promo.name, promo.active_to) if tier else ""
+	try:
+		components = template_components(
+			touch.get("step") or "", first_name_of(customer_name or touch.get("customer_name")), offer, code
+		)
+	except ValueError:
+		return ""
+	return template_text(touch.get("step") or "", components)
+
+
+def _record_sent_touch(touch: dict[str, Any], msisdn: str, customer_name: str | None = None) -> bool:
+	from jarz_pos.services import chat_send
+
+	text = sent_template_text(touch, customer_name)
+	if not msisdn or not text:
+		return False
+	return bool(
+		chat_send.record_system_message(
+			msisdn,
+			text,
+			touch["wa_message_id"],
+			customer=touch.get("customer"),
+			source=_template_source(touch),
+			when=touch.get("done_at"),
+		)
+	)
+
+
+def show_templates_in_new_chat(conv: Any, days: int = 30) -> int:
+	"""Add the templates sent to this customer lately to their brand-new WhatsApp chat. Never raises.
+
+	Called by chat ingest when a customer's first message opens a chat, often in
+	answer to a template, so staff and the AI draft see what they are answering.
+	"""
+	try:
+		from jarz_pos.utils.phone import phone_variants
+
+		if conv.get("customer"):
+			extra = {"customer": conv.get("customer")}
+		else:
+			variants = phone_variants(conv.get("phone") or conv.get("external_id"))
+			if not variants:
+				return 0
+			extra = {"phone": ["in", variants]}
+		return sum(1 for t in _sent_touches(days, extra) if _record_sent_touch(t, conv.get("external_id")))
+	except Exception:
+		frappe.log_error(frappe.get_traceback(), "followups: could not show templates in new chat")
+		return 0
+
+
+def backfill_templates_in_chat(days: int = 30) -> dict[str, int]:
+	"""Show templates sent in the last *days* in the chats that already exist. Re-runnable."""
+	from jarz_pos.utils.phone import whatsapp_msisdn
+
+	result = {"shown": 0, "skipped": 0}
+	rows = _sent_touches(days)
+	cust = _customer_info(r["customer"] for r in rows)
+	for r in rows:
+		c = cust.get(r["customer"], {})
+		msisdn = whatsapp_msisdn(r.get("phone") or c.get("mobile_no") or "")
+		shown = _record_sent_touch(r, msisdn, r.get("customer_name") or c.get("customer_name"))
+		result["shown" if shown else "skipped"] += 1
+		if shown:
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- one chat row per commit, re-runnable
+	return result
+
+
 def template_components(step: str, first_name: str, offer: str = "", code: str = "") -> list[dict[str, Any]]:
 	"""Components for the jarz_followup_<step> template. Pure.
 
@@ -2664,6 +2804,7 @@ def send_due_template_messages() -> dict[str, Any]:
 			)
 			result["sent"] += 1
 			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- a sent message must stay recorded even if a later row fails
+			_show_in_chat(r, msisdn, wamid, template_text(r["step"], components))
 	except Exception:
 		result["status"] = "failed_exception"
 		try:

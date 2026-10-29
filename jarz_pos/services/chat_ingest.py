@@ -824,9 +824,14 @@ def _apply_status(event: dict[str, Any]) -> str | None:
 
 		followups.record_template_status(event["external_message_id"], event.get("status"), event.get("error"))
 		return None
-	row = frappe.db.get_value(cc.MESSAGE, name, ["status", "direction", "conversation"], as_dict=True)
+	row = frappe.db.get_value(cc.MESSAGE, name, ["status", "direction", "conversation", "sent_via"], as_dict=True)
 	if not row or row.direction != "Outbound":
 		return None
+	if row.sent_via == "System":
+		# A follow-up template shown in the chat: its touch still tracks delivered / read.
+		from jarz_pos.services import customer_followups as followups
+
+		followups.record_template_status(event["external_message_id"], event.get("status"), event.get("error"))
 	new = str(event.get("status") or "")
 	if new == "failed":
 		frappe.db.set_value(
@@ -1127,6 +1132,11 @@ def _persist_message(
 		conv = _create_conversation(event, when)
 		if conv is None:
 			return None
+		if inbound and event["channel"] == cc.WHATSAPP:
+			# Often an answer to a follow-up template: put it in the chat first.
+			from jarz_pos.services import customer_followups as followups
+
+			followups.show_templates_in_new_chat(conv)
 
 	body = str(event.get("body") or "")
 	if not inbound and _is_app_echo(conv.name, body, when):
