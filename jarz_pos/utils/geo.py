@@ -737,6 +737,21 @@ def distance_m_or_none(lat1: object, lng1: object, lat2: object, lng2: object) -
 #: the case today: the business delivers in Greater Cairo.
 GREATER_CAIRO = (30.0444, 31.2357)
 
+
+def is_placeholder_point(lat: object, lng: object) -> bool:
+	"""True when *lat*/*lng* is the :data:`GREATER_CAIRO` placeholder (to 4 dp, ~10 m).
+
+	That exact point is no door. It is where the POS map picker starts, and the
+	example in the paste-box hint. By 2026-10-29, 21 Addresses held it as a
+	``pos_link`` pin (order #19830: El Shorouk pinned to Tahrir). Either the
+	picker was confirmed without a tap, or the hint was typed in. A pin write
+	must refuse it like Null Island.
+	"""
+	try:
+		return round(float(lat), 4) == GREATER_CAIRO[0] and round(float(lng), 4) == GREATER_CAIRO[1]
+	except (TypeError, ValueError):
+		return False
+
 #: A swapped reading must land this close to a delivery reference...
 SWAP_NEAR_M = 40_000.0
 #: ...and the typed reading must be this far from every one of them, otherwise

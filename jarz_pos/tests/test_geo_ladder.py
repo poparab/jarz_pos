@@ -242,6 +242,19 @@ class TestServiceEnforcesTheLadder(unittest.TestCase):
 		self.assertFalse(result["accepted"])
 		self.assertEqual(result["reason"], "missing_address")
 
+	def test_cairo_placeholder_is_refused_from_every_source(self):
+		"""Order #19830: El Shorouk pinned to Tahrir, the picker's start point."""
+		for source in ALL_SOURCES:
+			for lat, lng in ((30.0444, 31.2357), (30.044400, 31.235700), ("30.04441", "31.23569")):
+				with self.subTest(source=source, lat=lat):
+					result = self._evaluate("", source, latitude=lat, longitude=lng)
+					self.assertFalse(result["accepted"])
+					self.assertEqual(result["reason"], "placeholder_pin")
+
+	def test_a_point_beside_the_placeholder_is_a_real_pin(self):
+		result = self._evaluate("", "pos_link", latitude=30.0452, longitude=31.2361)
+		self.assertTrue(result["accepted"])
+
 	def test_movement_distance_is_reported(self):
 		result = self._evaluate("pos_link", "courier_verified")
 		self.assertIsNotNone(result["moved_m"])
@@ -388,6 +401,32 @@ class TestStaffCorrectionWrite(unittest.TestCase):
 		self.assertFalse(result["staff_correction"])
 		self.assertIs(fake.db.set_value.call_args.args[2]["custom_geo_updated_on"], stamp)
 		fake.get_doc.assert_not_called()
+
+	def test_every_accepted_write_records_who_set_it(self):
+		for current, staff in (("customer_pin", True), ("territory_centroid", False)):
+			with self.subTest(current=current):
+				result, fake, _ = self._write(current, staff=staff)
+				self.assertTrue(result["accepted"])
+				self.assertEqual(fake.db.set_value.call_args.args[2]["custom_geo_set_by"], "staff@jarz")
+
+	def test_placeholder_pin_writes_nothing(self):
+		from unittest.mock import MagicMock
+
+		from jarz_pos.services import geo_resolution
+
+		fake = MagicMock()
+		with (
+			patch.object(geo_resolution, "frappe", fake),
+			patch.object(geo_resolution, "_assert_geo_fields"),
+			patch.object(geo_resolution, "get_address_geo", return_value={"custom_geo_source": ""}),
+		):
+			result = geo_resolution.set_address_pin(
+				"ADDR-0001", latitude=30.0444, longitude=31.2357, source="pos_link", staff_correction=True
+			)
+		self.assertTrue(result["success"])
+		self.assertFalse(result["accepted"])
+		self.assertEqual(result["reason"], "placeholder_pin")
+		fake.db.set_value.assert_not_called()
 
 	def test_unmigrated_site_skips_the_stamp_but_still_writes(self):
 		result, fake, _ = self._write("customer_pin", staff=True, field_present=False)

@@ -69,6 +69,15 @@ GEO_FIELDS = (
 #: cannot date them. Stamped on every accepted write, whatever the source.
 GEO_UPDATED_FIELD = "custom_geo_updated_on"
 
+#: Optional eighth column: the user whose request wrote the pin. The writes
+#: below skip Version and leave ``modified_by`` alone, so without it "who set
+#: this pin?" can only be guessed from other activity. Meta-guarded like
+#: :data:`GEO_UPDATED_FIELD`.
+GEO_SET_BY_FIELD = "custom_geo_set_by"
+
+#: Refusal reason for the Greater Cairo placeholder (see geo.is_placeholder_point).
+PLACEHOLDER_PIN = "placeholder_pin"
+
 #: Fields that must never appear in a geo write. ``address_line2`` carries the
 #: pasted Maps link and is part of Woo's dedup signature and outbound trigger
 #: set; the rest are the remainder of that trigger set. Listed explicitly so the
@@ -225,6 +234,8 @@ def evaluate_pin_write(
 		return {"accepted": False, "reason": "unknown_source", "source": str(source or "")}
 	if not geo.is_valid_coordinate(latitude, longitude):
 		return {"accepted": False, "reason": "invalid_coordinates"}
+	if geo.is_placeholder_point(latitude, longitude):
+		return {"accepted": False, "reason": PLACEHOLDER_PIN}
 
 	current = get_address_geo(name)
 	if not current:
@@ -415,6 +426,8 @@ def set_address_pin(
 	# arrives with `bench migrate`, and a pin write must not fail before then.
 	if _has_address_field(GEO_UPDATED_FIELD):
 		updates[GEO_UPDATED_FIELD] = now_datetime()
+	if _has_address_field(GEO_SET_BY_FIELD):
+		updates[GEO_SET_BY_FIELD] = getattr(frappe.session, "user", None) or None
 
 	_assert_no_woo_trigger_fields(updates)
 
