@@ -31,6 +31,7 @@ from typing import Any
 import frappe
 
 from jarz_pos.services import chat_common as cc
+from jarz_pos.services import chat_media
 
 #: Bodies above this are refused before hashing. A WhatsApp ``history`` chunk
 #: (up to 180 days of chats at onboarding) is the largest payload Meta sends.
@@ -60,6 +61,8 @@ DM_WINDOW_HOURS = 24
 #: Private-reply window for a public comment.
 COMMENT_WINDOW_DAYS = 7
 RAW_JSON_MAX = 20000
+#: Seconds for the media job: download, then (voice notes) the 60 s transcription call.
+DOWNLOAD_JOB_TIMEOUT = 240
 _UTC = _dt.timezone.utc
 
 _STATUS_RANK = {"queued": 0, "received": 0, "sent": 1, "delivered": 2, "read": 3}
@@ -632,14 +635,21 @@ def parse_webhook(payload: dict[str, Any], own_ids: set[str] | None = None) -> l
 
 
 def should_draft(event: dict[str, Any]) -> bool:
-	"""Inbound text, comment, or image with a caption gets an AI draft."""
+	"""Inbound text, comment, photo or voice note gets an AI draft.
+
+	A photo or a voice note qualifies when its file can be downloaded (the AI looks
+	at the photo / reads the transcript) or, for a photo, when it has a caption.
+	"""
 	if event.get("kind") != "message" or event.get("direction") != "Inbound":
 		return False
 	mtype = event.get("message_type")
 	if mtype in ("text", "comment"):
 		return bool(str(event.get("body") or "").strip())
+	has_file = bool(event.get("media_id") or event.get("media_url"))
 	if mtype == "image":
-		return bool(str(event.get("body") or "").strip())
+		return has_file or bool(str(event.get("body") or "").strip())
+	if mtype == "audio":
+		return has_file
 	return False
 
 
@@ -1325,6 +1335,7 @@ def _persist_message(
 		"conversation": conv.name,
 		"message": msg.name,
 		"draft": bool(settings.get("auto_draft")) and should_draft(event) and not stop,
+		"message_type": mtype,
 		"media": bool(event.get("media_id") or media_url)
 		and mtype in ("image", "audio", "video", "document", "sticker"),
 		"media_url": media_url if media_url and not stored_url else None,
@@ -1451,16 +1462,21 @@ def _after_commit(actions: list[dict[str, Any]], status_conversations: set[str])
 				cc.publish_chat_update(
 					action["conversation"], "message", message=cc.load_message(action["message"])
 				)
-			if action.get("media"):
+			plan = chat_media.plan_jobs(action)
+			if plan["download"]:
+				# A photo / voice note is drafted by this job once its file (and
+				# transcript) is in, so the draft never races the download.
 				frappe.enqueue(
 					"jarz_pos.services.chat_ingest.download_media",
 					queue="short",
-					timeout=120,
+					timeout=DOWNLOAD_JOB_TIMEOUT,
 					message_name=action["message"],
 					url=action.get("media_url"),
+					draft_after=plan["draft_after_download"],
+					transcribe=plan["transcribe"],
 					enqueue_after_commit=False,
 				)
-			if action.get("draft"):
+			if plan["draft_now"]:
 				frappe.enqueue(
 					"jarz_pos.services.chat_drafts.generate_draft_job",
 					queue="default",
@@ -1499,8 +1515,48 @@ def _extension(mime: str | None, message_type: str | None) -> str:
 	return ext
 
 
-def download_media(message_name: str, url: str | None = None) -> str | None:
-	"""Background job: fetch a message's attachment into a private File. Never raises.
+def download_media(
+	message_name: str, url: str | None = None, draft_after: bool = False, transcribe: bool = False
+) -> str | None:
+	"""Background job: download a message's attachment, then transcribe / draft. Never raises.
+
+	``transcribe`` turns a downloaded voice note into text (a no-op unless enabled in
+	the settings). ``draft_after`` enqueues the AI draft for the message when
+	the file is in, or when the download or transcription failed (a blind draft
+	beats none); the draft job's own debounce lets a newer message win.
+	"""
+	file_url = _fetch_media(message_name, url)
+	if transcribe and file_url:
+		try:
+			from jarz_pos.services import chat_transcribe
+
+			chat_transcribe.transcribe(message_name)
+		except Exception:
+			cc.safe_log_error("chat: transcription step failed", f"message={message_name}")
+	if draft_after:
+		_enqueue_draft(message_name)
+	return file_url
+
+
+def _enqueue_draft(message_name: str) -> None:
+	"""Queue the AI draft for an inbound media message. Never raises."""
+	try:
+		conversation = frappe.db.get_value(cc.MESSAGE, message_name, "conversation")
+		if conversation:
+			frappe.enqueue(
+				"jarz_pos.services.chat_drafts.generate_draft_job",
+				queue="default",
+				timeout=180,
+				conversation=conversation,
+				for_message=message_name,
+				enqueue_after_commit=False,
+			)
+	except Exception:
+		cc.safe_log_error("chat: draft enqueue after media failed", f"message={message_name}")
+
+
+def _fetch_media(message_name: str, url: str | None = None) -> str | None:
+	"""Fetch a message's attachment into a private File. Never raises.
 
 	``url`` carries an Instagram / Messenger CDN URL too long for the 140-char
 	``media_url`` field. Returns the private file URL, or ``None``.

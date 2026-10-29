@@ -24,6 +24,7 @@ DEFAULT_GRAPH_VERSION = "v24.0"
 DEFAULT_ALERT_AFTER_MINUTES = 10
 DEFAULT_ALERT_REPEAT_MINUTES = 10
 PLANTED_PERCENT_MAX = 20.0
+DEFAULT_TRANSCRIPTION_MODEL = "gpt-4o-transcribe"
 
 _SECRET_FIELDS = (
 	"anthropic_api_key",
@@ -31,6 +32,7 @@ _SECRET_FIELDS = (
 	"webhook_verify_token",
 	"whatsapp_access_token",
 	"page_access_token",
+	"openai_api_key",
 )
 
 _CACHE_ATTR = "jarz_chat_settings_cache"
@@ -276,6 +278,9 @@ def build_settings(doc: Any, flags: dict[str, Any] | None = None) -> dict[str, A
 		"ready_answers": ready,
 		# Topics switched off in ERP: they remove the built-in default of that topic.
 		"ready_answers_disabled": ready_disabled,
+		# Voice notes: off until staff switch it on (a Single ignores the JSON default).
+		"transcribe_voice_notes": bool(flags.get("transcribe_voice_notes", get("transcribe_voice_notes"))),
+		"transcription_model": _clean(get("transcription_model")) or DEFAULT_TRANSCRIPTION_MODEL,
 		"graph_api_version": _clean(get("graph_api_version")) or DEFAULT_GRAPH_VERSION,
 		"whatsapp_phone_number_id": _clean(get("whatsapp_phone_number_id")),
 		"whatsapp_business_account_id": _clean(get("whatsapp_business_account_id")),
@@ -291,7 +296,12 @@ def _read_flags() -> dict[str, Any]:
 	from jarz_pos.utils.settings_utils import single_flag, single_float
 
 	flags: dict[str, Any] = {}
-	for field, default in (("enabled", False), ("auto_draft", True), ("mask_personal_data", True)):
+	for field, default in (
+		("enabled", False),
+		("auto_draft", True),
+		("mask_personal_data", True),
+		("transcribe_voice_notes", False),
+	):
 		try:
 			flags[field] = single_flag(SETTINGS_DOCTYPE, field, default)
 		except Exception:

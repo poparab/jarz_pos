@@ -800,6 +800,11 @@ jobs:
             # Brand facts the chat AI may state: banned / allergen / unapproved claims are
             # flagged, addresses masked, chat text fenced as data, ready answers merged.
             test_chat_brand_facts
+            # Chat photos and voice notes for the AI: which photos reach Claude (newest
+            # three, image types, size cap, labels), voice-note transcripts in the
+            # transcript lines, the transcription request, and which job follows a media
+            # message (download, then transcribe, then one draft). Mocked: no network.
+            test_chat_media
             # The roles payload the mobile app routes on, incl. manager_home
             # (feature manager-home-bar): always a bool, follows the User
             # field, False on a site that has not migrated it yet.

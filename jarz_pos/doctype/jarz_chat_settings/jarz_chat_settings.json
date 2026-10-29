@@ -19,6 +19,10 @@
   "planted_draft_percent",
   "upsell_items",
   "ready_answers",
+  "sec_voice",
+  "transcribe_voice_notes",
+  "openai_api_key",
+  "transcription_model",
   "sec_meta",
   "graph_api_version",
   "meta_app_secret",
@@ -92,7 +96,7 @@
    "fieldtype": "Check",
    "label": "Mask Personal Data",
    "default": "1",
-   "description": "Replace phone numbers, emails, links and the customer's name before anything is sent to the AI."
+   "description": "Replace phone numbers, emails, links and the customer's name before anything is sent to the AI. Photos and voice-note audio cannot be masked and are sent as they are."
   },
   {
    "fieldname": "default_pos_profile",
@@ -127,6 +131,31 @@
    "label": "Ready Answers",
    "options": "Jarz Chat Ready Answer",
    "description": "Jarz's saved replies (menu, prices, offers, delivery areas...). The AI adapts the matching one instead of improvising. The built-in defaults stay unless you override them: a row with the same Topic replaces that default, an inactive row with that Topic removes it, and a new Topic is added. Placeholders such as {{menu}}, {{offers}}, {{delivery_areas}} and {{price:ITEM_CODE}} are filled live."
+  },
+  {
+   "fieldname": "sec_voice",
+   "fieldtype": "Section Break",
+   "label": "Voice notes"
+  },
+  {
+   "fieldname": "transcribe_voice_notes",
+   "fieldtype": "Check",
+   "label": "Transcribe Voice Notes",
+   "default": "0",
+   "description": "Turn each customer voice note into text (OpenAI) so the AI draft and Start order can read it. The audio is sent to OpenAI. Off until you switch it on and add the key."
+  },
+  {
+   "fieldname": "openai_api_key",
+   "fieldtype": "Password",
+   "label": "OpenAI API Key",
+   "depends_on": "transcribe_voice_notes"
+  },
+  {
+   "fieldname": "transcription_model",
+   "fieldtype": "Data",
+   "label": "Transcription Model",
+   "depends_on": "transcribe_voice_notes",
+   "description": "default gpt-4o-transcribe"
   },
   {
    "fieldname": "sec_meta",
@@ -186,7 +215,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-10-17 12:00:00.000000",
+ "modified": "2026-10-29 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "jarz pos",
  "name": "Jarz Chat Settings",

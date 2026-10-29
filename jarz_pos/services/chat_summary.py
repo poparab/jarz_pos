@@ -223,7 +223,7 @@ def _prepare(conversation: str, settings: dict[str, Any]) -> tuple[list[str], st
 		rows = frappe.get_all(
 			cc.MESSAGE,
 			filters={"conversation": chat.name},
-			fields=["direction", "message_type", "body", "timestamp"],
+			fields=["direction", "message_type", "body", "transcript", "timestamp"],
 			order_by="timestamp desc, creation desc",
 			limit_page_length=per_chat,
 			ignore_permissions=True,

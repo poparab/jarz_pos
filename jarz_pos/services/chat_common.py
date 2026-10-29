@@ -61,6 +61,7 @@ MESSAGE_FIELDS = (
 	"body",
 	"media_file",
 	"media_mime",
+	"transcript",
 	"status",
 	"sent_via",
 	"sent_by",
@@ -125,8 +126,16 @@ def window_open(window_expires_at: Any, at: _dt.datetime | None = None) -> bool:
 	return (at or now()) < expires
 
 
-def preview(text: Any, message_type: str | None = None) -> str:
+def voice_text(transcript: Any) -> str:
+	"""``[voice note] «words»`` for a transcribed voice note, one line, or ``""``."""
+	words = " ".join(str(transcript or "").replace("«", "").replace("»", "").split())
+	return f"[voice note] «{words}»" if words else ""
+
+
+def preview(text: Any, message_type: str | None = None, transcript: Any = None) -> str:
 	body = " ".join(str(text or "").split())
+	if not body and str(message_type or "") == "audio":
+		body = voice_text(transcript)
 	if not body:
 		body = {
 			"image": "[image]",
@@ -257,6 +266,7 @@ def serialize_message(row: Any) -> dict[str, Any]:
 		if media_file.startswith("/private/files/") or media_file.startswith("/files/")
 		else None,
 		"media_mime": get("media_mime") or None,
+		"transcript": get("transcript") or None,
 		"status": get("status") or None,
 		"sent_via": get("sent_via") or None,
 		"sent_by": get("sent_by") or None,
