@@ -260,3 +260,113 @@ class TestCashTransferAPI(unittest.TestCase):
 		except frappe.PermissionError:
 			# User doesn't have manager access
 			pass
+
+
+class TestSubmitTransferDuplicateGuard(unittest.TestCase):
+	"""A repeated identical transfer must not move the money twice.
+
+	2026-10-28: one 1,200 move from 6th of October to the main safe was posted
+	twice, 19 s apart, and the next shift close booked the gap to Cash Over Short.
+	"""
+
+	def _run(self, earlier, **kwargs):
+		from jarz_pos.api import cash_transfer
+
+		accounts = {
+			"6th of october - J": {"is_group": 0, "company": "Jarz"},
+			"Cash - J": {"is_group": 0, "company": "Jarz"},
+		}
+
+		def get_value(doctype, name, field):
+			return accounts[name][field]
+
+		created = []
+
+		class FakeJE:
+			name = "ACC-JV-NEW"
+
+			def __init__(self):
+				self.flags = frappe._dict()
+				self.rows = []
+
+			def append(self, _table, row):
+				self.rows.append(row)
+
+			def insert(self):
+				created.append(self)
+
+			def submit(self):
+				pass
+
+		sql_calls = []
+
+		def fake_sql(query, *args, **kwargs):
+			sql_calls.append(query)
+			return []
+
+		with (
+			patch.object(cash_transfer, "_ensure_manager_access"),
+			patch.object(cash_transfer.frappe.db, "exists", return_value=True),
+			patch.object(cash_transfer.frappe.db, "get_value", side_effect=get_value),
+			patch.object(cash_transfer.frappe.db, "sql", side_effect=fake_sql),
+			patch.object(cash_transfer.frappe.db, "commit"),
+			patch.object(cash_transfer.frappe, "new_doc", side_effect=lambda dt: FakeJE()),
+			patch.object(cash_transfer, "_recent_identical_transfer", return_value=earlier) as recent,
+		):
+			result = cash_transfer.submit_transfer(
+				from_account="6th of october - J", to_account="Cash - J", amount=1200, **kwargs
+			)
+		return result, created, recent, sql_calls
+
+	def test_repeat_returns_the_first_entry_without_posting(self):
+		result, created, recent, sql_calls = self._run({"name": "ACC-JV-new-2026-02761"})
+		self.assertEqual(result, {"ok": True, "journal_entry": "ACC-JV-new-2026-02761", "deduplicated": True})
+		self.assertEqual(created, [])
+		recent.assert_called_once_with("6th of october - J", "Cash - J", 1200.0)
+		self.assertTrue(any("FOR UPDATE" in q and "tabAccount" in q for q in sql_calls))
+
+	def test_first_transfer_is_posted(self):
+		result, created, _recent, _sql = self._run(None)
+		self.assertEqual(result, {"ok": True, "journal_entry": "ACC-JV-NEW"})
+		self.assertEqual(len(created), 1)
+		self.assertEqual(
+			created[0].rows,
+			[
+				{"account": "6th of october - J", "credit_in_account_currency": 1200.0},
+				{"account": "Cash - J", "debit_in_account_currency": 1200.0},
+			],
+		)
+
+	def test_allow_duplicate_skips_the_guard(self):
+		result, created, recent, sql_calls = self._run({"name": "ACC-JV-new-2026-02761"}, allow_duplicate=1)
+		self.assertEqual(result["journal_entry"], "ACC-JV-NEW")
+		self.assertEqual(len(created), 1)
+		recent.assert_not_called()
+		self.assertEqual(sql_calls, [])
+
+	def test_recent_lookup_matches_user_accounts_amount_and_window(self):
+		from jarz_pos.api import cash_transfer
+
+		captured = {}
+
+		def fake_sql(query, params=None, as_dict=False):
+			captured["query"] = query
+			captured["params"] = params
+			return [{"name": "ACC-JV-1", "creation": "2026-10-28 23:40:12"}]
+
+		with (
+			patch.object(cash_transfer.frappe.db, "sql", side_effect=fake_sql),
+			patch.object(cash_transfer.frappe, "session", frappe._dict(user="kareem@orderjarz.com")),
+		):
+			row = cash_transfer._recent_identical_transfer("6th of october - J", "Cash - J", 1200.0)
+
+		self.assertEqual(row["name"], "ACC-JV-1")
+		p = captured["params"]
+		self.assertEqual(p["user"], "kareem@orderjarz.com")
+		self.assertEqual(
+			(p["from_acc"], p["to_acc"], p["amount"]), ("6th of october - J", "Cash - J", 1200.0)
+		)
+		q = captured["query"]
+		self.assertIn("je.docstatus = 1", q)
+		self.assertIn("credit_in_account_currency", q)
+		self.assertIn("FOR UPDATE", q)

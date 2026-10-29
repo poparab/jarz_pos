@@ -261,6 +261,51 @@ def list_accounts(company: str | None = None, as_of: str | None = None) -> list[
 	return out
 
 
+# A second identical transfer by the same user inside this window is treated as
+# the first one tapped again. On 2026-10-28 one 1,200 move from 6th of October to
+# the main safe was posted twice, 19 s apart: the safe gained 2,400, the till went
+# 1,200 below zero in the books and the next shift close booked +1,200 to Cash
+# Over Short to put it back.
+DUPLICATE_TRANSFER_WINDOW_SECONDS = 120
+
+
+def _recent_identical_transfer(from_account: str, to_account: str, amount: float) -> dict | None:
+	"""The submitted transfer this user made with the same accounts and amount
+	inside the duplicate window, if any.
+
+	A locking read on purpose: it sees rows committed after this request's
+	snapshot was taken, so a retry that queued behind the original (see the
+	account lock in `submit_transfer`) finds the original's entry.
+	"""
+	since = frappe.utils.add_to_date(frappe.utils.now_datetime(), seconds=-DUPLICATE_TRANSFER_WINDOW_SECONDS)
+	rows = frappe.db.sql(
+		"""
+		SELECT je.name, je.creation
+		FROM `tabJournal Entry` je
+		WHERE je.docstatus = 1
+		  AND je.owner = %(user)s
+		  AND je.creation >= %(since)s
+		  AND EXISTS (SELECT 1 FROM `tabJournal Entry Account` a WHERE a.parent = je.name
+		              AND a.account = %(from_acc)s AND ABS(a.credit_in_account_currency - %(amount)s) < 0.005)
+		  AND EXISTS (SELECT 1 FROM `tabJournal Entry Account` a WHERE a.parent = je.name
+		              AND a.account = %(to_acc)s AND ABS(a.debit_in_account_currency - %(amount)s) < 0.005)
+		  AND (SELECT COUNT(*) FROM `tabJournal Entry Account` a WHERE a.parent = je.name) = 2
+		ORDER BY je.creation DESC
+		LIMIT 1
+		FOR UPDATE
+		""",
+		{
+			"user": frappe.session.user,
+			"since": since,
+			"from_acc": from_account,
+			"to_acc": to_account,
+			"amount": amount,
+		},
+		as_dict=True,
+	)
+	return rows[0] if rows else None
+
+
 @frappe.whitelist(methods=["POST"])
 def submit_transfer(
 	from_account: str,
@@ -268,10 +313,16 @@ def submit_transfer(
 	amount: float,
 	posting_date: str | None = None,
 	remark: str | None = None,
+	allow_duplicate: int | str | None = None,
 ) -> dict[str, Any]:
 	"""Create a Journal Entry to move funds between two asset accounts.
 
 	Both accounts must be leaf accounts and (typically) of Asset type; we will not enforce root type here but ensure they are not the same.
+
+	The same transfer (user, accounts, amount) repeated within
+	DUPLICATE_TRANSFER_WINDOW_SECONDS returns the first entry with
+	``deduplicated: True`` instead of moving the money again. Pass
+	``allow_duplicate=1`` to record a genuine second identical transfer.
 	"""
 	_ensure_manager_access()
 	try:
@@ -300,6 +351,14 @@ def submit_transfer(
 		frappe.throw(
 			_("From and To accounts must be in the same Company: {0} vs {1}").format(company_from, company_to)
 		)
+
+	if not cint(allow_duplicate):
+		# Serialise transfers out of one account: a retry racing its original
+		# waits here until the original commits, then finds it below.
+		frappe.db.sql("SELECT name FROM `tabAccount` WHERE name = %s FOR UPDATE", (from_account,))
+		earlier = _recent_identical_transfer(from_account, to_account, amount)
+		if earlier:
+			return {"ok": True, "journal_entry": earlier["name"], "deduplicated": True}
 
 	je = frappe.new_doc("Journal Entry")
 	je.voucher_type = "Journal Entry"
