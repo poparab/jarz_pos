@@ -814,7 +814,7 @@ class CustomerProfileTest(unittest.TestCase):
 			},
 			NOW,
 		)
-		self.assertIn("{{delivery_fee:EGMOHANDSEEN}}", text)
+		self.assertIn("{{customer_delivery_fee}}", text)
 		self.assertIn("EGMOHANDSEEN / المهندسين", text)
 		self.assertIn("address is on file", text)
 		self.assertIn("Orders so far: 17; last on 22 Jul 2026 (99 days ago): Jarz Signature Trio.", text)
@@ -868,6 +868,47 @@ class PausedFlavoursTest(unittest.TestCase):
 			available, paused = d.split_by_stock(self.PRODUCTS, stock)
 			self.assertEqual(len(available), len(self.PRODUCTS))
 			self.assertEqual(paused, [])
+
+
+class CustomerDeliveryFeeTest(unittest.TestCase):
+	"""CHAT-02215: a 6th of October customer (60) was quoted Masr El Gedida's fee (50)."""
+
+	AREA = {"customer_area": {"name": "EG6OCT", "fee": 60.0}}
+
+	def test_customer_fee_comes_from_their_area(self):
+		out, warnings, _f = d.fill_placeholders("التوصيل {{customer_delivery_fee}}", ctx(**self.AREA))
+		self.assertEqual(out, "التوصيل 60 جنيه")
+		self.assertEqual(warnings, [])
+
+	def test_no_area_on_file_is_never_guessed(self):
+		out, warnings, _f = d.fill_placeholders("التوصيل {{customer_delivery_fee}}", ctx())
+		self.assertIn(d.UNKNOWN, out)
+		self.assertIn("no delivery area on file", warnings[0])
+
+	def test_other_area_fee_is_flagged(self):
+		fees = {"egmasrjd": 50.0, "eg6oct": 60.0}
+		warnings = d.delivery_fee_warnings("{{delivery_fee:EGMASRJD}}", ctx(delivery_fees=fees, **self.AREA))
+		self.assertEqual(len(warnings), 1)
+		self.assertIn("EGMASRJD (50 EGP)", warnings[0])
+		self.assertIn("EG6OCT (60 EGP)", warnings[0])
+
+	def test_same_fee_or_no_area_is_not_flagged(self):
+		fees = {"eg6oct": 60.0, "zayed": 60.0}
+		self.assertEqual(
+			d.delivery_fee_warnings("{{delivery_fee:zayed}}", ctx(delivery_fees=fees, **self.AREA)), []
+		)
+		self.assertEqual(d.delivery_fee_warnings("{{delivery_fee:EGMASRJD}}", ctx()), [])
+
+	def test_billable_territories(self):
+		self.assertTrue(d.is_billable_territory({"is_group": 1, "delivery_income": 60}))
+		self.assertTrue(d.is_billable_territory({"is_group": 0, "delivery_income": 0}))
+		self.assertFalse(d.is_billable_territory({"is_group": 1, "delivery_income": 0}))
+		self.assertFalse(d.is_billable_territory({"is_group": 0, "delivery_income": None}))
+		self.assertFalse(d.is_billable_territory(None))
+
+	def test_prompt_prefers_the_customer_fee(self):
+		self.assertIn("{{customer_delivery_fee}}", d.SYSTEM_PROMPT)
+		self.assertIn("never guess one", d.SYSTEM_PROMPT)
 
 
 class CustomerOfferPlaceholderTest(unittest.TestCase):

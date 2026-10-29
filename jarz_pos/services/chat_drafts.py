@@ -106,7 +106,10 @@ never جرة. Match their greeting («وعليكم السلام»، «مساء �
 2. NEVER type a price, fee or amount as a number. Use only these placeholders, exactly:
    {{price:ITEM_CODE}} for an item or bundle price (ITEM_CODE from the menu),
    {{size_prices}} for the price of each jar size, one line (every flavour costs the same per size),
-   {{delivery_fee:TERRITORY_NAME}} for a delivery fee (TERRITORY_NAME from the delivery list),
+   {{customer_delivery_fee}} for the delivery fee to the customer's area on file (the profile \
+says when there is one): always this one for a customer with an area on file,
+   {{delivery_fee:TERRITORY_NAME}} only for an area the customer names in the chat \
+(TERRITORY_NAME exactly from the delivery list; never guess one),
    {{free_delivery_threshold}} for the free-delivery minimum,
    {{customer_first_name}} to greet the customer by name,
    {{menu}} for the full priced menu, only when they ask for the menu or the flavours,
@@ -143,7 +146,7 @@ say the team will get back to them; no sales pitch. Cafés, companies, wholesale
 «اسم الكافيه بتاعك. والـ 7 طبقات علينا.», ask for the café or company name, area and phone, \
 and hand over (needs_human_reason). Never quote wholesale prices, margins or minimums.
 12. The customer profile is what Jarz already knows about this customer. Never ask for what it \
-already gives: with an area on file, quote {{delivery_fee:AREA}} for it and only confirm it \
+already gives: with an area on file, quote {{customer_delivery_fee}} for it and only confirm it \
 («نوصلك على المهندسين زي المرة اللي فاتت؟»); with an address on file, ask them to confirm it \
 instead of sending it again. Use their past orders to suggest what they like. The notes from \
 past chats and the messages from their other chats are background too: use them, but never \
@@ -327,6 +330,12 @@ def fill_placeholders(
 				warnings.append(f"Unknown area in delivery fee placeholder: {arg or '?'}")
 				return UNKNOWN
 			return format_egp(fee, arabic)
+		if key == "customer_delivery_fee":
+			area = ctx.get("customer_area") or {}
+			if area.get("fee") is None:
+				warnings.append("This customer has no delivery area on file: ask them for their area")
+				return UNKNOWN
+			return format_egp(area["fee"], arabic)
 		if key == "free_delivery_threshold":
 			threshold = ctx.get("free_delivery_threshold")
 			if not threshold:
@@ -691,6 +700,32 @@ def render_delivery_areas(
 	return ("، " if arabic else ", ").join(seen)
 
 
+def delivery_fee_warnings(template: Any, ctx: dict[str, Any]) -> list[str]:
+	"""A warning for each ``{{delivery_fee:AREA}}`` whose fee differs from the fee
+	to the customer's area on file. Pure.
+
+	The model picks AREA itself, and on CHAT-02215 (29 Oct 2026) it picked
+	Masr El Gedida (50) for a 6th of October customer (60). The customer may
+	really be ordering somewhere new, so the moderator is told, not overruled.
+	"""
+	area = ctx.get("customer_area") or {}
+	if area.get("fee") is None:
+		return []
+	out = []
+	for match in _PLACEHOLDER.finditer(str(template or "")):
+		if match.group(1).strip().lower() != "delivery_fee":
+			continue
+		arg = (match.group(2) or "").strip()
+		fee = _resolve_territory(arg, ctx)
+		if fee is None or abs(float(fee) - float(area["fee"])) < 0.005:
+			continue
+		out.append(
+			f"Delivery fee quoted for {arg} ({_num(fee)} EGP), but this customer's orders go to "
+			f"{area.get('name') or 'another area'} ({_num(area['fee'])} EGP): check the area before sending"
+		)
+	return out
+
+
 def typed_number_warnings(template: Any) -> list[str]:
 	"""``[TYPED_NUMBER_WARNING]`` when the model wrote a money-like number itself."""
 	stripped = to_western_digits(_PLACEHOLDER.sub(" ", str(template or "")))
@@ -874,14 +909,31 @@ def _territory_fields(*base: str) -> list[str]:
 
 
 def _territories() -> list[dict[str, Any]]:
-	fields = _territory_fields("name", "delivery_income", "parent_territory")
+	"""Every territory an order can be billed to: leaves with a fee, and districts
+	(groups) with a fee of their own. The POS bills a group's ``delivery_income``
+	exactly like a leaf's (6th of October, EG6OCT, is a group billed 60), so a
+	group left out here is an area the drafts cannot quote."""
+	fields = _territory_fields("name", "delivery_income", "parent_territory", "is_group")
 	try:
-		rows = frappe.get_all(
-			"Territory", filters={"is_group": 0}, fields=fields, order_by="lft asc", ignore_permissions=True
-		)
+		rows = frappe.get_all("Territory", fields=fields, order_by="lft asc", ignore_permissions=True)
 	except Exception:
 		return []
-	return [r for r in rows if r.get("delivery_income") not in (None, "")]
+	return [r for r in rows if is_billable_territory(r)]
+
+
+def is_billable_territory(row: dict[str, Any] | None) -> bool:
+	"""A leaf with a fee set (0 is free delivery), or a group with a positive fee. Pure."""
+	if not row:
+		return False
+	fee = row.get("delivery_income")
+	if fee in (None, ""):
+		return False
+	if not int(row.get("is_group") or 0):
+		return True
+	try:
+		return float(fee) > 0
+	except (TypeError, ValueError):
+		return False
 
 
 def _territory_group_labels() -> dict[str, dict[str, str]]:
@@ -938,7 +990,7 @@ def build_context(settings: dict[str, Any]) -> dict[str, Any]:
 	for 10 minutes per POS profile: it is the cached prefix of every prompt.
 	"""
 	profile = settings.get("default_pos_profile") or ""
-	cache_key = f"jarz_chat_ctx:v5:{profile}"
+	cache_key = f"jarz_chat_ctx:v6:{profile}"
 	try:
 		cached = frappe.cache().get_value(cache_key)
 		if cached:
@@ -1180,7 +1232,8 @@ def render_customer_profile(profile: dict[str, Any] | None, now: Any = None) -> 
 		label = f"{area} / {profile['area_ar']}" if profile.get("area_ar") else str(area)
 		if profile.get("area_deliverable"):
 			lines.append(
-				f"- Area on file: {label}. Quote {{{{delivery_fee:{area}}}}} for it and confirm it instead of asking."
+				f"- Area on file: {label} (where their last order went). Quote {{{{customer_delivery_fee}}}} "
+				"for it and confirm it instead of asking."
 			)
 		else:
 			lines.append(
@@ -1311,7 +1364,7 @@ def _recent_followups(customer: str, now: Any) -> list[dict[str, Any]]:
 
 
 def _last_invoice(customer: str) -> dict[str, Any] | None:
-	fields = ["name", "posting_date", "customer_address"]
+	fields = ["name", "posting_date", "customer_address", "territory"]
 	try:
 		if frappe.db.has_column("Sales Invoice", "custom_sales_invoice_state"):
 			fields.append("custom_sales_invoice_state")
@@ -1405,23 +1458,12 @@ def customer_profile(customer: str | None, now: Any = None) -> dict[str, Any] | 
 		"last_order_date": card.get("last_order_date"),
 		"usual_items": cc.top_items(customer, 3),
 	}
-	territory = card.get("territory")
-	if territory:
-		try:
-			row = frappe.db.get_value(
-				"Territory", territory, _territory_fields("name", "is_group", "delivery_income"), as_dict=True
-			)
-		except Exception:
-			row = None
-		if row and territory != "All Territories":
-			profile["area"] = row.name
-			profile["area_ar"] = str(row.get("custom_territory_name_ar") or "").strip() or None
-			profile["area_deliverable"] = not int(row.is_group or 0) and row.delivery_income not in (None, "")
 	parts = (
 		("last", lambda: _last_invoice(customer)),
 		("offers", lambda: _customer_offers(customer, now)),
 		("followups", lambda: _recent_followups(customer, now)),
 	)
+	last_territory = None
 	for key, load in parts:
 		try:
 			value = load()
@@ -1433,8 +1475,28 @@ def customer_profile(customer: str | None, now: Any = None) -> dict[str, Any] | 
 			if placed and (now.date() - placed.date()).days <= RECENT_ORDER_DAYS:
 				profile["last_order_state"] = value.get("custom_sales_invoice_state") or None
 			profile["address_on_file"] = bool(value.get("customer_address"))
+			last_territory = value.get("territory")
 		elif key != "last":
 			profile[key] = value
+	# The area their last order was billed to is what the POS will charge again;
+	# the Customer's own territory is the fallback for a customer with no order.
+	for territory in (last_territory, card.get("territory")):
+		if not territory or territory == "All Territories":
+			continue
+		try:
+			row = frappe.db.get_value(
+				"Territory", territory, _territory_fields("name", "is_group", "delivery_income"), as_dict=True
+			)
+		except Exception:
+			row = None
+		if not row:
+			continue
+		profile["area"] = row.name
+		profile["area_ar"] = str(row.get("custom_territory_name_ar") or "").strip() or None
+		profile["area_deliverable"] = is_billable_territory(row)
+		if profile["area_deliverable"]:
+			profile["area_fee"] = float(row.get("delivery_income") or 0)
+		break
 	return profile
 
 
@@ -1611,9 +1673,11 @@ def generate_draft(conversation: str, for_message: str | None = None, hint: str 
 	ctx = dict(context)
 	ctx["customer_first_name"] = first_name(customer_name, conv.contact_name)
 	ctx["customer_offers"] = {o["code"]: o["wording"] for o in (profile or {}).get("offers") or []}
+	if (profile or {}).get("area_fee") is not None:
+		ctx["customer_area"] = {"name": profile.get("area"), "fee": profile["area_fee"]}
 	ctx["arabic"] = is_arabic(template) or not template
 	draft_text, fill_warnings, filled = fill_placeholders(template, ctx)
-	warnings += fill_warnings + typed_number_warnings(template)
+	warnings += fill_warnings + typed_number_warnings(template) + delivery_fee_warnings(template, ctx)
 	upsell_text = None
 	if clean["upsell_line"]:
 		upsell_text, upsell_warnings, _f = fill_placeholders(clean["upsell_line"], ctx)
