@@ -41,6 +41,9 @@ HISTORY_MESSAGES = 30
 FOLLOWUP_LOOKBACK_DAYS = 30
 #: The latest order's board state is shown only while the order is this fresh.
 RECENT_ORDER_DAYS = 2
+#: A flavour is off the AI's menu while every branch together holds fewer jars
+#: than this (paused flavours keep a stray jar or two, e.g. Mango 2026-10-29).
+MENU_MIN_STOCK = 3
 #: Body prefix of the placeholder chat_ingest stores for a Business Suite reply.
 SUITE_PLACEHOLDER_PREFIX = "Reply sent from Meta Business Suite"
 #: What each follow-up template says, for the model (the copy lives at Meta).
@@ -515,6 +518,68 @@ def _flavour(name: str, group: str) -> str:
 	return _DISPLAY_NAME.get(flavour.lower(), flavour)
 
 
+def split_by_stock(
+	products: Iterable[dict[str, Any]], stock: dict[str, float], minimum: float = 0
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+	"""``(available, paused)``. Pure.
+
+	*stock* holds the branch total of every stock item; an item missing from it
+	(a non-stock item) stays available. When no item reaches *minimum* the stock
+	data is not trusted and nothing is paused: an empty menu is worse than a
+	stale one.
+	"""
+	items = list(products)
+	minimum = minimum or MENU_MIN_STOCK
+	if not any(float(q or 0) >= minimum for q in stock.values()):
+		return items, []
+	available, paused = [], []
+	for item in items:
+		qty = stock.get(str(item.get("id") or ""))
+		(available if qty is None or float(qty or 0) >= minimum else paused).append(item)
+	return available, paused
+
+
+def paused_names(paused: Iterable[dict[str, Any]]) -> list[str]:
+	"""``Mango (Large)`` for each priced paused item, catalog order. Pure."""
+	names = []
+	for item in paused:
+		try:
+			if float(item.get("price") or 0) <= 0:
+				continue
+		except (TypeError, ValueError):
+			continue
+		group = str(item.get("item_group") or "")
+		label = _flavour(str(item.get("name") or item.get("id")), group)
+		names.append(f"{label} ({group})" if group else label)
+	return list(dict.fromkeys(names))
+
+
+def _branch_stock(codes: Iterable[str]) -> dict[str, float]:
+	"""Stock of each stock item summed over every enabled POS profile's warehouse."""
+	codes = sorted({c for c in codes if c})
+	if not codes:
+		return {}
+	try:
+		warehouses = sorted(
+			{w for w in frappe.get_all("POS Profile", filters={"disabled": 0}, pluck="warehouse") if w}
+		)
+		stock_items = frappe.get_all(
+			"Item", filters={"name": ["in", codes], "is_stock_item": 1}, pluck="name", ignore_permissions=True
+		)
+		if not warehouses or not stock_items:
+			return {}
+		out = dict.fromkeys(stock_items, 0.0)
+		for code, qty in frappe.db.sql(
+			"""select item_code, sum(actual_qty) from `tabBin`
+			where warehouse in %(wh)s and item_code in %(codes)s group by item_code""",
+			{"wh": tuple(warehouses), "codes": tuple(stock_items)},
+		):
+			out[code] = float(qty or 0)
+		return out
+	except Exception:
+		return {}
+
+
 def render_menu(products: Iterable[dict[str, Any]], arabic: bool) -> str:
 	"""Priced items grouped by item group: one line per group when the group
 	shares one price ("وسط 120 جنيه: Lotus، Mango"), else one line per item.
@@ -869,7 +934,7 @@ def build_context(settings: dict[str, Any]) -> dict[str, Any]:
 	for 10 minutes per POS profile: it is the cached prefix of every prompt.
 	"""
 	profile = settings.get("default_pos_profile") or ""
-	cache_key = f"jarz_chat_ctx:v4:{profile}"
+	cache_key = f"jarz_chat_ctx:v5:{profile}"
 	try:
 		cached = frappe.cache().get_value(cache_key)
 		if cached:
@@ -883,6 +948,7 @@ def build_context(settings: dict[str, Any]) -> dict[str, Any]:
 	names: dict[str, str] = {}
 	menu_lines: list[str] = []
 	products: list[dict[str, Any]] = []
+	paused: list[dict[str, Any]] = []
 	bundles: list[dict[str, Any]] = []
 	if profile:
 		from jarz_pos.api import pos as pos_api
@@ -892,6 +958,9 @@ def build_context(settings: dict[str, Any]) -> dict[str, Any]:
 				products = pos_api.get_profile_products(profile) or []
 		except Exception:
 			products = []
+		# Paused flavours (no stock at any branch) leave the menu, the size
+		# prices and the code list, so the model cannot offer them.
+		products, paused = split_by_stock(products, _branch_stock(str(p.get("id") or "") for p in products))
 		for item in products:
 			code = str(item.get("id") or "")
 			if not code:
@@ -958,6 +1027,7 @@ def build_context(settings: dict[str, Any]) -> dict[str, Any]:
 		for row in cap_ready_answers(settings.get("ready_answers") or DEFAULT_READY_ANSWERS)
 	]
 
+	paused_list = paused_names(paused)
 	parts = [
 		"# Jarz business context",
 		"Prices are never shown to you; use {{price:ITEM_CODE}}.",
@@ -969,6 +1039,11 @@ def build_context(settings: dict[str, Any]) -> dict[str, Any]:
 		"An order above {{free_delivery_threshold}} gets free delivery."
 		if threshold
 		else "No free-delivery offer is active.",
+		"## Paused flavours (out of stock at every branch)",
+		"Never offer these. Asked for one, say it is paused and coming back soon, and suggest a "
+		"flavour from the menu:\n" + ", ".join(paused_list)
+		if paused_list
+		else "(none: every menu flavour is available)",
 		"## Promo codes open to every customer (personal codes are in the customer profile)",
 		"\n".join(_public_promo_lines()) or "(none running)",
 		"## Upsell candidates (ITEM_CODE | name | pitch)",

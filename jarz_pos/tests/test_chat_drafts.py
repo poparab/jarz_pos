@@ -833,6 +833,43 @@ class CustomerProfileTest(unittest.TestCase):
 		self.assertIn("No orders yet", d.render_customer_profile({"total_orders": 0}, NOW))
 
 
+class PausedFlavoursTest(unittest.TestCase):
+	PRODUCTS = [
+		{"id": "Lotus Large", "name": "Lotus Large", "item_group": "Large", "price": 160},
+		{"id": "Mango Large", "name": "Mango Large", "item_group": "Large", "price": 160},
+		{"id": "Mango Medium", "name": "Mango Medium", "item_group": "Medium", "price": 120},
+		{"id": "Carrot cake Large", "name": "Carrot cake Large", "item_group": "Large", "price": 160},
+		{"id": "Gift Card", "name": "Gift Card", "item_group": "Large", "price": 100},
+		{"id": "Mango Small", "name": "Mango Small", "item_group": "Small", "price": 0},
+	]
+	# Branch totals on production, 2026-10-29. Gift Card is not a stock item.
+	STOCK = {
+		"Lotus Large": 61.0,
+		"Mango Large": 0.0,
+		"Mango Medium": 1.0,
+		"Carrot cake Large": 0.0,
+		"Mango Small": 0.0,
+	}
+
+	def test_out_of_stock_and_stray_jars_are_paused(self):
+		available, paused = d.split_by_stock(self.PRODUCTS, self.STOCK)
+		self.assertEqual([p["id"] for p in available], ["Lotus Large", "Gift Card"])
+		self.assertEqual(d.paused_names(paused), ["Mango (Large)", "Mango (Medium)", "Carrot Cake (Large)"])
+
+	def test_paused_flavours_leave_the_menu(self):
+		available, _paused = d.split_by_stock(self.PRODUCTS, self.STOCK)
+		menu = d.render_menu(available, arabic=False)
+		self.assertNotIn("Mango", menu)
+		self.assertNotIn("Carrot", menu)
+		self.assertIn("Lotus", menu)
+
+	def test_no_stock_data_pauses_nothing(self):
+		for stock in ({}, {"Lotus Large": 0.0, "Mango Large": 0.0}):
+			available, paused = d.split_by_stock(self.PRODUCTS, stock)
+			self.assertEqual(len(available), len(self.PRODUCTS))
+			self.assertEqual(paused, [])
+
+
 class CustomerOfferPlaceholderTest(unittest.TestCase):
 	OFFER = "عاملينلك جار لارج هدية بالكود BACKXQ33VV لحد 12 نوفمبر."
 
