@@ -269,7 +269,28 @@ class TestSubmitTransferDuplicateGuard(unittest.TestCase):
 	twice, 19 s apart, and the next shift close booked the gap to Cash Over Short.
 	"""
 
-	def _run(self, earlier, **kwargs):
+	class FakeCache:
+		"""Just enough of Frappe's RedisWrapper: ``set`` with nx/ex, ``get``, ``delete``."""
+
+		def __init__(self, store=None):
+			self.store = dict(store or {})
+
+		def make_key(self, key):
+			return f"site|{key}"
+
+		def set(self, key, value, nx=False, ex=None):
+			if nx and key in self.store:
+				return None
+			self.store[key] = value.encode() if isinstance(value, str) else value
+			return True
+
+		def get(self, key):
+			return self.store.get(key)
+
+		def delete(self, key):
+			self.store.pop(key, None)
+
+	def _run(self, earlier=None, cache=None, fail_insert=False, **kwargs):
 		from jarz_pos.api import cash_transfer
 
 		accounts = {
@@ -293,42 +314,41 @@ class TestSubmitTransferDuplicateGuard(unittest.TestCase):
 				self.rows.append(row)
 
 			def insert(self):
+				if fail_insert:
+					raise RuntimeError("insert failed")
 				created.append(self)
 
 			def submit(self):
 				pass
 
-		sql_calls = []
-
-		def fake_sql(query, *args, **kwargs):
-			sql_calls.append(query)
-			return []
-
+		cache = cache if cache is not None else self.FakeCache()
+		result = error = None
 		with (
 			patch.object(cash_transfer, "_ensure_manager_access"),
 			patch.object(cash_transfer.frappe.db, "exists", return_value=True),
 			patch.object(cash_transfer.frappe.db, "get_value", side_effect=get_value),
-			patch.object(cash_transfer.frappe.db, "sql", side_effect=fake_sql),
 			patch.object(cash_transfer.frappe.db, "commit"),
 			patch.object(cash_transfer.frappe, "new_doc", side_effect=lambda dt: FakeJE()),
+			patch.object(cash_transfer.frappe, "cache", return_value=cache),
+			# Translation reads the cache too; keep it off the fake.
+			patch.object(cash_transfer, "_", side_effect=lambda s: s),
+			patch.object(cash_transfer.frappe, "session", frappe._dict(user="kareem@orderjarz.com")),
 			patch.object(cash_transfer, "_recent_identical_transfer", return_value=earlier) as recent,
 		):
-			result = cash_transfer.submit_transfer(
-				from_account="6th of october - J", to_account="Cash - J", amount=1200, **kwargs
-			)
-		return result, created, recent, sql_calls
+			try:
+				result = cash_transfer.submit_transfer(
+					from_account="6th of october - J", to_account="Cash - J", amount=1200, **kwargs
+				)
+			except Exception as e:
+				error = e
+		return result, error, created, recent, cache
 
-	def test_repeat_returns_the_first_entry_without_posting(self):
-		result, created, recent, sql_calls = self._run({"name": "ACC-JV-new-2026-02761"})
-		self.assertEqual(result, {"ok": True, "journal_entry": "ACC-JV-new-2026-02761", "deduplicated": True})
-		self.assertEqual(created, [])
-		recent.assert_called_once_with("6th of october - J", "Cash - J", 1200.0)
-		self.assertTrue(any("FOR UPDATE" in q and "tabAccount" in q for q in sql_calls))
+	KEY = "site|jarz_cash_transfer:kareem@orderjarz.com:6th of october - J:Cash - J:1200.0"
 
-	def test_first_transfer_is_posted(self):
-		result, created, _recent, _sql = self._run(None)
+	def test_first_transfer_is_posted_and_claimed(self):
+		result, error, created, _recent, cache = self._run()
+		self.assertIsNone(error)
 		self.assertEqual(result, {"ok": True, "journal_entry": "ACC-JV-NEW"})
-		self.assertEqual(len(created), 1)
 		self.assertEqual(
 			created[0].rows,
 			[
@@ -336,13 +356,41 @@ class TestSubmitTransferDuplicateGuard(unittest.TestCase):
 				{"account": "Cash - J", "debit_in_account_currency": 1200.0},
 			],
 		)
+		self.assertEqual(cache.get(self.KEY), b"ACC-JV-NEW")
+
+	def test_repeat_after_the_first_finished_returns_it(self):
+		cache = self.FakeCache({self.KEY: b"ACC-JV-new-2026-02761"})
+		result, error, created, recent, _cache = self._run(cache=cache)
+		self.assertEqual(result, {"ok": True, "journal_entry": "ACC-JV-new-2026-02761", "deduplicated": True})
+		self.assertEqual(created, [])
+		recent.assert_not_called()
+
+	def test_repeat_while_the_first_is_still_posting_is_refused(self):
+		cache = self.FakeCache({self.KEY: b"pending"})
+		result, error, created, _recent, _cache = self._run(cache=cache)
+		self.assertIsNone(result)
+		self.assertIn("already being recorded", str(error))
+		self.assertEqual(created, [])
+
+	def test_lost_claim_falls_back_to_the_ledger(self):
+		result, _error, created, recent, cache = self._run(earlier={"name": "ACC-JV-new-2026-02761"})
+		self.assertEqual(result["journal_entry"], "ACC-JV-new-2026-02761")
+		self.assertTrue(result["deduplicated"])
+		self.assertEqual(created, [])
+		recent.assert_called_once_with("6th of october - J", "Cash - J", 1200.0)
+		self.assertEqual(cache.get(self.KEY), b"ACC-JV-new-2026-02761")
+
+	def test_failed_post_releases_the_claim(self):
+		_result, error, created, _recent, cache = self._run(fail_insert=True)
+		self.assertIn("insert failed", str(error))
+		self.assertIsNone(cache.get(self.KEY))
 
 	def test_allow_duplicate_skips_the_guard(self):
-		result, created, recent, sql_calls = self._run({"name": "ACC-JV-new-2026-02761"}, allow_duplicate=1)
+		cache = self.FakeCache({self.KEY: b"ACC-JV-new-2026-02761"})
+		result, _error, created, recent, _cache = self._run(cache=cache, allow_duplicate=1)
 		self.assertEqual(result["journal_entry"], "ACC-JV-NEW")
 		self.assertEqual(len(created), 1)
 		recent.assert_not_called()
-		self.assertEqual(sql_calls, [])
 
 	def test_recent_lookup_matches_user_accounts_amount_and_window(self):
 		from jarz_pos.api import cash_transfer
@@ -368,5 +416,6 @@ class TestSubmitTransferDuplicateGuard(unittest.TestCase):
 		)
 		q = captured["query"]
 		self.assertIn("je.docstatus = 1", q)
-		self.assertIn("credit_in_account_currency", q)
-		self.assertIn("FOR UPDATE", q)
+		self.assertIn("other.name IS NULL", q)
+		# A locking read here took gap locks that could deadlock two transfers.
+		self.assertNotIn("FOR UPDATE", q)

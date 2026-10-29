@@ -267,32 +267,42 @@ def list_accounts(company: str | None = None, as_of: str | None = None) -> list[
 # 1,200 below zero in the books and the next shift close booked +1,200 to Cash
 # Over Short to put it back.
 DUPLICATE_TRANSFER_WINDOW_SECONDS = 120
+_CLAIM_PENDING = "pending"
+
+
+def _transfer_claim_key(from_account: str, to_account: str, amount: float) -> str:
+	return frappe.cache().make_key(
+		f"jarz_cash_transfer:{frappe.session.user}:{from_account}:{to_account}:{round(float(amount), 2)}"
+	)
 
 
 def _recent_identical_transfer(from_account: str, to_account: str, amount: float) -> dict | None:
 	"""The submitted transfer this user made with the same accounts and amount
 	inside the duplicate window, if any.
 
-	A locking read on purpose: it sees rows committed after this request's
-	snapshot was taken, so a retry that queued behind the original (see the
-	account lock in `submit_transfer`) finds the original's entry.
+	The backstop for a retry that comes after the original has committed, when
+	the Redis claim in `submit_transfer` has been lost (cache flush, restart).
+	Deliberately not a locking read: a concurrent tap is the claim's job, and a
+	`FOR UPDATE` range here took gap locks that could deadlock two transfers out
+	of different accounts.
 	"""
 	since = frappe.utils.add_to_date(frappe.utils.now_datetime(), seconds=-DUPLICATE_TRANSFER_WINDOW_SECONDS)
 	rows = frappe.db.sql(
 		"""
 		SELECT je.name, je.creation
 		FROM `tabJournal Entry` je
+		JOIN `tabJournal Entry Account` cr ON cr.parent = je.name
+		     AND cr.account = %(from_acc)s AND ABS(cr.credit_in_account_currency - %(amount)s) < 0.005
+		JOIN `tabJournal Entry Account` dr ON dr.parent = je.name
+		     AND dr.account = %(to_acc)s AND ABS(dr.debit_in_account_currency - %(amount)s) < 0.005
+		LEFT JOIN `tabJournal Entry Account` other ON other.parent = je.name
+		     AND other.name NOT IN (cr.name, dr.name)
 		WHERE je.docstatus = 1
 		  AND je.owner = %(user)s
 		  AND je.creation >= %(since)s
-		  AND EXISTS (SELECT 1 FROM `tabJournal Entry Account` a WHERE a.parent = je.name
-		              AND a.account = %(from_acc)s AND ABS(a.credit_in_account_currency - %(amount)s) < 0.005)
-		  AND EXISTS (SELECT 1 FROM `tabJournal Entry Account` a WHERE a.parent = je.name
-		              AND a.account = %(to_acc)s AND ABS(a.debit_in_account_currency - %(amount)s) < 0.005)
-		  AND (SELECT COUNT(*) FROM `tabJournal Entry Account` a WHERE a.parent = je.name) = 2
+		  AND other.name IS NULL
 		ORDER BY je.creation DESC
 		LIMIT 1
-		FOR UPDATE
 		""",
 		{
 			"user": frappe.session.user,
@@ -352,14 +362,46 @@ def submit_transfer(
 			_("From and To accounts must be in the same Company: {0} vs {1}").format(company_from, company_to)
 		)
 
+	claim_key = None
 	if not cint(allow_duplicate):
-		# Serialise transfers out of one account: a retry racing its original
-		# waits here until the original commits, then finds it below.
-		frappe.db.sql("SELECT name FROM `tabAccount` WHERE name = %s FOR UPDATE", (from_account,))
+		# Claim this exact transfer in Redis before touching the books. The claim
+		# is atomic across workers, so a second tap that arrives while the first is
+		# still posting cannot slip past — a database read could not promise that,
+		# because the second request's snapshot predates the first one's commit.
+		cache = frappe.cache()
+		claim_key = _transfer_claim_key(from_account, to_account, amount)
+		if not cache.set(claim_key, _CLAIM_PENDING, nx=True, ex=DUPLICATE_TRANSFER_WINDOW_SECONDS):
+			held = cache.get(claim_key)
+			held = held.decode() if isinstance(held, bytes) else held
+			if held and held != _CLAIM_PENDING:
+				return {"ok": True, "journal_entry": held, "deduplicated": True}
+			frappe.throw(
+				_("This transfer is already being recorded. Check the transfer list before trying again.")
+			)
 		earlier = _recent_identical_transfer(from_account, to_account, amount)
 		if earlier:
+			cache.set(claim_key, earlier["name"], ex=DUPLICATE_TRANSFER_WINDOW_SECONDS)
 			return {"ok": True, "journal_entry": earlier["name"], "deduplicated": True}
 
+	try:
+		je_name = _post_transfer(from_account, to_account, amount, company_from, posting_date, remark)
+	except Exception:
+		if claim_key:
+			frappe.cache().delete(claim_key)
+		raise
+	if claim_key:
+		frappe.cache().set(claim_key, je_name, ex=DUPLICATE_TRANSFER_WINDOW_SECONDS)
+	return {"ok": True, "journal_entry": je_name}
+
+
+def _post_transfer(
+	from_account: str,
+	to_account: str,
+	amount: float,
+	company_from: str | None,
+	posting_date: str | None,
+	remark: str | None,
+) -> str:
 	je = frappe.new_doc("Journal Entry")
 	je.voucher_type = "Journal Entry"
 	# Set company from from_account for consistency
@@ -401,7 +443,7 @@ def submit_transfer(
 	je.submit()
 	frappe.db.commit()
 
-	return {"ok": True, "journal_entry": je.name}
+	return je.name
 
 
 def _transferable_account_names(company: str) -> set[str]:
