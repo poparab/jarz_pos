@@ -528,7 +528,12 @@ class ReadyAnswersCapTest(unittest.TestCase):
 
 	@staticmethod
 	def _row(n, answer=None, **extra):
-		return {"topic": f"Topic {n}", "when_to_use": "", "answer": answer if answer is not None else f"Answer {n}", **extra}
+		return {
+			"topic": f"Topic {n}",
+			"when_to_use": "",
+			"answer": answer if answer is not None else f"Answer {n}",
+			**extra,
+		}
 
 	@staticmethod
 	def _doc_row(n, modified="2026-10-01 10:00:00", idx=None, active=1, answer=None):
@@ -713,6 +718,141 @@ class FirstNameTest(unittest.TestCase):
 		self.assertEqual(d.first_name("+201111034268", "Sara Ali"), "Sara")
 		self.assertEqual(d.first_name("201111034268", None, "  منى  أحمد "), "منى")
 		self.assertEqual(d.first_name(None, ""), "")
+
+
+NOW = datetime.datetime(2026, 10, 29, 19, 47)
+
+VIP_GIFT = {
+	"name": "BACKXQ33VV",
+	"discount_type": "Percentage",
+	"discount_value": 100,
+	"min_order_amount": 0,
+	"applies_to": "Specific Items",
+	"allow_pickup": 1,
+	"active_to": datetime.datetime(2026, 11, 12, 13, 21),
+}
+
+
+class TranscriptTest(unittest.TestCase):
+	def test_lines_carry_their_time(self):
+		lines = d.transcript_lines(
+			[
+				{
+					"direction": "Inbound",
+					"body": "هديه من غير اوردر ولا مع اوردر",
+					"timestamp": datetime.datetime(2026, 10, 29, 19, 2),
+				},
+				{
+					"direction": "Outbound",
+					"body": "قصدك هدية مع الأوردر؟",
+					"timestamp": datetime.datetime(2026, 10, 29, 19, 44),
+				},
+			],
+			mask=True,
+			names=[],
+		)
+		self.assertEqual(lines[0], "[Thu 29 Oct 19:02] Customer: هديه من غير اوردر ولا مع اوردر")
+		self.assertTrue(lines[1].startswith("[Thu 29 Oct 19:44] Jarz: "))
+
+	def test_no_timestamp_no_prefix(self):
+		self.assertEqual(
+			d.transcript_lines([{"direction": "Inbound", "body": "hi"}], False, []), ["Customer: hi"]
+		)
+
+	def test_business_suite_placeholder_is_a_marker(self):
+		body = "Reply sent from Meta Business Suite (Meta does not share its text)\nتم الرد من Meta Business Suite"
+		lines = d.transcript_lines([{"direction": "Outbound", "body": body}], True, [])
+		self.assertEqual(lines, ["Jarz (sent from Business Suite, text not available): ..."])
+
+
+class CustomerProfileTest(unittest.TestCase):
+	def test_unlinked(self):
+		self.assertIn("not linked", d.render_customer_profile(None, NOW))
+
+	def test_describe_vip_gift(self):
+		facts = d.describe_promo(VIP_GIFT, ["Large Jar"])
+		self.assertEqual(
+			facts,
+			"free (100% off) on Large Jar; no minimum order; delivery fee charged as usual; "
+			"pickup allowed; valid until 12 Nov 2026",
+		)
+
+	def test_describe_capped_percentage_with_minimum(self):
+		promo = {
+			"discount_type": "Percentage",
+			"discount_value": 15,
+			"max_discount_amount": 100,
+			"min_order_amount": 400,
+		}
+		self.assertEqual(
+			d.describe_promo(promo),
+			"15% off up to 100 EGP on the order; minimum order 400 EGP; delivery fee charged as usual",
+		)
+
+	def test_free_delivery_has_no_delivery_fee_note(self):
+		self.assertNotIn("delivery fee", d.describe_promo({"discount_type": "Free Delivery"}))
+
+	def test_full_profile(self):
+		text = d.render_customer_profile(
+			{
+				"area": "EGMOHANDSEEN",
+				"area_ar": "المهندسين",
+				"area_deliverable": True,
+				"address_on_file": True,
+				"total_orders": 17,
+				"last_order_date": datetime.datetime(2026, 7, 22),
+				"last_order_items": ["Jarz Signature Trio"],
+				"usual_items": ["Lotus Large", "Mango Large"],
+				"offers": [{"code": "BACKXQ33VV", "facts": "free (100% off) on Large Jar", "wording": "x"}],
+				"followups": [
+					{
+						"step": "day50",
+						"at": datetime.datetime(2026, 10, 29, 13, 21),
+						"offer_code": "BACKXQ33VV",
+					}
+				],
+			},
+			NOW,
+		)
+		self.assertIn("{{delivery_fee:EGMOHANDSEEN}}", text)
+		self.assertIn("EGMOHANDSEEN / المهندسين", text)
+		self.assertIn("address is on file", text)
+		self.assertIn("Orders so far: 17; last on 22 Jul 2026 (99 days ago): Jarz Signature Trio.", text)
+		self.assertIn("Usually orders: Lotus Large, Mango Large.", text)
+		self.assertIn("Personal offer code BACKXQ33VV", text)
+		self.assertIn("{{customer_offer:BACKXQ33VV}}", text)
+		self.assertIn("Thu 29 Oct 13:21: Jarz sent them a 'we have not seen you in a while'", text)
+		self.assertNotIn("EGP", text)
+
+	def test_area_outside_delivery_is_not_quoted(self):
+		text = d.render_customer_profile({"area": "Alexandria", "area_deliverable": False}, NOW)
+		self.assertNotIn("{{delivery_fee", text)
+		self.assertIn("not one of our delivery areas", text)
+
+	def test_new_customer(self):
+		self.assertIn("No orders yet", d.render_customer_profile({"total_orders": 0}, NOW))
+
+
+class CustomerOfferPlaceholderTest(unittest.TestCase):
+	OFFER = "عاملينلك جار لارج هدية بالكود BACKXQ33VV لحد 12 نوفمبر."
+
+	def test_fills_by_code_ignoring_case_and_dashes(self):
+		out, warnings, _f = d.fill_placeholders(
+			"عندك هدية 💛 {{customer_offer:back-xq33vv}}", ctx(customer_offers={"BACKXQ33VV": self.OFFER})
+		)
+		self.assertIn(self.OFFER, out)
+		self.assertEqual(warnings, [])
+
+	def test_single_offer_without_code(self):
+		out, _w, _f = d.fill_placeholders(
+			"{{customer_offer}}", ctx(customer_offers={"BACKXQ33VV": self.OFFER})
+		)
+		self.assertEqual(out, self.OFFER)
+
+	def test_unknown_offer_is_flagged(self):
+		out, warnings, _f = d.fill_placeholders("{{customer_offer:NOPE}}", ctx())
+		self.assertIn(d.UNKNOWN, out)
+		self.assertEqual(warnings, ["No personal offer NOPE for this customer"])
 
 
 if __name__ == "__main__":

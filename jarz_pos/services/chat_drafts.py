@@ -21,6 +21,7 @@ distance, cost) carry no database access and are unit-tested directly.
 from __future__ import annotations
 
 import contextlib
+import datetime as _dt
 import io
 import json
 import random
@@ -35,7 +36,18 @@ from jarz_pos.services import chat_common as cc
 from jarz_pos.services.chat_settings import cap_ready_answers, render_ready_answer
 
 INTENTS = ("Inquiry", "Order", "Complaint", "Other")
-HISTORY_MESSAGES = 20
+HISTORY_MESSAGES = 30
+#: Follow-ups and personal offers older than this are left out of the profile.
+FOLLOWUP_LOOKBACK_DAYS = 30
+#: The latest order's board state is shown only while the order is this fresh.
+RECENT_ORDER_DAYS = 2
+#: Body prefix of the placeholder chat_ingest stores for a Business Suite reply.
+SUITE_PLACEHOLDER_PREFIX = "Reply sent from Meta Business Suite"
+#: What each follow-up template says, for the model (the copy lives at Meta).
+FOLLOWUP_GIST = {
+	"day32": "a 'we miss you, a month since your last order' WhatsApp message (no offer)",
+	"day50": "a 'we have not seen you in a while' WhatsApp message carrying the personal offer",
+}
 CONTEXT_CACHE_SECONDS = 600
 # Sonnet/Haiku 5.5 think by default and thinking counts against max_tokens: 600 cut
 # Sonnet off before it called submit_draft. Effort "low" keeps thinking short.
@@ -95,7 +107,8 @@ never جرة. Match their greeting («وعليكم السلام»، «مساء �
    {{menu}} for the full priced menu, only when they ask for the menu or the flavours,
    {{offers}} for every live bundle with what is inside and its price, plus free delivery: only \
 when they ask about offers or boxes, or want 3 jars or more,
-   {{delivery_areas}} for the list of areas we deliver to.
+   {{delivery_areas}} for the list of areas we deliver to,
+   {{customer_offer:CODE}} for the wording of a personal offer listed in the customer profile.
    {{menu}}, {{offers}} and {{delivery_areas}} expand to several lines: put each on its own line, \
 use each at most once, never retype or summarise what it contains, and never send one as the \
 whole reply: a human line comes before it and a question after it.
@@ -124,12 +137,25 @@ helping: we take the order here in the chat; orderjarz.com is only an extra opti
 say the team will get back to them; no sales pitch. Cafés, companies, wholesale: mention \
 «اسم الكافيه بتاعك. والـ 7 طبقات علينا.», ask for the café or company name, area and phone, \
 and hand over (needs_human_reason). Never quote wholesale prices, margins or minimums.
+12. The customer profile is what Jarz already knows about this customer. Never ask for what it \
+already gives: with an area on file, quote {{delivery_fee:AREA}} for it and only confirm it \
+(«نوصلك على المهندسين زي المرة اللي فاتت؟»); with an address on file, ask them to confirm it \
+instead of sending it again. Use their past orders to suggest what they like.
+13. Personal offers and follow-ups in the profile were sent by Jarz itself. When the customer \
+mentions «هدية»، «الكود»، «العرض» or «الرسالة», that is the offer: state it with \
+{{customer_offer:CODE}}, tell them we apply the code when they order here in the chat, and \
+follow its facts (minimum order, delivery fee, expiry). A promo code that is neither in the \
+profile nor in the promo code list is not ours: say a team member will check it. Never invent \
+a code or an offer.
+14. A line «Jarz (sent from Business Suite, text not available)» is a reply a team member sent \
+that we cannot read: do not repeat a greeting or a question it probably already covered.
 
 What sells (from 1,800 past Jarz chats):
 - Answer the price with the numbers first, through {{size_prices}}. Never «حسب الحجم» or \
 «حسب النكهة» without them: customers who got that asked a second time or left.
 - Ask «تحب وسط ولا كبير؟» rather than an open «تحب تطلب إيه؟».
-- Ask their area early («حضرتك في أنهي منطقة؟»): it unlocks the delivery fee and the order.
+- Ask their area early («حضرتك في أنهي منطقة؟») unless the profile already gives it: it \
+unlocks the delivery fee and the order.
 - Suggest a box in one short line when they want 3 jars or more, or are hosting or gifting.
 - Name 1-2 flavours when they hesitate.
 - When they are ready, ask for name, phone and detailed address in ONE message.
@@ -302,6 +328,20 @@ def fill_placeholders(
 			return format_egp(threshold, arabic)
 		if key == "customer_first_name":
 			return str(ctx.get("customer_first_name") or "")
+		if key == "customer_offer":
+			offers = ctx.get("customer_offers") or {}
+			wanted = arg.replace("-", "").upper()
+			offer = next((t for c, t in offers.items() if c.replace("-", "").upper() == wanted), None)
+			if offer is None and not arg and len(offers) == 1:
+				offer = next(iter(offers.values()))
+			if not offer:
+				warnings.append(
+					f"No personal offer {arg} for this customer"
+					if arg
+					else "No personal offer for this customer"
+				)
+				return UNKNOWN
+			return offer
 		if key in BLOCK_PLACEHOLDERS:
 			block = ((ctx.get("blocks") or {}).get("ar" if arabic else "en") or {}).get(key)
 			if not block:
@@ -829,7 +869,7 @@ def build_context(settings: dict[str, Any]) -> dict[str, Any]:
 	for 10 minutes per POS profile: it is the cached prefix of every prompt.
 	"""
 	profile = settings.get("default_pos_profile") or ""
-	cache_key = f"jarz_chat_ctx:v3:{profile}"
+	cache_key = f"jarz_chat_ctx:v4:{profile}"
 	try:
 		cached = frappe.cache().get_value(cache_key)
 		if cached:
@@ -929,6 +969,8 @@ def build_context(settings: dict[str, Any]) -> dict[str, Any]:
 		"An order above {{free_delivery_threshold}} gets free delivery."
 		if threshold
 		else "No free-delivery offer is active.",
+		"## Promo codes open to every customer (personal codes are in the customer profile)",
+		"\n".join(_public_promo_lines()) or "(none running)",
 		"## Upsell candidates (ITEM_CODE | name | pitch)",
 		"\n".join(upsell_lines) or "(none: do not upsell)",
 		"## Ready answers",
@@ -975,6 +1017,12 @@ _MEDIA_LABEL = {
 def transcript_lines(
 	messages: Iterable[dict[str, Any]], mask: bool, names: Iterable[str | None]
 ) -> list[str]:
+	"""``[Thu 29 Oct 19:02] Customer: ...`` lines, oldest first as given.
+
+	The time prefix lets the model tell a reply a minute ago from one last week;
+	a Business Suite placeholder becomes a plain marker instead of its bilingual
+	"text not shared" notice.
+	"""
 	lines = []
 	for msg in messages:
 		who = "Customer" if msg.get("direction") == "Inbound" else "Jarz"
@@ -982,27 +1030,298 @@ def transcript_lines(
 		body = str(msg.get("body") or "").strip()
 		if mtype == "location":
 			body = ""
-		if mask and body:
-			body = mask_text(body, names)
-		label = _MEDIA_LABEL.get(mtype)
-		text = f"{label} {body}".strip() if label else body
+		if who == "Jarz" and body.startswith(SUITE_PLACEHOLDER_PREFIX):
+			who, body = "Jarz (sent from Business Suite, text not available)", ""
+			text = "..."
+		else:
+			if mask and body:
+				body = mask_text(body, names)
+			label = _MEDIA_LABEL.get(mtype)
+			text = f"{label} {body}".strip() if label else body
 		if text:
-			lines.append(f"{who}: {text}")
+			when = _stamp(msg.get("timestamp"))
+			lines.append(f"{when}{who}: {text}")
 	return lines
 
 
-def _history_block(customer: str | None) -> str:
-	if not customer:
-		return "Customer history: not linked to a customer record."
-	card = cc.customer_card(customer) or {}
-	top = cc.top_items(customer, 3)
-	return (
-		"Customer history: "
-		f"{card.get('total_orders') or 0} previous orders"
-		+ (f", last on {card.get('last_order_date')}" if card.get("last_order_date") else "")
-		+ (f", usually orders: {', '.join(top)}" if top else "")
-		+ "."
+def _stamp(value: Any) -> str:
+	when = cc.to_dt(value)
+	return when.strftime("[%a %d %b %H:%M] ") if when else ""
+
+
+# ── customer profile ────────────────────────────────────────────────────
+
+
+def describe_promo(promo: dict[str, Any], item_names: Iterable[str] = ()) -> str:
+	"""The facts of a promo code in plain English, for the model. Pure."""
+	kind = str(promo.get("discount_type") or "")
+	value = float(promo.get("discount_value") or 0)
+	items = [str(n) for n in item_names if n]
+	if kind == "Free Delivery":
+		what = "free delivery"
+	elif kind == "Fixed Amount":
+		what = f"{value:g} EGP off"
+	elif value >= 100:
+		what = "free (100% off)"
+	else:
+		what = f"{value:g}% off"
+		if float(promo.get("max_discount_amount") or 0):
+			what += f" up to {float(promo['max_discount_amount']):g} EGP"
+	if items:
+		what += " on " + ", ".join(items[:5])
+	elif str(promo.get("applies_to") or "") not in ("", "Whole Order"):
+		what += " on selected items"
+	else:
+		what += " on the order"
+	parts = [what]
+	minimum = float(promo.get("min_order_amount") or 0)
+	parts.append(f"minimum order {minimum:g} EGP" if minimum else "no minimum order")
+	if kind != "Free Delivery":
+		parts.append("delivery fee charged as usual")
+	if int(promo.get("allow_pickup") or 0):
+		parts.append("pickup allowed")
+	until = cc.to_dt(promo.get("active_to"))
+	if until:
+		parts.append("valid until " + until.strftime("%d %b %Y"))
+	return "; ".join(parts)
+
+
+def render_customer_profile(profile: dict[str, Any] | None, now: Any = None) -> str:
+	"""The "Customer profile" block of the prompt. Pure.
+
+	Money amounts are left out on purpose: the model must never type a number,
+	and a lifetime total invites it to.
+	"""
+	if not profile:
+		return "Customer profile: not linked to a customer record (nothing is known about them yet)."
+	now_dt = cc.to_dt(now)
+	lines = ["Customer profile (from Jarz records; never ask for what is already here):"]
+	area = profile.get("area")
+	if area:
+		label = f"{area} / {profile['area_ar']}" if profile.get("area_ar") else str(area)
+		if profile.get("area_deliverable"):
+			lines.append(
+				f"- Area on file: {label}. Quote {{{{delivery_fee:{area}}}}} for it and confirm it instead of asking."
+			)
+		else:
+			lines.append(
+				f"- Area on file: {label} (not one of our delivery areas: confirm where to deliver)."
+			)
+	if profile.get("address_on_file"):
+		lines.append("- A delivery address is on file from an earlier order: ask them to confirm it.")
+	orders = int(profile.get("total_orders") or 0)
+	if orders:
+		line = f"- Orders so far: {orders}"
+		last = cc.to_dt(profile.get("last_order_date"))
+		if last:
+			line += f"; last on {last.strftime('%d %b %Y')}"
+			if now_dt:
+				line += f" ({max((now_dt.date() - last.date()).days, 0)} days ago)"
+		if profile.get("last_order_items"):
+			line += ": " + ", ".join(profile["last_order_items"][:6])
+		lines.append(line + ".")
+		if profile.get("last_order_state"):
+			lines.append(f"- Their latest order is at «{profile['last_order_state']}» on our board.")
+	else:
+		lines.append("- No orders yet: a new customer.")
+	if profile.get("usual_items"):
+		lines.append("- Usually orders: " + ", ".join(profile["usual_items"][:3]) + ".")
+	for offer in profile.get("offers") or []:
+		lines.append(
+			f"- Personal offer code {offer['code']}: {offer['facts']}. "
+			f"Its wording is {{{{customer_offer:{offer['code']}}}}}."
+		)
+	for touch in profile.get("followups") or []:
+		when = cc.to_dt(touch.get("at"))
+		stamp = when.strftime("%a %d %b %H:%M") if when else "recently"
+		gist = FOLLOWUP_GIST.get(str(touch.get("step") or ""), f"a '{touch.get('step')}' follow-up")
+		line = f"- {stamp}: Jarz sent them {gist}"
+		if touch.get("offer_code"):
+			line += f" (code {touch['offer_code']})"
+		if touch.get("outcome"):
+			line += f", outcome: {touch['outcome']}"
+		lines.append(line + ".")
+	return "\n".join(lines)
+
+
+def _promo_items(code: str) -> list[str]:
+	rows = frappe.get_all(
+		"Jarz Promo Code Item",
+		filters={"parent": code, "parenttype": "Jarz Promo Code"},
+		fields=["item_code", "item_group"],
+		ignore_permissions=True,
 	)
+	names = []
+	for row in rows:
+		if row.item_code:
+			names.append(frappe.db.get_value("Item", row.item_code, "item_name") or row.item_code)
+		elif row.item_group:
+			names.append(str(row.item_group))
+	return names
+
+
+def _usable_promo(promo: dict[str, Any], now: Any) -> bool:
+	if not int(promo.get("enabled") or 0):
+		return False
+	if int(promo.get("usage_limit") or 0) and int(promo.get("times_used") or 0) >= int(promo["usage_limit"]):
+		return False
+	start, end = cc.to_dt(promo.get("active_from")), cc.to_dt(promo.get("active_to"))
+	return (start is None or start <= now) and (end is None or end > now)
+
+
+_PROMO_FIELDS = [
+	"name",
+	"enabled",
+	"discount_type",
+	"discount_value",
+	"max_discount_amount",
+	"min_order_amount",
+	"applies_to",
+	"allow_pickup",
+	"usage_limit",
+	"times_used",
+	"active_from",
+	"active_to",
+]
+
+
+def _customer_offers(customer: str, now: Any) -> list[dict[str, Any]]:
+	"""Usable personal promo codes: ``[{code, facts, wording}]``."""
+	from jarz_pos.services import customer_followups as fu
+
+	rows = frappe.get_all(
+		"Jarz Promo Code",
+		filters={"customer": customer, "enabled": 1},
+		fields=_PROMO_FIELDS,
+		order_by="creation desc",
+		limit_page_length=5,
+		ignore_permissions=True,
+	)
+	offers = []
+	for row in rows:
+		if not _usable_promo(row, now):
+			continue
+		facts = describe_promo(row, _promo_items(row.name))
+		try:
+			wording = fu.offer_text_for_code(row.name)
+		except Exception:
+			wording = ""
+		offers.append({"code": row.name, "facts": facts, "wording": wording or f"الكود {row.name}"})
+	return offers
+
+
+def _recent_followups(customer: str, now: Any) -> list[dict[str, Any]]:
+	since = now - _dt.timedelta(days=FOLLOWUP_LOOKBACK_DAYS)
+	rows = frappe.get_all(
+		"Jarz Follow-up Touch",
+		filters={"customer": customer, "status": "Done", "done_at": [">=", since]},
+		fields=["step", "channel", "done_at", "offer_code", "outcome"],
+		order_by="done_at asc",
+		limit_page_length=5,
+		ignore_permissions=True,
+	)
+	return [
+		{
+			"step": r.step,
+			"at": r.done_at,
+			"offer_code": r.offer_code,
+			"outcome": r.outcome if r.channel != "Message" else None,
+		}
+		for r in rows
+	]
+
+
+def _last_invoice(customer: str) -> dict[str, Any] | None:
+	fields = ["name", "posting_date", "customer_address"]
+	try:
+		if frappe.db.has_column("Sales Invoice", "custom_sales_invoice_state"):
+			fields.append("custom_sales_invoice_state")
+	except Exception:
+		pass
+	rows = frappe.get_all(
+		"Sales Invoice",
+		filters={"customer": customer, "docstatus": 1, "is_return": 0},
+		fields=fields,
+		order_by="posting_date desc, creation desc",
+		limit_page_length=1,
+		ignore_permissions=True,
+	)
+	if not rows:
+		return None
+	inv = rows[0]
+	inv["items"] = frappe.get_all(
+		"Sales Invoice Item",
+		filters={"parent": inv.name, "parenttype": "Sales Invoice"},
+		pluck="item_name",
+		order_by="idx asc",
+		ignore_permissions=True,
+	)
+	return inv
+
+
+def _public_promo_lines() -> list[str]:
+	"""``CODE | facts`` for every usable promo code not tied to one customer."""
+	try:
+		rows = frappe.get_all(
+			"Jarz Promo Code",
+			filters={"enabled": 1, "customer": ["is", "not set"]},
+			fields=_PROMO_FIELDS,
+			order_by="creation desc",
+			limit_page_length=20,
+			ignore_permissions=True,
+		)
+		now = cc.now()
+		return [
+			f"{r.name} | {describe_promo(r, _promo_items(r.name))}" for r in rows if _usable_promo(r, now)
+		]
+	except Exception:
+		return []
+
+
+def customer_profile(customer: str | None, now: Any = None) -> dict[str, Any] | None:
+	"""Everything the draft should know about *customer*. Never raises; parts that fail are left out."""
+	if not customer:
+		return None
+	now = cc.to_dt(now) or cc.now()
+	card = cc.customer_card(customer)
+	if not card:
+		return None
+	profile: dict[str, Any] = {
+		"total_orders": card.get("total_orders") or 0,
+		"last_order_date": card.get("last_order_date"),
+		"usual_items": cc.top_items(customer, 3),
+	}
+	territory = card.get("territory")
+	if territory:
+		try:
+			row = frappe.db.get_value(
+				"Territory", territory, _territory_fields("name", "is_group", "delivery_income"), as_dict=True
+			)
+		except Exception:
+			row = None
+		if row and territory != "All Territories":
+			profile["area"] = row.name
+			profile["area_ar"] = str(row.get("custom_territory_name_ar") or "").strip() or None
+			profile["area_deliverable"] = not int(row.is_group or 0) and row.delivery_income not in (None, "")
+	parts = (
+		("last", lambda: _last_invoice(customer)),
+		("offers", lambda: _customer_offers(customer, now)),
+		("followups", lambda: _recent_followups(customer, now)),
+	)
+	for key, load in parts:
+		try:
+			value = load()
+		except Exception:
+			continue
+		if key == "last" and value:
+			profile["last_order_items"] = [str(n) for n in value.get("items") or [] if n]
+			placed = cc.to_dt(value.get("posting_date"))
+			if placed and (now.date() - placed.date()).days <= RECENT_ORDER_DAYS:
+				profile["last_order_state"] = value.get("custom_sales_invoice_state") or None
+			profile["address_on_file"] = bool(value.get("customer_address"))
+		elif key != "last":
+			profile[key] = value
+	return profile
 
 
 # ── Claude call ─────────────────────────────────────────────────────────
@@ -1136,16 +1455,21 @@ def generate_draft(conversation: str, for_message: str | None = None, hint: str 
 		names = [conv.contact_name, customer_name]
 		lines = transcript_lines(rows, mask, names)
 		context = build_context(settings)
+		now = cc.now()
+		profile = customer_profile(conv.customer, now)
 		user_parts = [
 			f"Channel: {conv.channel}",
-			_history_block(conv.customer),
+			"Now: " + now.strftime("%a %d %b %Y %H:%M"),
+			render_customer_profile(profile, now),
 			"Conversation (oldest first):",
 			"\n".join(lines) or "(no text messages)",
 		]
 		if hint:
 			hint_text = mask_text(hint, names) if mask else str(hint)
 			user_parts.append(f"Moderator's instruction for this draft: {hint_text[:500]}")
-		user_parts.append("Draft the next reply to the customer's latest message and submit it with submit_draft.")
+		user_parts.append(
+			"Draft the next reply to the customer's latest message and submit it with submit_draft."
+		)
 		result = _call_claude(api_key, model, context["text"], "\n\n".join(user_parts))
 	except Exception as exc:
 		message = f"{type(exc).__name__}: {str(exc)[:500]}"
@@ -1164,6 +1488,7 @@ def generate_draft(conversation: str, for_message: str | None = None, hint: str 
 	template = clean["reply"]
 	ctx = dict(context)
 	ctx["customer_first_name"] = first_name(customer_name, conv.contact_name)
+	ctx["customer_offers"] = {o["code"]: o["wording"] for o in (profile or {}).get("offers") or []}
 	ctx["arabic"] = is_arabic(template) or not template
 	draft_text, fill_warnings, filled = fill_placeholders(template, ctx)
 	warnings += fill_warnings + typed_number_warnings(template)
