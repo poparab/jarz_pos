@@ -148,6 +148,41 @@ class ValidateOrderTest(unittest.TestCase):
 		self.assertNotIn("EGP", text)
 
 
+class UnsureLinesTest(unittest.TestCase):
+	"""CHAT-02441: a jar whose size the model assumed must not reach the cart."""
+
+	def test_unsure_item_is_listed_not_added(self):
+		lines, warnings = o.validate_order(
+			{
+				"items": [
+					{"item_code": "Lotus Medium", "qty": 1, "sure": True},
+					{"item_code": "Chocolate Hazelnut Large", "qty": 1, "sure": False},
+				]
+			},
+			CATALOG,
+		)
+		self.assertEqual([line["item_code"] for line in lines], ["Lotus Medium"])
+		self.assertIn("Not sure: Chocolate Hazelnut Large x1, check with the customer", warnings)
+
+	def test_unsure_flavour_leaves_the_bundle_for_staff(self):
+		lines, warnings = o.validate_order(
+			{
+				"bundles": [
+					{
+						"bundle_code": "Jarz Signature Trio",
+						"selections": [
+							{"item_code": "Chocolate Hazelnut Large", "qty": 2},
+							{"item_code": "Mango Large", "qty": 1, "sure": False},
+						],
+					}
+				]
+			},
+			CATALOG,
+		)
+		self.assertFalse(lines[0]["complete"])
+		self.assertIn("Jarz Signature Trio: not sure about Mango Large x1, check with the customer", warnings)
+
+
 class ContactChangesTest(unittest.TestCase):
 	ROWS = {
 		1: {"direction": "Inbound", "body": "عمارة 12 الدور 3 شقة 5 الحي السابع"},
@@ -167,6 +202,62 @@ class ContactChangesTest(unittest.TestCase):
 
 	def test_missing_numbers(self):
 		self.assertEqual(o.contact_changes({}, self.ROWS, []), {"address": None, "phone": None})
+
+
+class LocationTest(unittest.TestCase):
+	def test_whatsapp_pin(self):
+		loc = o.location_from({"direction": "Inbound", "body": "30.0600493,31.2086096"})
+		self.assertAlmostEqual(loc["latitude"], 30.0600493)
+		self.assertAlmostEqual(loc["longitude"], 31.2086096)
+		self.assertIn("query=30.060049,31.20861", loc["link"])
+
+	def test_full_maps_link_in_an_address(self):
+		body = "عمارة 5 https://www.google.com/maps/place/@30.05,31.21,17z/data=!3d30.0612!4d31.2201"
+		loc = o.location_from({"direction": "Inbound", "body": body})
+		self.assertAlmostEqual(loc["latitude"], 30.0612)
+		self.assertAlmostEqual(loc["longitude"], 31.2201)
+		self.assertTrue(loc["link"].startswith("https://www.google.com/maps"))
+
+	def test_short_link_keeps_the_link_only(self):
+		loc = o.location_from({"direction": "Inbound", "body": "https://maps.app.goo.gl/AbC123xyz"})
+		self.assertEqual(
+			loc, {"latitude": None, "longitude": None, "link": "https://maps.app.goo.gl/AbC123xyz"}
+		)
+
+	def test_not_a_location(self):
+		self.assertIsNone(o.location_from({"direction": "Inbound", "body": "عمارة 5 الدور 3"}))
+		self.assertIsNone(o.location_from({"direction": "Outbound", "body": "30.06,31.20"}))
+		self.assertIsNone(o.location_from(None))
+
+
+class PromoCodeTest(unittest.TestCase):
+	NOW = datetime.datetime(2026, 10, 29, 20, 0)
+	PROMOS = [
+		{
+			"name": "BACKXQ33VV",
+			"enabled": 1,
+			"customer": "زمزم - 1",
+			"active_to": datetime.datetime(2026, 11, 20),
+		},
+		{"name": "JARZ10", "enabled": 1, "customer": None},
+		{"name": "OLD5", "enabled": 1, "customer": None, "active_to": datetime.datetime(2026, 10, 1)},
+	]
+
+	def test_typed_spellings_and_personal_owner(self):
+		codes, warnings = o.check_promo_codes(
+			["back-xq33vv", "jarz10 ", "JARZ10"], self.PROMOS, "زمزم - 1", self.NOW
+		)
+		self.assertEqual(codes, ["BACKXQ33VV", "JARZ10"])
+		self.assertEqual(warnings, [])
+
+	def test_refused_codes_are_named(self):
+		codes, warnings = o.check_promo_codes(
+			["BACKXQ33VV", "OLD5", "NOPE"], self.PROMOS, "Someone Else", self.NOW
+		)
+		self.assertEqual(codes, [])
+		self.assertIn("Promo code BACKXQ33VV belongs to another customer", warnings)
+		self.assertIn("Promo code OLD5 is disabled, used up or expired", warnings)
+		self.assertIn("Promo code NOPE does not exist", warnings)
 
 
 class ResolveAreaTest(unittest.TestCase):

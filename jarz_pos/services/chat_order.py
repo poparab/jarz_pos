@@ -28,6 +28,7 @@ import frappe
 from jarz_pos.services import chat_common as cc
 
 HISTORY_MESSAGES = 40
+PAYMENT_METHODS = ("cash", "instapay", "wallet", "card")
 MAX_TOKENS = 1500
 EFFORT = "low"
 
@@ -44,9 +45,21 @@ clearly agreed to is unclear: leave it out and say so in "unclear". Never guess 
 choose flavours, leave selections empty. Jars ordered outside a box go in "items".
 - «زي المرة اللي فاتت» / «ع النفس» / "same as last time" means the last order in the profile: \
 use its codes.
-- address_message: the [number] of the customer's own message that gives a delivery address \
-different from the one on file (street, building, floor, landmark, or a shared location). Null \
-when they confirmed the address on file or gave none.
+- address_message: the [number] of the customer's own message that gives a written delivery \
+address different from the one on file (street, building, floor, landmark). Null when they \
+confirmed the address on file or gave none.
+- location_message: the [number] of the customer's own [location] pin or map link for this \
+delivery (the latest one when they sent several). Null when there is none.
+- promo_codes: the promo or gift codes the customer wants used on this order: a code they typed, \
+or the personal offer code from the profile when they mean it («الهدية»، «الكود»، «العرض»). Write \
+the code exactly; never invent one.
+- payment_method: how they said they will pay for THIS order: "cash" (cash to the courier on \
+delivery, «كاش»، «عند الاستلام»), "instapay", "wallet" (Vodafone Cash «فودافون كاش» or any other \
+mobile wallet: never "cash"), "card" (card or payment link). Null when they did not say, when they \
+named two, or when the payment talk is about an earlier order or a price difference.
+- Never assume. Mark every item and every bundle selection with "sure": false when you had to \
+assume anything about it (size, flavour, how many), and true only when the customer stated or \
+clearly agreed to exactly that. Unsure lines are shown to staff instead of being added.
 - phone_message: the [number] of the customer's message that gives a new phone number. Null otherwise.
 - area: the delivery area they named, exactly as written in the delivery area list, only when it \
 differs from the area on file. Null otherwise.
@@ -65,7 +78,11 @@ TOOL = {
 				"type": "array",
 				"items": {
 					"type": "object",
-					"properties": {"item_code": {"type": "string"}, "qty": {"type": "integer"}},
+					"properties": {
+						"item_code": {"type": "string"},
+						"qty": {"type": "integer"},
+						"sure": {"type": "boolean"},
+					},
 					"required": ["item_code", "qty"],
 				},
 			},
@@ -82,6 +99,7 @@ TOOL = {
 								"properties": {
 									"item_code": {"type": "string"},
 									"qty": {"type": "integer"},
+									"sure": {"type": "boolean"},
 								},
 								"required": ["item_code", "qty"],
 							},
@@ -91,7 +109,10 @@ TOOL = {
 				},
 			},
 			"address_message": {"type": ["integer", "null"]},
+			"location_message": {"type": ["integer", "null"]},
 			"phone_message": {"type": ["integer", "null"]},
+			"promo_codes": {"type": "array", "items": {"type": "string"}},
+			"payment_method": {"type": ["string", "null"], "enum": [*PAYMENT_METHODS, None]},
 			"area": {"type": ["string", "null"]},
 			"pickup": {"type": "boolean"},
 			"notes": {"type": ["string", "null"]},
@@ -201,6 +222,9 @@ def assign_selections(
 	for pick in picks or []:
 		qty = _qty(pick.get("qty"))
 		ref = pick.get("item_code")
+		if pick.get("sure") is False:
+			warnings.append(f"{bundle['name']}: not sure about {ref} x{qty}, check with the customer")
+			continue
 		for group in bundle["groups"]:
 			if qty <= 0:
 				break
@@ -237,6 +261,9 @@ def validate_order(
 			warnings.append(f"Not on the menu: {row.get('item_code') or '?'}")
 			continue
 		if qty <= 0:
+			continue
+		if row.get("sure") is False:
+			warnings.append(f"Not sure: {catalog['items'][code]} x{qty}, check with the customer")
 			continue
 		merged[code] = merged.get(code, 0) + qty
 	for code, qty in merged.items():
@@ -319,6 +346,66 @@ def contact_changes(
 	return out
 
 
+def location_from(row: dict[str, Any] | None) -> dict[str, Any] | None:
+	"""``{"latitude", "longitude", "link"}`` from a customer's pin or map link. Pure.
+
+	A WhatsApp pin is stored as ``lat,lng``; a typed Google Maps link keeps its
+	coordinates when the link carries them. A short link (maps.app.goo.gl) has
+	none until it is opened, so only ``link`` is set and the address dialog
+	resolves it the way it resolves any pasted link.
+	"""
+	from jarz_pos.utils import geo
+
+	if not row or row.get("direction") != "Inbound":
+		return None
+	body = str(row.get("body") or "").strip()
+	if not body:
+		return None
+	link = geo.extract_location_link(body)
+	coords = geo.parse_maps_link(link or body)
+	if coords:
+		lat, lng, _precision = coords
+		if not geo.is_valid_coordinate(lat, lng):
+			return None
+		return {"latitude": lat, "longitude": lng, "link": link or geo.maps_link_for(lat, lng)}
+	return {"latitude": None, "longitude": None, "link": link} if link else None
+
+
+def _code_key(code: Any) -> str:
+	return "".join(ch for ch in str(code or "").upper() if ch.isalnum())
+
+
+def check_promo_codes(
+	asked: list[Any], promos: list[dict[str, Any]], customer: str | None, now: Any
+) -> tuple[list[str], list[str]]:
+	"""The asked codes that exist, are usable now and may be used by *customer*. Pure.
+
+	Returns ``(codes, warnings)``. Codes match ignoring case, spaces and dashes
+	(customers type «back-xq33vv»); a personal code belongs to its customer only.
+	The POS still checks the order rules (minimum order, items) when it applies them.
+	"""
+	from jarz_pos.services import chat_drafts as drafts
+
+	by_key = {_code_key(p.get("name")): p for p in promos}
+	codes, warnings = [], []
+	for raw in asked or []:
+		key = _code_key(raw)
+		if not key:
+			continue
+		promo = by_key.get(key)
+		if not promo:
+			warnings.append(f"Promo code {str(raw)[:40]} does not exist")
+			continue
+		owner = str(promo.get("customer") or "")
+		if owner and owner != str(customer or ""):
+			warnings.append(f"Promo code {promo['name']} belongs to another customer")
+		elif not drafts._usable_promo(promo, now):
+			warnings.append(f"Promo code {promo['name']} is disabled, used up or expired")
+		elif promo["name"] not in codes:
+			codes.append(promo["name"])
+	return codes, warnings
+
+
 def resolve_area(name: Any, territories: list[dict[str, Any]]) -> dict[str, Any] | None:
 	"""The delivery territory *name* refers to (code or Arabic name), with its fee. Pure."""
 	low = str(name or "").strip().lower()
@@ -353,6 +440,21 @@ def _catalog(profile: str) -> dict[str, Any]:
 	return build_catalog(products, bundles, paused)
 
 
+def _promos(asked: list[Any]) -> list[dict[str, Any]]:
+	"""The Jarz Promo Code rows the asked codes may name (as typed, or letters and digits only)."""
+	from jarz_pos.services import chat_drafts as drafts
+
+	names = sorted({v for raw in asked for v in (str(raw or "").strip().upper(), _code_key(raw)) if v})
+	if not names or not frappe.db.exists("DocType", "Jarz Promo Code"):
+		return []
+	return frappe.get_all(
+		"Jarz Promo Code",
+		filters={"name": ["in", names]},
+		fields=[*drafts._PROMO_FIELDS, "customer"],
+		ignore_permissions=True,
+	)
+
+
 def _last_order_codes(customer: str | None) -> list[str]:
 	if not customer:
 		return []
@@ -380,19 +482,33 @@ def _call(api_key: str, model: str, system_text: str, user_text: str) -> dict[st
 	import anthropic
 
 	client = anthropic.Anthropic(api_key=api_key, timeout=40.0, max_retries=1)
-	resp = client.messages.create(
-		model=model,
-		max_tokens=MAX_TOKENS,
-		system=[{"type": "text", "text": SYSTEM_PROMPT}, {"type": "text", "text": system_text}],
-		messages=[{"role": "user", "content": user_text}],
-		tools=[TOOL],
-		# Sonnet 5.5 and Opus 5.5 reject a forced tool with a 400.
-		tool_choice={"type": "auto"},
-		extra_body={"output_config": {"effort": EFFORT}},
-	)
-	for block in getattr(resp, "content", None) or []:
-		if getattr(block, "type", None) == "tool_use" and getattr(block, "name", "") == "submit_order":
-			return getattr(block, "input", None) or {}
+	messages: list[dict[str, Any]] = [{"role": "user", "content": user_text}]
+	# tool_choice stays "auto" (Sonnet 5.5 and Opus 5.5 reject a forced tool with
+	# a 400), so the model sometimes answers in prose (CHAT-02442): ask once more.
+	for _attempt in range(2):
+		resp = client.messages.create(
+			model=model,
+			max_tokens=MAX_TOKENS,
+			system=[{"type": "text", "text": SYSTEM_PROMPT}, {"type": "text", "text": system_text}],
+			messages=messages,
+			tools=[TOOL],
+			tool_choice={"type": "auto"},
+			extra_body={"output_config": {"effort": EFFORT}},
+		)
+		content = getattr(resp, "content", None) or []
+		for block in content:
+			if getattr(block, "type", None) == "tool_use" and getattr(block, "name", "") == "submit_order":
+				return getattr(block, "input", None) or {}
+		text = "\n".join(
+			str(getattr(b, "text", "") or "") for b in content if getattr(b, "type", None) == "text"
+		).strip()
+		messages += [
+			{"role": "assistant", "content": text or "(no answer)"},
+			{
+				"role": "user",
+				"content": "Call submit_order now; empty lists are fine when there is no order.",
+			},
+		]
 	return None
 
 
@@ -475,11 +591,24 @@ def order_from_chat(conversation: str) -> dict[str, Any]:
 		area = None  # the area on file: nothing changed
 	if not order_lines:
 		warnings.append("No items found in the chat: add them by hand")
+	# The pin, else a map link inside the written address.
+	location = location_from(by_number.get(_qty(raw.get("location_message"))))
+	if not location:
+		address_row = by_number.get(_qty(raw.get("address_message")))
+		location = location_from(address_row) if changes["address"] else None
+	promo_codes, promo_warnings = check_promo_codes(
+		raw.get("promo_codes") or [], _promos(raw.get("promo_codes") or []), customer, cc.now()
+	)
+	warnings += promo_warnings
+	payment = str(raw.get("payment_method") or "").strip().lower()
 	notes = str(raw.get("notes") or "").strip()[:500] or None
 	return {
 		"order": {
 			"lines": order_lines,
 			"address": changes["address"],
+			"location": location,
+			"promo_codes": promo_codes,
+			"payment_method": payment if payment in PAYMENT_METHODS else None,
 			"area": area,
 			"phone": changes["phone"],
 			"contact_name": None,
