@@ -235,8 +235,12 @@ def get_conversation(name: str, limit: int | str | None = 50, before: str | None
 
 
 @frappe.whitelist(methods=["GET", "POST"])
-def get_order_prefill(conversation: str) -> dict[str, Any]:
-	"""What the order screen needs to start an order from this chat."""
+def get_order_prefill(conversation: str, with_order: int | str | None = None) -> dict[str, Any]:
+	"""What the order screen needs to start an order from this chat.
+
+	With ``with_order=1`` the AI also reads the order out of the chat (items,
+	bundles, a new address or phone, notes); see ``chat_order.order_from_chat``.
+	"""
 	_gate()
 	conv = _conversation_or_throw(conversation)
 	customer = None
@@ -247,7 +251,12 @@ def get_order_prefill(conversation: str) -> dict[str, Any]:
 		if row:
 			customer = {"name": row.name, "customer_name": row.customer_name, "mobile_no": row.mobile_no}
 	phone = conv.phone or (customer or {}).get("mobile_no") or None
-	return {"customer": customer, "phone": phone, "contact_name": conv.contact_name or None}
+	out = {"customer": customer, "phone": phone, "contact_name": conv.contact_name or None}
+	if frappe.utils.cint(with_order):
+		from jarz_pos.services.chat_order import order_from_chat
+
+		out.update(order_from_chat(conv.name))
+	return out
 
 
 @frappe.whitelist(methods=["GET", "POST"])
