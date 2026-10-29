@@ -171,7 +171,7 @@
    "fieldtype": "Data",
    "label": "Transcription Model",
    "depends_on": "transcribe_voice_notes",
-   "description": "Leave empty for the provider's default: gpt-4o-transcribe (OpenAI) / gemini-2.5-flash (Gemini)."
+   "description": "Leave empty for the provider's default: gpt-4o-transcribe (OpenAI) / gemini-3.8-flash (Gemini)."
   },
   {
    "fieldname": "sec_meta",

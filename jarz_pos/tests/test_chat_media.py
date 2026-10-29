@@ -456,9 +456,9 @@ class GeminiRequestTest(unittest.TestCase):
 	KEY = "AIzaSyFAKEKEY1234567890abcdefghijklmno"
 
 	def test_url_has_the_model_and_no_key(self):
-		url, _body = tr.build_gemini_request("gemini-2.5-flash", "audio/ogg", b"abc", "do it")
+		url, _body = tr.build_gemini_request("gemini-3.8-flash", "audio/ogg", b"abc", "do it")
 		self.assertEqual(
-			url, "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+			url, "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent"
 		)
 		self.assertNotIn("key", url)
 		self.assertNotIn("?", url)
@@ -470,7 +470,7 @@ class GeminiRequestTest(unittest.TestCase):
 		self.assertNotIn("?", url)
 		self.assertEqual(url.count("/models/"), 1)
 		url, _ = tr.build_gemini_request("", "audio/ogg", b"a", "x")
-		self.assertIn("gemini-2.5-flash", url)
+		self.assertIn("gemini-3.8-flash", url)
 
 	def test_body_shape(self):
 		_url, body = tr.build_gemini_request("m", "audio/ogg", b"\x00\\x01OggS", "instruction")
@@ -527,9 +527,9 @@ class GeminiRequestTest(unittest.TestCase):
 
 	def test_model_defaults_follow_the_provider(self):
 		self.assertEqual(tr.model_of({}), "gpt-4o-transcribe")
-		self.assertEqual(tr.model_of({"transcription_provider": "Gemini"}), "gemini-2.5-flash")
+		self.assertEqual(tr.model_of({"transcription_provider": "Gemini"}), "gemini-3.8-flash")
 		self.assertEqual(
-			tr.model_of({"transcription_provider": "Gemini", "transcription_model": " "}), "gemini-2.5-flash"
+			tr.model_of({"transcription_provider": "Gemini", "transcription_model": " "}), "gemini-3.8-flash"
 		)
 		self.assertEqual(
 			tr.model_of({"transcription_provider": "Gemini", "transcription_model": "gemini-2.5-pro"}),
@@ -639,7 +639,7 @@ class GeminiPostTest(unittest.TestCase):
 			mock.patch.object(tr.cc, "safe_log_error") as log,
 		):
 			try:
-				out = tr._post_gemini(self.KEY, "gemini-2.5-flash", "audio/ogg", b"OggS", "do it")
+				out = tr._post_gemini(self.KEY, "gemini-3.8-flash", "audio/ogg", b"OggS", "do it")
 				error = None
 			except RuntimeError as exc:
 				out, error = None, exc
@@ -734,7 +734,7 @@ class GeminiFlowTest(unittest.TestCase):
 		publish.assert_called_once()
 		preview.assert_called_once()
 		key, model, mime, content, instruction = post.call_args.args
-		self.assertEqual((key, model, mime), (self.KEY, "gemini-2.5-flash", "audio/ogg"))
+		self.assertEqual((key, model, mime), (self.KEY, "gemini-3.8-flash", "audio/ogg"))
 		self.assertEqual(content, b"OggS" + b"\x00" * 10)
 		self.assertIn("verbatim", instruction)
 		self.assertIn("Lotus Jar", instruction)

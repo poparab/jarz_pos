@@ -5,7 +5,7 @@ Two providers, picked by the ``transcription_provider`` setting:
 * **OpenAI** ``gpt-4o-transcribe`` (best on Egyptian Arabic; takes WhatsApp's
   ogg/opus and Instagram's m4a as they are; 25 MB per file) through a plain
   ``requests`` multipart POST, no SDK.
-* **Gemini** ``gemini-2.5-flash`` through ``generateContent`` with the audio
+* **Gemini** ``gemini-3.8-flash`` through ``generateContent`` with the audio
   inline (base64 in a JSON body, ``requests``). The key goes in the
   ``x-goog-api-key`` header, never in the URL.
 
@@ -45,7 +45,7 @@ PROVIDER_OPENAI = "OpenAI"
 PROVIDER_GEMINI = "Gemini"
 
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-GEMINI_DEFAULT_MODEL = "gemini-2.5-flash"
+GEMINI_DEFAULT_MODEL = "gemini-3.8-flash"
 #: Inline audio rides in the JSON body, which Gemini caps at 20 MB; base64 adds a
 #: third, so 14 MiB of audio is about 18.7 MiB on the wire. Bigger files are skipped.
 GEMINI_MAX_AUDIO_BYTES = 14 * 1024 * 1024
