@@ -22,6 +22,7 @@
   "call_window_end",
   "auto_send_whatsapp",
   "auto_send_daily_cap",
+  "wa_message_cost",
   "section_senders",
   "sender_users",
   "section_msgs",
@@ -152,6 +153,12 @@
    "description": "Most template messages sent per day (the number's Meta limit is 250 new customers a day)."
   },
   {
+   "fieldname": "wa_message_cost",
+   "fieldtype": "Currency",
+   "label": "Cost per WhatsApp message (EGP)",
+   "description": "What Meta charges per follow-up template message, in EGP. Used for the cost-vs-orders report."
+  },
+  {
    "fieldname": "section_senders",
    "fieldtype": "Section Break",
    "label": "Daily Push"
@@ -213,7 +220,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-10-27 16:00:00.000000",
+ "modified": "2026-10-29 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "jarz pos",
  "name": "Jarz Follow-up Settings",

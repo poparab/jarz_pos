@@ -84,6 +84,15 @@ TEMPLATE_LANGUAGE = "ar_EG"
 #: Fills {{1}} when the customer has no usable first name.
 TEMPLATE_NAME_FALLBACK = "عميلنا"
 DEFAULT_AUTO_SEND_CAP = 100
+#: EGP per delivered follow-up template: Meta's Egypt marketing rate ($0.0644, rate card of
+#: 1 Oct 2026) at ~56 EGP/USD. The settings field `wa_message_cost` overrides it.
+DEFAULT_WA_MESSAGE_COST = 3.6
+REPORT_CURRENCY = "EGP"
+#: Sent-report result windows: replies count for 7 days, orders for 30.
+REPLY_WINDOW_DAYS = 7
+ORDER_WINDOW_DAYS = 30
+REPORT_LIST_CAP = 5
+REPLY_TEXT_MAX = 500
 
 REASON_NEW_ORDER = "New order"
 REASON_QUALITY = "Quality complaint"
@@ -364,6 +373,8 @@ def load_settings() -> dict[str, Any]:
 		"call_window_end": _to_time(_get(doc, "call_window_end"), DEFAULT_CALL_END),
 		"auto_send_whatsapp": int(_get(doc, "auto_send_whatsapp", 0) or 0),
 		"auto_send_daily_cap": int(_get(doc, "auto_send_daily_cap", 0) or 0) or DEFAULT_AUTO_SEND_CAP,
+		# Singles ignore new field defaults, so a never-saved 0 falls back to the default rate.
+		"wa_message_cost": float(_get(doc, "wa_message_cost", 0) or 0) or DEFAULT_WA_MESSAGE_COST,
 		"high_value_order_min": rfm.high_value_threshold(),
 		"sender_users": [],
 		"templates": {},
@@ -2208,43 +2219,176 @@ def record_template_status(wamid: str | None, status: str | None, error: str | N
 		return False
 
 
-def get_sent_report(from_date: str | None = None, to_date: str | None = None, limit: int = 200) -> dict[str, Any]:
+def _fmt_dt(value: Any) -> str:
+	"""``YYYY-MM-DD HH:MM:SS`` for a datetime (or anything str()-able). Pure."""
+	if isinstance(value, _dt.datetime):
+		return value.strftime("%Y-%m-%d %H:%M:%S")
+	return str(value or "")[:19]
+
+
+def _assign_windows(
+	done_at: Any,
+	messages: list[dict[str, Any]],
+	invoices: list[dict[str, Any]],
+	code_invoice: str = "",
+) -> dict[str, Any]:
+	"""Attach one sent message's results: the replies and the orders that followed. Pure.
+
+	*messages* are one customer's inbound messages (``timestamp``, ``body``,
+	``message_type``) and *invoices* their retail invoices (``name``,
+	``creation``, ``grand_total``, ``woo_order_id``), both oldest first.
+	Replies count in (done_at, done_at + 7 days], orders in (done_at, done_at + 30
+	days]; each list shows the first 5, the count and the order total are not
+	capped. ``order_refs`` carries every order for the money roll-up.
+	"""
+	start = _to_datetime(done_at)
+	reply_end = start + _dt.timedelta(days=REPLY_WINDOW_DAYS)
+	order_end = start + _dt.timedelta(days=ORDER_WINDOW_DAYS)
+	replies: list[dict[str, Any]] = []
+	reply_count = 0
+	for m in messages:
+		at = _to_datetime(m.get("timestamp"))
+		if not (start < at <= reply_end):
+			continue
+		reply_count += 1
+		if len(replies) < REPORT_LIST_CAP:
+			body = str(m.get("body") or "")
+			replies.append(
+				{
+					"at": _fmt_dt(at),
+					"text": body.strip()[:REPLY_TEXT_MAX],
+					"type": str(m.get("message_type") or ""),
+					"is_stop": int(is_stop_reply(body)),
+				}
+			)
+	orders: list[dict[str, Any]] = []
+	order_refs: list[tuple[str, float]] = []
+	reorder_total = 0.0
+	for inv in invoices:
+		at = _to_datetime(inv.get("creation"))
+		if not (start < at <= order_end):
+			continue
+		total = float(inv.get("grand_total") or 0)
+		reorder_total += total
+		order_refs.append((str(inv.get("name")), total))
+		if len(orders) < REPORT_LIST_CAP:
+			orders.append(
+				{
+					"invoice": inv.get("name"),
+					"at": _fmt_dt(at),
+					"grand_total": round(total, 2),
+					"woo_order_id": str(inv.get("woo_order_id") or ""),
+					"used_code": int(bool(code_invoice) and inv.get("name") == code_invoice),
+				}
+			)
+	return {
+		"replies": replies,
+		"reply_count": reply_count,
+		"orders": orders,
+		"reorder_total": round(reorder_total, 2),
+		"order_refs": order_refs,
+	}
+
+
+def _code_state(promo: Any, redemption: Any, now: Any) -> dict[str, Any]:
+	"""Where a follow-up code stands: used / expired / unused, plus what it cost. Pure.
+
+	*promo* is the Jarz Promo Code row (``enabled``, ``active_to``) or None when
+	it no longer exists; *redemption* its first Active redemption or None.
+	"""
+	if redemption:
+		return {
+			"code_status": "used",
+			"code_discount": round(float(redemption.get("discount_applied") or 0), 2),
+			"code_invoice": str(redemption.get("sales_invoice") or ""),
+		}
+	expired = True
+	if promo:
+		active_to = promo.get("active_to")
+		expired = not int(promo.get("enabled") or 0) or bool(active_to and _to_datetime(active_to) < _to_datetime(now))
+	return {"code_status": "expired" if expired else "unused", "code_discount": 0.0, "code_invoice": ""}
+
+
+def _code_counts(statuses: dict[str, str]) -> dict[str, int]:
+	"""``{"issued", "used", "unused", "expired"}`` over distinct codes (code -> status). Pure."""
+	values = list(statuses.values())
+	return {
+		"issued": len(values),
+		"used": values.count("used"),
+		"unused": values.count("unused"),
+		"expired": values.count("expired"),
+	}
+
+
+def _sent_money(
+	orders: Iterable[tuple[str, float]],
+	code_invoices: Iterable[str],
+	code_discounts: dict[str, float],
+	billable: int,
+	cost_each: float,
+) -> dict[str, Any]:
+	"""Campaign cost against the orders it brought. Pure.
+
+	*orders* are every (invoice, grand_total) found after any message; the same
+	invoice can follow two messages and counts once. *code_discounts* maps each
+	distinct code to its discount, so a code shared by two touches costs once.
+	"""
+	distinct: dict[str, float] = {}
+	for name, total in orders:
+		distinct.setdefault(name, float(total or 0))
+	code_set = set(code_invoices)
+	with_code = [n for n in distinct if n in code_set]
+	messages_cost = round(billable * cost_each, 2)
+	discount_cost = round(sum(code_discounts.values()), 2)
+	total_cost = round(messages_cost + discount_cost, 2)
+	revenue = round(sum(distinct.values()), 2)
+	return {
+		"currency": REPORT_CURRENCY,
+		"message_cost_each": round(cost_each, 2),
+		"billable_messages": billable,
+		"messages_cost": messages_cost,
+		"discount_cost": discount_cost,
+		"total_cost": total_cost,
+		"orders": len(distinct),
+		"revenue": revenue,
+		"orders_with_code": len(with_code),
+		"revenue_with_code": round(sum(distinct[n] for n in with_code), 2),
+		"net": round(revenue - total_cost, 2),
+		"roi": round(revenue / total_cost, 2) if total_cost else None,
+		"cost_per_order": round(total_cost / len(distinct), 2) if distinct else None,
+	}
+
+
+def get_sent_report(from_date: str | None = None, to_date: str | None = None, limit: int = 1000) -> dict[str, Any]:
 	"""What the follow-up sender sent in the range (default: last 7 days), with results.
 
-	Per message: delivered / read as Meta reported it, whether the customer
-	replied on WhatsApp afterwards, and whether they ordered again within 30
-	days. Totals per step and per day, plus the opt-outs and the touches
-	cancelled in the range by reason.
+	Per message: delivered / read as Meta reported it, the customer's WhatsApp
+	replies in the next 7 days (text, type, stop requests), the retail orders
+	placed in the next 30 days, and its win-back code (tier, used / expired /
+	unused, discount, invoice). Top level: totals per step and per day, the
+	opt-outs and cancelled touches by reason, ``money`` (messages + discounts
+	against revenue, net, ROI), ``codes`` (issued / used / unused / expired) and
+	the number of customers messaged. Replies, orders and codes are fetched in
+	four batched queries, not per row; ``limit`` caps only ``items``.
 	"""
-	from frappe.utils import add_days, getdate, nowdate
+	from frappe.utils import add_days, getdate, now_datetime, nowdate
 
 	from jarz_pos.services import rfm_segmentation as rfm
 
 	to_d = getdate(to_date) if to_date else getdate(nowdate())
 	from_d = getdate(from_date) if from_date else add_days(to_d, -6)
 	# The limit caps only the items list; totals count every message in the range.
-	item_limit = max(1, min(int(limit or 200), 1000))
+	item_limit = max(1, min(int(limit or 1000), 1000))
 	params = {
 		"from_d": "%s 00:00:00" % from_d,
 		"to_d": "%s 00:00:00" % add_days(to_d, 1),
 	}
-	newer = " AND ".join(rfm.retail_invoice_conditions(rfm.website_only_enabled(), "n"))
 	status_col = "t.wa_status" if frappe.db.has_column(TOUCH_DOCTYPE, "wa_status") else "''"
-	# nosemgrep: frappe-sql-format-injection -- newer is built by rfm.retail_invoice_conditions and status_col by a has_column check (constants only); values are bound
+	# nosemgrep: frappe-sql-format-injection -- status_col is a has_column-checked constant; values are bound
 	rows = frappe.db.sql(
 		f"""
         SELECT t.name, t.customer, t.customer_name, t.phone, t.step, t.done_at, t.offer_code,
-               t.woo_order_id, t.invoice, {status_col} AS wa_status, t.wa_send_error,
-               EXISTS (
-                   SELECT 1 FROM `tabJarz Chat Message` m
-                   INNER JOIN `tabJarz Chat Conversation` cv ON cv.name = m.conversation
-                   WHERE cv.customer = t.customer AND m.direction = 'Inbound' AND m.timestamp > t.done_at
-                     AND m.timestamp <= DATE_ADD(t.done_at, INTERVAL 7 DAY)
-               ) AS replied,
-               (SELECT MIN(n.name) FROM `tabSales Invoice` n
-                WHERE n.customer = t.customer AND {newer}
-                  AND n.creation > t.done_at AND n.creation <= DATE_ADD(t.done_at, INTERVAL 30 DAY)
-               ) AS reorder_invoice
+               t.woo_order_id, t.invoice, {status_col} AS wa_status, t.wa_send_error
         FROM `tabJarz Follow-up Touch` t
         WHERE t.status = 'Done' AND IFNULL(t.wa_message_id, '') != ''
           AND t.done_at >= %(from_d)s AND t.done_at < %(to_d)s
@@ -2253,13 +2397,94 @@ def get_sent_report(from_date: str | None = None, to_date: str | None = None, li
 		params,
 		as_dict=True,
 	)
+	customers = sorted({r.customer for r in rows if r.customer})
+	codes = sorted({r.offer_code for r in rows if r.offer_code})
+
+	messages_by_customer: dict[str, list[dict[str, Any]]] = {}
+	invoices_by_customer: dict[str, list[dict[str, Any]]] = {}
+	if customers:
+		for m in frappe.db.sql(
+			"""
+            SELECT cv.customer, m.timestamp, m.body, m.message_type
+            FROM `tabJarz Chat Message` m
+            INNER JOIN `tabJarz Chat Conversation` cv ON cv.name = m.conversation
+            WHERE cv.customer IN %(customers)s AND m.direction = 'Inbound'
+              AND m.timestamp >= %(from_d)s AND m.timestamp < %(msg_to)s
+            ORDER BY m.timestamp ASC
+            """,
+			{
+				"customers": tuple(customers),
+				"from_d": params["from_d"],
+				"msg_to": "%s 00:00:00" % add_days(to_d, REPLY_WINDOW_DAYS + 1),
+			},
+			as_dict=True,
+		):
+			messages_by_customer.setdefault(m.customer, []).append(m)
+		newer = " AND ".join(rfm.retail_invoice_conditions(rfm.website_only_enabled(), "n"))
+		woo_col = "n.woo_order_id" if frappe.db.has_column("Sales Invoice", "woo_order_id") else "''"
+		# nosemgrep: frappe-sql-format-injection -- newer is built by rfm.retail_invoice_conditions and woo_col by a has_column check (constants only); values are bound
+		for inv in frappe.db.sql(
+			f"""
+            SELECT n.customer, n.name, n.creation, n.grand_total, {woo_col} AS woo_order_id
+            FROM `tabSales Invoice` n
+            WHERE n.customer IN %(customers)s AND {newer}
+              AND n.creation >= %(from_d)s AND n.creation < %(inv_to)s
+            ORDER BY n.creation ASC, n.name ASC
+            """,
+			{
+				"customers": tuple(customers),
+				"from_d": params["from_d"],
+				"inv_to": "%s 00:00:00" % add_days(to_d, ORDER_WINDOW_DAYS + 1),
+			},
+			as_dict=True,
+		):
+			invoices_by_customer.setdefault(inv.customer, []).append(inv)
+
+	promos: dict[str, Any] = {}
+	redemptions: dict[str, Any] = {}
+	if codes:
+		promos = {
+			p.name: p
+			for p in frappe.get_all(
+				"Jarz Promo Code",
+				filters={"name": ["in", codes]},
+				fields=["name", "title", "enabled", "active_to"],
+				limit_page_length=0,
+			)
+		}
+		for red in frappe.get_all(
+			"Jarz Promo Redemption",
+			filters={"promo_code": ["in", codes], "status": "Active"},
+			fields=["promo_code", "sales_invoice", "discount_applied"],
+			order_by="creation asc",
+			limit_page_length=0,
+		):
+			redemptions.setdefault(red.promo_code, red)
+
+	now = now_datetime()
+	code_info: dict[str, dict[str, Any]] = {
+		code: _code_state(promos.get(code), redemptions.get(code), now) for code in codes
+	}
+	empty_code = {"code_status": "", "code_discount": 0.0, "code_invoice": ""}
+
 	totals = {"sent": 0, "delivered": 0, "read": 0, "failed": 0, "replied": 0, "reordered": 0}
 	by_step: dict[str, dict[str, int]] = {}
 	by_day: dict[str, int] = {}
 	items = []
+	all_orders: list[tuple[str, float]] = []
 	for r in rows:
 		st = str(r.wa_status or "")
 		delivered = st in ("delivered", "read")
+		code = code_info.get(r.offer_code, empty_code) if r.offer_code else empty_code
+		res = _assign_windows(
+			r.done_at,
+			messages_by_customer.get(r.customer, []),
+			invoices_by_customer.get(r.customer, []),
+			code["code_invoice"],
+		)
+		replied = res["reply_count"] > 0
+		reorder_invoice = res["order_refs"][0][0] if res["order_refs"] else ""
+		all_orders.extend(res["order_refs"])
 		step = by_step.setdefault(r.step, {"sent": 0, "delivered": 0, "read": 0, "reordered": 0})
 		totals["sent"] += 1
 		step["sent"] += 1
@@ -2268,9 +2493,9 @@ def get_sent_report(from_date: str | None = None, to_date: str | None = None, li
 		totals["read"] += int(st == "read")
 		step["read"] += int(st == "read")
 		totals["failed"] += int(st == "failed")
-		totals["replied"] += int(bool(r.replied))
-		totals["reordered"] += int(bool(r.reorder_invoice))
-		step["reordered"] += int(bool(r.reorder_invoice))
+		totals["replied"] += int(replied)
+		totals["reordered"] += int(bool(reorder_invoice))
+		step["reordered"] += int(bool(reorder_invoice))
 		day = str(r.done_at)[:10]
 		by_day[day] = by_day.get(day, 0) + 1
 		if len(items) >= item_limit:
@@ -2287,8 +2512,16 @@ def get_sent_report(from_date: str | None = None, to_date: str | None = None, li
 				"order_no": r.woo_order_id or r.invoice or "",
 				"wa_status": st or "sent",
 				"error": r.wa_send_error or "",
-				"replied": int(bool(r.replied)),
-				"reorder_invoice": r.reorder_invoice or "",
+				"replied": int(replied),
+				"reorder_invoice": reorder_invoice,
+				"tier": _tier_of_code(promos[r.offer_code]) if r.offer_code in promos else "",
+				"code_status": code["code_status"],
+				"code_discount": code["code_discount"],
+				"code_invoice": code["code_invoice"],
+				"replies": res["replies"],
+				"reply_count": res["reply_count"],
+				"orders": res["orders"],
+				"reorder_total": res["reorder_total"],
 			}
 		)
 	cancelled = {
@@ -2303,6 +2536,14 @@ def get_sent_report(from_date: str | None = None, to_date: str | None = None, li
 	failed_pending = frappe.db.count(
 		TOUCH_DOCTYPE, {"status": "Pending", "channel": MESSAGE, "wa_send_error": ["!=", ""]}
 	)
+	cost_each = float(load_settings().get("wa_message_cost") or 0) or DEFAULT_WA_MESSAGE_COST
+	money = _sent_money(
+		all_orders,
+		[c["code_invoice"] for c in code_info.values() if c["code_invoice"]],
+		{code: c["code_discount"] for code, c in code_info.items()},
+		totals["sent"] - totals["failed"],
+		cost_each,
+	)
 	return {
 		"from_date": str(from_d),
 		"to_date": str(to_d),
@@ -2316,6 +2557,9 @@ def get_sent_report(from_date: str | None = None, to_date: str | None = None, li
 			else 0
 		),
 		"refused_waiting_for_staff": failed_pending,
+		"money": money,
+		"codes": _code_counts({code: c["code_status"] for code, c in code_info.items()}),
+		"customers": len(customers),
 		"items": items,
 		"items_total": len(rows),
 	}

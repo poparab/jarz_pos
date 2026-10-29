@@ -815,5 +815,147 @@ class ExclusionTest(unittest.TestCase):
 		cancel.assert_called_once_with("name = %(name)s", {"name": "FUT-1"}, f.REASON_EXCLUDED)
 
 
+def msg(at, body="hi", kind="text"):
+	return {"timestamp": at, "body": body, "message_type": kind}
+
+
+def inv(name, at, total=100.0, woo=""):
+	return {"name": name, "creation": at, "grand_total": total, "woo_order_id": woo}
+
+
+class SentReportWindowsTest(unittest.TestCase):
+	DONE = D(2026, 10, 20, 14, 0)
+
+	def test_replies_window_is_seven_days_exclusive_start(self):
+		msgs = [
+			msg(self.DONE, "same instant"),  # not after done_at
+			msg(self.DONE + datetime.timedelta(seconds=1), "first"),
+			msg(self.DONE + datetime.timedelta(days=7), "edge"),  # inclusive end
+			msg(self.DONE + datetime.timedelta(days=7, seconds=1), "late"),
+		]
+		res = f._assign_windows(self.DONE, msgs, [])
+		self.assertEqual([r["text"] for r in res["replies"]], ["first", "edge"])
+		self.assertEqual(res["reply_count"], 2)
+		self.assertEqual(res["replies"][0]["at"], "2026-10-20 14:00:01")
+
+	def test_reply_list_capped_at_five_count_is_not(self):
+		msgs = [msg(self.DONE + datetime.timedelta(hours=h + 1), "m%d" % h) for h in range(8)]
+		res = f._assign_windows(self.DONE, msgs, [])
+		self.assertEqual(len(res["replies"]), 5)
+		self.assertEqual(res["reply_count"], 8)
+		self.assertEqual(res["replies"][0]["text"], "m0")
+
+	def test_reply_text_type_and_stop_flag(self):
+		long_body = "x" * 800
+		res = f._assign_windows(
+			self.DONE,
+			[
+				msg(self.DONE + datetime.timedelta(hours=1), "Stop messages", "button"),
+				msg(self.DONE + datetime.timedelta(hours=2), long_body),
+				msg(self.DONE + datetime.timedelta(hours=3), None, "image"),
+			],
+			[],
+		)
+		a, b, c = res["replies"]
+		self.assertEqual((a["type"], a["is_stop"]), ("button", 1))
+		self.assertEqual((len(b["text"]), b["is_stop"]), (500, 0))
+		self.assertEqual((c["text"], c["type"], c["is_stop"]), ("", "image", 0))
+
+	def test_orders_window_is_thirty_days_and_reorder_total_uncapped(self):
+		invoices = [
+			inv("SI-0", self.DONE),  # not after done_at
+			*[inv("SI-%d" % i, self.DONE + datetime.timedelta(days=i), 100.0 + i, "W%d" % i) for i in range(1, 8)],
+			inv("SI-EDGE", self.DONE + datetime.timedelta(days=30), 50.0),
+			inv("SI-LATE", self.DONE + datetime.timedelta(days=30, seconds=1), 999.0),
+		]
+		res = f._assign_windows(self.DONE, [], invoices)
+		self.assertEqual([o["invoice"] for o in res["orders"]], ["SI-1", "SI-2", "SI-3", "SI-4", "SI-5"])
+		self.assertEqual(res["orders"][0]["woo_order_id"], "W1")
+		self.assertEqual(len(res["order_refs"]), 8)  # 7 + the edge one
+		self.assertEqual(res["reorder_total"], sum(100.0 + i for i in range(1, 8)) + 50.0)
+		self.assertEqual(res["order_refs"][0], ("SI-1", 101.0))
+
+	def test_used_code_flag_marks_only_the_code_invoice(self):
+		invoices = [inv("SI-A", self.DONE + datetime.timedelta(days=1)), inv("SI-B", self.DONE + datetime.timedelta(days=2))]
+		res = f._assign_windows(self.DONE, [], invoices, code_invoice="SI-B")
+		self.assertEqual([o["used_code"] for o in res["orders"]], [0, 1])
+		res = f._assign_windows(self.DONE, [], invoices)
+		self.assertEqual([o["used_code"] for o in res["orders"]], [0, 0])
+
+	def test_no_results_means_empty_lists(self):
+		res = f._assign_windows(self.DONE, [], [])
+		self.assertEqual((res["replies"], res["reply_count"], res["orders"], res["reorder_total"]), ([], 0, [], 0.0))
+
+
+class SentReportCodeTest(unittest.TestCase):
+	NOW = D(2026, 10, 29, 12, 0)
+
+	def test_used_when_an_active_redemption_exists(self):
+		state = f._code_state(
+			{"enabled": 1, "active_to": D(2026, 1, 1)},  # expiry is irrelevant once used
+			{"discount_applied": 59.999, "sales_invoice": "SI-9"},
+			self.NOW,
+		)
+		self.assertEqual(state, {"code_status": "used", "code_discount": 60.0, "code_invoice": "SI-9"})
+
+	def test_expired_when_past_active_to_or_disabled_or_gone(self):
+		for promo in (
+			{"enabled": 1, "active_to": D(2026, 10, 1)},
+			{"enabled": 0, "active_to": D(2027, 1, 1)},
+			None,
+		):
+			state = f._code_state(promo, None, self.NOW)
+			self.assertEqual(state["code_status"], "expired", promo)
+			self.assertEqual((state["code_discount"], state["code_invoice"]), (0.0, ""))
+
+	def test_unused_while_still_valid(self):
+		for promo in ({"enabled": 1, "active_to": D(2026, 11, 30)}, {"enabled": 1, "active_to": None}):
+			self.assertEqual(f._code_state(promo, None, self.NOW)["code_status"], "unused")
+
+	def test_counts_over_distinct_codes(self):
+		counts = f._code_counts({"A": "used", "B": "unused", "C": "expired", "D": "used"})
+		self.assertEqual(counts, {"issued": 4, "used": 2, "unused": 1, "expired": 1})
+		self.assertEqual(f._code_counts({}), {"issued": 0, "used": 0, "unused": 0, "expired": 0})
+
+	def test_tier_comes_from_the_back_code_title(self):
+		self.assertEqual(f._tier_of_code(SimpleNamespace(title="Win-back vip - Mona")), "vip")
+		self.assertEqual(f._tier_of_code(SimpleNamespace(title="Something else")), "")
+
+
+class SentReportMoneyTest(unittest.TestCase):
+	def test_invoice_after_two_messages_counts_once(self):
+		# Two messages to the same customer both see SI-1 in their window.
+		money = f._sent_money(
+			[("SI-1", 200.0), ("SI-1", 200.0), ("SI-2", 100.5)],
+			code_invoices=["SI-2"],
+			code_discounts={"BACK-A": 20.0},
+			billable=2,
+			cost_each=5.0,
+		)
+		self.assertEqual(money["orders"], 2)
+		self.assertEqual(money["revenue"], 300.5)
+		self.assertEqual((money["orders_with_code"], money["revenue_with_code"]), (1, 100.5))
+		self.assertEqual((money["messages_cost"], money["discount_cost"], money["total_cost"]), (10.0, 20.0, 30.0))
+		self.assertEqual(money["net"], 270.5)
+		self.assertEqual(money["roi"], 10.02)
+		self.assertEqual(money["cost_per_order"], 15.0)
+		self.assertEqual((money["currency"], money["billable_messages"], money["message_cost_each"]), ("EGP", 2, 5.0))
+
+	def test_roi_is_null_at_zero_cost(self):
+		money = f._sent_money([("SI-1", 80.0)], [], {}, billable=0, cost_each=5.0)
+		self.assertIsNone(money["roi"])
+		self.assertEqual((money["total_cost"], money["net"], money["revenue"]), (0.0, 80.0, 80.0))
+
+	def test_no_orders_means_no_cost_per_order(self):
+		money = f._sent_money([], [], {"BACK-A": 0.0}, billable=3, cost_each=4.0)
+		self.assertEqual((money["orders"], money["revenue"], money["total_cost"]), (0, 0.0, 12.0))
+		self.assertIsNone(money["cost_per_order"])
+		self.assertEqual(money["roi"], 0.0)
+
+	def test_code_invoice_outside_the_orders_is_not_counted(self):
+		money = f._sent_money([("SI-1", 10.0)], ["SI-OTHER"], {}, billable=1, cost_each=1.0)
+		self.assertEqual((money["orders_with_code"], money["revenue_with_code"]), (0, 0.0))
+
+
 if __name__ == "__main__":
 	unittest.main()

@@ -73,7 +73,7 @@ def get_followup_stats(from_date=None, to_date=None):
 
 @frappe.whitelist()
 def get_sent_report(from_date=None, to_date=None):
-	"""Messages the sender sent (default: last 7 days), with delivered / read / reply / reorder."""
+	"""Messages the sender sent (default: last 7 days): delivery, replies, orders, codes and cost vs revenue."""
 	_gate(_MANAGER_ROLES)
 	from jarz_pos.services import customer_followups as svc
 
