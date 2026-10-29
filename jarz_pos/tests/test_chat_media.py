@@ -452,12 +452,349 @@ class TranscribeFlowTest(unittest.TestCase):
 		db.set_value.assert_not_called()
 
 
+class GeminiRequestTest(unittest.TestCase):
+	KEY = "AIzaSyFAKEKEY1234567890abcdefghijklmno"
+
+	def test_url_has_the_model_and_no_key(self):
+		url, _body = tr.build_gemini_request("gemini-2.5-flash", "audio/ogg", b"abc", "do it")
+		self.assertEqual(
+			url, "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+		)
+		self.assertNotIn("key", url)
+		self.assertNotIn("?", url)
+
+	def test_model_name_cannot_change_the_path(self):
+		url, _ = tr.build_gemini_request("models/gemini-2.5-pro", "audio/ogg", b"a", "x")
+		self.assertTrue(url.endswith("/models/gemini-2.5-pro:generateContent"))
+		url, _ = tr.build_gemini_request("../x?key=1", "audio/ogg", b"a", "x")
+		self.assertNotIn("?", url)
+		self.assertEqual(url.count("/models/"), 1)
+		url, _ = tr.build_gemini_request("", "audio/ogg", b"a", "x")
+		self.assertIn("gemini-2.5-flash", url)
+
+	def test_body_shape(self):
+		_url, body = tr.build_gemini_request("m", "audio/ogg", b"\x00\\x01OggS", "instruction")
+		self.assertEqual(set(body), {"contents", "generationConfig"})
+		self.assertEqual(body["generationConfig"], {"temperature": 0, "maxOutputTokens": 1024})
+		(turn,) = body["contents"]
+		self.assertEqual(turn["role"], "user")
+		text_part, audio_part = turn["parts"]
+		self.assertEqual(text_part, {"text": "instruction"})
+		self.assertEqual(
+			audio_part,
+			{"inline_data": {"mime_type": "audio/ogg", "data": base64.b64encode(b"\x00\\x01OggS").decode()}},
+		)
+
+	def test_instruction_asks_for_verbatim_arabic_and_carries_the_menu(self):
+		plain = tr.gemini_instruction("")
+		for needle in (
+			"Egyptian Arabic",
+			"verbatim",
+			"Arabic script",
+			"do not translate",
+			"only the transcript",
+		):
+			self.assertIn(needle.lower(), plain.lower())
+		self.assertIn("no speech", plain)
+		hinted = tr.gemini_instruction(tr.vocabulary_prompt(["Lotus Jar"]))
+		self.assertTrue(hinted.startswith(plain))
+		self.assertIn("Menu: Lotus Jar", hinted)
+
+	def test_mime_mapping(self):
+		self.assertEqual(tr.gemini_mime("audio/ogg; codecs=opus"), "audio/ogg")
+		self.assertEqual(tr.gemini_mime("audio/opus"), "audio/ogg")
+		self.assertEqual(tr.gemini_mime("AUDIO/MPEG"), "audio/mp3")
+		self.assertEqual(tr.gemini_mime("audio/mp4"), "audio/mp4")
+		self.assertEqual(tr.gemini_mime("audio/x-m4a"), "audio/mp4")
+		self.assertEqual(tr.gemini_mime("audio/aac"), "audio/aac")
+		self.assertEqual(tr.gemini_mime("audio/wav"), "audio/wav")
+		self.assertEqual(tr.gemini_mime("audio/flac"), "audio/flac")
+		# stored mime missing or unknown: the extension decides
+		self.assertEqual(tr.gemini_mime(None, "chat-X.m4a"), "audio/mp4")
+		self.assertEqual(tr.gemini_mime("application/octet-stream", "a.OGG"), "audio/ogg")
+		self.assertEqual(tr.gemini_mime("", "voice.mp3"), "audio/mp3")
+		# Gemini takes none of these
+		self.assertIsNone(tr.gemini_mime("audio/webm", "a.webm"))
+		self.assertIsNone(tr.gemini_mime(None, None))
+
+	def test_provider_selection(self):
+		self.assertEqual(tr.provider_of({}), "OpenAI")
+		self.assertEqual(tr.provider_of({"transcription_provider": ""}), "OpenAI")
+		self.assertEqual(tr.provider_of({"transcription_provider": "OpenAI"}), "OpenAI")
+		self.assertEqual(tr.provider_of({"transcription_provider": "Gemini"}), "Gemini")
+		self.assertEqual(tr.provider_of({"transcription_provider": " gemini"}), "Gemini")
+		self.assertEqual(tr.provider_of({"transcription_provider": "other"}), "OpenAI")
+
+	def test_model_defaults_follow_the_provider(self):
+		self.assertEqual(tr.model_of({}), "gpt-4o-transcribe")
+		self.assertEqual(tr.model_of({"transcription_provider": "Gemini"}), "gemini-2.5-flash")
+		self.assertEqual(
+			tr.model_of({"transcription_provider": "Gemini", "transcription_model": " "}), "gemini-2.5-flash"
+		)
+		self.assertEqual(
+			tr.model_of({"transcription_provider": "Gemini", "transcription_model": "gemini-2.5-pro"}),
+			"gemini-2.5-pro",
+		)
+		self.assertEqual(
+			tr.model_of({"transcription_model": "gpt-4o-mini-transcribe"}), "gpt-4o-mini-transcribe"
+		)
+
+	def test_skip_reasons_use_the_chosen_providers_key(self):
+		row = {"message_type": "audio", "media_file": "/private/files/a.ogg"}
+		gem = {"transcribe_voice_notes": True, "transcription_provider": "Gemini", "gemini_api_key": self.KEY}
+		self.assertIsNone(tr.skip_reason(gem, row))
+		# an OpenAI key does not help a Gemini setup, and vice versa
+		self.assertEqual(
+			tr.skip_reason({**gem, "gemini_api_key": " ", "openai_api_key": "sk-x"}, row), "no Gemini key"
+		)
+		openai = {"transcribe_voice_notes": True, "openai_api_key": "sk-x", "gemini_api_key": self.KEY}
+		self.assertIsNone(tr.skip_reason(openai, row))
+		self.assertEqual(tr.skip_reason({**openai, "openai_api_key": ""}, row), "no OpenAI key")
+		self.assertEqual(
+			tr.skip_reason({**gem, "transcribe_voice_notes": False}, row), "transcription is off"
+		)
+		self.assertEqual(tr.skip_reason(gem, {**row, "message_type": "image"}), "not a voice note")
+		self.assertEqual(tr.skip_reason(gem, {**row, "media_file": ""}), "no file")
+		self.assertEqual(tr.skip_reason(gem, {**row, "transcript": "done"}), "already transcribed")
+
+	def test_gemini_size_cap_is_lower_than_openais(self):
+		row = {"message_type": "audio", "media_file": "/private/files/a.ogg"}
+		gem = {"transcribe_voice_notes": True, "transcription_provider": "Gemini", "gemini_api_key": self.KEY}
+		self.assertIsNone(tr.skip_reason(gem, row, tr.GEMINI_MAX_AUDIO_BYTES))
+		self.assertIn("14 MB", tr.skip_reason(gem, row, tr.GEMINI_MAX_AUDIO_BYTES + 1))
+		openai = {"transcribe_voice_notes": True, "openai_api_key": "sk-x"}
+		self.assertIsNone(tr.skip_reason(openai, row, tr.GEMINI_MAX_AUDIO_BYTES + 1))
+		# base64 of the largest accepted file still fits the 20 MB request limit
+		self.assertLess(tr.GEMINI_MAX_AUDIO_BYTES * 4 // 3 + 4096, 20 * 1024 * 1024)
+
+	def test_redaction_of_google_and_openai_keys(self):
+		text = f"HTTP 400 API key not valid: {self.KEY} and sk-proj-abc123"
+		out = tr.redact(text)
+		self.assertNotIn("AIzaSyFAKEKEY", out)
+		self.assertNotIn("sk-proj-abc123", out)
+		# a key with an unusual shape is cut by value
+		out = tr.redact("bad key XYZ-secret-value-123 here", "XYZ-secret-value-123")
+		self.assertNotIn("XYZ-secret-value-123", out)
+		self.assertEqual(tr.redact(None), "")
+
+
+class GeminiResponseTest(unittest.TestCase):
+	def reply(self, *parts, finish="STOP"):
+		return {"candidates": [{"content": {"role": "model", "parts": list(parts)}, "finishReason": finish}]}
+
+	def test_normal(self):
+		text, problem = tr.parse_gemini_response(self.reply({"text": "عايز جارين لوتس"}))
+		self.assertEqual(text, "عايز جارين لوتس")
+		self.assertIsNone(problem)
+
+	def test_multiple_parts_are_joined_and_thoughts_dropped(self):
+		data = self.reply({"text": "thinking...", "thought": True}, {"text": "عايز "}, {"text": "جارين"})
+		self.assertEqual(tr.parse_gemini_response(data), ("عايز جارين", None))
+
+	def test_only_the_first_candidate_is_used(self):
+		data = self.reply({"text": "first"})
+		data["candidates"].append({"content": {"parts": [{"text": "second"}]}})
+		self.assertEqual(tr.parse_gemini_response(data)[0], "first")
+
+	def test_empty_answer_is_silence_not_an_error(self):
+		self.assertEqual(tr.parse_gemini_response(self.reply({"text": "  "})), ("", None))
+		self.assertEqual(tr.parse_gemini_response(self.reply()), ("", None))
+		self.assertEqual(tr.parse_gemini_response({"candidates": [{"finishReason": "STOP"}]}), ("", None))
+
+	def test_blocked_prompt(self):
+		data = {"promptFeedback": {"blockReason": "OTHER"}}
+		self.assertEqual(tr.parse_gemini_response(data), ("", "blocked: OTHER"))
+
+	def test_blocked_candidate(self):
+		data = {"candidates": [{"finishReason": "SAFETY"}]}
+		self.assertEqual(tr.parse_gemini_response(data), ("", "blocked: SAFETY"))
+		self.assertEqual(
+			tr.parse_gemini_response(self.reply(finish="RECITATION")), ("", "blocked: RECITATION")
+		)
+
+	def test_text_survives_a_late_finish_reason(self):
+		self.assertEqual(
+			tr.parse_gemini_response(self.reply({"text": "cut off"}, finish="MAX_TOKENS")), ("cut off", None)
+		)
+
+	def test_no_candidates_and_garbage(self):
+		self.assertEqual(tr.parse_gemini_response({}), ("", "no candidates"))
+		self.assertEqual(tr.parse_gemini_response({"candidates": []}), ("", "no candidates"))
+		self.assertEqual(tr.parse_gemini_response(None)[0], "")
+		self.assertIsNotNone(tr.parse_gemini_response("nope")[1])
+		self.assertEqual(tr.parse_gemini_response({"candidates": ["x"]}), ("", "no candidates"))
+
+
+class GeminiPostTest(unittest.TestCase):
+	"""``_post_gemini`` against a faked ``requests.post``."""
+
+	KEY = "AIzaSyFAKEKEY1234567890abcdefghijklmno"
+
+	def response(self, status=200, payload=None):
+		return mock.Mock(status_code=status, json=mock.Mock(return_value=payload))
+
+	def run_post(self, resp):
+		with (
+			mock.patch("requests.post", return_value=resp) as post,
+			mock.patch.object(tr.cc, "safe_log_error") as log,
+		):
+			try:
+				out = tr._post_gemini(self.KEY, "gemini-2.5-flash", "audio/ogg", b"OggS", "do it")
+				error = None
+			except RuntimeError as exc:
+				out, error = None, exc
+		return out, error, post, log
+
+	def test_key_is_a_header_and_never_in_the_url(self):
+		ok = {"candidates": [{"content": {"parts": [{"text": "تمام"}]}}]}
+		out, _err, post, log = self.run_post(self.response(200, ok))
+		self.assertEqual(out, "تمام")
+		log.assert_not_called()
+		(url,), kwargs = post.call_args
+		self.assertNotIn(self.KEY, url)
+		self.assertNotIn("key=", url)
+		self.assertEqual(kwargs["headers"]["x-goog-api-key"], self.KEY)
+		self.assertEqual(kwargs["timeout"], 60)
+		self.assertEqual(kwargs["json"]["contents"][0]["parts"][1]["inline_data"]["mime_type"], "audio/ogg")
+
+	def test_http_error_raises_without_the_key(self):
+		payload = {"error": {"status": "INVALID_ARGUMENT", "message": f"API key not valid {self.KEY}"}}
+		_out, error, _post, _log = self.run_post(self.response(400, payload))
+		self.assertIn("HTTP 400", str(error))
+		self.assertNotIn(self.KEY, str(error))
+		self.assertNotIn("AIzaSy", str(error))
+
+	def test_blocked_answer_is_logged_and_empty(self):
+		out, error, _post, log = self.run_post(
+			self.response(200, {"promptFeedback": {"blockReason": "SAFETY"}})
+		)
+		self.assertEqual(out, "")
+		self.assertIsNone(error)
+		log.assert_called_once()
+		self.assertIn("blocked: SAFETY", log.call_args.args[1])
+		self.assertNotIn(self.KEY, log.call_args.args[1])
+
+	def test_silence_is_empty_and_not_logged(self):
+		out, _err, _post, log = self.run_post(self.response(200, {"candidates": [{"finishReason": "STOP"}]}))
+		self.assertEqual(out, "")
+		log.assert_not_called()
+
+
+class GeminiFlowTest(unittest.TestCase):
+	"""``transcribe`` end to end with the Gemini provider chosen and the network mocked."""
+
+	KEY = "AIzaSyFAKEKEY1234567890abcdefghijklmno"
+	SETTINGS = {
+		"transcribe_voice_notes": True,
+		"transcription_provider": "Gemini",
+		"gemini_api_key": KEY,
+		"openai_api_key": "sk-secret",
+		"transcription_model": "",
+	}
+	ROW = TranscribeFlowTest.ROW
+
+	def run_flow(
+		self, settings=None, row=None, post=None, content=b"OggS" + b"\x00" * 10, file_name="chat-MSG-1.ogg"
+	):
+		db = SimpleNamespace(
+			get_value=mock.Mock(return_value=row or self.ROW),
+			set_value=mock.Mock(),
+			commit=mock.Mock(),
+			rollback=mock.Mock(),
+		)
+		doc = mock.Mock(
+			get=lambda key, default=None: {"file_size": len(content), "file_name": file_name}.get(key),
+			get_content=mock.Mock(return_value=content),
+		)
+		post = post or mock.Mock(return_value="  عايز جارين  ")
+		openai_post = mock.Mock(side_effect=AssertionError("OpenAI must not be called"))
+		with (
+			mock.patch.object(tr.frappe, "db", db, create=True),
+			mock.patch.object(tr.frappe, "get_doc", return_value=doc, create=True),
+			mock.patch(
+				"jarz_pos.services.chat_settings.get_chat_settings", return_value=settings or self.SETTINGS
+			),
+			mock.patch.object(tr, "_post_gemini", post),
+			mock.patch.object(tr, "_post", openai_post),
+			mock.patch.object(tr, "_menu_names", return_value=["Lotus Jar"]),
+			mock.patch.object(tr, "_refresh_preview") as preview,
+			mock.patch.object(tr.cc, "publish_chat_update") as publish,
+			mock.patch.object(tr.cc, "load_message", return_value={"name": "MSG-1"}),
+			mock.patch.object(tr.cc, "safe_log_error") as log,
+		):
+			out = tr.transcribe("MSG-1")
+		return out, db, post, publish, preview, log
+
+	def test_success_calls_gemini_with_the_default_model_and_mime(self):
+		out, db, post, publish, preview, _log = self.run_flow()
+		self.assertEqual(out, "عايز جارين")
+		db.set_value.assert_called_once_with(
+			"Jarz Chat Message", "MSG-1", "transcript", "عايز جارين", update_modified=False
+		)
+		publish.assert_called_once()
+		preview.assert_called_once()
+		key, model, mime, content, instruction = post.call_args.args
+		self.assertEqual((key, model, mime), (self.KEY, "gemini-2.5-flash", "audio/ogg"))
+		self.assertEqual(content, b"OggS" + b"\x00" * 10)
+		self.assertIn("verbatim", instruction)
+		self.assertIn("Lotus Jar", instruction)
+
+	def test_configured_model_wins(self):
+		_out, _db, post, *_ = self.run_flow(
+			settings={**self.SETTINGS, "transcription_model": "gemini-2.5-pro"}
+		)
+		self.assertEqual(post.call_args.args[1], "gemini-2.5-pro")
+
+	def test_skipped_without_a_gemini_key_even_with_an_openai_key(self):
+		out, db, post, _p, _pv, log = self.run_flow(settings={**self.SETTINGS, "gemini_api_key": ""})
+		self.assertIsNone(out)
+		post.assert_not_called()
+		db.set_value.assert_not_called()
+		log.assert_not_called()
+
+	def test_oversize_audio_is_not_sent(self):
+		out, _db, post, *_ = self.run_flow(content=b"\x00" * (tr.GEMINI_MAX_AUDIO_BYTES + 1))
+		self.assertIsNone(out)
+		post.assert_not_called()
+
+	def test_unsupported_format_is_logged_and_not_sent(self):
+		row = Row(**{**self.ROW, "media_mime": "audio/webm"})
+		out, _db, post, _p, _pv, log = self.run_flow(row=row, file_name="chat-MSG-1.webm")
+		self.assertIsNone(out)
+		post.assert_not_called()
+		self.assertIn("message=MSG-1", log.call_args.args[1])
+
+	def test_stored_mime_missing_falls_back_to_the_file_extension(self):
+		row = Row(**{**self.ROW, "media_mime": None})
+		_out, _db, post, *_ = self.run_flow(row=row, file_name="chat-MSG-1.m4a")
+		self.assertEqual(post.call_args.args[2], "audio/mp4")
+
+	def test_failure_never_raises_and_the_log_has_no_key(self):
+		post = mock.Mock(side_effect=RuntimeError(f"Gemini returned HTTP 403 key {self.KEY} / sk-secret-1"))
+		out, db, _post, publish, _pv, log = self.run_flow(post=post)
+		self.assertIsNone(out)
+		db.set_value.assert_not_called()
+		publish.assert_not_called()
+		message = log.call_args.args[1]
+		self.assertNotIn("AIzaSy", message)
+		self.assertNotIn("sk-secret", message)
+		self.assertIn("message=MSG-1", message)
+
+	def test_empty_answer_is_not_stored(self):
+		out, db, *_ = self.run_flow(post=mock.Mock(return_value=""))
+		self.assertIsNone(out)
+		db.set_value.assert_not_called()
+
+
 class SettingsDefaultsTest(unittest.TestCase):
 	def test_defaults_when_never_saved(self):
 		built = cs.build_settings({}, {})
 		self.assertFalse(built["transcribe_voice_notes"])
-		self.assertEqual(built["transcription_model"], "gpt-4o-transcribe")
+		# Empty: chat_transcribe picks the chosen provider's own default.
+		self.assertEqual(built["transcription_model"], "")
+		self.assertEqual(built["transcription_provider"], "OpenAI")
 		self.assertEqual(built["openai_api_key"], "")
+		self.assertEqual(built["gemini_api_key"], "")
 
 	def test_values_and_flag_override(self):
 		doc = SimpleNamespace(
@@ -473,6 +810,22 @@ class SettingsDefaultsTest(unittest.TestCase):
 
 	def test_key_is_a_secret_field(self):
 		self.assertIn("openai_api_key", cs._SECRET_FIELDS)
+		self.assertIn("gemini_api_key", cs._SECRET_FIELDS)
+
+	def test_provider_is_normalised(self):
+		def built(value):
+			doc = SimpleNamespace(
+				get=lambda key, default=None: {"transcription_provider": value}.get(key, default),
+				get_password=lambda fieldname, raise_exception=False: "",
+			)
+			return cs.build_settings(doc, {})["transcription_provider"]
+
+		self.assertEqual(built("Gemini"), "Gemini")
+		self.assertEqual(built(" gemini "), "Gemini")
+		self.assertEqual(built("OpenAI"), "OpenAI")
+		self.assertEqual(built(""), "OpenAI")
+		self.assertEqual(built(None), "OpenAI")
+		self.assertEqual(built("Whisper"), "OpenAI")
 
 
 class JobPlanTest(unittest.TestCase):

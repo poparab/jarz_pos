@@ -21,7 +21,9 @@
   "ready_answers",
   "sec_voice",
   "transcribe_voice_notes",
+  "transcription_provider",
   "openai_api_key",
+  "gemini_api_key",
   "transcription_model",
   "sec_meta",
   "graph_api_version",
@@ -142,20 +144,34 @@
    "fieldtype": "Check",
    "label": "Transcribe Voice Notes",
    "default": "0",
-   "description": "Turn each customer voice note into text (OpenAI) so the AI draft and Start order can read it. The audio is sent to OpenAI. Off until you switch it on and add the key."
+   "description": "Turn each customer voice note into text so the AI draft and Start order can read it. The audio is sent to the provider chosen below. Off until you switch it on and add that provider's key."
+  },
+  {
+   "fieldname": "transcription_provider",
+   "fieldtype": "Select",
+   "label": "Transcription Provider",
+   "options": "OpenAI\nGemini",
+   "default": "OpenAI",
+   "depends_on": "transcribe_voice_notes"
   },
   {
    "fieldname": "openai_api_key",
    "fieldtype": "Password",
    "label": "OpenAI API Key",
-   "depends_on": "transcribe_voice_notes"
+   "depends_on": "eval:doc.transcribe_voice_notes && doc.transcription_provider != 'Gemini'"
+  },
+  {
+   "fieldname": "gemini_api_key",
+   "fieldtype": "Password",
+   "label": "Gemini API Key",
+   "depends_on": "eval:doc.transcribe_voice_notes && doc.transcription_provider == 'Gemini'"
   },
   {
    "fieldname": "transcription_model",
    "fieldtype": "Data",
    "label": "Transcription Model",
    "depends_on": "transcribe_voice_notes",
-   "description": "default gpt-4o-transcribe"
+   "description": "Leave empty for the provider's default: gpt-4o-transcribe (OpenAI) / gemini-2.5-flash (Gemini)."
   },
   {
    "fieldname": "sec_meta",
@@ -215,7 +231,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-10-29 12:00:00.000000",
+ "modified": "2026-10-30 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "jarz pos",
  "name": "Jarz Chat Settings",
