@@ -126,7 +126,7 @@
    "fieldtype": "Table",
    "label": "Ready Answers",
    "options": "Jarz Chat Ready Answer",
-   "description": "Jarz's saved replies (menu, prices, offers, delivery areas...). The AI adapts the matching one instead of improvising. Empty means the built-in defaults. Placeholders such as {{menu}}, {{offers}}, {{delivery_areas}} and {{price:ITEM_CODE}} are filled live."
+   "description": "Jarz's saved replies (menu, prices, offers, delivery areas...). The AI adapts the matching one instead of improvising. The built-in defaults stay unless you override them: a row with the same Topic replaces that default, an inactive row with that Topic removes it, and a new Topic is added. Placeholders such as {{menu}}, {{offers}}, {{delivery_areas}} and {{price:ITEM_CODE}} are filled live."
   },
   {
    "fieldname": "sec_meta",

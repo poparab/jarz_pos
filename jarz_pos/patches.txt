@@ -73,3 +73,6 @@ jarz_pos.Patches.v1_9.show_followup_templates_in_chat
 # Unlinked chats are now linked by the mobile the customer typed (exactly one
 # matching customer). Apply it to the messages already stored. Re-runnable.
 jarz_pos.Patches.v1_9.link_chats_by_typed_phone
+# Seed the Jarz Brand Fact table (the facts the chat AI may state) from the facts that were
+# hard-coded in the draft prompt and the ready answers. Skipped once any row exists.
+jarz_pos.Patches.v1_9.seed_brand_facts

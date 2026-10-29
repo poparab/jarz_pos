@@ -35,6 +35,10 @@ _SECRET_FIELDS = (
 
 _CACHE_ATTR = "jarz_chat_settings_cache"
 
+#: Redis prefix of the cached AI draft context (menu, facts, ready answers); see
+#: ``chat_drafts.build_context``. Saving the settings or a Brand Fact clears it.
+DRAFT_CONTEXT_CACHE_PREFIX = "jarz_chat_ctx:"
+
 
 def _clean(value: Any) -> str:
 	return str(value or "").strip()
@@ -63,6 +67,38 @@ MAX_READY_ANSWER_CHARS = 12000
 
 _TRUNCATION_MARK = "\u2026"
 _ready_cap_logged: set[tuple[int, int, int]] = set()
+
+
+def _topic_key(topic: Any) -> str:
+	return " ".join(str(topic or "").split()).lower()
+
+
+def merge_ready_answers(
+	defaults: list[dict[str, Any]],
+	rows: list[dict[str, Any]] | None,
+	disabled_topics: list[str] | None = None,
+) -> list[dict[str, Any]]:
+	"""The ready answers the model sees: the built-in *defaults* merged with the ERP *rows*.
+
+	A row with the same topic as a default overrides it, a topic that is switched
+	off in ERP (*disabled_topics*, unless an active row has it too) removes the
+	default, and new topics are added. Active ERP rows come first, in the order
+	they arrive (already priority-ordered), so :func:`cap_ready_answers` drops
+	untouched defaults before anything staff wrote. Pure.
+	"""
+	rows = list(rows or [])
+	own = {_topic_key(r.get("topic")) for r in rows}
+	off = {_topic_key(t) for t in disabled_topics or []} - own
+	rest = [d for d in defaults if _topic_key(d.get("topic")) not in own | off]
+	return rows + rest
+
+
+def clear_draft_context_cache() -> None:
+	"""Drop every cached AI draft context (all POS profiles). Never raises."""
+	try:
+		frappe.cache().delete_keys(DRAFT_CONTEXT_CACHE_PREFIX)
+	except Exception:
+		pass
 
 
 def render_ready_answer(row: dict[str, Any]) -> str:
@@ -197,6 +233,7 @@ def build_settings(doc: Any, flags: dict[str, Any] | None = None) -> dict[str, A
 	# ``modified``) fall back to ``idx``, the order staff arranged the grid in. The
 	# sorts are stable, so the result is deterministic; then the prompt cap applies.
 	ready_rows: list[tuple[str, int, dict[str, Any]]] = []
+	ready_disabled: list[str] = []
 	for position, row in enumerate(get("ready_answers") or []):
 		getter = (
 			row.get if hasattr(row, "get") else (lambda key, default=None, _r=row: getattr(_r, key, default))
@@ -204,7 +241,10 @@ def build_settings(doc: Any, flags: dict[str, Any] | None = None) -> dict[str, A
 		topic = _clean(getter("topic"))
 		answer = _clean(getter("answer"))
 		active = getter("active")
-		if not topic or not answer or (active not in (None, "") and not int(active or 0)):
+		off = active not in (None, "") and not int(active or 0)
+		if topic and off:
+			ready_disabled.append(topic)
+		if not topic or not answer or off:
 			continue
 		try:
 			idx = int(getter("idx") or position + 1)
@@ -234,6 +274,8 @@ def build_settings(doc: Any, flags: dict[str, Any] | None = None) -> dict[str, A
 		"planted_draft_percent": planted,
 		"upsell_items": upsell,
 		"ready_answers": ready,
+		# Topics switched off in ERP: they remove the built-in default of that topic.
+		"ready_answers_disabled": ready_disabled,
 		"graph_api_version": _clean(get("graph_api_version")) or DEFAULT_GRAPH_VERSION,
 		"whatsapp_phone_number_id": _clean(get("whatsapp_phone_number_id")),
 		"whatsapp_business_account_id": _clean(get("whatsapp_business_account_id")),

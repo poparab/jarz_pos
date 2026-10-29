@@ -797,6 +797,9 @@ jobs:
             # (plain lines, bundles with the same flavours in any order, quantity
             # mismatches, shipping rows ignored) and rolled up into the accuracy summary.
             test_chat_order_log
+            # Brand facts the chat AI may state: banned / allergen / unapproved claims are
+            # flagged, addresses masked, chat text fenced as data, ready answers merged.
+            test_chat_brand_facts
             # The roles payload the mobile app routes on, incl. manager_home
             # (feature manager-home-bar): always a bool, follows the User
             # field, False on a site that has not migrated it yet.

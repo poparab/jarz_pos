@@ -240,6 +240,8 @@ def get_order_prefill(conversation: str, with_order: int | str | None = None) ->
 
 	With ``with_order=1`` the AI also reads the order out of the chat (items,
 	bundles, a new address or phone, notes); see ``chat_order.order_from_chat``.
+	``precomputed`` is true when that read was already done in the background
+	(``chat_order.precompute_job``) and the chat has not changed since.
 	"""
 	_gate()
 	conv = _conversation_or_throw(conversation)
@@ -251,11 +253,26 @@ def get_order_prefill(conversation: str, with_order: int | str | None = None) ->
 		if row:
 			customer = {"name": row.name, "customer_name": row.customer_name, "mobile_no": row.mobile_no}
 	phone = conv.phone or (customer or {}).get("mobile_no") or None
-	out = {"customer": customer, "phone": phone, "contact_name": conv.contact_name or None}
+	out = {
+		"customer": customer,
+		"phone": phone,
+		"contact_name": conv.contact_name or None,
+		"precomputed": False,
+	}
 	if frappe.utils.cint(with_order):
-		from jarz_pos.services.chat_order import order_from_chat
+		from jarz_pos.services import chat_order
 
-		out.update(order_from_chat(conv.name))
+		# Prepared in the background when the customer's last message came in; it
+		# is served only while no message has been added since (see chat_order).
+		prepared = chat_order.cached_prefill(conv.name)
+		if prepared:
+			result = prepared["result"]
+			chat_order.record_usage(conv.name, result["order"], result.get("_usage") or {})
+			chat_order.drop_prefill(conv.name)
+			out["precomputed"] = True
+		else:
+			result = chat_order.order_from_chat(conv.name)
+		out.update({k: v for k, v in result.items() if not k.startswith("_")})
 	return out
 
 

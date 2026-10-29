@@ -19,7 +19,7 @@ dependencies = [
     "pypdfium2>=4.30.0",
     # Claude drafts replies for the chat inbox (jarz_pos.services.chat_drafts).
     # Imported lazily, so a missing package only fails the draft, never boot.
-    "anthropic>=0.40.0",
+    "anthropic>=0.41.0",
 ]
 
 [build-system]

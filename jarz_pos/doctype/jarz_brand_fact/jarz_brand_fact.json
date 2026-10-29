@@ -1,0 +1,161 @@
+{
+ "actions": [],
+ "autoname": "hash",
+ "creation": "2026-10-29 12:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "topic",
+  "category",
+  "status",
+  "fact_owner",
+  "column_break_wording",
+  "approved_by",
+  "approved_on",
+  "last_reviewed",
+  "section_wording",
+  "fact_ar",
+  "fact_en",
+  "section_evidence",
+  "source",
+  "notes"
+ ],
+ "fields": [
+  {
+   "bold": 1,
+   "description": "Short name. The draft's claims check looks these topics up by name: Natural ingredients, No preservatives, Less sugar, Real chocolate, Real fruit fillings, Made in our kitchen, Layers: cheesecakes, Storage: fridge, Storage: freezer. Renaming one makes the AI's use of that claim show a warning.",
+   "fieldname": "topic",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Topic",
+   "reqd": 1,
+   "unique": 1
+  },
+  {
+   "fieldname": "category",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Category",
+   "options": "Product\nSizes\nStorage\nIngredients and claims\nDelivery\nPayment\nOrdering\nAllergens and nutrition\nBrand voice\nOther"
+  },
+  {
+   "default": "On Hold",
+   "description": "Only Approved facts reach the AI as things it may state. On Hold and Retired topics are listed as never to be stated.",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Status",
+   "options": "Approved\nOn Hold\nRetired",
+   "search_index": 1
+  },
+  {
+   "fieldname": "fact_owner",
+   "fieldtype": "Link",
+   "label": "Owner",
+   "options": "User"
+  },
+  {
+   "fieldname": "column_break_wording",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "approved_by",
+   "fieldtype": "Data",
+   "label": "Approved By"
+  },
+  {
+   "fieldname": "approved_on",
+   "fieldtype": "Date",
+   "label": "Approved On"
+  },
+  {
+   "fieldname": "last_reviewed",
+   "fieldtype": "Date",
+   "label": "Last Reviewed"
+  },
+  {
+   "fieldname": "section_wording",
+   "fieldtype": "Section Break",
+   "label": "Wording"
+  },
+  {
+   "description": "Egyptian Arabic, exactly as the customer may be told. Put the scope in brackets at the end (for example: only Chocolate Hazelnut and Molten Cake). Never type prices.",
+   "fieldname": "fact_ar",
+   "fieldtype": "Small Text",
+   "label": "Fact (Arabic)"
+  },
+  {
+   "description": "English wording, with the scope and the \"never\" rules for this fact. Required (either language) when Approved.",
+   "fieldname": "fact_en",
+   "fieldtype": "Small Text",
+   "label": "Fact (English)"
+  },
+  {
+   "fieldname": "section_evidence",
+   "fieldtype": "Section Break",
+   "label": "Evidence"
+  },
+  {
+   "fieldname": "source",
+   "fieldtype": "Small Text",
+   "label": "Source"
+  },
+  {
+   "description": "Internal. Not shown to the AI.",
+   "fieldname": "notes",
+   "fieldtype": "Small Text",
+   "label": "Notes"
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-10-29 12:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "jarz pos",
+ "name": "Jarz Brand Fact",
+ "naming_rule": "Random",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "JARZ Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "read": 1,
+   "report": 1,
+   "role": "Moderator"
+  },
+  {
+   "read": 1,
+   "report": 1,
+   "role": "JARZ line manager"
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "title_field": "topic",
+ "track_changes": 1
+}

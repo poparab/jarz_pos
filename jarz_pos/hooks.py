@@ -700,6 +700,12 @@ scheduler_events = {
 		"30 3 * * *": [
 			"jarz_pos.services.chat_summary.enqueue_nightly",
 		],
+		# Chat inbox: the 03:30 notes go through the Message Batches API; this
+		# writes the results once the batch has ended (usually within the hour).
+		# A cheap Redis read when nothing is pending; never raises.
+		"*/20 * * * *": [
+			"jarz_pos.services.chat_summary.poll_batch",
+		],
 		# Chat inbox: score yesterday's "Start order" proposals against the
 		# invoice that was actually billed (accuracy log). Never raises. See
 		# jarz_pos.services.chat_order_log.

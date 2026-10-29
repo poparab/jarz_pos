@@ -482,7 +482,9 @@ class ReadyAnswersAndPromptTest(unittest.TestCase):
 		self.assertIn("Never Modern", d.SYSTEM_PROMPT)
 		for key in d.BLOCK_PLACEHOLDERS:
 			self.assertIn("{{" + key + "}}", d.SYSTEM_PROMPT)
-		self.assertIn("من 30 دقيقة لحد ساعتين بالكتير", d.SYSTEM_PROMPT)
+		# The delivery time is a Brand Fact now, not a sentence of the prompt.
+		self.assertNotIn("من 30 دقيقة لحد ساعتين بالكتير", d.SYSTEM_PROMPT)
+		self.assertIn("Delivery time", {f["topic"] for f in d.DEFAULT_FACTS})
 
 	def test_prompt_carries_what_sells(self):
 		for phrase in ("تحب وسط ولا كبير؟", "أنهي منطقة", "ONE message", "مش متواجدين", "Nutella"):
