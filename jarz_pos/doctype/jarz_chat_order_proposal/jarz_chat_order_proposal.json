@@ -1,0 +1,190 @@
+{
+ "actions": [],
+ "autoname": "hash",
+ "creation": "2026-10-29 12:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "conversation",
+  "customer",
+  "model",
+  "latency_ms",
+  "input_tokens",
+  "output_tokens",
+  "cost_usd",
+  "lines_proposed",
+  "warnings_count",
+  "proposal_json",
+  "scoring_section",
+  "sales_invoice",
+  "scored_at",
+  "lines_billed",
+  "lines_matched",
+  "exact_match",
+  "missing_json",
+  "extra_json",
+  "score_note"
+ ],
+ "fields": [
+  {
+   "fieldname": "conversation",
+   "fieldtype": "Link",
+   "label": "Conversation",
+   "read_only": 1,
+   "options": "Jarz Chat Conversation",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "customer",
+   "fieldtype": "Link",
+   "label": "Customer",
+   "read_only": 1,
+   "options": "Customer",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "model",
+   "fieldtype": "Data",
+   "label": "Model",
+   "read_only": 1
+  },
+  {
+   "fieldname": "latency_ms",
+   "fieldtype": "Int",
+   "label": "Latency (ms)",
+   "read_only": 1
+  },
+  {
+   "fieldname": "input_tokens",
+   "fieldtype": "Int",
+   "label": "Input Tokens",
+   "read_only": 1
+  },
+  {
+   "fieldname": "output_tokens",
+   "fieldtype": "Int",
+   "label": "Output Tokens",
+   "read_only": 1
+  },
+  {
+   "fieldname": "cost_usd",
+   "fieldtype": "Float",
+   "label": "Cost (USD)",
+   "read_only": 1,
+   "precision": "6",
+   "description": "Approximate."
+  },
+  {
+   "fieldname": "lines_proposed",
+   "fieldtype": "Int",
+   "label": "Lines Proposed",
+   "read_only": 1,
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "warnings_count",
+   "fieldtype": "Int",
+   "label": "Warnings",
+   "read_only": 1
+  },
+  {
+   "fieldname": "proposal_json",
+   "fieldtype": "Long Text",
+   "label": "Proposal JSON",
+   "read_only": 1,
+   "description": "The whole order dict the AI proposed."
+  },
+  {
+   "fieldname": "scoring_section",
+   "fieldtype": "Section Break",
+   "label": "Scoring"
+  },
+  {
+   "fieldname": "sales_invoice",
+   "fieldtype": "Link",
+   "label": "Sales Invoice",
+   "read_only": 1,
+   "options": "Sales Invoice",
+   "in_standard_filter": 1
+  },
+  {
+   "fieldname": "scored_at",
+   "fieldtype": "Datetime",
+   "label": "Scored At",
+   "read_only": 1,
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "lines_billed",
+   "fieldtype": "Int",
+   "label": "Lines Billed",
+   "read_only": 1
+  },
+  {
+   "fieldname": "lines_matched",
+   "fieldtype": "Int",
+   "label": "Lines Matched",
+   "read_only": 1
+  },
+  {
+   "fieldname": "exact_match",
+   "fieldtype": "Check",
+   "label": "Exact Match",
+   "read_only": 1,
+   "in_list_view": 1,
+   "in_standard_filter": 1
+  },
+  {
+   "fieldname": "missing_json",
+   "fieldtype": "Small Text",
+   "label": "Missing",
+   "read_only": 1,
+   "description": "Billed lines the proposal missed."
+  },
+  {
+   "fieldname": "extra_json",
+   "fieldtype": "Small Text",
+   "label": "Extra",
+   "read_only": 1,
+   "description": "Proposed lines that were not billed."
+  },
+  {
+   "fieldname": "score_note",
+   "fieldtype": "Small Text",
+   "label": "Score Note",
+   "read_only": 1,
+   "description": "Why a proposal was not scored, e.g. no invoice within 6 h."
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-10-29 12:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "jarz pos",
+ "name": "Jarz Chat Order Proposal",
+ "naming_rule": "Random",
+ "owner": "Administrator",
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 0,
+ "permissions": [
+  {
+   "delete": 1,
+   "export": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager"
+  },
+  {
+   "export": 1,
+   "read": 1,
+   "report": 1,
+   "role": "JARZ Manager"
+  }
+ ]
+}

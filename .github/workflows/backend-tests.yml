@@ -793,6 +793,10 @@ jobs:
             # bundle's flavours fill its groups (unfinished ones are flagged),
             # address/phone come verbatim from the customer's own messages.
             test_chat_order
+            # "Start order" accuracy log: a proposal is compared with the billed invoice
+            # (plain lines, bundles with the same flavours in any order, quantity
+            # mismatches, shipping rows ignored) and rolled up into the accuracy summary.
+            test_chat_order_log
             # The roles payload the mobile app routes on, incl. manager_home
             # (feature manager-home-bar): always a bool, follows the User
             # field, False on a site that has not migrated it yet.

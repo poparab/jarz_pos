@@ -20,6 +20,7 @@ before anything is billed.
 
 from __future__ import annotations
 
+import json
 import time
 from typing import Any
 
@@ -31,6 +32,8 @@ HISTORY_MESSAGES = 40
 PAYMENT_METHODS = ("cash", "instapay", "wallet", "card")
 MAX_TOKENS = 1500
 EFFORT = "low"
+#: Seconds; one attempt (see :func:`_call`).
+CALL_TIMEOUT = 20.0
 
 SYSTEM_PROMPT = """You read a chat between Jarz (an Egyptian dessert brand: jars, cakes, bundles) \
 and a customer, and write down the order the customer wants placed now, for the POS.
@@ -57,70 +60,57 @@ the code exactly; never invent one.
 delivery, «كاش»، «عند الاستلام»), "instapay", "wallet" (Vodafone Cash «فودافون كاش» or any other \
 mobile wallet: never "cash"), "card" (card or payment link). Null when they did not say, when they \
 named two, or when the payment talk is about an earlier order or a price difference.
-- Never assume. Mark every item and every bundle selection with "sure": false when you had to \
-assume anything about it (size, flavour, how many), and true only when the customer stated or \
-clearly agreed to exactly that. Unsure lines are shown to staff instead of being added.
+- Never assume. Write "unclear" first: everything you had to assume or could not tell. Then mark \
+every item and bundle selection "sure": true only when the customer stated or clearly agreed to \
+exactly that, and "sure": false for any line "unclear" mentions. Inside a bundle the size comes \
+from the bundle's choices, so a flavour the customer named for that box is sure. Unsure lines are \
+shown to staff instead of being added.
 - phone_message: the [number] of the customer's message that gives a new phone number. Null otherwise.
 - area: the delivery area they named, exactly as written in the delivery area list, only when it \
 differs from the area on file. Null otherwise.
 - pickup: true only when they said they will collect it from a branch.
 - notes: short English notes for the kitchen or courier that the customer asked for (gift card \
 text, "fresh batch", call before arriving, deliver after 9 pm). Never prices.
-Always answer by calling submit_order."""
+Answer with the JSON object only."""
 
-TOOL = {
-	"name": "submit_order",
-	"description": "Submit the order the customer wants placed now.",
-	"input_schema": {
+
+def _strict(properties: dict[str, Any]) -> dict[str, Any]:
+	"""An object schema for structured output: every key required, nothing else allowed."""
+	return {
 		"type": "object",
-		"properties": {
-			"items": {
-				"type": "array",
-				"items": {
-					"type": "object",
-					"properties": {
-						"item_code": {"type": "string"},
-						"qty": {"type": "integer"},
-						"sure": {"type": "boolean"},
-					},
-					"required": ["item_code", "qty"],
-				},
-			},
-			"bundles": {
-				"type": "array",
-				"items": {
-					"type": "object",
-					"properties": {
-						"bundle_code": {"type": "string"},
-						"selections": {
-							"type": "array",
-							"items": {
-								"type": "object",
-								"properties": {
-									"item_code": {"type": "string"},
-									"qty": {"type": "integer"},
-									"sure": {"type": "boolean"},
-								},
-								"required": ["item_code", "qty"],
-							},
-						},
-					},
-					"required": ["bundle_code"],
-				},
-			},
-			"address_message": {"type": ["integer", "null"]},
-			"location_message": {"type": ["integer", "null"]},
-			"phone_message": {"type": ["integer", "null"]},
-			"promo_codes": {"type": "array", "items": {"type": "string"}},
-			"payment_method": {"type": ["string", "null"], "enum": [*PAYMENT_METHODS, None]},
-			"area": {"type": ["string", "null"]},
-			"pickup": {"type": "boolean"},
-			"notes": {"type": ["string", "null"]},
-			"unclear": {"type": ["string", "null"]},
+		"properties": properties,
+		"required": list(properties),
+		"additionalProperties": False,
+	}
+
+
+_NULLABLE_INT = {"anyOf": [{"type": "integer"}, {"type": "null"}]}
+_NULLABLE_STR = {"anyOf": [{"type": "string"}, {"type": "null"}]}
+_LINE = _strict({"item_code": {"type": "string"}, "qty": {"type": "integer"}, "sure": {"type": "boolean"}})
+
+#: The answer's shape, enforced by the API (``output_config.format``): the
+#: model can no longer answer in prose or drop a key (CHAT-02442).
+ORDER_SCHEMA = _strict(
+	{
+		# First on purpose: the model writes its doubts before it marks lines sure.
+		"unclear": _NULLABLE_STR,
+		"items": {"type": "array", "items": _LINE},
+		"bundles": {
+			"type": "array",
+			"items": _strict(
+				{"bundle_code": {"type": "string"}, "selections": {"type": "array", "items": _LINE}}
+			),
 		},
-		"required": ["items", "bundles"],
-	},
-}
+		"address_message": _NULLABLE_INT,
+		"location_message": _NULLABLE_INT,
+		"phone_message": _NULLABLE_INT,
+		"promo_codes": {"type": "array", "items": {"type": "string"}},
+		"payment_method": {"anyOf": [{"type": "string", "enum": list(PAYMENT_METHODS)}, {"type": "null"}]},
+		"area": _NULLABLE_STR,
+		"pickup": {"type": "boolean"},
+		"notes": _NULLABLE_STR,
+	}
+)
 
 
 # ── pure ────────────────────────────────────────────────────────────────
@@ -478,38 +468,45 @@ def _last_order_codes(customer: str | None) -> list[str]:
 	return [f"{r.item_code} x{float(r.qty or 0):g}" for r in rows if r.item_code]
 
 
-def _call(api_key: str, model: str, system_text: str, user_text: str) -> dict[str, Any] | None:
+def json_from_content(content: Any) -> dict[str, Any] | None:
+	"""The JSON object in a structured-output response, or ``None``. Pure."""
+	for block in content or []:
+		if getattr(block, "type", None) != "text":
+			continue
+		try:
+			data = json.loads(str(getattr(block, "text", "") or ""))
+		except ValueError:
+			continue
+		if isinstance(data, dict):
+			return data
+	return None
+
+
+def _call(api_key: str, model: str, system_text: str, user_text: str) -> dict[str, Any]:
+	"""One structured-output call. ``{"input", "stop_reason", "input_tokens", "output_tokens"}``.
+
+	Capped at :data:`CALL_TIMEOUT` with no SDK retry: staff wait on it, and it
+	holds a web worker of a 4 GB server meanwhile.
+	"""
 	import anthropic
 
-	client = anthropic.Anthropic(api_key=api_key, timeout=40.0, max_retries=1)
-	messages: list[dict[str, Any]] = [{"role": "user", "content": user_text}]
-	# tool_choice stays "auto" (Sonnet 5.5 and Opus 5.5 reject a forced tool with
-	# a 400), so the model sometimes answers in prose (CHAT-02442): ask once more.
-	for _attempt in range(2):
-		resp = client.messages.create(
-			model=model,
-			max_tokens=MAX_TOKENS,
-			system=[{"type": "text", "text": SYSTEM_PROMPT}, {"type": "text", "text": system_text}],
-			messages=messages,
-			tools=[TOOL],
-			tool_choice={"type": "auto"},
-			extra_body={"output_config": {"effort": EFFORT}},
-		)
-		content = getattr(resp, "content", None) or []
-		for block in content:
-			if getattr(block, "type", None) == "tool_use" and getattr(block, "name", "") == "submit_order":
-				return getattr(block, "input", None) or {}
-		text = "\n".join(
-			str(getattr(b, "text", "") or "") for b in content if getattr(b, "type", None) == "text"
-		).strip()
-		messages += [
-			{"role": "assistant", "content": text or "(no answer)"},
-			{
-				"role": "user",
-				"content": "Call submit_order now; empty lists are fine when there is no order.",
-			},
-		]
-	return None
+	client = anthropic.Anthropic(api_key=api_key, timeout=CALL_TIMEOUT, max_retries=0)
+	resp = client.messages.create(
+		model=model,
+		max_tokens=MAX_TOKENS,
+		system=[{"type": "text", "text": SYSTEM_PROMPT}, {"type": "text", "text": system_text}],
+		messages=[{"role": "user", "content": user_text}],
+		extra_body={
+			"output_config": {"effort": EFFORT, "format": {"type": "json_schema", "schema": ORDER_SCHEMA}}
+		},
+	)
+	usage = getattr(resp, "usage", None)
+	return {
+		"input": json_from_content(getattr(resp, "content", None)),
+		"stop_reason": getattr(resp, "stop_reason", None),
+		"input_tokens": int(getattr(usage, "input_tokens", 0) or 0),
+		"output_tokens": int(getattr(usage, "output_tokens", 0) or 0),
+	}
 
 
 def order_from_chat(conversation: str) -> dict[str, Any]:
@@ -566,21 +563,25 @@ def order_from_chat(conversation: str) -> dict[str, Any]:
 			"Last order: " + (", ".join(last) if last else "(none)"),
 			"Conversation (oldest first, [number] before each message):",
 			"\n".join(lines),
-			"Write down the order the customer wants placed now, with submit_order.",
+			"Write down the order the customer wants placed now.",
 		]
 	)
 	model = settings.get("draft_model") or "claude-haiku-5-5"
 	started = time.monotonic()
 	try:
-		raw = _call(api_key, model, system_text, user_text)
+		result = _call(api_key, model, system_text, user_text)
 	except Exception as exc:
 		cc.safe_log_error(
 			"chat: order prefill failed",
 			f"conversation={conversation} {type(exc).__name__}: {str(exc)[:300]}",
 		)
 		return {"order": None, "order_error": "The AI could not read the order; add it by hand"}
+	raw = result["input"]
 	if raw is None:
-		return {"order": None, "order_error": "The AI did not return an order; add it by hand"}
+		reason = "The AI did not return an order"
+		if result["stop_reason"] == "max_tokens":
+			reason += " (the chat is too long)"
+		return {"order": None, "order_error": reason + "; add it by hand"}
 
 	order_lines, warnings = validate_order(raw, catalog)
 	changes = contact_changes(raw, by_number, [conv.phone, customer_row.get("mobile_no")])
@@ -602,20 +603,30 @@ def order_from_chat(conversation: str) -> dict[str, Any]:
 	warnings += promo_warnings
 	payment = str(raw.get("payment_method") or "").strip().lower()
 	notes = str(raw.get("notes") or "").strip()[:500] or None
-	return {
-		"order": {
-			"lines": order_lines,
-			"address": changes["address"],
-			"location": location,
-			"promo_codes": promo_codes,
-			"payment_method": payment if payment in PAYMENT_METHODS else None,
-			"area": area,
-			"phone": changes["phone"],
-			"contact_name": None,
-			"pickup": bool(raw.get("pickup")),
-			"notes": notes,
-			"warnings": warnings,
-			"latency_ms": int((time.monotonic() - started) * 1000),
-		},
-		"order_error": None,
+	order = {
+		"lines": order_lines,
+		"address": changes["address"],
+		"location": location,
+		"promo_codes": promo_codes,
+		"payment_method": payment if payment in PAYMENT_METHODS else None,
+		"area": area,
+		"phone": changes["phone"],
+		"contact_name": None,
+		"pickup": bool(raw.get("pickup")),
+		"notes": notes,
+		"warnings": warnings,
+		"latency_ms": int((time.monotonic() - started) * 1000),
 	}
+	# Kept for scoring against the order actually billed (chat_order_log.score_pending).
+	from jarz_pos.services.chat_order_log import record_proposal
+
+	record_proposal(
+		conversation,
+		customer,
+		order,
+		model,
+		order["latency_ms"],
+		result["input_tokens"],
+		result["output_tokens"],
+	)
+	return {"order": order, "order_error": None}

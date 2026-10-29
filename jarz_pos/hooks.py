@@ -700,6 +700,12 @@ scheduler_events = {
 		"30 3 * * *": [
 			"jarz_pos.services.chat_summary.enqueue_nightly",
 		],
+		# Chat inbox: score yesterday's "Start order" proposals against the
+		# invoice that was actually billed (accuracy log). Never raises. See
+		# jarz_pos.services.chat_order_log.
+		"45 3 * * *": [
+			"jarz_pos.services.chat_order_log.score_pending",
+		],
 	},
 }
 
@@ -867,6 +873,13 @@ try:
 	_chat_api.get_order_prefill
 	_chat_api.get_chat_metrics
 	_chat_api.get_unread_total
+except Exception:
+	pass
+
+try:
+	from jarz_pos.api import chat_order_log as _chat_order_log_api
+
+	_chat_order_log_api.get_order_accuracy
 except Exception:
 	pass
 

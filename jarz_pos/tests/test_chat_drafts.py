@@ -695,13 +695,27 @@ class DraftFromResponseTest(unittest.TestCase):
 		self.assertEqual(d.draft_input_from_content([]), (None, False))
 		self.assertEqual(d.draft_input_from_content([SimpleNamespace(type="text", text=" ")]), (None, False))
 
-	def test_tool_choice_is_never_forced(self):
-		# Sonnet 5.5 / Opus 5.5 answer a forced tool_choice with a 400 (broke every draft on 2026-10-23).
+	def test_structured_output_json_is_the_draft(self):
+		content = [
+			SimpleNamespace(
+				type="text", text='{"reply": "أهلاً 💛", "intent": "Order", "is_complaint": false}'
+			)
+		]
+		self.assertEqual(
+			d.draft_input_from_content(content),
+			({"reply": "أهلاً 💛", "intent": "Order", "is_complaint": False}, False),
+		)
+
+	def test_answer_shape_is_enforced_and_tool_choice_never_forced(self):
+		# Sonnet 5.5 / Opus 5.5 answer a forced tool_choice with a 400 (broke every draft on 2026-10-23);
+		# structured output enforces the shape instead, with every key required.
 		import inspect
 
 		src = inspect.getsource(d._call_claude)
-		self.assertIn('tool_choice={"type": "auto"}', src)
-		self.assertNotIn('"type": "tool"', src)
+		self.assertIn('"format": {"type": "json_schema", "schema": DRAFT_SCHEMA}', src)
+		self.assertNotIn("tool_choice", src)
+		self.assertFalse(d.DRAFT_SCHEMA["additionalProperties"])
+		self.assertEqual(sorted(d.DRAFT_SCHEMA["required"]), sorted(d.DRAFT_SCHEMA["properties"]))
 
 	def test_thinking_has_room_for_the_tool_call(self):
 		# 5.5 models think by default and thinking counts against max_tokens: 600 cut Sonnet off
@@ -909,6 +923,54 @@ class CustomerDeliveryFeeTest(unittest.TestCase):
 	def test_prompt_prefers_the_customer_fee(self):
 		self.assertIn("{{customer_delivery_fee}}", d.SYSTEM_PROMPT)
 		self.assertIn("never guess one", d.SYSTEM_PROMPT)
+
+
+class OrderTotalTest(unittest.TestCase):
+	"""CHAT-02215: «كدا الاجمالي 370 صح؟» could only be answered by a person."""
+
+	CTX = {
+		"prices": {"Chocolate Hazelnut Large": 160.0, "Lotus Medium": 120.0, "Jarz Signature Trio": 480.0},
+		"item_names": {},
+		"delivery_fees": {"eg6oct": 60.0, "egmasrjd": 50.0},
+		"free_delivery_threshold": 1000.0,
+		"free_shipping_codes": ["Jarz Signature Trio"],
+		"customer_area": {"name": "EG6OCT", "fee": 60.0},
+	}
+
+	def fill(self, template, **extra):
+		return d.fill_placeholders(template, {**self.CTX, "arabic": True, **extra})
+
+	def test_items_plus_the_customers_delivery(self):
+		out, warnings, filled = self.fill("الإجمالي {{order_total:Chocolate Hazelnut Large x2}}")
+		self.assertEqual(out, "الإجمالي 320 جنيه + 60 جنيه توصيل = 380 جنيه")
+		self.assertEqual(warnings, [])
+		self.assertEqual(filled, [("Chocolate Hazelnut Large", 160.0)])
+
+	def test_several_lines_and_a_named_area(self):
+		out, _w, _f = self.fill("{{order_total:Chocolate Hazelnut Large x1; Lotus Medium x2 @EGMASRJD}}")
+		self.assertEqual(out, "400 جنيه + 50 جنيه توصيل = 450 جنيه")
+
+	def test_free_delivery_bundle_and_threshold(self):
+		out, _w, _f = self.fill("{{order_total:Jarz Signature Trio}}")
+		self.assertEqual(out, "480 جنيه + توصيل مجاني = 480 جنيه")
+		out, _w, _f = self.fill("{{order_total:Chocolate Hazelnut Large x7}}")
+		self.assertEqual(out, "1120 جنيه + توصيل مجاني = 1120 جنيه")
+
+	def test_unknown_item_or_no_area(self):
+		out, warnings, _f = self.fill("{{order_total:Kunafa x2}}")
+		self.assertEqual(out, d.UNKNOWN)
+		self.assertIn("Unknown item in order total: Kunafa", warnings)
+		out, warnings, _f = self.fill("{{order_total:Lotus Medium}}", customer_area={})
+		self.assertEqual(out, "120 جنيه")
+		self.assertIn("delivery is not included", warnings[0])
+
+	def test_planted_price_reaches_the_total(self):
+		out, _w, _f = d.fill_placeholders(
+			"{{order_total:Chocolate Hazelnut Large x2}}",
+			{**self.CTX, "arabic": True},
+			overrides={"Chocolate Hazelnut Large": 170.0},
+		)
+		self.assertEqual(out, "340 جنيه + 60 جنيه توصيل = 400 جنيه")
 
 
 class CustomerOfferPlaceholderTest(unittest.TestCase):

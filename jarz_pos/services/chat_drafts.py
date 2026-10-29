@@ -55,7 +55,7 @@ FOLLOWUP_GIST = {
 }
 CONTEXT_CACHE_SECONDS = 600
 # Sonnet/Haiku 5.5 think by default and thinking counts against max_tokens: 600 cut
-# Sonnet off before it called submit_draft. Effort "low" keeps thinking short.
+# Sonnet off before it wrote the draft. Effort "low" keeps thinking short.
 MAX_TOKENS = 2000
 DRAFT_EFFORT = "low"
 UNKNOWN = "[؟]"
@@ -111,6 +111,10 @@ says when there is one): always this one for a customer with an area on file,
    {{delivery_fee:TERRITORY_NAME}} only for an area the customer names in the chat \
 (TERRITORY_NAME exactly from the delivery list; never guess one),
    {{free_delivery_threshold}} for the free-delivery minimum,
+   {{order_total:ITEM_CODE x QTY; ITEM_CODE x QTY}} for the order total with delivery, when the \
+customer asks for the total or you confirm an order (add " @TERRITORY_NAME" only for an area they \
+named in the chat; otherwise their area on file is used). Never add the numbers up yourself, and \
+never use it when a promo code applies: say the team confirms the total after the code,
    {{customer_first_name}} to greet the customer by name,
    {{menu}} for the full priced menu, only when they ask for the menu or the flavours,
    {{offers}} for every live bundle with what is inside and its price, plus free delivery: only \
@@ -196,23 +200,25 @@ Chocolate Hazelnut are the favourites) or the bundle that fits their headcount.
 detailed address in one message.
 - Emoji: 1-2, from 💛 ♥️ 🥰 😍 🍰 🚚 ✨; they matter (warm human replies sold several times \
 more than cold ones). In a complaint or apology, only 🙏.
-Always answer by calling submit_draft."""
+Answer with the JSON object only: reply (the message to the customer, with placeholders), intent, \
+is_complaint, upsell_item_code, upsell_line and needs_human_reason (null when they do not apply)."""
 
-TOOL = {
-	"name": "submit_draft",
-	"description": "Submit the reply draft for the moderator to review.",
-	"input_schema": {
-		"type": "object",
-		"properties": {
-			"reply": {"type": "string", "description": "The message to the customer, with placeholders."},
-			"intent": {"type": "string", "enum": list(INTENTS)},
-			"is_complaint": {"type": "boolean"},
-			"upsell_item_code": {"type": ["string", "null"]},
-			"upsell_line": {"type": ["string", "null"]},
-			"needs_human_reason": {"type": ["string", "null"]},
-		},
-		"required": ["reply", "intent", "is_complaint"],
+_NULLABLE_STR = {"anyOf": [{"type": "string"}, {"type": "null"}]}
+
+#: The draft's shape, enforced by the API (``output_config.format``): every key
+#: is present and the answer is always this JSON object, never prose.
+DRAFT_SCHEMA = {
+	"type": "object",
+	"properties": {
+		"reply": {"type": "string"},
+		"intent": {"type": "string", "enum": list(INTENTS)},
+		"is_complaint": {"type": "boolean"},
+		"upsell_item_code": _NULLABLE_STR,
+		"upsell_line": _NULLABLE_STR,
+		"needs_human_reason": _NULLABLE_STR,
 	},
+	"required": ["reply", "intent", "is_complaint", "upsell_item_code", "upsell_line", "needs_human_reason"],
+	"additionalProperties": False,
 }
 
 
@@ -296,6 +302,61 @@ def _resolve_territory(ref: str, ctx: dict[str, Any]) -> float | None:
 	return None
 
 
+_TOTAL_LINE = re.compile(r"^(.*?)(?:\s*[x×*]\s*(\d+))?$", re.IGNORECASE)
+
+
+def order_total(arg: Any, ctx: dict[str, Any], arabic: bool) -> tuple[str | None, list[str], list]:
+	"""``{{order_total:CODE x2; CODE x1 @AREA}}``: items, delivery and total, from the menu. Pure.
+
+	Returns ``(text, warnings, filled_prices)``; text is None when an item is unknown.
+	Delivery is the area named after ``@``, else the customer's area on file; it
+	is free when the items reach the free-delivery minimum or hold a
+	free-delivery bundle, as the POS bills it. Promo codes are not applied.
+	"""
+	body, _, area_ref = str(arg or "").partition("@")
+	subtotal, filled, warnings = 0.0, [], []
+	free_codes = set(ctx.get("free_shipping_codes") or [])
+	free = False
+	for part in re.split(r"[;,،]", body):
+		part = part.strip()
+		if not part:
+			continue
+		match = _TOTAL_LINE.match(part)
+		ref, qty = (match.group(1) or "").strip(), int(match.group(2) or 1)
+		code = resolve_item_code(ref, ctx)
+		price = (ctx.get("prices") or {}).get(code) if code else None
+		if price is None:
+			warnings.append(f"Unknown item in order total: {ref or '?'}")
+			return None, warnings, []
+		subtotal += float(price) * qty
+		filled.append((code, float(price)))
+		free = free or code in free_codes
+	if not filled:
+		warnings.append("Empty order total")
+		return None, warnings, []
+	threshold = ctx.get("free_delivery_threshold")
+	free = free or bool(threshold and subtotal >= float(threshold))
+	if area_ref.strip():
+		fee = _resolve_territory(area_ref, ctx)
+		if fee is None:
+			warnings.append(f"Unknown area in order total: {area_ref.strip()}")
+	else:
+		fee = (ctx.get("customer_area") or {}).get("fee")
+		if fee is None and not free:
+			warnings.append("Order total has no delivery area: delivery is not included")
+	if free:
+		fee = 0.0
+	if fee is None:
+		return format_egp(subtotal, arabic), warnings, filled
+	if arabic:
+		delivery = "توصيل مجاني" if not fee else f"{format_egp(fee, True)} توصيل"
+		text = f"{format_egp(subtotal, True)} + {delivery} = {format_egp(subtotal + fee, True)}"
+	else:
+		delivery = "free delivery" if not fee else f"{format_egp(fee, False)} delivery"
+		text = f"{format_egp(subtotal, False)} + {delivery} = {format_egp(subtotal + fee, False)}"
+	return text, warnings, filled
+
+
 def fill_placeholders(
 	template: Any, ctx: dict[str, Any], overrides: dict[str, float] | None = None
 ) -> tuple[str, list[str], list[tuple[str, float]]]:
@@ -330,6 +391,12 @@ def fill_placeholders(
 				warnings.append(f"Unknown area in delivery fee placeholder: {arg or '?'}")
 				return UNKNOWN
 			return format_egp(fee, arabic)
+		if key == "order_total":
+			priced = {**ctx, "prices": {**(ctx.get("prices") or {}), **overrides}} if overrides else ctx
+			text_out, total_warnings, total_filled = order_total(arg, priced, arabic)
+			warnings.extend(total_warnings)
+			filled.extend(total_filled)
+			return text_out if text_out is not None else UNKNOWN
 		if key == "customer_delivery_fee":
 			area = ctx.get("customer_area") or {}
 			if area.get("fee") is None:
@@ -990,7 +1057,7 @@ def build_context(settings: dict[str, Any]) -> dict[str, Any]:
 	for 10 minutes per POS profile: it is the cached prefix of every prompt.
 	"""
 	profile = settings.get("default_pos_profile") or ""
-	cache_key = f"jarz_chat_ctx:v6:{profile}"
+	cache_key = f"jarz_chat_ctx:v7:{profile}"
 	try:
 		cached = frappe.cache().get_value(cache_key)
 		if cached:
@@ -1118,6 +1185,9 @@ def build_context(settings: dict[str, Any]) -> dict[str, Any]:
 		"item_names": names,
 		"delivery_fees": fees,
 		"free_delivery_threshold": threshold,
+		"free_shipping_codes": [
+			str(b.get("erpnext_item")) for b in bundles if b.get("erpnext_item") and b.get("free_shipping")
+		],
 		"candidates": candidates,
 		"blocks": blocks,
 	}
@@ -1504,10 +1574,11 @@ def customer_profile(customer: str | None, now: Any = None) -> dict[str, Any] | 
 
 
 def draft_input_from_content(content: Any) -> tuple[dict[str, Any] | None, bool]:
-	"""The submit_draft input from a response, or the plain-text answer as a fallback.
+	"""The draft from a response, or the plain-text answer as a fallback.
 
-	Returns ``(input, from_text)``. tool_choice stays "auto" (Sonnet 5.5 and Opus 5.5
-	reject a forced tool with a 400), so the model may answer in text instead.
+	Returns ``(input, from_text)``. The answer is the :data:`DRAFT_SCHEMA` JSON
+	object (structured output). A submit_draft tool call, the shape before
+	structured output, is still read; prose only when neither is there.
 	"""
 	texts: list[str] = []
 	for block in content or []:
@@ -1515,7 +1586,14 @@ def draft_input_from_content(content: Any) -> tuple[dict[str, Any] | None, bool]
 		if kind == "tool_use" and getattr(block, "name", "submit_draft") == "submit_draft":
 			return getattr(block, "input", None), False
 		if kind == "text":
-			texts.append(str(getattr(block, "text", "") or ""))
+			text = str(getattr(block, "text", "") or "")
+			try:
+				data = json.loads(text)
+			except ValueError:
+				data = None
+			if isinstance(data, dict) and "reply" in data:
+				return data, False
+			texts.append(text)
 	text = "\n".join(t.strip() for t in texts if t.strip())
 	if not text:
 		return None, False
@@ -1535,9 +1613,12 @@ def _call_claude(api_key: str, model: str, context_text: str, user_text: str) ->
 			{"type": "text", "text": context_text, "cache_control": {"type": "ephemeral"}},
 		],
 		messages=[{"role": "user", "content": user_text}],
-		tools=[TOOL],
-		tool_choice={"type": "auto"},
-		extra_body={"output_config": {"effort": DRAFT_EFFORT}},
+		extra_body={
+			"output_config": {
+				"effort": DRAFT_EFFORT,
+				"format": {"type": "json_schema", "schema": DRAFT_SCHEMA},
+			}
+		},
 	)
 	latency = int((time.monotonic() - started) * 1000)
 	tool_input, from_text = draft_input_from_content(resp.content)
@@ -1651,9 +1732,7 @@ def generate_draft(conversation: str, for_message: str | None = None, hint: str 
 		if hint:
 			hint_text = mask_text(hint, names) if mask else str(hint)
 			user_parts.append(f"Moderator's instruction for this draft: {hint_text[:500]}")
-		user_parts.append(
-			"Draft the next reply to the customer's latest message and submit it with submit_draft."
-		)
+		user_parts.append("Draft the next reply to the customer's latest message.")
 		result = _call_claude(api_key, model, context["text"], "\n\n".join(user_parts))
 	except Exception as exc:
 		message = f"{type(exc).__name__}: {str(exc)[:500]}"
