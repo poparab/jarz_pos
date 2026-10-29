@@ -478,6 +478,78 @@ class TestPaymentCollectionChangeService(unittest.TestCase):
 		self.assertEqual(len(invoice._save_calls), 1)
 
 
+class TestPartnerRowKeepsNoCourierFee(unittest.TestCase):
+	"""A delivery-partner rider's row must not pick up a fee on a method change.
+
+	His company's fee is on ``partner_fee`` and paid by bank. Until 2026-10-29 the
+	change filled ``shipping_amount`` from the invoice's shipping expense, so the
+	next settlement paid him 35 out of the 6th of October till that he never took
+	(ACC-SINV-2026-19195-1, Woo order 19826) and the close counted 35 over.
+	"""
+
+	PARTNER_ROW = {
+		"name": "CT-PARTNER-1",
+		"party_type": "Supplier",
+		"party": "Rider One",
+		"amount": 370.0,
+		"shipping_amount": 0.0,
+		"partner_fee": 35.0,
+		"payment_mode": "Deferred",
+		"is_partner_order": 1,
+		"delivery_partner": "Deliverk",
+		"partner_invoice_ref": None,
+	}
+
+	def _switch_to_instapay(self, row, invoice):
+		module, _ = _import_delivery_handling(invoice)
+		module._publish_branch_event = MagicMock(return_value=[])
+		module._get_collection_change_source_ct = MagicMock(return_value=dict(row))
+		module._get_real_customer_payment_entry = MagicMock(return_value=None)
+		module._validate_collection_receipt = MagicMock(return_value={"name": "PR-1"})
+		module._apply_collection_change_to_online = MagicMock(
+			return_value={"mode": "cod_to_online", "invoice": invoice.name, "journal_entry": "JE-1"}
+		)
+		module.change_payment_collection_method(
+			invoice_name=invoice.name,
+			new_method="Instapay",
+			pos_profile="6th of october",
+			receipt_name="PR-1",
+		)
+		return module._apply_collection_change_to_online.call_args.kwargs
+
+	def test_partner_row_switch_to_online_carries_no_fee(self):
+		invoice = _FakeInvoice(name="INV-PARTNER-1", custom_shipping_expense=35.0, custom_is_partner_order=1)
+		kwargs = self._switch_to_instapay(self.PARTNER_ROW, invoice)
+		self.assertEqual(kwargs["shipping_amount"], 0.0)
+		self.assertEqual(kwargs["order_amount"], 370.0)
+
+	def test_own_courier_row_without_fee_still_falls_back_to_shipping_expense(self):
+		row = {**self.PARTNER_ROW, "is_partner_order": 0, "delivery_partner": None, "partner_fee": 0.0}
+		invoice = _FakeInvoice(name="INV-OWN-1", custom_shipping_expense=35.0)
+		kwargs = self._switch_to_instapay(row, invoice)
+		self.assertEqual(kwargs["shipping_amount"], 35.0)
+
+	def test_helper(self):
+		module, _ = _import_delivery_handling(_FakeInvoice())
+		partner_inv = _FakeInvoice(custom_shipping_expense=60.0, custom_is_partner_order=1)
+		own_inv = _FakeInvoice(custom_shipping_expense=60.0)
+		self.assertEqual(module._collection_change_shipping(self.PARTNER_ROW, own_inv), 0.0)
+		self.assertEqual(
+			module._collection_change_shipping(
+				{"delivery_partner": "Deliverk", "shipping_amount": 0}, own_inv
+			),
+			0.0,
+		)
+		# No courier row at all: the invoice says whether it was a partner delivery.
+		self.assertEqual(module._collection_change_shipping(None, partner_inv), 0.0)
+		self.assertEqual(module._collection_change_shipping(None, own_inv), 60.0)
+		# An own-courier row keeps the fee it already states.
+		self.assertEqual(
+			module._collection_change_shipping({"is_partner_order": 0, "shipping_amount": 20.0}, own_inv),
+			20.0,
+		)
+
+
 class TestConfirmOnlinePayment(unittest.TestCase):
 	"""confirm_online_payment: booking, idempotency, field stamping."""
 

@@ -4713,6 +4713,32 @@ def settle_courier_collected_payment(invoice_name: str, pos_profile: str, party_
 	return {"success": True, **payload}
 
 
+def _collection_change_shipping(source_ct, inv) -> float:
+	"""The courier fee a payment-method change carries onto the courier row.
+
+	A delivery-partner rider is owed nothing out of the branch's cash: his company's
+	fee sits on ``partner_fee``, was accrued to the partner at dispatch and is paid by
+	bank. So a partner row keeps ``shipping_amount`` at zero. Filling it from the
+	invoice's shipping expense — which this did until 2026-10-29 — made the next
+	settlement pay the rider the fee out of the till ("Order: 0, Shipping: 35"), while
+	he took nothing; every such order showed up as an overage at the 6th of October
+	close (11 orders since 2026-09-27, e.g. ACC-SINV-2026-19195-1).
+	"""
+	if source_ct:
+		is_partner = _safe_float(source_ct.get("is_partner_order")) > 0 or bool(
+			source_ct.get("delivery_partner")
+		)
+	else:
+		is_partner = _safe_float(inv.get("custom_is_partner_order")) > 0
+	if is_partner:
+		return 0.0
+	shipping_amount = float((source_ct or {}).get("shipping_amount") or 0)
+	if shipping_amount <= 0.0001:
+		stored_ship = _safe_float(getattr(inv, "custom_shipping_expense", 0))
+		shipping_amount = stored_ship if stored_ship > 0 else (_get_delivery_expense_amount(inv) or 0.0)
+	return shipping_amount
+
+
 def change_payment_collection_method(
 	invoice_name: str,
 	new_method: str,
@@ -4792,10 +4818,7 @@ def change_payment_collection_method(
 			stored_mode if _is_recognised_collection_method(stored_mode) else new_method
 		)
 		update_submitted_sales_invoice_fields(inv, {"custom_payment_method": effective_method})
-		shipping_amount = float(source_ct.get("shipping_amount") or 0)
-		if shipping_amount <= 0.0001:
-			stored_ship = _safe_float(getattr(inv, "custom_shipping_expense", 0))
-			shipping_amount = stored_ship if stored_ship > 0 else (_get_delivery_expense_amount(inv) or 0.0)
+		shipping_amount = _collection_change_shipping(source_ct, inv)
 		# Echo the SAME customer amount the first call reported, or a replay of a
 		# part-paid credit order answers 1,000 where the original answered 600.
 		# The row's own ``amount`` first (that is what the classic COD/online
@@ -4908,10 +4931,7 @@ def change_payment_collection_method(
 		if frappe.db.exists("Courier Transaction", {"reference_invoice": inv.name}):
 			frappe.throw("No unsettled courier transaction was found for this invoice")
 
-	shipping_amount = float((source_ct or {}).get("shipping_amount") or 0)
-	if shipping_amount <= 0.0001:
-		stored_ship = _safe_float(getattr(inv, "custom_shipping_expense", 0))
-		shipping_amount = stored_ship if stored_ship > 0 else (_get_delivery_expense_amount(inv) or 0.0)
+	shipping_amount = _collection_change_shipping(source_ct, inv)
 
 	receipt_data = None
 	# An unpaid online-intent order has not been paid yet by definition, so there is no
