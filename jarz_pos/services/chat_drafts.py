@@ -44,6 +44,8 @@ RECENT_ORDER_DAYS = 2
 #: A flavour is off the AI's menu while every branch together holds fewer jars
 #: than this (paused flavours keep a stray jar or two, e.g. Mango 2026-10-29).
 MENU_MIN_STOCK = 3
+#: Messages shown from each of the customer's other chats (another channel).
+OTHER_CHAT_MESSAGES = 12
 #: Body prefix of the placeholder chat_ingest stores for a Business Suite reply.
 SUITE_PLACEHOLDER_PREFIX = "Reply sent from Meta Business Suite"
 #: What each follow-up template says, for the model (the copy lives at Meta).
@@ -143,7 +145,9 @@ and hand over (needs_human_reason). Never quote wholesale prices, margins or min
 12. The customer profile is what Jarz already knows about this customer. Never ask for what it \
 already gives: with an area on file, quote {{delivery_fee:AREA}} for it and only confirm it \
 («نوصلك على المهندسين زي المرة اللي فاتت؟»); with an address on file, ask them to confirm it \
-instead of sending it again. Use their past orders to suggest what they like.
+instead of sending it again. Use their past orders to suggest what they like. The notes from \
+past chats and the messages from their other chats are background too: use them, but never \
+quote them back or say you have them.
 13. Personal offers and follow-ups in the profile were sent by Jarz itself. When the customer \
 mentions «هدية»، «الكود»، «العرض» or «الرسالة», that is the offer: state it with \
 {{customer_offer:CODE}}, tell them we apply the code when they order here in the chat, and \
@@ -1334,6 +1338,41 @@ def _last_invoice(customer: str) -> dict[str, Any] | None:
 	return inv
 
 
+def _other_chat_parts(conv: Any, mask: bool, names: list[Any]) -> list[str]:
+	"""The latest messages from the same customer's other chats (another channel). Never raises."""
+	if not conv.get("customer"):
+		return []
+	try:
+		others = frappe.get_all(
+			cc.CONVERSATION,
+			filters={"customer": conv.customer, "name": ["!=", conv.name]},
+			fields=["name", "channel"],
+			order_by="last_message_at desc",
+			limit_page_length=3,
+			ignore_permissions=True,
+		)
+		parts = []
+		for other in others:
+			rows = frappe.get_all(
+				cc.MESSAGE,
+				filters={"conversation": other.name},
+				fields=["direction", "message_type", "body", "timestamp"],
+				order_by="timestamp desc, creation desc",
+				limit_page_length=OTHER_CHAT_MESSAGES,
+				ignore_permissions=True,
+			)
+			rows.reverse()
+			lines = transcript_lines(rows, mask, names)
+			if lines:
+				parts.append(
+					f"Their latest messages in another chat ({other.channel}), oldest first:\n"
+					+ "\n".join(lines)
+				)
+		return parts
+	except Exception:
+		return []
+
+
 def _public_promo_lines() -> list[str]:
 	"""``CODE | facts`` for every usable promo code not tied to one customer."""
 	try:
@@ -1501,7 +1540,10 @@ def generate_draft(conversation: str, for_message: str | None = None, hint: str 
 	settings = get_chat_settings()
 	model = settings.get("draft_model") or "claude-haiku-5-5"
 	conv = frappe.db.get_value(
-		cc.CONVERSATION, conversation, ["name", "contact_name", "customer", "channel"], as_dict=True
+		cc.CONVERSATION,
+		conversation,
+		["name", "contact_name", "customer", "channel", "customer_summary"],
+		as_dict=True,
 	)
 	if not conv:
 		frappe.throw(f"Conversation {conversation} not found", frappe.DoesNotExistError)
@@ -1536,9 +1578,14 @@ def generate_draft(conversation: str, for_message: str | None = None, hint: str 
 			f"Channel: {conv.channel}",
 			"Now: " + now.strftime("%a %d %b %Y %H:%M"),
 			render_customer_profile(profile, now),
-			"Conversation (oldest first):",
-			"\n".join(lines) or "(no text messages)",
 		]
+		if conv.customer_summary:
+			user_parts.append(
+				"Notes on this customer from all their past chats and orders (rewritten nightly):\n"
+				+ str(conv.customer_summary)
+			)
+		user_parts += _other_chat_parts(conv, mask, names)
+		user_parts += ["Conversation (oldest first):", "\n".join(lines) or "(no text messages)"]
 		if hint:
 			hint_text = mask_text(hint, names) if mask else str(hint)
 			user_parts.append(f"Moderator's instruction for this draft: {hint_text[:500]}")

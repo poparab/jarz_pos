@@ -70,3 +70,6 @@ jarz_pos.Patches.v1_9.cancel_3h_followups
 # Follow-up templates are now written into the customer's WhatsApp chat when sent.
 # Backfill the last 30 days into chats that already exist (no chat is created). Re-runnable.
 jarz_pos.Patches.v1_9.show_followup_templates_in_chat
+# Unlinked chats are now linked by the mobile the customer typed (exactly one
+# matching customer). Apply it to the messages already stored. Re-runnable.
+jarz_pos.Patches.v1_9.link_chats_by_typed_phone

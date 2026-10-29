@@ -27,7 +27,9 @@
   "source_post_id",
   "ad_referral",
   "private_reply_sent",
-  "last_order"
+  "last_order",
+  "customer_summary",
+  "customer_summary_at"
  ],
  "fields": [
   {
@@ -186,11 +188,24 @@
    "label": "Last Order",
    "options": "Sales Invoice",
    "description": "Order started from this chat."
+  },
+  {
+   "fieldname": "customer_summary",
+   "fieldtype": "Small Text",
+   "label": "Customer Summary",
+   "read_only": 1,
+   "description": "Short AI notes on this customer from all their chats and orders, rewritten nightly by chat_summary.run_nightly. Read by AI drafts."
+  },
+  {
+   "fieldname": "customer_summary_at",
+   "fieldtype": "Datetime",
+   "label": "Customer Summary At",
+   "read_only": 1
   }
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-10-16 21:30:00.000000",
+ "modified": "2026-10-29 21:00:00.000000",
  "modified_by": "Administrator",
  "module": "jarz pos",
  "name": "Jarz Chat Conversation",

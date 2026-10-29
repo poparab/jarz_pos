@@ -25,6 +25,7 @@ import hashlib
 import hmac
 import json
 import mimetypes
+import re
 from typing import Any
 
 import frappe
@@ -682,6 +683,83 @@ def _match_customer(phone: str | None) -> str | None:
 		return None
 
 
+#: An Egyptian mobile as customers type it: 010…, 2010…, +2010…, or 10… (no trunk zero).
+_TYPED_MOBILE = re.compile(r"(?<!\d)(?:\+?20|0)?1[0125]\d{8}(?!\d)")
+_ARABIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
+
+
+def typed_phones(text: Any) -> list[str]:
+	"""Egyptian mobile numbers typed in a message, in order, deduplicated. Pure.
+
+	Arabic-Indic digits and single spaces, dashes or dots between digits are
+	accepted ("0111 103 4268", "٠١١١٠٣٤٢٦٨").
+	"""
+	clean = str(text or "").translate(_ARABIC_DIGITS)
+	clean = re.sub(r"(?<=\d)[ \-.]{1,2}(?=\d)", "", clean)
+	return list(dict.fromkeys(_TYPED_MOBILE.findall(clean)))
+
+
+def link_by_typed_phone(body: Any, current_phone: str | None = None) -> dict[str, Any]:
+	"""Conversation updates linking a Messenger / Instagram chat to the customer whose
+	mobile the customer typed. ``{}`` unless the numbers point at exactly one customer.
+
+	A number can belong to someone else (a gift's recipient); staff relink by
+	hand, and a chat already linked is never touched (callers check).
+	"""
+	phones = typed_phones(body)
+	if not phones:
+		return {}
+	try:
+		from jarz_pos.utils.phone import normalize_phone, phone_variants
+
+		variants = sorted({v for p in phones for v in phone_variants(p)})
+		customers = frappe.get_all(
+			"Customer",
+			filters={"mobile_no": ["in", variants], "disabled": 0},
+			pluck="name",
+			limit_page_length=3,
+			ignore_permissions=True,
+		)
+	except Exception:
+		return {}
+	if len(set(customers)) != 1:
+		return {}
+	updates = {"customer": customers[0], "last_order": _last_order(customers[0])}
+	if not current_phone:
+		updates["phone"] = normalize_phone(phones[0]) or None
+	return updates
+
+
+def link_chats_by_typed_phone(dry_run: bool = True) -> dict[str, int]:
+	"""Link every unlinked chat whose customer typed a mobile that belongs to
+	exactly one customer. Re-runnable."""
+	result = {"checked": 0, "linked": 0}
+	convs = frappe.get_all(
+		cc.CONVERSATION,
+		filters={"customer": ["is", "not set"]},
+		fields=["name", "phone"],
+		limit_page_length=0,
+	)
+	for conv in convs:
+		result["checked"] += 1
+		bodies = frappe.get_all(
+			cc.MESSAGE,
+			filters={"conversation": conv.name, "direction": "Inbound", "body": ["like", "%1%"]},
+			pluck="body",
+			order_by="timestamp asc",
+			limit_page_length=500,
+		)
+		updates = link_by_typed_phone("\n".join(b or "" for b in bodies), conv.phone)
+		if not updates:
+			continue
+		result["linked"] += 1
+		if not dry_run:
+			frappe.db.set_value(cc.CONVERSATION, conv.name, updates, update_modified=False)
+	if not dry_run:
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- one-off backfill
+	return result
+
+
 def _last_order(customer: str | None) -> str | None:
 	if not customer:
 		return None
@@ -1219,11 +1297,14 @@ def _persist_message(
 				pass
 		if event.get("post_id") and not conv.get("source_post_id"):
 			updates["source_post_id"] = event["post_id"]
-		if event["channel"] == cc.WHATSAPP and not conv.get("customer"):
-			customer = _match_customer(conv.get("phone"))
-			if customer:
-				updates["customer"] = customer
-				updates["last_order"] = _last_order(customer)
+		if not conv.get("customer"):
+			link: dict[str, Any] = {}
+			if event["channel"] == cc.WHATSAPP:
+				customer = _match_customer(conv.get("phone"))
+				if customer:
+					link = {"customer": customer, "last_order": _last_order(customer)}
+			# Otherwise the mobile they typed (Messenger, or a WhatsApp number we do not know).
+			updates.update(link or link_by_typed_phone(body, conv.get("phone")))
 	else:
 		updates.update(
 			{

@@ -693,6 +693,13 @@ scheduler_events = {
 		"* * * * *": [
 			"jarz_pos.services.chat_alerts.check_waiting",
 		],
+		# Chat inbox: rewrite the short AI notes of every chat with something
+		# new (read by AI drafts). 03:30 site time, enqueued on the long queue,
+		# capped per night. Off until Jarz Chat Settings is enabled; never
+		# raises. See jarz_pos.services.chat_summary.
+		"30 3 * * *": [
+			"jarz_pos.services.chat_summary.enqueue_nightly",
+		],
 	},
 }
 
