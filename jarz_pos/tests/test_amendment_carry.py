@@ -226,14 +226,30 @@ class TestApplyHeaderDiscountCarry(unittest.TestCase):
 		return doc
 
 	@staticmethod
-	def _eval(*accepted):
-		return SimpleNamespace(results=[SimpleNamespace(accepted=a) for a in accepted])
+	def _eval(*accepted, codes=None):
+		codes = codes or ["SAVE10", "WOO50", "NEW15", "BAD"][: len(accepted)]
+		return SimpleNamespace(results=[SimpleNamespace(code=c, accepted=a) for c, a in zip(codes, accepted)])
 
 	def test_every_code_accepted_lets_the_re_evaluation_stand(self):
 		doc = self._doc(discount=40.0)
 		carry = {"header_discount": 50.0, "source_promo_codes": ["SAVE10"]}
 		self.assertEqual(carry_mod.apply_header_discount_carry(doc, carry, self._eval(True), ["SAVE10"]), 0.0)
 		self.assertEqual(doc.discount_amount, 40.0)
+
+	def test_a_rejected_added_code_does_not_bring_the_source_discount_back(self):
+		# Source P10 = 100 on 1000; cart cut to 500 re-evaluates P10 at 50. The added
+		# BAD is rejected -- that must not put the full 100 back on the smaller cart.
+		doc = self._doc(discount=50.0)
+		carry = {"header_discount": 100.0, "source_promo_codes": ["P10"]}
+		promo_eval = self._eval(True, False, codes=["P10", "BAD"])
+		self.assertEqual(carry_mod.apply_header_discount_carry(doc, carry, promo_eval, ["P10", "BAD"]), 0.0)
+		self.assertEqual(doc.discount_amount, 50.0)
+
+	def test_a_rejected_source_code_still_keeps_its_discount_next_to_an_added_one(self):
+		doc = self._doc(discount=20.0)
+		carry = {"header_discount": 50.0, "source_promo_codes": ["WOO50"]}
+		promo_eval = self._eval(False, True, codes=["WOO50", "NEW15"])
+		self.assertEqual(carry_mod.apply_header_discount_carry(doc, carry, promo_eval, ["WOO50", "NEW15"]), 50.0)
 
 	def test_added_code_does_not_replace_a_larger_codeless_discount(self):
 		# A Woo non-coupon discount is re-evaluated by no code: the larger one stands.
@@ -318,6 +334,15 @@ class TestRequestedPromoCodes(unittest.TestCase):
 			self.assertEqual(updated["header_discount"], 0.0)
 			self.assertEqual(updated["woo_discount_total"], 0.0)
 
+	def test_keep_source_only_adds(self):
+		# A restored draft has no codes in hand: [] or a new code must not remove SAVE10.
+		for requested, expected in (([], ["SAVE10"]), (["NEW15"], ["SAVE10", "NEW15"])):
+			updated = carry_mod.with_requested_promo_codes(
+				self._carry(["SAVE10"], 25.0), requested, keep_source=True
+			)
+			self.assertEqual(updated["promo_codes"], expected)
+			self.assertEqual(updated["header_discount"], 25.0)
+
 	def test_codeless_source_discount_survives_an_added_code(self):
 		updated = carry_mod.with_requested_promo_codes(self._carry([], 30.0), ["NEW15"])
 		self.assertEqual(updated["header_discount"], 30.0)
@@ -331,6 +356,10 @@ class TestRequestedPromoCodes(unittest.TestCase):
 		without = _build_invoice_amendment_request_id(**base)
 		self.assertEqual(without, _build_invoice_amendment_request_id(**base, promo_codes=None))
 		self.assertNotEqual(without, _build_invoice_amendment_request_id(**base, promo_codes=["BACK42R4FV"]))
+		self.assertNotEqual(
+			_build_invoice_amendment_request_id(**base, promo_codes=["BACK42R4FV"]),
+			_build_invoice_amendment_request_id(**base, promo_codes=["BACK42R4FV"], keep_source_promo_codes=1),
+		)
 
 
 class TestAmendmentJobCarriesSourcePricing(unittest.TestCase):
@@ -407,6 +436,13 @@ class TestAmendmentJobCarriesSourcePricing(unittest.TestCase):
 		src = self._source(custom_pos_audit_markers="", custom_promo_codes='["SAVE10"]', grand_total=0.0)
 		creation = self._run(src, [{"item_code": "PISTACHIO-L", "qty": 1, "rate": 160}], promo_codes="[]")
 		self.assertIsNone(creation.call_args.kwargs["promo_codes"])
+
+	def test_restored_draft_adding_a_code_keeps_the_source_code(self):
+		src = self._source(custom_pos_audit_markers="", custom_promo_codes='["SAVE10"]', grand_total=0.0)
+		creation = self._run(
+			src, [{"item_code": "PISTACHIO-L", "qty": 1, "rate": 160}], promo_codes='["NEW15"]', keep_source_promo_codes=1
+		)
+		self.assertEqual(json.loads(creation.call_args.kwargs["promo_codes"]), ["SAVE10", "NEW15"])
 
 	def test_no_codes_passes_none(self):
 		creation = self._run(self._source(), [{"item_code": "PISTACHIO-L", "qty": 1, "rate": 160}])

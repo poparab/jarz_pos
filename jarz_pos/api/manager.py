@@ -1805,6 +1805,7 @@ def _build_invoice_amendment_request_id(
 	provided_idempotency_key: str | None = None,
 	employee_payment: str | None = None,
 	promo_codes: list[str] | None = None,
+	keep_source_promo_codes: bool | int | str | None = None,
 ) -> str:
 	"""Build a stable idempotency key for amendment retries of the same payload.
 
@@ -1859,6 +1860,8 @@ def _build_invoice_amendment_request_id(
 	# Same rule: adding a promo code to an otherwise unchanged cart is a new request.
 	if promo_codes is not None:
 		payload["promo_codes"] = list(promo_codes)
+		if _is_truthy_flag(keep_source_promo_codes):
+			payload["keep_source_promo_codes"] = True
 	digest = hashlib.sha256(
 		json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
 	).hexdigest()
@@ -2499,6 +2502,7 @@ def _run_invoice_amendment_job(
 	delivery_slot_explicit: bool | int | str | None = None,
 	keep_source_line_pricing: bool | int | str | None = None,
 	promo_codes: Any = None,
+	keep_source_promo_codes: bool | int | str | None = None,
 ) -> dict[str, Any]:
 	"""Queueable job that supersedes a submitted invoice and recreates it from the POS payload."""
 	if _create_amendment_invoice is None:
@@ -2802,7 +2806,11 @@ def _run_invoice_amendment_job(
 		or (effective_custom_delivery_income is not None and flt(effective_custom_delivery_income) <= 0),
 	)
 	# The operator's codes, when the app sent them, replace the source's (order 20029).
-	amendment_carry = _with_requested_promo_codes(amendment_carry, _parse_requested_promo_codes(promo_codes))
+	amendment_carry = _with_requested_promo_codes(
+		amendment_carry,
+		_parse_requested_promo_codes(promo_codes),
+		keep_source=_is_truthy_flag(keep_source_promo_codes),
+	)
 	# A replacement priced from a different list than the source (the operator picked
 	# a new one) is re-priced from that list: pinning every line to the old price
 	# would quietly overrule the choice.
@@ -3308,6 +3316,7 @@ def submit_invoice_amendment(
 	delivery_slot_explicit: bool | int | str | None = None,
 	keep_source_line_pricing: bool | int | str | None = None,
 	promo_codes: Any = None,
+	keep_source_promo_codes: bool | int | str | None = None,
 ) -> dict[str, Any]:
 	"""Supersede a submitted invoice and recreate it from the edited POS cart payload.
 
@@ -3315,6 +3324,8 @@ def submit_invoice_amendment(
 	authoritative when sent -- ``[]`` removes the source's codes. Omitted (older apps)
 	→ the source's codes are carried. Before this was declared, a code added while
 	amending was dropped silently (order 20029, 2026-10-30).
+	``keep_source_promo_codes=1``: the app did not have the order's codes (a draft
+	restored from local storage), so ``promo_codes`` only adds to them.
 
 	``delivery_slot_explicit``: ``1`` when the operator picked the delivery slot,
 	``0`` when the POS pre-selected it, omitted by older apps. Declared and passed
@@ -3404,6 +3415,7 @@ def submit_invoice_amendment(
 		provided_idempotency_key=idempotency_key,
 		employee_payment=employee_payment,
 		promo_codes=_parse_requested_promo_codes(promo_codes),
+		keep_source_promo_codes=keep_source_promo_codes,
 	)
 	if existing_replacement:
 		return _build_invoice_amendment_response(
@@ -3466,6 +3478,7 @@ def submit_invoice_amendment(
 		delivery_slot_explicit=delivery_slot_explicit,
 		keep_source_line_pricing=keep_source_line_pricing,
 		promo_codes=promo_codes,
+		keep_source_promo_codes=keep_source_promo_codes,
 	)
 
 

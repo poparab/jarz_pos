@@ -152,19 +152,26 @@ def parse_requested_promo_codes(value: Any) -> list[str] | None:
 	return _promo_codes._normalize_codes(_promo_codes._parse_codes_value(value))
 
 
-def with_requested_promo_codes(carry: dict[str, Any], requested: list[str] | None) -> dict[str, Any]:
+def with_requested_promo_codes(
+	carry: dict[str, Any], requested: list[str] | None, *, keep_source: bool = False
+) -> dict[str, Any]:
 	"""Make the operator's codes the ones the replacement is evaluated with.
 
 	Removing a source code also drops the source's header discount from the carry:
 	that discount came from the codes, so carrying it would put back what the
 	operator just took off. Added codes leave it alone; :func:`apply_header_discount_carry`
 	then keeps whichever discount is larger.
+
+	``keep_source``: the app did not know the order's codes (a draft restored from
+	local storage keeps none), so ``requested`` only ADDS to them and removes nothing.
 	"""
 	if requested is None:
 		return carry
+	source_codes = carry.get("source_promo_codes") or []
+	if keep_source:
+		requested = list(source_codes) + [code for code in requested if code not in source_codes]
 	updated = dict(carry)
 	updated["promo_codes"] = list(requested)
-	source_codes = carry.get("source_promo_codes") or []
 	if any(code not in requested for code in source_codes):
 		updated["header_discount"] = 0.0
 		updated["woo_discount_total"] = 0.0
@@ -345,7 +352,17 @@ def apply_header_discount_carry(
 		return 0.0
 	source_codes = carry.get("source_promo_codes", carry.get("promo_codes")) or []
 	results = list(getattr(promo_eval, "results", None) or [])
-	if source_codes and promo_codes_list and results and all(getattr(r, "accepted", False) for r in results):
+	# Judged on the SOURCE's codes only: a code the operator added and the engine
+	# rejected says nothing about whether the source discount was reproduced, and
+	# letting it trip the carry would put the full source amount back on a smaller cart.
+	source_results = {
+		str(getattr(r, "code", "") or "").strip().upper(): bool(getattr(r, "accepted", False)) for r in results
+	}
+	if (
+		source_codes
+		and promo_codes_list
+		and all(source_results.get(str(code).strip().upper()) for code in source_codes)
+	):
 		return 0.0
 	current = flt(_get(invoice_doc, "discount_amount"))
 	if current >= source_discount - _RATE_TOLERANCE:
