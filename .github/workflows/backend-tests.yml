@@ -647,6 +647,10 @@ jobs:
             # issue/return permission matrix, the holder's expense routing and
             # the purchase custody:<holder> option.
             test_cash_custody
+            # Payment Entry over-allocation guard: a locking read of each
+            # referenced invoice, so two concurrent payments cannot both take
+            # the same outstanding (2026-10-28: one PI paid three times).
+            test_payment_guards
             # Reversing a courier settlement. Until this shipped, every reversal
             # was a hand-written script piped into a production bench console.
             # The load-bearing cases are the refusals: an arbitrary Journal

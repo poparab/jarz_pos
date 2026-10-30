@@ -495,7 +495,12 @@ doc_events = {
 		"on_cancel": "jarz_pos.services.cash_custody.verify_custody_after_posting",
 	},
 	"Payment Entry": {
-		"before_submit": "jarz_pos.services.cash_custody.guard_custody_balance",
+		"before_submit": [
+			# Locks the referenced invoices so two concurrent payments cannot
+			# both allocate the same outstanding amount (2026-10-28: one PI paid 3x).
+			"jarz_pos.services.payment_guards.guard_invoice_overallocation",
+			"jarz_pos.services.cash_custody.guard_custody_balance",
+		],
 		"before_cancel": "jarz_pos.services.cash_custody.guard_custody_balance_on_cancel",
 		"on_submit": "jarz_pos.services.cash_custody.verify_custody_after_posting",
 		"on_cancel": "jarz_pos.services.cash_custody.verify_custody_after_posting",
