@@ -231,9 +231,22 @@ class TestApplyHeaderDiscountCarry(unittest.TestCase):
 
 	def test_every_code_accepted_lets_the_re_evaluation_stand(self):
 		doc = self._doc(discount=40.0)
-		carry = {"header_discount": 50.0}
+		carry = {"header_discount": 50.0, "source_promo_codes": ["SAVE10"]}
 		self.assertEqual(carry_mod.apply_header_discount_carry(doc, carry, self._eval(True), ["SAVE10"]), 0.0)
 		self.assertEqual(doc.discount_amount, 40.0)
+
+	def test_added_code_does_not_replace_a_larger_codeless_discount(self):
+		# A Woo non-coupon discount is re-evaluated by no code: the larger one stands.
+		doc = self._doc(discount=20.0)
+		carry = {"header_discount": 50.0, "source_promo_codes": []}
+		self.assertEqual(carry_mod.apply_header_discount_carry(doc, carry, self._eval(True), ["NEW15"]), 50.0)
+		self.assertEqual(doc.discount_amount, 50.0)
+
+	def test_added_code_larger_than_a_codeless_discount_wins(self):
+		doc = self._doc(discount=72.0)
+		carry = {"header_discount": 50.0, "source_promo_codes": []}
+		self.assertEqual(carry_mod.apply_header_discount_carry(doc, carry, self._eval(True), ["NEW15"]), 0.0)
+		self.assertEqual(doc.discount_amount, 72.0)
 
 	def test_rejected_code_keeps_the_source_discount(self):
 		doc = self._doc()
@@ -272,8 +285,52 @@ class TestBuildAmendmentCarry(unittest.TestCase):
 		src = _free_cakes_source(custom_promo_codes='["SAVE10"]', discount_amount=25)
 		carry = carry_mod.build_amendment_carry(src, zero_shipping=False)
 		self.assertEqual(carry["promo_codes"], ["SAVE10"])
+		self.assertEqual(carry["source_promo_codes"], ["SAVE10"])
 		self.assertEqual(carry["header_discount"], 25.0)
 		self.assertEqual(carry["source"], _SOURCE)
+
+
+class TestRequestedPromoCodes(unittest.TestCase):
+	"""Order 20029 (2026-10-30): a code added while amending was dropped twice."""
+
+	def _carry(self, codes, discount):
+		return {"promo_codes": list(codes), "source_promo_codes": list(codes), "header_discount": discount,
+			"woo_discount_total": discount}
+
+	def test_parse_tells_absent_from_empty(self):
+		self.assertIsNone(carry_mod.parse_requested_promo_codes(None))
+		self.assertEqual(carry_mod.parse_requested_promo_codes("[]"), [])
+		self.assertEqual(carry_mod.parse_requested_promo_codes('["back42r4fv", "BACK42R4FV"]'), ["BACK42R4FV"])
+
+	def test_absent_keeps_the_source_carry(self):
+		carry = self._carry(["SAVE10"], 25.0)
+		self.assertIs(carry_mod.with_requested_promo_codes(carry, None), carry)
+
+	def test_added_code_is_used_and_the_source_discount_kept(self):
+		updated = carry_mod.with_requested_promo_codes(self._carry(["SAVE10"], 25.0), ["SAVE10", "BACK42R4FV"])
+		self.assertEqual(updated["promo_codes"], ["SAVE10", "BACK42R4FV"])
+		self.assertEqual(updated["header_discount"], 25.0)
+
+	def test_removed_code_drops_the_source_discount(self):
+		for requested in ([], ["OTHER"]):
+			updated = carry_mod.with_requested_promo_codes(self._carry(["SAVE10"], 25.0), requested)
+			self.assertEqual(updated["promo_codes"], requested)
+			self.assertEqual(updated["header_discount"], 0.0)
+			self.assertEqual(updated["woo_discount_total"], 0.0)
+
+	def test_codeless_source_discount_survives_an_added_code(self):
+		updated = carry_mod.with_requested_promo_codes(self._carry([], 30.0), ["NEW15"])
+		self.assertEqual(updated["header_discount"], 30.0)
+
+	def test_codes_change_the_amendment_request_id(self):
+		from jarz_pos.api.manager import _build_invoice_amendment_request_id
+
+		base = dict(invoice_id=_SOURCE, cart_json="[]", pos_profile_name=_PROFILE, customer_name=None,
+			shipping_address_name=None, required_delivery_datetime=None, delivery_end_datetime=None,
+			sales_partner=None, payment_type=None, pickup=None, payment_method=None)
+		without = _build_invoice_amendment_request_id(**base)
+		self.assertEqual(without, _build_invoice_amendment_request_id(**base, promo_codes=None))
+		self.assertNotEqual(without, _build_invoice_amendment_request_id(**base, promo_codes=["BACK42R4FV"]))
 
 
 class TestAmendmentJobCarriesSourcePricing(unittest.TestCase):
@@ -339,6 +396,17 @@ class TestAmendmentJobCarriesSourcePricing(unittest.TestCase):
 		src = self._source(custom_pos_audit_markers="", custom_promo_codes='["SAVE10"]', grand_total=0.0)
 		creation = self._run(src, [{"item_code": "PISTACHIO-L", "qty": 1, "rate": 160}])
 		self.assertEqual(json.loads(creation.call_args.kwargs["promo_codes"]), ["SAVE10"])
+
+	def test_operator_added_code_is_passed_to_creation(self):
+		# Order 20029: no code on the source, the operator added the customer's win-back code.
+		src = self._source(custom_pos_audit_markers="", grand_total=0.0)
+		creation = self._run(src, [{"item_code": "PISTACHIO-L", "qty": 1, "rate": 160}], promo_codes='["back42r4fv"]')
+		self.assertEqual(json.loads(creation.call_args.kwargs["promo_codes"]), ["BACK42R4FV"])
+
+	def test_operator_removing_every_code_passes_none(self):
+		src = self._source(custom_pos_audit_markers="", custom_promo_codes='["SAVE10"]', grand_total=0.0)
+		creation = self._run(src, [{"item_code": "PISTACHIO-L", "qty": 1, "rate": 160}], promo_codes="[]")
+		self.assertIsNone(creation.call_args.kwargs["promo_codes"])
 
 	def test_no_codes_passes_none(self):
 		creation = self._run(self._source(), [{"item_code": "PISTACHIO-L", "qty": 1, "rate": 160}])

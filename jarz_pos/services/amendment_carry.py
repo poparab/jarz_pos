@@ -12,6 +12,11 @@ the source carried *on top of* the price list was therefore dropped silently:
   because the amendment job never passed ``promo_codes`` at all;
 * the ``[ZERO SHIPPING OVERRIDE]`` audit marker (the money itself was kept).
 
+The operator can also change the codes while amending (order 20029, 2026-10-30:
+a win-back code added on two amendments was dropped both times, because the
+endpoint only ever forwarded the source's codes). :func:`with_requested_promo_codes`
+makes the app's list authoritative when it sends one.
+
 The amendment job (``api/manager.py::_run_invoice_amendment_job``) builds a
 *carry* from the cancelled source with :func:`build_amendment_carry`, injects the
 line prices into the cart with :func:`apply_source_line_pricing`, and publishes the
@@ -134,14 +139,48 @@ def source_promo_codes(source: Any) -> list[str]:
 		return []
 
 
+def parse_requested_promo_codes(value: Any) -> list[str] | None:
+	"""The operator's promo codes for an amendment, or None when the app sent none.
+
+	None (an older app that never sends the field) means "keep the source's codes";
+	an empty list means the operator removed them all.
+	"""
+	if value is None:
+		return None
+	from jarz_pos.services import promo_codes as _promo_codes
+
+	return _promo_codes._normalize_codes(_promo_codes._parse_codes_value(value))
+
+
+def with_requested_promo_codes(carry: dict[str, Any], requested: list[str] | None) -> dict[str, Any]:
+	"""Make the operator's codes the ones the replacement is evaluated with.
+
+	Removing a source code also drops the source's header discount from the carry:
+	that discount came from the codes, so carrying it would put back what the
+	operator just took off. Added codes leave it alone; :func:`apply_header_discount_carry`
+	then keeps whichever discount is larger.
+	"""
+	if requested is None:
+		return carry
+	updated = dict(carry)
+	updated["promo_codes"] = list(requested)
+	source_codes = carry.get("source_promo_codes") or []
+	if any(code not in requested for code in source_codes):
+		updated["header_discount"] = 0.0
+		updated["woo_discount_total"] = 0.0
+	return updated
+
+
 def build_amendment_carry(source: Any, *, zero_shipping: bool) -> dict[str, Any]:
 	"""Everything the replacement must inherit from ``source`` beyond its cart."""
+	codes = source_promo_codes(source)
 	return {
 		"source": str(_get(source, "name") or "").strip(),
 		"line_rates": source_line_rate_overrides(source),
 		"line_discounts": source_line_discounts(source),
 		"source_qty": source_item_quantities(source),
-		"promo_codes": source_promo_codes(source),
+		"promo_codes": codes,
+		"source_promo_codes": list(codes),
 		"header_discount": round(flt(_get(source, "discount_amount")), 2),
 		"woo_discount_total": round(flt(_get(source, "custom_promo_woo_discount_total")), 2),
 		"zero_shipping_marker": bool(zero_shipping and source_has_marker(source, ZERO_SHIPPING_MARKER)),
@@ -294,14 +333,19 @@ def apply_header_discount_carry(
 	window closed after the order was placed, a Woo non-coupon discount with no code
 	at all) the source's discount amount is kept, capped at the new line total.
 	Returns the amount carried, 0 when nothing was changed.
+
+	A source discount with no code behind it (a Woo non-coupon discount) is not
+	re-evaluated by any code, so a code the operator adds does not replace it: the
+	larger of the two stands.
 	"""
 	if not carry:
 		return 0.0
 	source_discount = flt(carry.get("header_discount"))
 	if source_discount <= 0:
 		return 0.0
+	source_codes = carry.get("source_promo_codes", carry.get("promo_codes")) or []
 	results = list(getattr(promo_eval, "results", None) or [])
-	if promo_codes_list and results and all(getattr(r, "accepted", False) for r in results):
+	if source_codes and promo_codes_list and results and all(getattr(r, "accepted", False) for r in results):
 		return 0.0
 	current = flt(_get(invoice_doc, "discount_amount"))
 	if current >= source_discount - _RATE_TOLERANCE:

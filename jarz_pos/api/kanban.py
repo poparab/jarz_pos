@@ -3486,6 +3486,14 @@ def get_invoice_details(invoice_id: str) -> dict[str, Any]:
 			data["amendment_line_rates"] = source_line_rate_overrides(invoice)
 		except Exception:
 			data["amendment_line_rates"] = {}
+		# The order's promo codes, normalised, so the edit cart opens with them applied
+		# and the operator can keep, remove or add to them.
+		try:
+			from jarz_pos.services.amendment_carry import source_promo_codes
+
+			data["amendment_promo_codes"] = source_promo_codes(invoice)
+		except Exception:
+			data["amendment_promo_codes"] = []
 		data.update(get_invoice_cancellation_eligibility(invoice))
 		try:
 			from jarz_pos.services.invoice_return import get_invoice_return_eligibility

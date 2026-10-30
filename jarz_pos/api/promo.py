@@ -41,6 +41,10 @@ def validate_promo_codes():
 	    pos_profile  : optional POS Profile name
 	    channel      : default "flutter"
 	    pickup       : truthy flag
+	    amended_from : optional Sales Invoice being amended; its own redemptions
+	                   are not counted, so a single-use code the order already
+	                   carries does not preview as used up (the redemption is
+	                   reversed when the amendment cancels it)
 	"""
 	fd = frappe.form_dict
 
@@ -63,6 +67,11 @@ def validate_promo_codes():
 	invoice_doc = frappe.new_doc("Sales Invoice")
 	if customer:
 		invoice_doc.customer = customer
+	# evaluate_promo_codes skips redemptions held by invoice_doc.name; the doc is
+	# never saved, so borrowing the source's name only affects that count.
+	amended_from = str(fd.get("amended_from") or "").strip()
+	if amended_from and frappe.db.exists("Sales Invoice", amended_from):
+		invoice_doc.name = amended_from
 
 	# Resolve company defensively from POS profile or global defaults.
 	company = None
