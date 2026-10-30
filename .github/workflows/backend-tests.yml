@@ -651,6 +651,10 @@ jobs:
             # referenced invoice, so two concurrent payments cannot both take
             # the same outstanding (2026-10-28: one PI paid three times).
             test_payment_guards
+            # submit_transfer's duplicate-tap claim (Redis SET NX): a repeat of
+            # the same transfer within 2 min is refused (2026-10-27: one Nasr
+            # City transfer posted twice 16 s apart).
+            test_transfer_duplicate_guard
             # Reversing a courier settlement. Until this shipped, every reversal
             # was a hand-written script piped into a production bench console.
             # The load-bearing cases are the refusals: an arbitrary Journal

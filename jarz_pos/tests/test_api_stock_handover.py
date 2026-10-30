@@ -1885,6 +1885,13 @@ class TestStockHandoverReminders(unittest.TestCase):
 
 
 class TestSubmitTransferRouting(unittest.TestCase):
+	def setUp(self):
+		# These tests send the same transfer repeatedly; the duplicate-tap
+		# claim (pinned in test_transfer_duplicate_guard) would refuse them.
+		claim = patch.object(transfer_api, "_claim_transfer", return_value=None)
+		claim.start()
+		self.addCleanup(claim.stop)
+
 	def test_transfer_touching_a_branch_becomes_a_pending_handover(self):
 		with (
 			patch.object(transfer_api, "_ensure_transfer_access"),
@@ -1952,7 +1959,9 @@ class TestSubmitTransferRouting(unittest.TestCase):
 	def test_direct_is_refused_below_jarz_manager(self):
 		with (
 			patch.object(transfer_api, "_ensure_transfer_access"),
-			patch.object(transfer_api.frappe, "get_roles", return_value=["JARZ line manager", "Stock Manager"]),
+			patch.object(
+				transfer_api.frappe, "get_roles", return_value=["JARZ line manager", "Stock Manager"]
+			),
 			patch.object(svc, "touches_branch", return_value=True),
 			patch.object(svc, "create_manager_handover") as create,
 			patch.object(transfer_api, "_insert_and_submit_stock_entry") as post,

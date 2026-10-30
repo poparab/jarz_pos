@@ -297,6 +297,62 @@ def _insert_and_submit_stock_entry(se: Any) -> Any:
 	return se
 
 
+# How long an identical transfer by the same user is treated as a repeat tap.
+# On 2026-10-27, while production was throttled, one direct Finished Goods ->
+# Nasr City transfer (8 lines, 5,697.96 EGP) was posted twice 16 s apart.
+DUPLICATE_TRANSFER_WINDOW = 120
+
+
+def _transfer_claim_key(source_warehouse: str, target_warehouse: str, lines: list[dict[str, Any]]) -> str:
+	import hashlib
+	import json
+
+	lines_key = sorted([ln["item_code"], round(float(ln["qty"]), 6)] for ln in lines)
+	raw = json.dumps([str(frappe.session.user), source_warehouse, target_warehouse, lines_key])
+	return frappe.cache.make_key("jarz_pos:transfer_claim:" + hashlib.sha256(raw.encode()).hexdigest())
+
+
+def _claim_transfer(source_warehouse: str, target_warehouse: str, lines: list[dict[str, Any]]) -> str | None:
+	"""Atomically claim this exact transfer for ``DUPLICATE_TRANSFER_WINDOW`` seconds.
+
+	Refuses when the same user sent the same warehouses and lines within the
+	window, naming what the first request posted. A Redis ``SET NX`` rather
+	than a DB check: a request's plain reads answer from its own snapshot, so
+	two requests in flight at once would each miss the other. Returns the key
+	to record the result under, or ``None`` when Redis is unreachable (fails
+	open: a broken cache must not stop stock moving).
+	"""
+	try:
+		key = _transfer_claim_key(source_warehouse, target_warehouse, lines)
+		if frappe.cache.set(key, "in progress", nx=True, ex=DUPLICATE_TRANSFER_WINDOW):
+			return key
+		previous = frappe.cache.get(key)
+	except Exception:
+		frappe.log_error(title="submit_transfer: duplicate claim unavailable", message=frappe.get_traceback())
+		return None
+	if isinstance(previous, bytes):
+		previous = previous.decode()
+	frappe.throw(
+		_(
+			"This exact transfer was already sent in the last {0} seconds ({1}). "
+			"Check the transfer history; send it again after that only if it really is a second transfer."
+		).format(DUPLICATE_TRANSFER_WINDOW, previous or _("in progress")),
+		title=_("Transfer already sent"),
+	)
+
+
+def _record_transfer_claim(key: str | None, result: str | None) -> None:
+	if not key:
+		return
+	try:
+		if result:
+			frappe.cache.set(key, result, xx=True, keepttl=True)
+		else:
+			frappe.cache.delete(key)
+	except Exception:
+		pass
+
+
 @frappe.whitelist(methods=["POST"])
 def submit_transfer(
 	source_warehouse: str,
@@ -347,22 +403,33 @@ def submit_transfer(
 	from jarz_pos.services import stock_handover as handover_service
 
 	remarks = None
-	if handover_service.touches_branch(source_warehouse, target_warehouse):
-		if not direct:
-			handover = handover_service.create_manager_handover(source_warehouse, target_warehouse, cleaned)
-			return {"ok": True, "stock_entry": None, "handover": handover, "pending": True}
-		if not can_post_direct():
-			frappe.throw(
-				_("Not permitted: only a JARZ Manager can post a branch transfer without confirmation."),
-				frappe.PermissionError,
-			)
-		remarks = _("Direct transfer by {0}, posted without the other side's confirmation.").format(
-			frappe.session.user
+	branch = handover_service.touches_branch(source_warehouse, target_warehouse)
+	if branch and direct and not can_post_direct():
+		frappe.throw(
+			_("Not permitted: only a JARZ Manager can post a branch transfer without confirmation."),
+			frappe.PermissionError,
 		)
 
-	se = _build_material_transfer(source_warehouse, target_warehouse, cleaned, posting_date, remarks)
-	_insert_and_submit_stock_entry(se)
-	frappe.db.commit()
+	# A repeat tap while the server is slow must not move the stock twice
+	# (or open a second pending handover for the same goods).
+	claim = _claim_transfer(source_warehouse, target_warehouse, cleaned)
+	try:
+		if branch and not direct:
+			handover = handover_service.create_manager_handover(source_warehouse, target_warehouse, cleaned)
+			_record_transfer_claim(claim, handover)
+			return {"ok": True, "stock_entry": None, "handover": handover, "pending": True}
+		if branch:
+			remarks = _("Direct transfer by {0}, posted without the other side's confirmation.").format(
+				frappe.session.user
+			)
+
+		se = _build_material_transfer(source_warehouse, target_warehouse, cleaned, posting_date, remarks)
+		_insert_and_submit_stock_entry(se)
+		frappe.db.commit()
+	except Exception:
+		_record_transfer_claim(claim, None)
+		raise
+	_record_transfer_claim(claim, se.name)
 
 	out: dict[str, Any] = {"ok": True, "stock_entry": se.name}
 	if remarks:
