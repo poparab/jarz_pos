@@ -455,6 +455,51 @@ class TestStaffCorrectionWrite(unittest.TestCase):
 		fake.log_error.assert_called_once()
 
 
+class TestPinChangedHook(unittest.TestCase):
+	"""A moved pin calls ``jarz_address_pin_changed`` hooks (how Woo re-pushes the order)."""
+
+	def _write(self, current, *, hook_error=None):
+		from unittest.mock import MagicMock
+
+		from jarz_pos.services import geo_resolution
+
+		fake = MagicMock()
+		fake.session.user = "staff@jarz"
+		fake.get_meta.return_value.has_field.return_value = True
+		fake.get_hooks.return_value = ["other_app.pins.on_pin_changed"]
+		listener = MagicMock(side_effect=hook_error)
+		fake.get_attr.return_value = listener
+		with (
+			patch.object(geo_resolution, "frappe", fake),
+			patch.object(geo_resolution, "_assert_geo_fields"),
+			patch.object(geo_resolution, "get_address_geo", return_value=current),
+		):
+			result = geo_resolution.set_address_pin(
+				"ADDR-0001", latitude=30.05, longitude=31.05, source="pos_link", staff_correction=True
+			)
+		return result, fake, listener
+
+	def test_moved_pin_calls_the_hook_with_the_address(self):
+		result, fake, listener = self._write({"custom_geo_source": "", "custom_latitude": None, "custom_longitude": None})
+		self.assertTrue(result["accepted"])
+		fake.get_hooks.assert_called_once_with("jarz_address_pin_changed")
+		listener.assert_called_once_with(address="ADDR-0001")
+
+	def test_unchanged_point_calls_no_hook(self):
+		current = {"custom_geo_source": "pos_link", "custom_latitude": 30.05, "custom_longitude": 31.05}
+		result, fake, listener = self._write(current)
+		listener.assert_not_called()
+
+	def test_hook_failure_does_not_undo_the_write(self):
+		result, fake, listener = self._write(
+			{"custom_geo_source": "", "custom_latitude": None, "custom_longitude": None},
+			hook_error=RuntimeError("woo down"),
+		)
+		self.assertTrue(result["accepted"])
+		fake.db.set_value.assert_called_once()
+		fake.log_error.assert_called_once()
+
+
 class TestBeforeSaveClamp(unittest.TestCase):
 	"""``events.address.clamp_geo_confidence`` — zero queries, never raises."""
 

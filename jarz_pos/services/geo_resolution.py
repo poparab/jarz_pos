@@ -474,7 +474,30 @@ def set_address_pin(
 		except Exception:
 			frappe.log_error(frappe.get_traceback(), "geo_resolution: staff correction audit failed")
 
+	if decision.get("coordinates_changed"):
+		_notify_pin_changed(decision["address"])
+
 	return {"success": True, **decision, "written_fields": sorted(updates)}
+
+
+#: Hook other apps register to hear that an Address pin moved. The set_value
+#: above fires no document event (by design, see _assert_no_woo_trigger_fields),
+#: so without this a pin set after an order reached the store never followed it
+#: there. Named hook, not an import: jarz_pos never imports another app.
+PIN_CHANGED_HOOK = "jarz_address_pin_changed"
+
+
+def _notify_pin_changed(address_name: str) -> None:
+	"""Call every ``jarz_address_pin_changed`` hook. Best-effort; never raises."""
+	try:
+		methods = frappe.get_hooks(PIN_CHANGED_HOOK) or []
+	except Exception:
+		return
+	for method in methods:
+		try:
+			frappe.get_attr(method)(address=address_name)
+		except Exception:
+			frappe.log_error(frappe.get_traceback(), f"geo_resolution: {PIN_CHANGED_HOOK} hook failed")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
