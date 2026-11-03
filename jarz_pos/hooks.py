@@ -397,6 +397,9 @@ has_permission = {
 
 override_doctype_class = {
 	"POS Closing Entry": "jarz_pos.overrides.pos_closing_entry.POSClosingEntry",
+	# Any-branch check-in (Employee.custom_checkin_any_branch): HRMS's geofence
+	# measures only the rostered branch, and it throws before any app hook runs.
+	"Employee Checkin": "jarz_pos.overrides.employee_checkin.EmployeeCheckin",
 }
 
 # Document Events

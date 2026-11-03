@@ -20,6 +20,7 @@ from typing import Any, Optional
 import frappe
 
 from jarz_pos.events.employee_checkin import EMPLOYEE_EXEMPT_FIELD
+from jarz_pos.services.checkin_location import ANY_BRANCH_FIELD
 from jarz_pos.services.roster import (
 	EMPLOYEE_STANDARD_HOURS_FIELD,
 	POS_PROFILE_LOCATION_FIELD,
@@ -110,6 +111,18 @@ def ensure_roster_setup() -> dict[str, list[str]]:
 				"description": (
 					"Let this employee check in even on a day the roster leaves empty. "
 					"For fixing a rota mistake without switching the gate off company-wide."
+				),
+			},
+			{
+				"fieldname": ANY_BRANCH_FIELD,
+				"label": "May Check In At Any Branch",
+				"fieldtype": "Check",
+				"insert_after": EMPLOYEE_EXEMPT_FIELD,
+				"default": "0",
+				"description": (
+					"Accept this employee's check-in at any branch, not only the one "
+					"on their shift. Still geofenced: they must be at a branch. For a "
+					"manager who visits other branches before their own."
 				),
 			},
 		],

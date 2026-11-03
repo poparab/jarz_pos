@@ -138,6 +138,7 @@ from frappe.utils import add_days, flt, get_datetime, get_first_day, get_last_da
 
 from jarz_pos.events.employee_checkin import EMPLOYEE_EXEMPT_FIELD
 from jarz_pos.services import roster as roster_service
+from jarz_pos.services.checkin_location import ANY_BRANCH_FIELD, any_branch_field_exists
 from jarz_pos.services.checkin_device import CHECKIN_FLAG_FIELDS, FLAG_ORDER, mask_tokens_in_detail
 from jarz_pos.services.checkin_log_type import CHECKIN_LOG_TYPE_FIELDS
 from jarz_pos.utils.settings_utils import single_flag, single_int
@@ -436,7 +437,11 @@ def _distance_m(lat1: Any, lng1: Any, lat2: Any, lng2: Any) -> float | None:
 		return distance_m_or_none(a_lat, a_lng, b_lat, b_lng)
 
 
-def _geo_ok(coords: list[tuple[Any, Any]], location_row: dict[str, Any] | None) -> bool | None:
+def _geo_ok(
+	coords: list[tuple[Any, Any]],
+	location_row: dict[str, Any] | None,
+	any_of: list[dict[str, Any]] | None = None,
+) -> bool | None:
 	"""Whether every located check-in of the day sat inside the branch radius.
 
 	``None`` -- not False -- whenever the question cannot be answered: no
@@ -444,20 +449,31 @@ def _geo_ok(coords: list[tuple[Any, Any]], location_row: dict[str, Any] | None) 
 	configured. ``False`` is an accusation and must only be returned when a
 	distance was actually measured and actually exceeded. A non-positive radius
 	means "do not measure", matching HRMS's own escape hatch.
+
+	``any_of`` is for an any-branch employee (``custom_checkin_any_branch``):
+	the gate accepted them inside ANY branch, so a check-in inside any of these
+	locations is in range too -- otherwise the board would accuse them of the
+	exact visit the flag allows.
 	"""
-	if not coords or not location_row:
-		return None
-	radius = flt(location_row.get("checkin_radius") or 0)
-	if radius <= 0:
+	candidates = [row for row in [location_row, *(any_of or [])] if row]
+	if not coords or not candidates:
 		return None
 
 	measured = False
 	for lat, lng in coords:
-		distance = _distance_m(location_row.get("latitude"), location_row.get("longitude"), lat, lng)
-		if distance is None:
+		inside = None
+		for row in candidates:
+			radius = flt(row.get("checkin_radius") or 0)
+			if radius <= 0:
+				continue
+			distance = _distance_m(row.get("latitude"), row.get("longitude"), lat, lng)
+			if distance is None:
+				continue
+			inside = bool(inside) or distance <= radius
+		if inside is None:
 			continue
 		measured = True
-		if distance > radius:
+		if not inside:
 			return False
 	return True if measured else None
 
@@ -797,6 +813,7 @@ def build_cell(
 	grace: int,
 	today: date_cls,
 	location_row: dict[str, Any] | None = None,
+	any_branch_locations: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
 	"""One calendar cell, in the exact shape the contract fixes."""
 	late = late_minutes_for(group)
@@ -825,7 +842,7 @@ def build_cell(
 		"worked_hours": worked_hours_for(group),
 		"checkin_count": count,
 		"offshift": bool(group.get("shift_start") is None) if group else False,
-		"geo_ok": _geo_ok(group.get("coords") if group else [], location_row),
+		"geo_ok": _geo_ok(group.get("coords") if group else [], location_row, any_branch_locations),
 		"day_off": (
 			{
 				"off_type": day_off_row.get("off_type"),
@@ -1185,6 +1202,8 @@ def build_grid(
 		fields = ["name", "employee_name", "designation", "department", "status"]
 		if _employee_exempt_field_exists():
 			fields.append(EMPLOYEE_EXEMPT_FIELD)
+		if any_branch_field_exists():
+			fields.append(ANY_BRANCH_FIELD)
 		for row in frappe.get_all("Employee", filters={"name": ("in", names)}, fields=fields):
 			employee_rows[row["name"]] = row
 
@@ -1254,6 +1273,7 @@ def build_grid(
 		row = employee_rows.get(name, {})
 		designation = row.get("designation")
 		exempt = bool(row.get(EMPLOYEE_EXEMPT_FIELD))
+		any_branch = bool(row.get(ANY_BRANCH_FIELD))
 		employee_holidays = holidays.get(name, set())
 
 		cells: dict[str, dict[str, Any]] = {}
@@ -1301,6 +1321,7 @@ def build_grid(
 				grace=grace,
 				today=today,
 				location_row=locations.get(resolved_location) if resolved_location else None,
+				any_branch_locations=list(locations.values()) if any_branch else None,
 			)
 
 		cells_by_employee[name] = cells
@@ -1317,6 +1338,7 @@ def build_grid(
 				),
 				"is_courier": _is_courier(name, designation),
 				"exempt": exempt,
+				"any_branch": any_branch,
 			}
 		)
 
@@ -1623,7 +1645,9 @@ def get_employee(employee: str, from_date: str | None = None, to_date: str | Non
 					"latitude": lat,
 					"longitude": lng,
 					"geo_ok": _geo_ok(
-						[(lat, lng)] if lat is not None and lng is not None else [], location_row
+						[(lat, lng)] if lat is not None and lng is not None else [],
+						location_row,
+						list(locations.values()) if meta.get("any_branch") else None,
 					),
 				}
 			)

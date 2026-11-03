@@ -324,6 +324,11 @@ def _enforce_location(doc, shift_location: str | None) -> None:
 	its escape hatches: the global geolocation setting still governs, and a
 	location with a non-positive radius still means "do not measure".
 	"""
+	from jarz_pos.services import checkin_location
+
+	if checkin_location.is_any_branch(doc.employee):
+		checkin_location.enforce_any_branch(doc)
+		return
 	if not shift_location:
 		return
 	try:

@@ -487,6 +487,10 @@ jobs:
             # thing in this app that can stop a real person from clocking in --
             # each of its allow-paths is pinned individually.
             test_roster
+            # Any-branch check-in (Employee.custom_checkin_any_branch): the
+            # Employee Checkin class override that widens the geofence to every
+            # branch for a flagged manager -- and only for them.
+            test_checkin_location
             # Branch access (POS Profile membership + one-day access). The
             # reason this must be in CI: it writes the table that decides who
             # can use the till, so a regression either locks a cashier out of
