@@ -1458,3 +1458,204 @@ class TestPlanApiGuards(unittest.TestCase):
 
 if __name__ == "__main__":
 	unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# Weekly repeat: one day's change applied to the same weekday for good
+# ---------------------------------------------------------------------------
+
+import frappe as _frappe  # noqa: E402
+
+from jarz_pos.services import roster_weekly  # noqa: E402
+
+
+def _weekly_person(pattern=None, generated=date(2027, 1, 11), last_assignment=None, rows=None):
+	return _frappe._dict(
+		employee="HR-EMP-1",
+		name="Belal",
+		rows=rows or [],
+		pattern=pattern if pattern is not None else {"Sunday": ("Branch Evening", "Nasr City")},
+		generated=generated,
+		last_assignment=last_assignment,
+		open_ended=False,
+	)
+
+
+def _ssa_row(name, shift_type, days, location="Nasr City", after=date(2027, 1, 11)):
+	return _frappe._dict(
+		name=name,
+		company="Jarz",
+		shift_type=shift_type,
+		days=list(days),
+		shift_location=location,
+		create_shifts_after=after,
+	)
+
+
+class TestWeeklyDates(unittest.TestCase):
+	def test_steps_a_week_inclusive(self):
+		days = roster_weekly._weekly_dates(date(2026, 11, 8), date(2026, 11, 29))
+		self.assertEqual(days, [date(2026, 11, 8), date(2026, 11, 15), date(2026, 11, 22), date(2026, 11, 29)])
+
+	def test_horizon_is_the_latest_thing_already_on_file(self):
+		"""The new schedule starts the day after this, so nothing may sit past it."""
+		person = _weekly_person(generated=date(2027, 1, 11), last_assignment=date(2027, 12, 9))
+		self.assertEqual(roster_weekly._horizon(person, date(2026, 11, 8)), date(2027, 12, 9))
+
+	def test_horizon_never_falls_before_the_start(self):
+		person = _weekly_person(generated=None, last_assignment=None)
+		self.assertEqual(roster_weekly._horizon(person, date(2026, 11, 8)), date(2026, 11, 8))
+
+
+class TestWeeklyOneOffDays(unittest.TestCase):
+	"""What the weekly change keeps (and lists) instead of overwriting."""
+
+	SUNDAY = date(2026, 11, 8)
+
+	def _one_off(self, person, own=None, covering=(), assignment=None, ignore=None, through=date(2027, 1, 11)):
+		with patch.object(roster_service, "_assignment_on", return_value=assignment):
+			return roster_weekly._one_off(
+				person, self.SUNDAY, "Sunday", own, list(covering), through, ignore_cover_of=ignore
+			)
+
+	def test_day_off_on_a_working_weekday_is_a_one_off(self):
+		entry = self._one_off(_weekly_person(), own=_frappe._dict(name="DO-1", from_plan=0))
+		self.assertEqual(entry["kind"], roster_service.KIND_DAY_OFF)
+
+	def test_day_off_on_the_usual_day_off_is_the_pattern(self):
+		person = _weekly_person(pattern={"Monday": ("Branch Evening", "Nasr City")})
+		self.assertIsNone(self._one_off(person, own=_frappe._dict(name="DO-1", from_plan=0)))
+
+	def test_plan_made_day_off_is_never_a_one_off(self):
+		self.assertIsNone(self._one_off(_weekly_person(), own=_frappe._dict(name="DO-1", from_plan=1)))
+
+	def test_covering_a_colleague_is_listed(self):
+		cover = _frappe._dict(name="DO-2", employee="HR-EMP-2", employee_name="Hassan")
+		entry = self._one_off(_weekly_person(), covering=[cover])
+		self.assertEqual(entry["kind"], roster_service.KIND_COVER)
+		self.assertEqual(entry["records"], [cover])
+
+	def test_covering_the_person_being_repeated_is_not_listed(self):
+		"""The coverer covering them is exactly the relationship being rewritten."""
+		cover = _frappe._dict(name="DO-2", employee="HR-EMP-2", employee_name="Hassan")
+		assignment = {"shift_type": "Branch Full Day", "shift_location": "Dokki", "shift_schedule_assignment": None}
+		self.assertIsNone(self._one_off(_weekly_person(), covering=[cover], assignment=assignment, ignore="HR-EMP-2"))
+
+	def test_hand_swapped_shift_is_a_one_off(self):
+		assignment = {"shift_type": "Branch Morning", "shift_location": "Nasr City", "shift_schedule_assignment": None}
+		entry = self._one_off(_weekly_person(), assignment=assignment)
+		self.assertEqual(entry["kind"], roster_service.KIND_SHIFT)
+
+	def test_schedule_made_shift_is_not(self):
+		assignment = {"shift_type": "Branch Morning", "shift_location": "Nasr City", "shift_schedule_assignment": "SSA-1"}
+		self.assertIsNone(self._one_off(_weekly_person(), assignment=assignment))
+
+	def test_unlinked_tail_matching_the_rota_is_not(self):
+		assignment = {"shift_type": "Branch Evening", "shift_location": "Nasr City", "shift_schedule_assignment": None}
+		self.assertIsNone(self._one_off(_weekly_person(), assignment=assignment))
+
+	def test_emptied_day_inside_the_generated_range_is_a_one_off(self):
+		entry = self._one_off(_weekly_person(), assignment=None)
+		self.assertEqual(entry["kind"], roster_service.KIND_EMPTY)
+
+	def test_day_past_the_explicit_range_is_left_to_the_schedule(self):
+		self.assertIsNone(self._one_off(_weekly_person(), assignment=None, through=date(2026, 11, 1)))
+
+
+class TestWeeklyCoerce(unittest.TestCase):
+	def _coerce(self, **change):
+		base = {"employee": "HR-EMP-1", "date": "2026-11-08", "action": "assign", "shift_type": "Branch Morning"}
+		base.update(change)
+		with (
+			patch.object(roster_service, "_today", return_value=date(2026, 11, 3)),
+			patch.object(roster_weekly.frappe.db, "exists", return_value=True),
+		):
+			return roster_weekly._coerce(base)
+
+	def test_weekday_comes_from_the_date(self):
+		self.assertEqual(self._coerce()["weekday"], "Sunday")
+
+	def test_past_start_is_refused(self):
+		with self.assertRaises(Exception):
+			self._coerce(date="2026-11-01")
+
+	def test_cover_needs_a_shift(self):
+		with self.assertRaises(Exception):
+			self._coerce(action="day_off", covered_by="HR-EMP-2")
+
+	def test_nobody_covers_themselves(self):
+		with self.assertRaises(Exception):
+			self._coerce(action="day_off", covered_by="HR-EMP-1", cover_shift_type="Branch Full Day")
+
+	def test_unknown_shift_type_is_refused_before_any_write(self):
+		with (
+			patch.object(roster_service, "_today", return_value=date(2026, 11, 3)),
+			patch.object(roster_weekly.frappe.db, "exists", return_value=False),
+			self.assertRaises(Exception),
+		):
+			roster_weekly._coerce({"employee": "HR-EMP-1", "date": "2026-11-08", "shift_type": "Nope"})
+
+	def test_replace_reads_text_booleans(self):
+		self.assertFalse(self._coerce(replace_manual="false")["replace_manual"])
+		self.assertTrue(self._coerce(replace_manual="1")["replace_manual"])
+
+
+class TestWeeklyRepattern(unittest.TestCase):
+	"""The standing-rota half: where the weekday goes and from when."""
+
+	THROUGH = date(2027, 1, 11)
+
+	def _run(self, rows, target):
+		person = _weekly_person(rows=rows)
+		with (
+			patch.object(roster_weekly.frappe.db, "set_value") as set_value,
+			patch.object(roster_service, "_employee_company", return_value="Jarz"),
+			patch.object(
+				roster_service, "_find_or_create_shift_schedule", side_effect=lambda t, d: f"{t} ({','.join(d)})"
+			),
+			patch.object(roster_service, "_insert_schedule_assignment", return_value="SSA-NEW") as insert,
+		):
+			result = roster_weekly._repattern(person, "Sunday", target, self.THROUGH)
+		disabled = [c.args[1] for c in set_value.call_args_list]
+		inserted = [(c.args[2], c.args[3], c.args[4]) for c in insert.call_args_list]
+		return result, disabled, inserted
+
+	def test_shift_change_moves_the_weekday_to_its_own_schedule(self):
+		rows = [_ssa_row("SSA-E", "Branch Evening", ["Sunday", "Monday"], after=date(2027, 1, 10))]
+		result, disabled, inserted = self._run(rows, ("Branch Morning", "Nasr City"))
+		self.assertTrue(result["changed"])
+		self.assertEqual(disabled, ["SSA-E"])
+		# The old row carries on from where it was; the new weekday starts after the horizon.
+		self.assertIn(("Branch Evening (Monday)", "Nasr City", date(2027, 1, 10)), inserted)
+		self.assertIn(("Branch Morning (Sunday)", "Nasr City", self.THROUGH), inserted)
+
+	def test_joins_a_matching_schedule_only_when_it_is_at_the_horizon(self):
+		rows = [
+			_ssa_row("SSA-E", "Branch Evening", ["Sunday"]),
+			_ssa_row("SSA-M", "Branch Morning", ["Tuesday"], after=self.THROUGH),
+		]
+		_result, disabled, inserted = self._run(rows, ("Branch Morning", "Nasr City"))
+		self.assertEqual(sorted(disabled), ["SSA-E", "SSA-M"])
+		self.assertEqual(inserted, [("Branch Morning (Tuesday,Sunday)", "Nasr City", self.THROUGH)])
+
+	def test_a_matching_schedule_behind_the_horizon_is_left_alone(self):
+		"""Merging it would regenerate the weekday over days already written."""
+		rows = [
+			_ssa_row("SSA-E", "Branch Evening", ["Sunday"]),
+			_ssa_row("SSA-M", "Branch Morning", ["Tuesday"], after=date(2027, 1, 5)),
+		]
+		_result, disabled, inserted = self._run(rows, ("Branch Morning", "Nasr City"))
+		self.assertEqual(disabled, ["SSA-E"])
+		self.assertEqual(inserted, [("Branch Morning (Sunday)", "Nasr City", self.THROUGH)])
+
+	def test_day_off_only_removes_the_weekday(self):
+		rows = [_ssa_row("SSA-E", "Branch Evening", ["Sunday", "Monday"])]
+		_result, disabled, inserted = self._run(rows, None)
+		self.assertEqual(disabled, ["SSA-E"])
+		self.assertEqual(inserted, [("Branch Evening (Monday)", "Nasr City", self.THROUGH)])
+
+	def test_already_right_changes_nothing(self):
+		rows = [_ssa_row("SSA-E", "Branch Evening", ["Sunday"])]
+		result, disabled, inserted = self._run(rows, ("Branch Evening", "Nasr City"))
+		self.assertFalse(result["changed"])
+		self.assertEqual((disabled, inserted), ([], []))

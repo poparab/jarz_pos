@@ -27,6 +27,7 @@ from frappe.utils import add_days, getdate, nowdate
 
 from jarz_pos.services import branch_access as branch_access_service
 from jarz_pos.services import roster as roster_service
+from jarz_pos.services import roster_weekly as roster_weekly_service
 
 
 def _ensure_access() -> None:
@@ -568,4 +569,45 @@ def apply_plan(payload: Any, dry_run: Any = 1) -> dict[str, Any]:
 			result["pos_access_failed"].append(
 				{"covered_by": cover["covered_by"], "date": cover["date"], "reason": reason}
 			)
+	return result
+
+
+@frappe.whitelist()
+def apply_weekly_change(payload: Any, dry_run: Any = 1) -> dict[str, Any]:
+	"""Preview (``dry_run=1``, the default) or write one day's change as a
+	change to the same weekday every week, for good.
+
+	``payload``: ``employee``, ``date`` (the first day it applies), ``action``
+	(``assign`` | ``day_off``), then ``shift_type`` / ``shift_location`` for a
+	shift, or ``off_type`` / ``covered_by`` / ``cover_shift_type`` / ``notes``
+	for a day off, and ``replace_manual`` to overwrite one-off edits instead of
+	keeping them. Both the person and the coverer get the stricter home-scope
+	test, because both of their standing rotas are rewritten.
+	"""
+	_ensure_access()
+	change = payload
+	if isinstance(change, str):
+		try:
+			change = json.loads(change)
+		except Exception:
+			frappe.throw(_("Invalid JSON payload."))
+	if not isinstance(change, dict):
+		frappe.throw(_("The change must be an object."))
+
+	for key in ("employee", "covered_by"):
+		employee = _clean(change.get(key))
+		if employee:
+			_ensure_employee_active(employee)
+			_ensure_employee_in_scope(employee)
+			_ensure_plan_home_in_scope(employee)
+	_ensure_location_allowed(_clean(change.get("shift_location")))
+
+	if not _wants_apply(dry_run):
+		result = roster_weekly_service.preview(change)
+		# Colleagues whose cover a replace would take away.
+		for employee in result.get("touched_outside") or []:
+			_ensure_employee_in_scope(employee)
+	else:
+		result = roster_weekly_service.apply(change, check_employee=_ensure_employee_in_scope)
+	result["success"] = True
 	return result
