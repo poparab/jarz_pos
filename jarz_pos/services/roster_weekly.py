@@ -44,6 +44,13 @@ from jarz_pos.services import roster
 ACTION_ASSIGN = "assign"
 ACTION_DAY_OFF = "day_off"
 
+WEEKLY_OFF = "Weekly Off"
+
+#: How far past the horizon day-off records are written. They follow the
+#: records already on file (the standing rota's run to 2027-12-14), but a
+#: single mistyped far-future record must not turn one request into thousands.
+DAY_OFF_REACH = timedelta(weeks=60)
+
 WARN_OLD_COVERER = "old_coverer_still_rostered"
 WARN_UNCOVERED = "cover_kept_own_days"
 
@@ -115,6 +122,7 @@ def _records(filters: dict[str, Any]) -> list[frappe._dict]:
 				"employee",
 				"employee_name",
 				"off_date",
+				"off_type",
 				"from_plan",
 				"original_shift_type",
 				"original_shift_location",
@@ -223,8 +231,11 @@ def _one_off(
 	"""
 	expected = person.pattern.get(weekday)
 	if own:
-		if expected and not own.get("from_plan"):
-			return _kept_entry(person, day, roster.KIND_DAY_OFF, _("Off"), [own])
+		# Leave or sickness booked on their usual day off is still somebody's
+		# decision about that date, not the weekly pattern.
+		booked = (own.get("off_type") or WEEKLY_OFF) != WEEKLY_OFF
+		if booked or (expected and not own.get("from_plan")):
+			return _kept_entry(person, day, roster.KIND_DAY_OFF, own.get("off_type") or _("Off"), [own])
 		return None
 
 	others = [r for r in covering if r.employee != ignore_cover_of]
@@ -347,7 +358,11 @@ def _compute(change: dict[str, Any]) -> dict[str, Any]:
 		last = max([through, *own.keys(), *covering.keys()])
 	else:
 		target = None
-		last = max(d for d in (cover_through or through, _last_day_off_on_file()) if d)
+		explicit_end = cover_through or through
+		on_file = _last_day_off_on_file()
+		if on_file:
+			on_file = min(on_file, start + DAY_OFF_REACH)
+		last = max(d for d in (explicit_end, on_file) if d)
 
 	c_own: dict[date_cls, frappe._dict] = {}
 	c_covering: dict[date_cls, list[frappe._dict]] = {}
@@ -633,7 +648,14 @@ def _repattern(
 	"""
 	rows = person.rows
 	holders = [r for r in rows if weekday in r.days]
-	if target and holders and (holders[0].shift_type, holders[0].shift_location) == target:
+	if (
+		target
+		and holders
+		and (holders[0].shift_type, holders[0].shift_location) == target
+		and (roster._as_date(holders[0].get("create_shifts_after")) or through) >= through
+	):
+		# Already right AND already generated as far as the explicit writes go.
+		# A row behind ``through`` would regenerate the days just written.
 		return {"changed": False}
 	if not target and not holders:
 		return {"changed": False}

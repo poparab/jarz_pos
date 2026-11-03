@@ -1526,6 +1526,13 @@ class TestWeeklyOneOffDays(unittest.TestCase):
 		person = _weekly_person(pattern={"Monday": ("Branch Evening", "Nasr City")})
 		self.assertIsNone(self._one_off(person, own=_frappe._dict(name="DO-1", from_plan=0)))
 
+	def test_leave_on_the_usual_day_off_is_a_one_off(self):
+		"""Vacation booked on a weekly-off day must not be discarded as pattern."""
+		person = _weekly_person(pattern={"Monday": ("Branch Evening", "Nasr City")})
+		own = _frappe._dict(name="DO-1", from_plan=0, off_type="Vacation")
+		entry = self._one_off(person, own=own)
+		self.assertEqual(entry["kind"], roster_service.KIND_DAY_OFF)
+
 	def test_plan_made_day_off_is_never_a_one_off(self):
 		self.assertIsNone(self._one_off(_weekly_person(), own=_frappe._dict(name="DO-1", from_plan=1)))
 
@@ -1653,6 +1660,15 @@ class TestWeeklyRepattern(unittest.TestCase):
 		_result, disabled, inserted = self._run(rows, None)
 		self.assertEqual(disabled, ["SSA-E"])
 		self.assertEqual(inserted, [("Branch Evening (Monday)", "Nasr City", self.THROUGH)])
+
+	def test_already_right_but_behind_the_horizon_is_repatterned(self):
+		"""Explicit writes run to the horizon; a row behind it would regenerate them."""
+		rows = [_ssa_row("SSA-E", "Branch Evening", ["Sunday", "Monday"], after=date(2027, 1, 4))]
+		result, disabled, inserted = self._run(rows, ("Branch Evening", "Nasr City"))
+		self.assertTrue(result["changed"])
+		self.assertEqual(disabled, ["SSA-E"])
+		self.assertIn(("Branch Evening (Monday)", "Nasr City", date(2027, 1, 4)), inserted)
+		self.assertIn(("Branch Evening (Sunday)", "Nasr City", self.THROUGH), inserted)
 
 	def test_already_right_changes_nothing(self):
 		rows = [_ssa_row("SSA-E", "Branch Evening", ["Sunday"])]
