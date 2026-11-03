@@ -926,6 +926,57 @@ def bill_print_order(
 		frappe.throw(f"Print order {print_order!r} not found.")
 
 	doc = frappe.get_doc(PRINT_ORDER_DOCTYPE, name)
+	pi_name = _bill_print_order_doc(
+		doc,
+		supplier=supplier,
+		total_cost=total_cost,
+		bill_no=bill_no,
+		bill_date=bill_date,
+		is_paid=is_paid,
+		payment_option=payment_option,
+	)
+
+	return {
+		"print_order": name,
+		"purchase_invoice": pi_name,
+		"label": get_label_detail(doc.label),
+	}
+
+
+def _printing_item_or_throw() -> str:
+	"""The configured ``Customer Label Printing`` item, or a clear refusal."""
+	settings = label_stock.get_label_settings()
+	printing_item = settings.get("printing_item")
+	if not printing_item or not frappe.db.exists("Item", printing_item):
+		frappe.throw(
+			"The label printing item is not configured (Jarz POS Settings > "
+			"Label Printing Item). Run bench migrate or create it, then retry."
+		)
+	return printing_item
+
+
+def _bill_print_order_doc(
+	doc: Any,
+	*,
+	supplier: Any = None,
+	total_cost: Any = None,
+	bill_no: Any = None,
+	bill_date: Any = None,
+	is_paid: Any = 0,
+	payment_option: Any = None,
+	posting_date: Any = None,
+) -> str:
+	"""Book the supplier Purchase Invoice for one print order; return the PI name.
+
+	The single billing code path, shared by :func:`bill_print_order` and
+	:func:`record_bought_batch`. The caller owns the manager gate and the
+	lookup. ``posting_date`` empty means "today" (what ``bill_print_order``
+	has always done); a backdated purchase passes its real date.
+
+	Never commits: a throw anywhere after this rolls the PI back with the rest
+	of the request.
+	"""
+	name = doc.name
 	if doc.purchase_invoice:
 		frappe.throw(f"{name} is already billed on {doc.purchase_invoice}.")
 	if doc.status == "Cancelled":
@@ -939,13 +990,7 @@ def bill_print_order(
 	if cost <= 0:
 		frappe.throw("Enter what the printer charged (net of VAT).")
 
-	settings = label_stock.get_label_settings()
-	printing_item = settings["printing_item"]
-	if not printing_item or not frappe.db.exists("Item", printing_item):
-		frappe.throw(
-			"The label printing item is not configured (Jarz POS Settings > "
-			"Label Printing Item). Run bench migrate or create it, then retry."
-		)
+	printing_item = _printing_item_or_throw()
 
 	sheets = _int(doc.qty_sheets) or 1
 	from jarz_pos.api.purchase import create_purchase_invoice
@@ -959,6 +1004,9 @@ def bill_print_order(
 	# bill for any printing item whose stock unit is not "Nos".
 	result = create_purchase_invoice(
 		supplier=supplier_name,
+		# None -> create_purchase_invoice leaves the date alone (today), which is
+		# exactly bill_print_order's long-standing behaviour.
+		posting_date=_clean(posting_date),
 		is_paid=1 if _bool(is_paid) else 0,
 		payment_option=_clean(payment_option),
 		items=[
@@ -987,11 +1035,168 @@ def bill_print_order(
 	# again is idempotent -- it covers a deduplicated retry, where the PI
 	# existed before this call and no submit hook fired this time.
 	label_stock.link_bill(name, pi_name)
+	return pi_name
+
+
+# ---------------------------------------------------------------------------
+# One-step "bought & received" batch
+# ---------------------------------------------------------------------------
+def _request_id_supported() -> bool:
+	"""True once ``client_request_id`` exists on the print order (after migrate).
+
+	The field and the code that reads it ship in one commit; between the pull
+	and ``bench migrate`` the column is legitimately absent, and querying it
+	would turn every one-step save into a 500. The broad except is scoped to
+	this single meta lookup.
+	"""
+	try:
+		return bool(frappe.get_meta(PRINT_ORDER_DOCTYPE).has_field("client_request_id"))
+	except Exception:
+		return False
+
+
+def _print_order_for_request(request_id: str) -> str | None:
+	"""The print order an earlier attempt with this ``client_request_id`` created."""
+	if not request_id or not _request_id_supported():
+		return None
+	return frappe.db.get_value(PRINT_ORDER_DOCTYPE, {"client_request_id": request_id}, "name")
+
+
+def _bought_batch_result(print_order: str) -> dict[str, Any]:
+	row = (
+		frappe.db.get_value(PRINT_ORDER_DOCTYPE, print_order, ["label", "purchase_invoice"], as_dict=True)
+		or {}
+	)
+	return {
+		"print_order": print_order,
+		"purchase_invoice": row.get("purchase_invoice"),
+		"label": get_label_detail(row.get("label")),
+	}
+
+
+def _date_or_none(value: Any, what: str) -> str | None:
+	"""A ``YYYY-MM-DD`` string, or None when empty. Refuses junk and future dates."""
+	text = _clean(value)
+	if not text:
+		return None
+	try:
+		day = frappe.utils.getdate(text)
+	except Exception:
+		frappe.throw(f"{what} {text!r} is not a valid date (YYYY-MM-DD).")
+	if day > frappe.utils.getdate(frappe.utils.today()):
+		frappe.throw(f"{what} cannot be in the future.")
+	return str(day)
+
+
+@frappe.whitelist()
+def record_bought_batch(
+	label,
+	qty_sheets,
+	supplier,
+	total_cost,
+	received_qty=None,
+	bill_no=None,
+	bill_date=None,
+	received_on=None,
+	is_paid=0,
+	payment_option=None,
+	notes=None,
+	client_request_id=None,
+):
+	"""Record a batch that was already bought AND delivered, in one save.
+
+	The same three steps as the normal flow -- :func:`create_print_order`,
+	:func:`bill_print_order`, then ``update_print_order(status="Received")`` --
+	in one request, in the order that books it right: billed BEFORE received,
+	so the receipt prices at the bill's cost instead of arriving at zero and
+	being revalued. ``bill_date`` (else ``received_on``) is the bill's posting
+	date, so a purchase recorded days later lands on the day it happened.
+
+	Manager-gated (it commits money). Nothing here commits: any refusal rolls
+	the order, the Purchase Invoice and the receipt back together.
+
+	``client_request_id`` makes a retry safe -- the order an earlier attempt
+	created is returned as-is, and nothing is booked twice.
+	"""
+	_ensure_manager()
+
+	request_id = _clean(client_request_id)
+	if request_id:
+		existing = _print_order_for_request(request_id)
+		if existing:
+			return _bought_batch_result(existing)
+
+	# -- validate everything before a single row is written -----------------
+	name = _require_label(label)
+
+	sheets = _int(qty_sheets)
+	if sheets <= 0:
+		frappe.throw("Order at least one sheet.")
+
+	supplier_name = _clean(supplier)
+	if not supplier_name:
+		frappe.throw("Pick the print supplier.")
+	if not frappe.db.exists("Supplier", supplier_name):
+		frappe.throw(f"Supplier {supplier_name!r} not found.")
+
+	cost = _float(total_cost)
+	if cost <= 0:
+		frappe.throw("Enter what the printer charged (net of VAT).")
+
+	if received_qty in (None, ""):
+		# Same derivation as JarzLabelPrintOrder._derive_label_qty.
+		row = frappe.db.get_value(LABEL_DOCTYPE, name, ["size", "labels_per_sheet"], as_dict=True) or {}
+		labels_received = sheets * label_stock.labels_per_sheet_for(row)
+	else:
+		labels_received = _int(received_qty)
+	if labels_received <= 0:
+		frappe.throw("Enter how many labels arrived.")
+
+	received_day = _date_or_none(received_on, "Received on") or frappe.utils.today()
+	bill_day = _date_or_none(bill_date, "Bill date")
+	paid = _bool(is_paid)
+
+	_printing_item_or_throw()
+
+	# -- 1. the order --------------------------------------------------------
+	doc = frappe.new_doc(PRINT_ORDER_DOCTYPE)
+	doc.label = name
+	doc.qty_sheets = sheets
+	doc.status = "Requested"
+	doc.requested_on = bill_day or received_day
+	doc.supplier = supplier_name
+	doc.total_cost = cost
+	doc.notes = _clean(notes)
+	if request_id and _request_id_supported():
+		doc.client_request_id = request_id
+	doc.insert(ignore_permissions=True)
+
+	# -- 2. the bill (before the receipt, so the receipt prices at its cost) --
+	pi_name = _bill_print_order_doc(
+		doc,
+		supplier=supplier_name,
+		total_cost=cost,
+		bill_no=bill_no,
+		bill_date=bill_day,
+		is_paid=1 if paid else 0,
+		payment_option=payment_option if paid else None,
+		posting_date=bill_day or received_day,
+	)
+
+	# -- 3. the receipt ------------------------------------------------------
+	# link_bill wrote purchase_invoice / total_cost / cost_per_label straight to
+	# the row with update_modified=True; saving the in-memory doc without a
+	# reload would fail its timestamp check.
+	doc.reload()
+	doc.status = "Received"
+	doc.received_qty = labels_received
+	doc.received_on = received_day
+	doc.save(ignore_permissions=True)  # on_update posts the Print Received movement once
 
 	return {
-		"print_order": name,
+		"print_order": doc.name,
 		"purchase_invoice": pi_name,
-		"label": get_label_detail(doc.label),
+		"label": get_label_detail(name),
 	}
 
 

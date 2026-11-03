@@ -139,6 +139,8 @@ jobs:
             # B2B printed labels: per-(customer, flavour, branch) stock, invoice
             # consumption from the fulfilling branch, and the money cycle.
             test_label_stock
+            # One-step "bought & received" batch: order, bill and receipt in one save.
+            test_label_bought_batch
             test_b2b_pricing
             test_pricing_manager_gate
             # Order purpose drives the price list: a purpose that owns a list

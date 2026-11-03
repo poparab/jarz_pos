@@ -29,7 +29,8 @@
   "column_break_detail",
   "received_on",
   "received_qty",
-  "notes"
+  "notes",
+  "client_request_id"
  ],
  "fields": [
   {
@@ -182,13 +183,24 @@
    "label": "Billing",
    "options": "Unbilled\nBilled",
    "read_only": 1
+  },
+  {
+   "description": "Set by the app's one-step \"bought & received\" save so a retry returns this batch instead of buying it twice.",
+   "fieldname": "client_request_id",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "label": "Client Request ID",
+   "no_copy": 1,
+   "print_hide": 1,
+   "read_only": 1,
+   "search_index": 1
   }
  ],
  "index_web_pages_for_search": 0,
  "is_submittable": 0,
  "istable": 0,
  "links": [],
- "modified": "2026-08-17 00:00:00.000000",
+ "modified": "2026-11-03 00:00:00.000000",
  "modified_by": "Administrator",
  "module": "jarz pos",
  "name": "Jarz Label Print Order",
