@@ -76,6 +76,48 @@ class TestEnforceAnyBranch(unittest.TestCase):
 		self.assertIsNone(self._run(AT_HOME, locations=[]))
 
 
+class TestWidenNeverReplaces(unittest.TestCase):
+	"""The flag only rescues a press HRMS would refuse for distance."""
+
+	def _run(self, lat_lng, rostered=NASR_CITY, geo_on=True):
+		with (
+			patch.object(checkin_location, "frappe") as mock_frappe,
+			patch.object(checkin_location, "measurable_locations", return_value=LOCATIONS),
+		):
+			mock_frappe.db.get_single_value.return_value = 1 if geo_on else 0
+			mock_frappe.db.get_value.return_value = (
+				{k: rostered[k] for k in ("checkin_radius", "latitude", "longitude")} if rostered else None
+			)
+
+			def fake_throw(msg, title=None, exc=None):
+				raise _Blocked(str(msg))
+
+			mock_frappe.throw.side_effect = fake_throw
+			return checkin_location.widen_rostered_check(_doc(lat_lng), rostered["name"] if rostered else None)
+
+	def test_at_rostered_branch_passes(self):
+		self.assertEqual(self._run(AT_NASR_CITY), "Nasr City")
+
+	def test_miss_at_rostered_but_at_other_branch_passes(self):
+		self.assertEqual(self._run(AT_DOKKI), "Dokki")
+
+	def test_miss_everywhere_refused(self):
+		with self.assertRaises(_Blocked):
+			self._run(AT_HOME)
+
+	def test_radius_zero_rostered_location_stays_unmeasured(self):
+		"""HRMS lets this through anywhere; the flag must not lock it out."""
+		self.assertIsNone(self._run(AT_HOME, rostered=dict(NASR_CITY, checkin_radius=0)))
+
+	def test_no_rostered_location_stays_unmeasured(self):
+		"""Off-shift / roster-exempt: HRMS measures nothing, nor do we."""
+		self.assertIsNone(self._run(AT_HOME, rostered=None))
+
+	def test_missing_coordinates_still_refused(self):
+		with self.assertRaises(_Blocked):
+			self._run(None)
+
+
 class TestOffWindowGateUsesAnyBranch(unittest.TestCase):
 	"""The roster gate's own geofence (off-window press) follows the flag too."""
 
@@ -83,12 +125,22 @@ class TestOffWindowGateUsesAnyBranch(unittest.TestCase):
 		doc = _doc(AT_DOKKI)
 		with (
 			patch.object(checkin_location, "is_any_branch", return_value=True),
-			patch.object(checkin_location, "enforce_any_branch") as mock_any,
+			patch.object(checkin_location, "widen_rostered_check") as mock_widen,
 			patch.object(checkin_guard, "frappe") as mock_frappe,
 		):
 			checkin_guard._enforce_location(doc, "Nasr City")
-		mock_any.assert_called_once_with(doc)
+		mock_widen.assert_called_once_with(doc, "Nasr City")
 		mock_frappe.db.get_value.assert_not_called()
+
+	def test_no_rostered_location_stays_unmeasured_even_with_flag(self):
+		"""HRMS measures nothing here, so the flag must not start measuring."""
+		doc = _doc(AT_HOME)
+		with (
+			patch.object(checkin_location, "is_any_branch", return_value=True),
+			patch.object(checkin_location, "widen_rostered_check") as mock_widen,
+		):
+			checkin_guard._enforce_location(doc, None)
+		mock_widen.assert_not_called()
 
 	def test_unflagged_employee_keeps_rostered_branch(self):
 		doc = _doc(AT_DOKKI)
@@ -106,17 +158,18 @@ class TestOffWindowGateUsesAnyBranch(unittest.TestCase):
 
 
 class TestOverrideClass(unittest.TestCase):
-	def test_flag_routes_to_any_branch(self):
+	def test_flag_widens_with_hrms_rostered_location(self):
 		from jarz_pos.overrides.employee_checkin import EmployeeCheckin
 
 		doc = MagicMock(spec=EmployeeCheckin)
 		doc.employee = "HR-EMP-00001"
+		doc._rostered_shift_location.return_value = "Nasr City"
 		with (
 			patch.object(checkin_location, "is_any_branch", return_value=True),
-			patch.object(checkin_location, "enforce_any_branch") as mock_any,
+			patch.object(checkin_location, "widen_rostered_check") as mock_widen,
 		):
 			EmployeeCheckin.validate_distance_from_shift_location(doc)
-		mock_any.assert_called_once_with(doc)
+		mock_widen.assert_called_once_with(doc, "Nasr City")
 
 	def test_no_flag_keeps_hrms_rule(self):
 		from hrms.hr.doctype.employee_checkin.employee_checkin import (
@@ -129,7 +182,7 @@ class TestOverrideClass(unittest.TestCase):
 		doc.employee = "HR-EMP-00002"
 		with (
 			patch.object(checkin_location, "is_any_branch", return_value=False),
-			patch.object(checkin_location, "enforce_any_branch") as mock_any,
+			patch.object(checkin_location, "widen_rostered_check") as mock_any,
 			patch.object(HRMSEmployeeCheckin, "validate_distance_from_shift_location") as mock_hrms,
 		):
 			EmployeeCheckin.validate_distance_from_shift_location(doc)

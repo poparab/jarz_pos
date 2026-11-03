@@ -326,10 +326,10 @@ def _enforce_location(doc, shift_location: str | None) -> None:
 	"""
 	from jarz_pos.services import checkin_location
 
-	if checkin_location.is_any_branch(doc.employee):
-		checkin_location.enforce_any_branch(doc)
-		return
 	if not shift_location:
+		return
+	if checkin_location.is_any_branch(doc.employee):
+		checkin_location.widen_rostered_check(doc, shift_location)
 		return
 	try:
 		if not frappe.db.get_single_value("HR Settings", "allow_geolocation_tracking"):
