@@ -1055,14 +1055,21 @@ def _request_id_supported() -> bool:
 		return False
 
 
-def _print_order_for_request(request_id: str) -> str | None:
-	"""The print order an earlier attempt with this ``client_request_id`` created."""
+def _print_order_for_request(request_id: str, lock: bool = False) -> str | None:
+	"""The print order an earlier attempt with this ``client_request_id`` created.
+
+	``lock`` makes it a locking read, needed after a concurrent twin's insert
+	lost on the unique key: a plain REPEATABLE READ snapshot taken before the
+	winner committed would still not see its row.
+	"""
 	if not request_id or not _request_id_supported():
 		return None
-	return frappe.db.get_value(PRINT_ORDER_DOCTYPE, {"client_request_id": request_id}, "name")
+	return frappe.db.get_value(
+		PRINT_ORDER_DOCTYPE, {"client_request_id": request_id}, "name", for_update=lock
+	)
 
 
-def _bought_batch_result(print_order: str) -> dict[str, Any]:
+def _bought_batch_result(print_order: str, deduplicated: bool = False) -> dict[str, Any]:
 	row = (
 		frappe.db.get_value(PRINT_ORDER_DOCTYPE, print_order, ["label", "purchase_invoice"], as_dict=True)
 		or {}
@@ -1071,6 +1078,9 @@ def _bought_batch_result(print_order: str) -> dict[str, Any]:
 		"print_order": print_order,
 		"purchase_invoice": row.get("purchase_invoice"),
 		"label": get_label_detail(row.get("label")),
+		# True when this call booked nothing: an earlier attempt with the same
+		# client_request_id already recorded the batch.
+		"deduplicated": deduplicated,
 	}
 
 
@@ -1124,7 +1134,7 @@ def record_bought_batch(
 	if request_id:
 		existing = _print_order_for_request(request_id)
 		if existing:
-			return _bought_batch_result(existing)
+			return _bought_batch_result(existing, deduplicated=True)
 
 	# -- validate everything before a single row is written -----------------
 	name = _require_label(label)
@@ -1143,14 +1153,22 @@ def record_bought_batch(
 	if cost <= 0:
 		frappe.throw("Enter what the printer charged (net of VAT).")
 
+	# Same derivation as JarzLabelPrintOrder._derive_label_qty.
+	row = frappe.db.get_value(LABEL_DOCTYPE, name, ["size", "labels_per_sheet"], as_dict=True) or {}
+	expected_labels = sheets * label_stock.labels_per_sheet_for(row)
 	if received_qty in (None, ""):
-		# Same derivation as JarzLabelPrintOrder._derive_label_qty.
-		row = frappe.db.get_value(LABEL_DOCTYPE, name, ["size", "labels_per_sheet"], as_dict=True) or {}
-		labels_received = sheets * label_stock.labels_per_sheet_for(row)
+		labels_received = expected_labels
 	else:
 		labels_received = _int(received_qty)
 	if labels_received <= 0:
 		frappe.throw("Enter how many labels arrived.")
+	if expected_labels and labels_received > 2 * expected_labels:
+		# A typo (2100 for 210) would inflate the shelf and cut the per-label
+		# cost tenfold until the next count; the bill's total stays right.
+		frappe.throw(
+			f"{labels_received} labels from {sheets} sheet(s) is more than twice what "
+			f"they hold ({expected_labels}). Check the number of labels or sheets."
+		)
 
 	received_day = _date_or_none(received_on, "Received on") or frappe.utils.today()
 	bill_day = _date_or_none(bill_date, "Bill date")
@@ -1169,7 +1187,17 @@ def record_bought_batch(
 	doc.notes = _clean(notes)
 	if request_id and _request_id_supported():
 		doc.client_request_id = request_id
-	doc.insert(ignore_permissions=True)
+	try:
+		doc.insert(ignore_permissions=True)
+	except (frappe.DuplicateEntryError, frappe.UniqueValidationError):
+		# A twin request with the same key (the app retried while the first
+		# save was still running) committed first. client_request_id is a
+		# unique column, so this insert -- the first write here -- lost, and
+		# nothing has been booked twice. Hand back the winner.
+		existing = _print_order_for_request(request_id, lock=True) if request_id else None
+		if not existing:
+			raise
+		return _bought_batch_result(existing, deduplicated=True)
 
 	# -- 2. the bill (before the receipt, so the receipt prices at its cost) --
 	pi_name = _bill_print_order_doc(
@@ -1197,6 +1225,7 @@ def record_bought_batch(
 		"print_order": doc.name,
 		"purchase_invoice": pi_name,
 		"label": get_label_detail(name),
+		"deduplicated": False,
 	}
 
 

@@ -157,6 +157,43 @@ class TestRecordBoughtBatch(unittest.TestCase):
 		self.assertEqual(result["print_order"], "JLPO-00009")
 		self.assertEqual(result["purchase_invoice"], PI)
 		self.assertEqual(result["label"], {"name": LABEL})
+		self.assertTrue(result["deduplicated"])
+
+	def test_fresh_save_is_not_flagged_deduplicated(self):
+		with self._env() as (_events, _doc, _mocks):
+			result = labels.record_bought_batch(**_args(client_request_id="req-3"))
+		self.assertFalse(result["deduplicated"])
+
+	def test_concurrent_twin_losing_on_the_unique_key_returns_the_winner(self):
+		# Both requests passed the plain lookup before either committed; the
+		# second insert hits the unique client_request_id and must book nothing.
+		with self._env() as (events, doc, mocks):
+			mocks.lookup.side_effect = [None, "JLPO-00007"]
+
+			def _dup(ignore_permissions=False):
+				events.append(("insert", doc.status))
+				raise frappe.UniqueValidationError("duplicate client_request_id")
+
+			doc.insert = _dup
+			result = labels.record_bought_batch(**_args(client_request_id="req-4"))
+		self.assertEqual(result["print_order"], "JLPO-00007")
+		self.assertTrue(result["deduplicated"])
+		mocks.create_pi.assert_not_called()
+		mocks.link_bill.assert_not_called()
+		self.assertEqual(mocks.lookup.call_args_list[-1].kwargs.get("lock"), True)
+
+	def test_duplicate_without_a_winner_reraises(self):
+		with self._env() as (_events, doc, _mocks):
+			def _dup(ignore_permissions=False):
+				raise frappe.DuplicateEntryError("dup")
+
+			doc.insert = _dup
+			with self.assertRaises(frappe.DuplicateEntryError):
+				labels.record_bought_batch(**_args(client_request_id="req-5"))
+
+	def test_more_than_twice_the_sheets_capacity_is_refused(self):
+		# 5 sheets x 21 = 105; 2100 is a typo, not a delivery.
+		self._assert_refused_before_insert(received_qty=2100)
 
 	def test_new_request_id_is_stamped_on_the_order(self):
 		with self._env() as (_events, doc, _mocks):
