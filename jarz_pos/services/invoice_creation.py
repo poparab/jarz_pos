@@ -3232,8 +3232,10 @@ def _apply_bundle_line_discount(item_code, bundle_price, item_data):
 		if discount_amount < 0:
 			frappe.throw(f"Discount amount for bundle '{item_code}' must be non-negative")
 		if discount_amount > 0:
-			if discount_amount > bundle_price:
-				frappe.throw(f"Discount amount for bundle '{item_code}' cannot exceed the bundle price")
+			# BundleProcessor refuses a target price of 0 ("price is not set"), so a
+			# discount that zeroes the bundle is refused here with a message that says why.
+			if discount_amount >= bundle_price:
+				frappe.throw(f"Discount amount for bundle '{item_code}' must be less than the bundle price")
 			return frappe.utils.flt(bundle_price - discount_amount, 6), True
 
 	discount_percentage = item_data.get("discount_percentage")
@@ -3242,8 +3244,8 @@ def _apply_bundle_line_discount(item_code, bundle_price, item_data):
 			discount_percentage = float(discount_percentage)
 		except (TypeError, ValueError):
 			frappe.throw(f"Invalid discount percentage for bundle '{item_code}': {discount_percentage}")
-		if discount_percentage < 0 or discount_percentage > 100:
-			frappe.throw(f"Discount percentage for bundle '{item_code}' must be between 0 and 100")
+		if discount_percentage < 0 or discount_percentage >= 100:
+			frappe.throw(f"Discount percentage for bundle '{item_code}' must be at least 0 and below 100")
 		if discount_percentage > 0:
 			return frappe.utils.flt(bundle_price * (1 - discount_percentage / 100.0), 6), True
 

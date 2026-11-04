@@ -37,16 +37,15 @@ class TestApplyBundleLineDiscount(unittest.TestCase):
 			self.assertFalse(applied)
 			self.assertEqual(price, 480.0)
 
-	def test_full_percentage_makes_bundle_free(self):
-		price, applied = ic._apply_bundle_line_discount("TRIO", 480.0, {"discount_percentage": 100})
-		self.assertTrue(applied)
-		self.assertEqual(price, 0.0)
-
 	def test_out_of_range_values_are_refused(self):
+		# 100% / the full amount would hand BundleProcessor a 0 target, which it
+		# refuses as "price is not set" -- refused here with a clear message instead.
 		for data in (
+			{"discount_percentage": 100},
 			{"discount_percentage": 120},
 			{"discount_percentage": -5},
 			{"discount_amount": -1},
+			{"discount_amount": 480},
 			{"discount_amount": 500},
 			{"discount_percentage": "abc"},
 		):
