@@ -2361,11 +2361,14 @@ def create_pos_invoice(
 			_append_audit_marker(invoice_doc, "[ZERO SHIPPING OVERRIDE]")
 		if any(
 			(
-				_pricing_field_provided(item.get("discount_amount"))
-				or _pricing_field_provided(item.get("discount_percentage"))
+				(
+					_pricing_field_provided(item.get("discount_amount"))
+					or _pricing_field_provided(item.get("discount_percentage"))
+				)
+				and not item.get("is_bundle_parent")
+				and not item.get("is_bundle_child")
 			)
-			and not item.get("is_bundle_parent")
-			and not item.get("is_bundle_child")
+			or item.get("_bundle_line_discount")
 			for item in processed_items
 		):
 			_append_audit_marker(invoice_doc, "[LINE DISCOUNTS]")
@@ -3180,6 +3183,10 @@ def _process_bundle_item(
 		if target_bundle_price < 0:
 			frappe.throw(f"Bundle price for '{item_code}' must be non-negative")
 
+		target_bundle_price, line_discounted = _apply_bundle_line_discount(
+			item_code, target_bundle_price, item_data
+		)
+
 		# Process bundle using ERPNext item code (not bundle record ID)
 		bundle_items = process_bundle_for_invoice(
 			item_code,
@@ -3188,6 +3195,9 @@ def _process_bundle_item(
 			price_list=price_list,
 			target_bundle_price=target_bundle_price,
 		)
+		if line_discounted:
+			for bundle_row in bundle_items:
+				bundle_row["_bundle_line_discount"] = True
 		print(f"      ✅ Bundle processed: {len(bundle_items)} items added")
 		return bundle_items
 	except Exception as bundle_error:
@@ -3197,6 +3207,47 @@ def _process_bundle_item(
 		logger.warning(error_msg)  # pre-throw: see _exception_detail note on log levels
 		print(f"      ❌ {error_msg}")
 		frappe.throw(error_msg)
+
+
+def _apply_bundle_line_discount(item_code, bundle_price, item_data):
+	"""Apply the cashier's per-line discount to a bundle's target price.
+
+	The POS discount dialog offers discount_amount / discount_percentage on a
+	bundle line exactly as on a plain one, and shows the reduced price in the
+	cart -- but the bundle path used to read only custom_rate_override /
+	price_list_rate, so the discount was dropped without a word (2026-11-04,
+	ACC-SINV-2026-19321 saved at full price). Same precedence as the client's
+	_applyDiscountsToRate: amount first, then percentage, both per bundle unit.
+	Returns (price, applied).
+	"""
+	if not isinstance(item_data, dict):
+		return bundle_price, False
+
+	discount_amount = item_data.get("discount_amount")
+	if _pricing_field_provided(discount_amount):
+		try:
+			discount_amount = float(discount_amount)
+		except (TypeError, ValueError):
+			frappe.throw(f"Invalid discount amount for bundle '{item_code}': {discount_amount}")
+		if discount_amount < 0:
+			frappe.throw(f"Discount amount for bundle '{item_code}' must be non-negative")
+		if discount_amount > 0:
+			if discount_amount > bundle_price:
+				frappe.throw(f"Discount amount for bundle '{item_code}' cannot exceed the bundle price")
+			return frappe.utils.flt(bundle_price - discount_amount, 6), True
+
+	discount_percentage = item_data.get("discount_percentage")
+	if _pricing_field_provided(discount_percentage):
+		try:
+			discount_percentage = float(discount_percentage)
+		except (TypeError, ValueError):
+			frappe.throw(f"Invalid discount percentage for bundle '{item_code}': {discount_percentage}")
+		if discount_percentage < 0 or discount_percentage > 100:
+			frappe.throw(f"Discount percentage for bundle '{item_code}' must be between 0 and 100")
+		if discount_percentage > 0:
+			return frappe.utils.flt(bundle_price * (1 - discount_percentage / 100.0), 6), True
+
+	return bundle_price, False
 
 
 def _process_regular_item(

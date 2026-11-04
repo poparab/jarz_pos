@@ -298,6 +298,8 @@ jobs:
             # introduce. Fix the realtime publish, then add it here.
             # Bundle expansion pricing/rounding.
             test_bundle_processing
+            # A cashier's % / amount discount on a bundle line reaches the bundle price.
+            test_bundle_line_discount
             # The address book + resolver. `_dedupe_address_rows` collapses
             # equivalent addresses and the resolver deliberately answers with the
             # survivor; `preferred_address_was_honoured` is the only thing telling
