@@ -442,6 +442,10 @@ class BundleProcessor:
 			bundle_price = flt(self.bundle_doc.bundle_price)
 		if bundle_price <= 0:
 			frappe.throw(_(f"Bundle {self.bundle_code} price is not set or invalid"))
+		# bundle_price is the price of ONE bundle, but the children below are summed
+		# over every unit (qty x self.quantity). Comparing the two unscaled booked a
+		# qty-2 trio at the price of one (480, not 960) -- scale to the line total.
+		bundle_price = flt(bundle_price) * flt(self.quantity or 1)
 
 		total_child_price = sum(
 			[flt(item["rate"]) * flt(item["qty"]) * self.quantity for item in self.bundle_items]

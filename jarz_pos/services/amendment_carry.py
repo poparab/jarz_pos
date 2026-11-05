@@ -36,6 +36,9 @@ from frappe.utils import flt
 from jarz_pos.utils.invoice_utils import POS_AUDIT_MARKERS_FIELD
 
 CUSTOM_LINE_PRICING_MARKER = "[CUSTOM LINE PRICING]"
+# A bundle line sold at a cashier's discount or custom price. The bundle's parent row
+# keeps the list price, so the charged price is only recoverable from its children.
+BUNDLE_PRICING_MARKER = "[BUNDLE PRICING]"
 ZERO_SHIPPING_MARKER = "[ZERO SHIPPING OVERRIDE]"
 DISCOUNT_CARRIED_MARKER = "[AMENDMENT DISCOUNT CARRIED]"
 
@@ -130,6 +133,122 @@ def source_item_quantities(source: Any) -> dict[str, float]:
 	return quantities
 
 
+def source_bundle_rates(source: Any) -> tuple[dict[str, float], dict[str, float]]:
+	"""``({bundle item: charged price of ONE bundle}, {bundle item: bundle qty})``.
+
+	Only for a source audited ``[BUNDLE PRICING]``: its bundle was discounted or
+	custom-priced, and every amendment re-priced it at list because no cart rebuild
+	carries that (the parent row stores the list price; the discount lives in the
+	children). BundleProcessor writes a parent row followed by its own children, so
+	children are grouped by order. Anything that does not read that way, or a bundle
+	held twice at two different prices, is left out rather than guessed.
+	"""
+	if not source_has_marker(source, BUNDLE_PRICING_MARKER):
+		return {}, {}
+	groups: list[list[Any]] = []
+	for row in _get(source, "items") or []:
+		if _get(row, "is_bundle_parent"):
+			groups.append([row, 0.0])
+		elif _get(row, "is_bundle_child"):
+			if not groups:
+				return {}, {}
+			parent = groups[-1][0]
+			if str(_get(row, "parent_bundle") or "") != str(_get(parent, "bundle_code") or ""):
+				return {}, {}
+			groups[-1][1] += flt(_get(row, "amount"))
+	rates: dict[str, float] = {}
+	quantities: dict[str, float] = {}
+	conflicting: set[str] = set()
+	for parent, children_total in groups:
+		code = str(_get(parent, "item_code") or "").strip()
+		qty = flt(_get(parent, "qty"))
+		if not code or qty <= 0:
+			continue
+		rate = flt(children_total / qty, 6)
+		if code in rates and abs(rates[code] - rate) > _RATE_TOLERANCE:
+			conflicting.add(code)
+		rates.setdefault(code, rate)
+		quantities[code] = quantities.get(code, 0.0) + qty
+	for code in conflicting:
+		rates.pop(code, None)
+		quantities.pop(code, None)
+	return rates, quantities
+
+
+def bundle_item_code(code: str) -> str:
+	"""The ERPNext item of a cart bundle row, whose code may be the Jarz Bundle name.
+
+	The server rebuild sends the Jarz Bundle record name; the app sends its id; the
+	source's parent row stores the ERPNext item. Carry is keyed by the latter.
+	"""
+	code = str(code or "").strip()
+	if not code:
+		return code
+	try:
+		item = frappe.db.get_value("Jarz Bundle", code, "erpnext_item")
+	except Exception:
+		item = None
+	return str(item or code).strip()
+
+
+def _row_bundle_rate(row: dict) -> float | None:
+	for fieldname in ("price_list_rate", "rate", "price"):
+		value = row.get(fieldname)
+		if value not in (None, ""):
+			return flt(value)
+	return None
+
+
+def apply_source_bundle_pricing(
+	cart: Any,
+	bundle_rates: dict[str, float],
+	bundle_qty: dict[str, float] | None = None,
+	resolve_code: Callable[[str], str] = bundle_item_code,
+) -> list[str]:
+	"""Give each kept bundle line the source's charged price; return the codes changed.
+
+	Same rules as :func:`apply_source_line_pricing`: a row that sends its own
+	``custom_rate_override`` or line discount is the operator's choice and is never
+	touched, a row already at that price needs nothing, and only the source's bundle
+	quantity inherits the price (extra units are split off at list). Mutates ``cart``.
+	"""
+	carried: list[str] = []
+	if not isinstance(cart, list) or not bundle_rates:
+		return carried
+	budget = dict(bundle_qty or {})
+	out: list[Any] = []
+	for row in cart:
+		out.append(row)
+		if not isinstance(row, dict) or not row.get("is_bundle"):
+			continue
+		if any(row.get(field) not in (None, "") for field in ("custom_rate_override", *_LINE_DISCOUNT_FIELDS)):
+			continue
+		code = resolve_code(str(row.get("item_code") or ""))
+		if code not in bundle_rates:
+			continue
+		override = flt(bundle_rates[code])
+		current = _row_bundle_rate(row)
+		if current is not None and abs(current - override) <= _RATE_TOLERANCE:
+			continue
+		qty_key = _row_qty_key(row)
+		qty = flt(row.get(qty_key) or 1)
+		remaining = flt(budget.get(code))
+		if remaining <= 1e-9:
+			continue
+		if qty > remaining + 1e-9:
+			extra = dict(row)
+			extra[qty_key] = round(qty - remaining, 6)
+			row[qty_key] = remaining
+			out.append(extra)
+			qty = remaining
+		budget[code] = remaining - qty
+		row["custom_rate_override"] = override
+		if code not in carried:
+			carried.append(code)
+	cart[:] = out
+	return carried
+
+
 def source_promo_codes(source: Any) -> list[str]:
 	from jarz_pos.services import promo_codes as _promo_codes
 
@@ -181,9 +300,12 @@ def with_requested_promo_codes(
 def build_amendment_carry(source: Any, *, zero_shipping: bool) -> dict[str, Any]:
 	"""Everything the replacement must inherit from ``source`` beyond its cart."""
 	codes = source_promo_codes(source)
+	bundle_rates, bundle_qty = source_bundle_rates(source)
 	return {
 		"source": str(_get(source, "name") or "").strip(),
 		"line_rates": source_line_rate_overrides(source),
+		"bundle_rates": bundle_rates,
+		"bundle_qty": bundle_qty,
 		"line_discounts": source_line_discounts(source),
 		"source_qty": source_item_quantities(source),
 		"promo_codes": codes,
@@ -284,9 +406,29 @@ def strip_carried_pricing_for_gate(cart_items: Any, carry: dict[str, Any] | None
 	line_rates = carry.get("line_rates") or {}
 	line_discounts = carry.get("line_discounts") or {}
 	budget = dict(carry.get("source_qty") or {})
+	bundle_rates = carry.get("bundle_rates") or {}
+	bundle_budget = dict(carry.get("bundle_qty") or {})
 	stripped: list[Any] = []
 	for item in cart_items:
-		if not isinstance(item, dict) or item.get("is_bundle"):
+		if isinstance(item, dict) and item.get("is_bundle"):
+			# Only the price apply_source_bundle_pricing put back, within the source's
+			# bundle quantity; a new discount or price on a bundle stays gated.
+			override = item.get("custom_rate_override")
+			if override not in (None, "") and bundle_rates:
+				code = bundle_item_code(str(item.get("item_code") or ""))
+				qty = flt(item.get("qty") or item.get("quantity") or 1)
+				remaining = flt(bundle_budget.get(code))
+				if (
+					code in bundle_rates
+					and qty <= remaining + 1e-9
+					and abs(flt(override) - flt(bundle_rates[code])) <= _RATE_TOLERANCE
+				):
+					item = dict(item)
+					item.pop("custom_rate_override", None)
+					bundle_budget[code] = remaining - qty
+			stripped.append(item)
+			continue
+		if not isinstance(item, dict):
 			stripped.append(item)
 			continue
 		code = str(item.get("item_code") or "").strip()

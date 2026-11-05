@@ -2351,8 +2351,13 @@ def create_pos_invoice(
 				_append_audit_marker(invoice_doc, f"[PRICE LIST OVERRIDE] {effective_price_list}")
 		if suppress_shipping_income is True or suppress_legacy_delivery_charges is True:
 			_append_audit_marker(invoice_doc, "[ZERO SHIPPING OVERRIDE]")
-		if any(_pricing_field_provided(item.get("custom_rate_override")) for item in processed_items):
+		if any(
+			_pricing_field_provided(item.get("custom_rate_override")) or item.get("_bundle_custom_price")
+			for item in processed_items
+		):
 			_append_audit_marker(invoice_doc, "[CUSTOM LINE PRICING]")
+		if any(item.get("_bundle_custom_price") or item.get("_bundle_line_discount") for item in processed_items):
+			_append_audit_marker(invoice_doc, _amendment_carry_mod.BUNDLE_PRICING_MARKER)
 		_amendment_carry = _amendment_carry_mod.trusted_carry(amended_from)
 		if _amendment_carry and _amendment_carry.get("zero_shipping_marker"):
 			# The source was zero-shipping by manager override and the replacement still
@@ -3163,9 +3168,11 @@ def _process_bundle_item(
 		print(f"      ✅ Found bundle: {bundle_code} for ERPNext item: {item_code}")
 
 		target_bundle_price = None
+		custom_priced = False
 		if isinstance(item_data, dict):
 			target_bundle_price = item_data.get("custom_rate_override")
-			if not _pricing_field_provided(target_bundle_price):
+			custom_priced = _pricing_field_provided(target_bundle_price)
+			if not custom_priced:
 				target_bundle_price = item_data.get("price_list_rate")
 		if not _pricing_field_provided(target_bundle_price):
 			target_bundle_price = rate
@@ -3195,9 +3202,13 @@ def _process_bundle_item(
 			price_list=price_list,
 			target_bundle_price=target_bundle_price,
 		)
-		if line_discounted:
-			for bundle_row in bundle_items:
+		# Audit flags, read when the markers are stamped. [BUNDLE PRICING] is what lets an
+		# amendment carry this bundle's price (amendment_carry.source_bundle_rates).
+		for bundle_row in bundle_items:
+			if line_discounted:
 				bundle_row["_bundle_line_discount"] = True
+			if custom_priced:
+				bundle_row["_bundle_custom_price"] = True
 		print(f"      ✅ Bundle processed: {len(bundle_items)} items added")
 		return bundle_items
 	except Exception as bundle_error:

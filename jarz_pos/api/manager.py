@@ -99,6 +99,7 @@ except Exception:  # pragma: no cover - defensive, mirrors the import above
 
 
 from jarz_pos.services.amendment_cart import build_amendment_cart_from_invoice
+from jarz_pos.services.amendment_carry import apply_source_bundle_pricing as _apply_source_bundle_pricing
 from jarz_pos.services.amendment_carry import apply_source_line_pricing as _apply_source_line_pricing
 from jarz_pos.services.amendment_carry import build_amendment_carry as _build_amendment_carry
 from jarz_pos.services.amendment_carry import parse_requested_promo_codes as _parse_requested_promo_codes
@@ -2827,6 +2828,16 @@ def _run_invoice_amendment_job(
 			source_qty=amendment_carry.get("source_qty") or {},
 		)
 		if carried_line_codes:
+			cart_json = json.dumps(parsed_cart)
+	# A discounted / custom-priced bundle: no app version carries its price, so the
+	# server puts it back whatever keep_source_line_pricing says (that flag is about
+	# plain lines the app rebuilt itself). A changed price list still re-prices.
+	if not _price_list_changed:
+		if _apply_source_bundle_pricing(
+			parsed_cart,
+			amendment_carry.get("bundle_rates") or {},
+			amendment_carry.get("bundle_qty") or {},
+		):
 			cart_json = json.dumps(parsed_cart)
 
 	# The guard catches a cart that LOST lines or quantity (a lossy client rebuild),

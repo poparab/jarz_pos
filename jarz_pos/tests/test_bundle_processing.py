@@ -533,6 +533,13 @@ class TestDuplicateBundleGroupMoney(unittest.TestCase):
 		self.assertEqual(children[2]["discount_percentage"], 29.323308)
 		self.assertEqual(_children_money(rows), 400.0)
 
+	def test_two_bundles_bill_twice_the_bundle_price(self):
+		"""qty 2 books 2 x 400, not 400: the children are summed over every unit,
+		so the target has to be too (a qty-2 trio used to save at the price of one)."""
+		_, rows = _expand(self.NAME_KEYED, quantity=2)
+		self.assertEqual([row["qty"] for row in _children(rows)], [6, 2, 2])
+		self.assertEqual(_children_money(rows), 800.0)
+
 	def test_the_parent_line_is_fully_discounted(self):
 		_, rows = _expand(self.NAME_KEYED)
 		parent = next(row for row in rows if row.get("is_bundle_parent"))

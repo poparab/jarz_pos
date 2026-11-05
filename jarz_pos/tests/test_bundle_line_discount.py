@@ -74,7 +74,7 @@ class TestProcessBundleItemAppliesDiscount(unittest.TestCase):
 		self.assertTrue(all(r.get("_bundle_line_discount") for r in out))
 
 	def test_discount_applies_on_top_of_custom_price(self):
-		target, _ = self._run(
+		target, out = self._run(
 			{
 				"item_code": "TRIO",
 				"is_bundle": True,
@@ -85,6 +85,8 @@ class TestProcessBundleItemAppliesDiscount(unittest.TestCase):
 			}
 		)
 		self.assertAlmostEqual(target, 400.0)
+		# Both flags set: [CUSTOM LINE PRICING] + [BUNDLE PRICING] are stamped from them.
+		self.assertTrue(all(r.get("_bundle_custom_price") and r.get("_bundle_line_discount") for r in out))
 
 	def test_undiscounted_bundle_is_unchanged(self):
 		target, out = self._run({"item_code": "TRIO", "is_bundle": True, "rate": 480.0, "price_list_rate": 480.0})

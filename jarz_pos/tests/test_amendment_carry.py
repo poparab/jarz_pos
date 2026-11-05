@@ -219,6 +219,107 @@ class TestStripCarriedPricingForGate(unittest.TestCase):
 		self.assertIs(carry_mod.strip_carried_pricing_for_gate(cart, None), cart)
 
 
+def _trio_source(*, markers="[LINE DISCOUNTS] [BUNDLE PRICING]", qty=1, children_amount=432.0, extra=()):
+	"""A Signature Trio sold at 10% off (480 -> 432): the parent keeps the list price."""
+	return {
+		"name": _SOURCE,
+		"custom_pos_audit_markers": markers,
+		"items": [
+			_row("TRIO", rate=480.0, qty=qty, is_bundle_parent=1, bundle_code="B-TRIO", amount=0.0),
+			_row("MOLTEN-L", rate=160.0, qty=3 * qty, is_bundle_child=1, parent_bundle="B-TRIO", amount=children_amount),
+			*extra,
+		],
+	}
+
+
+class TestSourceBundleRates(unittest.TestCase):
+	def test_discounted_bundle_yields_its_charged_price(self):
+		self.assertEqual(carry_mod.source_bundle_rates(_trio_source()), ({"TRIO": 432.0}, {"TRIO": 1.0}))
+
+	def test_price_is_per_bundle_at_qty_two(self):
+		rates, qty = carry_mod.source_bundle_rates(_trio_source(qty=2, children_amount=864.0))
+		self.assertEqual((rates, qty), ({"TRIO": 432.0}, {"TRIO": 2.0}))
+
+	def test_without_the_marker_nothing_is_carried(self):
+		self.assertEqual(carry_mod.source_bundle_rates(_trio_source(markers="[LINE DISCOUNTS]")), ({}, {}))
+
+	def test_one_bundle_at_two_prices_is_left_out(self):
+		second = (
+			_row("TRIO", rate=480.0, is_bundle_parent=1, bundle_code="B-TRIO", amount=0.0),
+			_row("MOLTEN-L", rate=160.0, qty=3, is_bundle_child=1, parent_bundle="B-TRIO", amount=480.0),
+		)
+		self.assertEqual(carry_mod.source_bundle_rates(_trio_source(extra=second)), ({}, {}))
+
+	def test_child_without_its_parent_is_not_guessed(self):
+		src = _trio_source()
+		src["items"][1]["parent_bundle"] = "OTHER"
+		self.assertEqual(carry_mod.source_bundle_rates(src), ({}, {}))
+
+	def test_carry_holds_the_bundle_rates(self):
+		carry = carry_mod.build_amendment_carry(_trio_source(), zero_shipping=False)
+		self.assertEqual(carry["bundle_rates"], {"TRIO": 432.0})
+		self.assertEqual(carry["bundle_qty"], {"TRIO": 1.0})
+
+
+class TestApplySourceBundlePricing(unittest.TestCase):
+	@staticmethod
+	def _apply(cart, rates=None, qty=None):
+		return carry_mod.apply_source_bundle_pricing(
+			cart, rates if rates is not None else {"TRIO": 432.0}, qty or {"TRIO": 1.0}, resolve_code=lambda c: c
+		)
+
+	def test_rebuilt_bundle_gets_the_source_price_back(self):
+		cart = [{"item_code": "TRIO", "qty": 1, "rate": 480.0, "price_list_rate": 480.0, "is_bundle": True}]
+		self.assertEqual(self._apply(cart), ["TRIO"])
+		self.assertEqual(cart[0]["custom_rate_override"], 432.0)
+
+	def test_operator_pricing_on_the_bundle_is_never_touched(self):
+		for field, value in (("custom_rate_override", 450.0), ("discount_percentage", 5.0), ("discount_amount", 20.0)):
+			cart = [{"item_code": "TRIO", "qty": 1, "rate": 480.0, "is_bundle": True, field: value}]
+			self.assertEqual(self._apply(cart), [], field)
+			self.assertEqual(cart[0].get("custom_rate_override"), value if field == "custom_rate_override" else None)
+
+	def test_already_at_that_price_needs_nothing(self):
+		cart = [{"item_code": "TRIO", "qty": 1, "rate": 432.0, "is_bundle": True}]
+		self.assertEqual(self._apply(cart), [])
+
+	def test_extra_bundles_are_split_off_at_list(self):
+		cart = [{"item_code": "TRIO", "qty": 3, "rate": 480.0, "is_bundle": True}]
+		self._apply(cart)
+		self.assertEqual(len(cart), 2)
+		self.assertEqual((cart[0]["qty"], cart[0]["custom_rate_override"]), (1.0, 432.0))
+		self.assertEqual(cart[1]["qty"], 2.0)
+		self.assertNotIn("custom_rate_override", cart[1])
+
+	def test_plain_rows_are_ignored(self):
+		cart = [{"item_code": "TRIO", "qty": 1, "rate": 480.0}]
+		self.assertEqual(self._apply(cart), [])
+
+
+class TestStripCarriedBundlePricingForGate(unittest.TestCase):
+	_carry = {"bundle_rates": {"TRIO": 432.0}, "bundle_qty": {"TRIO": 1.0}}
+
+	def test_inherited_bundle_price_does_not_need_a_manager(self):
+		out = carry_mod.strip_carried_pricing_for_gate(
+			[{"item_code": "TRIO", "qty": 1, "is_bundle": True, "custom_rate_override": 432.0}], self._carry
+		)
+		self.assertNotIn("custom_rate_override", out[0])
+
+	def test_new_bundle_price_or_more_bundles_stays_gated(self):
+		for row in (
+			{"item_code": "TRIO", "qty": 1, "is_bundle": True, "custom_rate_override": 400.0},
+			{"item_code": "TRIO", "qty": 2, "is_bundle": True, "custom_rate_override": 432.0},
+		):
+			out = carry_mod.strip_carried_pricing_for_gate([row], self._carry)
+			self.assertIn("custom_rate_override", out[0])
+
+	def test_bundle_line_discount_stays_gated(self):
+		out = carry_mod.strip_carried_pricing_for_gate(
+			[{"item_code": "TRIO", "qty": 1, "is_bundle": True, "discount_percentage": 10}], self._carry
+		)
+		self.assertEqual(out[0]["discount_percentage"], 10)
+
+
 class TestApplyHeaderDiscountCarry(unittest.TestCase):
 	def _doc(self, *, discount=0.0, lines=(500.0,)):
 		doc = SimpleNamespace(discount_amount=discount, items=[{"amount": a} for a in lines])
