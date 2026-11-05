@@ -170,37 +170,108 @@ _CAKE_NOTE = (
 	'"2 trays" is not restated because it is unclear which batch it meant.'
 )
 
+# v3 = Cake A, the official Fudge Cake (owner, 2026-10-29; method approved 2026-11-05).
+# The cocoa is bloomed in the boiling water instead of going in with the dry mix,
+# baking soda joins the dry mix, and the bake is cooler and pulled on centre
+# temperature.  BOM-Fudge Cake-005 is 45 eggs -> 14.29 Kg of batter.
 FUDGE_CAKE = {
 	"item_code": "Fudge Cake",
-	"version": 2,
+	"version": 3,
 	"yield_percent": 98,
-	"prep_time_mins": 60,
-	"equipment": "Planetary mixer (whisk then hand), trays, oven",
+	"prep_time_mins": 70,
+	"equipment": "Planetary mixer (whisk then hand), sieve, trays, oven, probe thermometer",
 	"notes": (
-		"One BOM batch = 9.258 Kg. The manual says baking soda; the BOM bills "
-		"baking powder, which is what the step now names.\n" + _CAKE_NOTE + "\n" + BASES_V2_NOTE
+		"Cake A, the official Fudge Cake since 2026-10-29. One BOM batch = 45 eggs = "
+		"14.29 Kg of batter. Cocoa is Cacao Barry Extra Brute (alkalised), so never "
+		"more baking soda than the BOM line. Bake loss target: 10% or less "
+		"(over 12% means overbaked). Don't keep plain cake in the fridge for days; "
+		"freeze what isn't used today.\n" + BASES_V2_NOTE
 	),
 	"steps": [
+		{
+			"title": "Bloom the cocoa in the boiling water",
+			"instruction": (
+				"Sift {{item:coco powder|grams}} cocoa. Boil {{item:Water (tap)|grams}} water, "
+				"whisk in the cocoa until there are no lumps, cover and rest 5 minutes.\n"
+				"ينخل {{item:coco powder|grams}} كاكاو. يغلي {{item:Water (tap)|grams}} ماء "
+				"و يضاف عليه الكاكاو مع التقليب بالمضرب اليدوي حتي لا يبقي اي تكتل، "
+				"ثم يغطي و يترك 5 دقائق."
+			),
+			"duration_mins": 10,
+			"scaling_mode": "Per Batch",
+			"requires_confirmation": 1,
+		},
 		dict(_CAKE_WHIP),
 		{
 			"title": "Add the dry mix in three additions on speed 1",
 			"instruction": (
 				"Drop to speed 1 and add the dry mix — {{item:flour|grams}} flour, "
-				"{{item:baking powder|grams}} baking powder, {{item:coco powder|grams}} "
-				"cocoa powder, a pinch of salt — in three additions, each until it "
-				"disappears.\n"
+				"{{item:baking powder|grams}} baking powder, {{item:baking soda|grams}} "
+				"baking soda, a pinch of salt — in three additions, each until it "
+				"disappears. Weigh the soda on the small scale.\n"
 				"انزال المضرب علي سرعه 1 ثم يضاف اليه الخليط الجاف "
 				"( {{item:flour|grams}} دقيق – {{item:baking powder|grams}} بيكنج بودر – "
-				"{{item:coco powder|grams}} كاكاو – رشه ملح ) علي ثلاث مرات حتي يختفي "
-				"الخليط."
+				"{{item:baking soda|grams}} بيكنج صودا – رشه ملح ) علي ثلاث مرات حتي يختفي "
+				"الخليط. الصودا توزن علي الميزان الصغير."
 			),
 			"duration_mins": 5,
 			"scaling_mode": "Per Batch",
 			"requires_confirmation": 1,
 		},
-		dict(_CAKE_OIL_WATER),
-		dict(_CAKE_DIVIDE),
-		dict(_BAKE_180_45),
+		{
+			"title": "Combine oil and the cocoa water, add gradually",
+			"instruction": (
+				"Mix {{item:oil|grams}} oil into the hot cocoa water, then add it "
+				"gradually to the mixer.\n"
+				"يخلط {{item:oil|grams}} زيت مع ماء الكاكاو الساخن "
+				"ثم يضاف علي الخليط في العجان تدريجيا."
+			),
+			"duration_mins": 5,
+			"scaling_mode": "Per Batch",
+			"requires_confirmation": 1,
+		},
+		{
+			"title": "Stop the mixer, hand-stir, fill the trays 3–4 cm deep",
+			"instruction": (
+				"Stop the mixer, stir well by hand with a spoon, then divide evenly "
+				"over the trays so the batter is 3–4 cm deep.\n"
+				"يفصل العجان و يقلب الخليط بمعلقه جيدا ثم يوزع بالتساوي علي الصاجات "
+				"بحيث يكون ارتفاع الخليط 3 الي 4 سم."
+			),
+			"duration_mins": 5,
+			"scaling_mode": "Per Batch",
+			"requires_confirmation": 1,
+		},
+		{
+			"title": "Bake at 165–170°C, pull at 95°C in the centre",
+			"instruction": (
+				"Bake at 165–170°C. Pull the tray when the centre reads about 95°C, or a "
+				"skewer comes out with moist crumbs.\n"
+				"يسوي الخليط علي درجه حراره 165 الي 170. يخرج الصاج لما حراره النص "
+				"توصل حوالي 95 درجه، او لما السيخ يطلع عليه فتافيت رطبه."
+			),
+			"duration_mins": 45,
+			"scaling_mode": "Fixed",
+			"capture_type": "Temperature",
+			"capture_label": "Centre temperature at pull (°C)",
+			"capture_min": 92,
+			"capture_max": 98,
+			"requires_confirmation": 1,
+		},
+		{
+			"title": "Cover while warm, cool, freeze what isn't used today",
+			"instruction": (
+				"Cover the trays with film or foil while warm and cool covered to room "
+				"temperature. Freeze any cake not used today; don't keep it in the fridge "
+				"for days.\n"
+				"يغطي الصاج بالاستريتش او الفويل و هو دافي و يبرد و هو مغطي لحد درجه "
+				"حراره الغرفه. اي كيك مش هيستخدم النهارده يدخل الفريزر، و ميتسابش في "
+				"التلاجه ايام."
+			),
+			"duration_mins": 5,
+			"scaling_mode": "Fixed",
+			"requires_confirmation": 1,
+		},
 	],
 }
 

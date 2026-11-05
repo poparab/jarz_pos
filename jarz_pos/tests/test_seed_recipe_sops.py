@@ -208,17 +208,19 @@ BASE_BOMS = {
 			"dr baker cream": 3.0,
 		},
 	),
+	# BOM-Fudge Cake-005 (Cake A, 2026-10-29): 45 eggs -> 14.29 Kg of batter.
 	"Fudge Cake": (
-		9.258,
+		14.29,
 		{
-			"eggs": 30,
-			"sugar": 2.5,
-			"kamina vanilla": 0.018,
-			"flour": 1.8,
-			"coco powder": 0.38,
-			"baking powder": 0.08,
-			"oil": 1.5,
-			"Water (tap)": 1.5,
+			"eggs": 45,
+			"sugar": 3.75,
+			"kamina vanilla": 0.027,
+			"flour": 2.7,
+			"coco powder": 0.57,
+			"baking powder": 0.105,
+			"baking soda": 0.0135,
+			"oil": 2.025,
+			"Water (tap)": 2.85,
 		},
 	),
 	"Red Velvet Cake": (
@@ -285,7 +287,8 @@ class TestBaseRecipes(unittest.TestCase):
 		from jarz_pos.scripts import seed_recipe_sops as seed
 
 		versions = {r["item_code"]: r["version"] for r in seed.RECIPES if r["item_code"] in BASE_BOMS}
-		self.assertEqual({code: 2 for code in BASE_BOMS}, versions)
+		# Fudge Cake is v3 (Cake A) so the v2 method stays on file, inactive.
+		self.assertEqual({**{code: 2 for code in BASE_BOMS}, "Fudge Cake": 3}, versions)
 
 	def test_no_base_leaves_a_token_unresolved(self):
 		for item_code in BASE_BOMS:
@@ -340,9 +343,12 @@ class TestBaseRecipes(unittest.TestCase):
 
 	def test_cakes_follow_the_bom_not_the_manual_batch(self):
 		fudge = render_base("Fudge Cake")
-		self.assertIn("beat 30 eggs + 2500 g sugar + 18 g vanilla", fudge["steps"][0]["instruction_html"])
-		self.assertIn("1800 g flour, 80 g baking powder, 380 g cocoa", fudge["steps"][1]["instruction_html"])
-		self.assertIn("1500 g oil with 1500 g boiling water", fudge["steps"][2]["instruction_html"])
+		self.assertIn("Sift 570 g cocoa. Boil 2850 g water", fudge["steps"][0]["instruction_html"])
+		self.assertIn("beat 45 eggs + 3750 g sugar + 27 g vanilla", fudge["steps"][1]["instruction_html"])
+		self.assertIn(
+			"2700 g flour, 105 g baking powder, 13.5 g baking soda", fudge["steps"][2]["instruction_html"]
+		)
+		self.assertIn("2025 g oil into the hot cocoa water", fudge["steps"][3]["instruction_html"])
 
 		velvet = render_base("Red Velvet Cake", batches=1.5)
 		self.assertIn("beat 45 eggs + 3750 g sugar", velvet["steps"][0]["instruction_html"])
@@ -377,7 +383,7 @@ class TestBaseRecipes(unittest.TestCase):
 	def test_shared_cake_steps_are_separate_copies(self):
 		from jarz_pos.scripts import seed_recipe_sops as seed
 
-		self.assertIsNot(seed.FUDGE_CAKE["steps"][0], seed.RED_VELVET_CAKE["steps"][0])
+		self.assertIsNot(seed.FUDGE_CAKE["steps"][1], seed.RED_VELVET_CAKE["steps"][0])
 
 
 class TestItemsFilter(unittest.TestCase):
