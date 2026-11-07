@@ -1557,9 +1557,10 @@ def _advances_due_by_month(
 	taken on 15 October belongs to October's salary and must not shrink what
 	September's row hands over.
 
-	Earlier months stay — the all-time balance rule in ``_build_payroll_rows``
-	is unchanged: an advance against July still unrecovered in September is
-	exactly the stale debt the board exists to chase. Legacy advances with no
+	Earlier months stay HERE; ``_carry_closed_month_advances`` then drops those
+	whose own salary month is still unpaid (they belong on that month's row). An
+	advance against July still unrecovered once July is paid is exactly the
+	stale debt the board exists to chase, and keeps carrying. Legacy advances with no
 	salary month count from their posting month (``advance_salary_month``).
 	"""
 	month_key = str(month_key or "")[:7]
@@ -1947,12 +1948,70 @@ def _month_context(month: str | None, company: str | None) -> tuple[date, date, 
 	return month_start, month_end, month_key, company, currency
 
 
-def _compute_month(month: str | None, company: str | None) -> dict[str, Any]:
+def _employees_still_owed(month_key: str, company: str | None) -> set[str] | None:
+	"""Employees whose salary for ``month_key`` is not yet fully paid.
+
+	Computed through ``_compute_month`` itself, so "fully paid" means exactly
+	what the screen and the pay guard mean by it. ``carry_check=False`` stops the
+	recursion: a row's ``remaining`` is due − paid and does not depend on which
+	advances the row lists. ``None`` when the month cannot be read — the caller
+	then carries every earlier advance, the old behaviour, because showing a
+	debt twice is the safer failure than hiding one.
+	"""
+	try:
+		context = _compute_month(month_key, company, carry_check=False)
+	except Exception:
+		_log("monthly_expenses: earlier-month salary state")
+		return None
+	return {
+		r["employee"]
+		for r in (context.get("payroll") or {}).get("rows") or []
+		if flt(r.get("remaining")) > MONEY_TOLERANCE
+	}
+
+
+def _carry_closed_month_advances(
+	advances_by_employee: dict[str, list[dict[str, Any]]],
+	month_key: str,
+	still_owed_by_month: dict[str, set[str] | None],
+) -> dict[str, list[dict[str, Any]]]:
+	"""Keep an EARLIER salary month's advance only once that month is paid. Pure.
+
+	An advance comes off the salary of its own month (``custom_jarz_salary_month``).
+	While that month's salary is still owed, the advance belongs on THAT month's
+	row; listing it on later boards too made the November board deduct October's
+	advances from November's salary while October was still unpaid (production,
+	2026-11-07: six employees). Once the earlier month is fully paid and the
+	advance is still open, nobody recovered it — it is now stale debt and carries
+	forward to every later board, which is what the all-time rule exists for.
+	A month whose state is unknown (``None``) carries, as before.
+	"""
+	month_key = str(month_key or "")[:7]
+	kept_by_employee: dict[str, list[dict[str, Any]]] = {}
+	for employee, rows in (advances_by_employee or {}).items():
+		kept = []
+		for row in rows or []:
+			salary_month = advance_salary_month(row) or month_key
+			if salary_month < month_key:
+				still_owed = still_owed_by_month.get(salary_month)
+				if still_owed is not None and employee in still_owed:
+					continue
+			kept.append(row)
+		if kept:
+			kept_by_employee[employee] = kept
+	return kept_by_employee
+
+
+def _compute_month(month: str | None, company: str | None, carry_check: bool = True) -> dict[str, Any]:
 	"""Everything the screen needs for one month. Used by the read AND pay paths.
 
 	The pay endpoints recompute through here rather than re-deriving "already
 	paid" their own way — one definition of paid, or the guard and the screen
 	will eventually disagree about the same money.
+
+	``carry_check`` decides whether an earlier salary month's open advance is
+	listed here (see ``_carry_closed_month_advances``); it is only switched off
+	for the inner computation of that earlier month.
 	"""
 	month_start, month_end, month_key, company, currency = _month_context(month, company)
 
@@ -2005,6 +2064,20 @@ def _compute_month(month: str | None, company: str | None) -> dict[str, Any]:
 	penalties_by_employee = _load_penalties(month_key, company)
 	all_open_advances, advances_readable = _load_advances(company)
 	advances_by_employee = _advances_due_by_month(all_open_advances, month_key)
+	if carry_check:
+		earlier_months = sorted(
+			{
+				advance_salary_month(r) or month_key
+				for rows in advances_by_employee.values()
+				for r in rows or []
+			}
+			- {month_key}
+		)
+		if earlier_months:
+			still_owed_by_month = {m: _employees_still_owed(m, company) for m in earlier_months}
+			advances_by_employee = _carry_closed_month_advances(
+				advances_by_employee, month_key, still_owed_by_month
+			)
 	settled_by_employee = _load_settlements(month_key, company)
 
 	# Anyone the month has anything to say about, whether or not payroll knows

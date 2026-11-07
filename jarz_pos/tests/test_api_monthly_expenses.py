@@ -3515,6 +3515,59 @@ class TestAdvancesDueByMonth(unittest.TestCase):
 		self.assertNotIn("EMP-1", self._due(rows, "2026-09"))
 
 
+class TestEarlierMonthAdvancesCarryOnlyOnceThatMonthIsPaid(unittest.TestCase):
+	"""Production 2026-11-07: October's advances were deducted on the November
+	board too while October's salary was still unpaid (six employees)."""
+
+	OCT = {"name": "A-OCT", "posting_date": "2026-10-29", "custom_jarz_salary_month": "2026-10"}
+	NOV = {"name": "A-NOV", "posting_date": "2026-11-03", "custom_jarz_salary_month": "2026-11"}
+
+	def _carry(self, rows, still_owed):
+		from jarz_pos.api.monthly_expenses import _carry_closed_month_advances
+
+		return _carry_closed_month_advances({"EMP-1": rows}, "2026-11", still_owed)
+
+	def test_an_unpaid_earlier_month_keeps_its_advance_off_later_boards(self):
+		out = self._carry([self.OCT, self.NOV], {"2026-10": {"EMP-1"}})
+		self.assertEqual([r["name"] for r in out["EMP-1"]], ["A-NOV"])
+
+	def test_only_earlier_advances_and_the_month_is_empty_drops_the_employee(self):
+		self.assertEqual(self._carry([self.OCT], {"2026-10": {"EMP-1"}}), {})
+
+	def test_a_paid_earlier_month_carries_its_unrecovered_advance(self):
+		out = self._carry([self.OCT, self.NOV], {"2026-10": set()})
+		self.assertEqual([r["name"] for r in out["EMP-1"]], ["A-OCT", "A-NOV"])
+
+	def test_another_employee_still_owed_does_not_hide_this_ones_debt(self):
+		out = self._carry([self.OCT], {"2026-10": {"EMP-2"}})
+		self.assertEqual([r["name"] for r in out["EMP-1"]], ["A-OCT"])
+
+	def test_an_unreadable_earlier_month_carries_as_before(self):
+		out = self._carry([self.OCT], {"2026-10": None})
+		self.assertEqual([r["name"] for r in out["EMP-1"]], ["A-OCT"])
+
+	def test_the_boards_own_month_is_never_dropped(self):
+		out = self._carry([self.NOV], {"2026-11": {"EMP-1"}})
+		self.assertEqual([r["name"] for r in out["EMP-1"]], ["A-NOV"])
+
+	def test_employees_still_owed_reads_remaining_through_compute_month(self):
+		from jarz_pos.api import monthly_expenses as me
+
+		ctx = {"payroll": {"rows": [
+			{"employee": "EMP-1", "remaining": 9000},
+			{"employee": "EMP-2", "remaining": 0.2},
+		]}}
+		with patch.object(me, "_compute_month", return_value=ctx) as compute:
+			self.assertEqual(me._employees_still_owed("2026-10", "JARZ"), {"EMP-1"})
+		compute.assert_called_once_with("2026-10", "JARZ", carry_check=False)
+
+	def test_employees_still_owed_is_none_when_the_month_fails(self):
+		from jarz_pos.api import monthly_expenses as me
+
+		with patch.object(me, "_compute_month", side_effect=RuntimeError("boom")), patch.object(me, "_log"):
+			self.assertIsNone(me._employees_still_owed("2026-10", "JARZ"))
+
+
 class TestAdvanceSettlementAllowList(unittest.TestCase):
 	def test_an_advance_not_on_the_row_is_refused_before_anything_is_read(self):
 		from jarz_pos.api import monthly_expenses
