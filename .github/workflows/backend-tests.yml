@@ -836,6 +836,12 @@ jobs:
             # system qty, a line manager posts at once while staff wait for
             # approval, approve posts at counted_at, reject needs a reason.
             test_branch_weekly_count
+            # Promo-code lookup for POS staff (feature promo-code-lookup). Mocked,
+            # no site: status precedence (disabled > not started > expired > used
+            # up), scope labels, remaining uses from Active redemptions, and the
+            # order check run through the real engine with the before_validate
+            # hook's channel / pickup rules, never saving the invoice.
+            test_promo_lookup
           )
           rc=0
           for m in "${MODULES[@]}"; do
