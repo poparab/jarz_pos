@@ -781,6 +781,11 @@ jobs:
             # name normalisation, hashing, the amendment-free event id, the
             # hold / approve / skip decision, the 7-day expiry and the payload.
             test_meta_capi
+            # Meta Ads report (feature meta-ads-dashboard). Pure, no site: purchase
+            # action preference (never a sum), ratios with zero denominators,
+            # date defaults and cap, ERP-by-ad-name allocation without double
+            # counting, filter lists, and the token staying out of URLs/errors.
+            test_meta_ads
             # Chat inbox (feature chat-inbox). Pure, no chat table
             # needed, so they pass before migrate. Pins Meta's HMAC check and
             # handshake and the WhatsApp/Messenger/Instagram/comment parsing

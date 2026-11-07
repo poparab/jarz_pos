@@ -23,7 +23,12 @@
   "send_website_orders",
   "website_first_order",
   "column_break_w",
-  "website_url"
+  "website_url",
+  "section_ads",
+  "ads_account_id",
+  "ads_api_version",
+  "column_break_ads",
+  "ads_access_token"
  ],
  "fields": [
   {
@@ -149,11 +154,41 @@
    "label": "Website URL",
    "default": "https://orderjarz.com/",
    "description": "Sent to Meta as the page the order came from."
+  },
+  {
+   "fieldname": "section_ads",
+   "fieldtype": "Section Break",
+   "label": "Ads Reporting",
+   "description": "Read-only access to the ad account for the Meta Ads report in the app. Independent of the Conversions API settings above."
+  },
+  {
+   "fieldname": "ads_account_id",
+   "fieldtype": "Data",
+   "label": "Ad Account ID",
+   "default": "act_1528131027872835",
+   "description": "Looks like act_1234567890."
+  },
+  {
+   "fieldname": "ads_api_version",
+   "fieldtype": "Data",
+   "label": "Ads Graph API Version",
+   "default": "v23.0"
+  },
+  {
+   "fieldname": "column_break_ads",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "ads_access_token",
+   "fieldtype": "Password",
+   "label": "Ads Access Token",
+   "permlevel": 1,
+   "description": "Read-only (ads_read) system-user token for the ad account. Stored encrypted; only a System Manager can see or change it."
   }
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-10-17 21:00:00.000000",
+ "modified": "2026-11-07 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "jarz pos",
  "name": "Meta CAPI Settings",
