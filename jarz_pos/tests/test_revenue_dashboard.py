@@ -207,6 +207,19 @@ class TestHelpers(unittest.TestCase):
 # ── summary ───────────────────────────────────────────────────────────────
 
 
+class TestB2cShipping(unittest.TestCase):
+	def test_b2b_delivery_charge_stays_out_of_the_b2c_tile(self):
+		s = summary(
+			shipping_rows=[
+				{"purpose": "Standard", "posting_date": date(2026, 10, 1), "amount": 60},
+				{"purpose": "B2B Supply", "posting_date": date(2026, 10, 1), "amount": 40},
+			]
+		)
+		self.assertEqual(s["shipping_income"], 100.0)
+		self.assertEqual(s["b2c_shipping_income"], 60.0)
+		self.assertEqual(s["b2c_incl_shipping"], s["b2c"] + 60.0)
+
+
 class TestSummary(unittest.TestCase):
 	def test_channel_split_and_b2b_share(self):
 		s = summary()
@@ -215,6 +228,8 @@ class TestSummary(unittest.TestCase):
 		self.assertEqual(s["b2b_share_pct"], 34.5)
 		self.assertEqual(s["shipping_income"], 60.0)
 		self.assertEqual(s["total_revenue"], 1510.0)
+		self.assertEqual(s["b2c_shipping_income"], 60.0)
+		self.assertEqual(s["b2c_incl_shipping"], 960.0)
 		self.assertEqual(
 			(s["orders"], s["b2c_orders"], s["b2b_orders"], s["other_orders"]),
 			(9, 5, 2, 2),

@@ -358,6 +358,7 @@ class TestBuildPlan(unittest.TestCase):
 				"sales_days",
 				"source",
 				"branches",
+				"branch_moves",
 				"summary",
 				"notice",
 			},
@@ -385,6 +386,10 @@ class TestBuildPlan(unittest.TestCase):
 				"available_at_source",
 				"send_now",
 				"short_by",
+				"item_group",
+				"jar_size",
+				"spare_qty",
+				"move_in",
 			},
 			set(row),
 		)
@@ -491,6 +496,137 @@ class TestBuildPlan(unittest.TestCase):
 		self.assertEqual([], payload["branches"])
 		self.assertEqual(0, payload["summary"]["branches"])
 		self.assertEqual(0.0, payload["summary"]["total_suggested"])
+
+
+class TestJarSize(unittest.TestCase):
+	def test_groups_map_to_sizes_including_the_typo(self):
+		self.assertEqual("medium", plan.jar_size("Medium"))
+		self.assertEqual("medium", plan.jar_size("Meduim"))
+		self.assertEqual("large", plan.jar_size(" Large "))
+		self.assertEqual("small", plan.jar_size("Small"))
+		self.assertEqual("", plan.jar_size("Cakes"))
+		self.assertEqual("", plan.jar_size(None))
+
+
+class TestSpareQty(unittest.TestCase):
+	def test_keeps_its_own_cover_and_offers_the_rest(self):
+		# 2/day x 14 days = 28 kept; 40 on the shelf -> 12 to spare.
+		row = {"on_hand": 40, "sells_per_day": 2, "target_days": 14}
+		self.assertEqual(12, plan.spare_qty(row))
+
+	def test_a_branch_below_its_own_cover_has_nothing_to_give(self):
+		row = {"on_hand": 20, "sells_per_day": 2, "target_days": 14}
+		self.assertEqual(0, plan.spare_qty(row))
+
+	def test_negative_shelf_has_nothing_to_give(self):
+		row = {"on_hand": -5, "sells_per_day": 0, "target_days": 14}
+		self.assertEqual(0, plan.spare_qty(row))
+
+	def test_a_jar_that_never_sells_here_is_all_spare(self):
+		row = {"on_hand": 9, "sells_per_day": 0, "target_days": 14}
+		self.assertEqual(9, plan.spare_qty(row))
+
+	def test_fractional_rate_rounds_the_kept_cover_up(self):
+		# 0.5/day x 15 = 7.5 -> keeps 8, gives 2 of 10.
+		row = {"on_hand": 10, "sells_per_day": 0.5, "target_days": 15}
+		self.assertEqual(2, plan.spare_qty(row))
+
+
+class TestBranchMoves(unittest.TestCase):
+	"""Shop-to-shop moves only ever fill what the factory could not."""
+
+	ITEMS = [{"item_code": "LOTUS-L", "item_name": "Lotus Large", "stock_uom": "Nos", "item_group": "Large"}]
+	BRANCHES = [
+		{"warehouse": "Nasr city - J", "branch": "Nasr city"},
+		{"warehouse": "Dokki - J", "branch": "Dokki"},
+		{"warehouse": "6th of october - J", "branch": "6th of october"},
+	]
+
+	def _plan(self, *, factory, on_hand, sold):
+		return plan.build_plan(
+			generated_on="2026-11-08 09:00:00",
+			company="Jarz",
+			source_warehouse="Finished Goods - J",
+			cover_days=14,
+			sales_days=14,
+			items=self.ITEMS,
+			branches=self.BRANCHES,
+			source_available={"LOTUS-L": factory},
+			on_hand=on_hand,
+			sold=sold,
+		)
+
+	def _row(self, payload, warehouse):
+		for branch in payload["branches"]:
+			if branch["warehouse"] == warehouse:
+				for row in branch["items"]:
+					return row
+		return None
+
+	def test_factory_short_is_filled_from_the_branch_with_spare(self):
+		payload = self._plan(
+			factory=0,
+			# Nasr City sells 3/day and holds 2 -> needs 40.  Dokki sells
+			# 1/day and holds 30 -> keeps 14, spares 16.
+			on_hand={("Nasr city - J", "LOTUS-L"): 2, ("Dokki - J", "LOTUS-L"): 30},
+			sold={("Nasr city - J", "LOTUS-L"): 42, ("Dokki - J", "LOTUS-L"): 14},
+		)
+		self.assertEqual(
+			[
+				{
+					"item_code": "LOTUS-L",
+					"item_name": "Lotus Large",
+					"jar_size": "large",
+					"from_warehouse": "Dokki - J",
+					"from_branch": "Dokki",
+					"to_warehouse": "Nasr city - J",
+					"to_branch": "Nasr city",
+					"qty": 16,
+				}
+			],
+			payload["branch_moves"],
+		)
+		nasr = self._row(payload, "Nasr city - J")
+		self.assertEqual(40, nasr["short_by"])  # still the factory's number
+		self.assertEqual(
+			[{"from_warehouse": "Dokki - J", "from_branch": "Dokki", "qty": 16}], nasr["move_in"]
+		)
+		self.assertEqual(16, self._row(payload, "Dokki - J")["spare_qty"])
+
+	def test_no_move_when_the_factory_covers_it(self):
+		payload = self._plan(
+			factory=100,
+			on_hand={("Nasr city - J", "LOTUS-L"): 2, ("Dokki - J", "LOTUS-L"): 30},
+			sold={("Nasr city - J", "LOTUS-L"): 42, ("Dokki - J", "LOTUS-L"): 14},
+		)
+		self.assertEqual([], payload["branch_moves"])
+		self.assertEqual([], self._row(payload, "Nasr city - J")["move_in"])
+
+	def test_a_move_never_exceeds_what_is_short(self):
+		payload = self._plan(
+			factory=35,
+			on_hand={("Nasr city - J", "LOTUS-L"): 2, ("Dokki - J", "LOTUS-L"): 30},
+			sold={("Nasr city - J", "LOTUS-L"): 42, ("Dokki - J", "LOTUS-L"): 14},
+		)
+		# Factory sends 35 of 40; Dokki covers only the last 5.
+		self.assertEqual(5, sum(m["qty"] for m in payload["branch_moves"]))
+
+	def test_the_biggest_shortfall_is_served_first_from_one_donor(self):
+		payload = self._plan(
+			factory=0,
+			on_hand={
+				("Nasr city - J", "LOTUS-L"): 0,
+				("6th of october - J", "LOTUS-L"): 0,
+				("Dokki - J", "LOTUS-L"): 20,
+			},
+			sold={
+				("Nasr city - J", "LOTUS-L"): 14,  # needs 14
+				("6th of october - J", "LOTUS-L"): 7,  # needs 7
+				# Dokki never sold it: all 20 spare.
+			},
+		)
+		moves = {m["to_warehouse"]: m["qty"] for m in payload["branch_moves"]}
+		self.assertEqual({"Nasr city - J": 14, "6th of october - J": 6}, moves)
 
 
 class TestCoerceDays(unittest.TestCase):

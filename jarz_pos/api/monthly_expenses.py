@@ -210,6 +210,11 @@ _ORDER_FIELDS = [
 	"grand_total",
 	"outstanding_amount",
 	"status",
+	# Shown on the order line so the board answers "which shop, how far along"
+	# without opening the invoice — the Manager Dashboard's employee ledger
+	# showed both, and this board replaced it.
+	"pos_profile",
+	"custom_sales_invoice_state",
 ]
 
 #: An ``advance_account`` whose ``account_name`` contains none of these is not
@@ -610,6 +615,8 @@ def _serialize_order(row: dict[str, Any]) -> dict[str, Any]:
 		"grand_total": _money(row.get("grand_total")),
 		"outstanding": _money(row.get("outstanding_amount")),
 		"status": row.get("status"),
+		"branch": row.get("pos_profile") or "",
+		"order_state": row.get("custom_sales_invoice_state") or "",
 	}
 
 

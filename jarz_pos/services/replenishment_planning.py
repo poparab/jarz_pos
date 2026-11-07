@@ -75,6 +75,22 @@ NON_SELLING_WAREHOUSE_NAME_HINTS = (
 )
 
 
+#: Item Group -> jar size.  ``Meduim`` is a known spelling on this site's data
+#: (see ``services/consumable_deduction``); the carton guide on the phone packs
+#: by size, so a jar whose size is unknown has to say so rather than guess.
+JAR_SIZE_BY_GROUP = {
+	"small": "small",
+	"medium": "medium",
+	"meduim": "medium",
+	"large": "large",
+}
+
+
+def jar_size(item_group: Any) -> str:
+	"""``small`` / ``medium`` / ``large`` from the Item Group, ``""`` otherwise."""
+	return JAR_SIZE_BY_GROUP.get(str(item_group or "").strip().lower(), "")
+
+
 # ── Scalars ─────────────────────────────────────────────────────────────
 
 
@@ -374,6 +390,8 @@ def build_branch_item_row(
 		"item_code": str(item.get("item_code") or ""),
 		"item_name": str(item.get("item_name") or item.get("item_code") or ""),
 		"stock_uom": str(item.get("stock_uom") or ""),
+		"item_group": str(item.get("item_group") or ""),
+		"jar_size": jar_size(item.get("item_group")),
 		"on_hand": on_hand_value,
 		# Reported, never subtracted.  This is the flag that says "go count
 		# this shelf", and it is the only place the raw negative does any work.
@@ -385,6 +403,9 @@ def build_branch_item_row(
 		"available_at_source": 0.0,
 		"send_now": 0,
 		"short_by": 0,
+		# Filled by :func:`plan_branch_moves` once the factory's share is known.
+		"spare_qty": 0,
+		"move_in": [],
 	}
 
 
@@ -432,6 +453,78 @@ def apply_allocation(
 			row["send_now"] = send_now
 			# Stated, not hidden: the branch is told what is still owed to it.
 			row["short_by"] = max(0, int(row["suggested_qty"]) - send_now)
+
+
+def spare_qty(row: Mapping[str, Any]) -> int:
+	"""Whole jars this branch can give away and still hold its own cover.
+
+	It keeps ``ceil(sells_per_day x target_days)`` — the same target the screen
+	fills every branch up to — and offers only what is above that.  A negative
+	or zero shelf has nothing to give.  A jar the branch has not sold at all in
+	the window keeps nothing back: it is exactly the stock worth moving to a
+	shop that does sell it.
+	"""
+	on_hand = to_float(row.get("on_hand"), 0.0)
+	if on_hand <= QTY_EPSILON:
+		return 0
+	rate = max(0.0, to_float(row.get("sells_per_day"), 0.0))
+	keep = math.ceil(rate * max(0, int(row.get("target_days") or 0)) - QTY_EPSILON)
+	return max(0, whole_jars(on_hand) - max(0, keep))
+
+
+def plan_branch_moves(
+	rows_by_warehouse: Mapping[str, Mapping[str, dict[str, Any]]],
+	labels: Mapping[str, str],
+) -> list[dict[str, Any]]:
+	"""Where the factory cannot cover a branch, which other branch can.
+
+	Runs after :func:`apply_allocation`, so it only ever fills ``short_by`` —
+	the factory's own stock is always the first answer and a move between
+	shops is the fallback, never a substitute.  Per jar, the branch short by
+	the most is served first from the branch with the most to spare; that keeps
+	a move to as few vans as possible.  Fills ``spare_qty`` on every row and
+	``move_in`` on the receiving rows, in place, and returns the flat list.
+	"""
+	moves: list[dict[str, Any]] = []
+	item_codes = sorted({code for rows in rows_by_warehouse.values() for code in rows})
+	for code in item_codes:
+		spare: dict[str, int] = {}
+		short: dict[str, int] = {}
+		for warehouse, rows in rows_by_warehouse.items():
+			row = rows.get(code)
+			if row is None:
+				continue
+			row["spare_qty"] = spare_qty(row) if int(row.get("short_by") or 0) <= 0 else 0
+			if row["spare_qty"] > 0:
+				spare[warehouse] = row["spare_qty"]
+			if int(row.get("short_by") or 0) > 0:
+				short[warehouse] = int(row["short_by"])
+		if not spare or not short:
+			continue
+		for to_wh in sorted(short, key=lambda w: (-short[w], w)):
+			need = short[to_wh]
+			for from_wh in sorted(spare, key=lambda w: (-spare[w], w)):
+				if need <= 0:
+					break
+				give = min(need, spare[from_wh])
+				if give <= 0:
+					continue
+				spare[from_wh] -= give
+				need -= give
+				row = rows_by_warehouse[to_wh][code]
+				line = {
+					"item_code": code,
+					"item_name": row.get("item_name") or code,
+					"jar_size": row.get("jar_size") or "",
+					"from_warehouse": from_wh,
+					"from_branch": labels.get(from_wh) or strip_abbr(from_wh),
+					"to_warehouse": to_wh,
+					"to_branch": labels.get(to_wh) or strip_abbr(to_wh),
+					"qty": give,
+				}
+				row["move_in"].append({k: line[k] for k in ("from_warehouse", "from_branch", "qty")})
+				moves.append(line)
+	return moves
 
 
 def summarise(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
@@ -487,6 +580,13 @@ def build_plan(
 		}
 
 	apply_allocation(rows_by_warehouse, source_available or {})
+	labels = {
+		str(b.get("warehouse") or "").strip(): str(b.get("branch") or "").strip()
+		or strip_abbr(b.get("warehouse"))
+		for b in branches or []
+		if str(b.get("warehouse") or "").strip()
+	}
+	branch_moves = plan_branch_moves(rows_by_warehouse, labels)
 
 	branch_payloads: list[dict[str, Any]] = []
 	for branch in branches or []:
@@ -525,6 +625,10 @@ def build_plan(
 			"available": {str(code): countable(qty) for code, qty in (source_available or {}).items()},
 		},
 		"branches": branch_payloads,
+		# Shop-to-shop moves that close what the factory cannot.  Suggestions:
+		# each one is sent through ``submit_transfer`` as a pending handover the
+		# giving branch confirms, the same path every branch transfer takes.
+		"branch_moves": branch_moves,
 		"summary": summary,
 		"notice": notice,
 	}

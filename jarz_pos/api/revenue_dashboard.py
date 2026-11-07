@@ -399,6 +399,15 @@ def build_summary(
 	b2c = _r(cur["channel_net"][CHANNEL_B2C])
 	b2b = _r(cur["channel_net"][CHANNEL_B2B])
 	shipping_income = _r(sum(_f(r.get("amount")) for r in shipping_rows or []))
+	# The B2C tile shows what consumers paid in full; B2B delivery charges
+	# (rare) stay out of it, so the per-channel split uses the same purpose map.
+	b2c_shipping = _r(
+		sum(
+			_f(r.get("amount"))
+			for r in shipping_rows or []
+			if channel_for_purpose(r.get("purpose")) == CHANNEL_B2C
+		)
+	)
 	days = (td - fd).days + 1
 	# Today is still in progress: it would always be the "worst day" of a range ending today.
 	last_whole_day = td - timedelta(days=1) if today == td and fd < td else td
@@ -419,6 +428,8 @@ def build_summary(
 		"samples": _r(cur["channel_net"][CHANNEL_SAMPLES]),
 		"shipping_income": shipping_income,
 		"total_revenue": _r(net + shipping_income),
+		"b2c_shipping_income": b2c_shipping,
+		"b2c_incl_shipping": _r(b2c + b2c_shipping),
 		"orders": int(cur["orders"]),
 		"b2c_orders": int(cur["channel_orders"][CHANNEL_B2C]),
 		"b2b_orders": int(cur["channel_orders"][CHANNEL_B2B]),

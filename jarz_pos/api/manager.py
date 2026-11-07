@@ -20,7 +20,7 @@ from typing import Any, Optional, Union
 
 import frappe
 from frappe import _
-from frappe.utils import add_days, flt, getdate, nowdate
+from frappe.utils import add_days, cint, flt, getdate, nowdate
 
 from jarz_pos.constants import ACCOUNTS, ROLES, WS_EVENTS
 
@@ -3801,18 +3801,29 @@ def get_pos_shift_monitor(
 
 @frappe.whitelist(allow_guest=False)
 def get_manager_orders(
-	branch: str | None = None, state: str | None = None, limit: int = 200
+	branch: str | None = None,
+	state: str | None = None,
+	limit: int = 200,
+	start: int = 0,
+	channel: str | None = None,
 ) -> dict[str, Any]:
 	"""Return a recent feed of POS invoices for selected branch or for all accessible branches.
 
 	Args:
 	  branch: POS Profile name; when omitted or 'all', includes all accessible profiles.
 	  limit: Max invoices to return (default 200).
+	  start: Offset for "load more" paging (default 0).
+	  channel: ``b2c`` / ``b2b`` / omitted or ``all``.  Same purpose map as the
+	    revenue dashboard (``financial_report.channel_for_purpose``): B2B is
+	    ``B2B Supply``; B2C is every consumer order, so staff and sample orders
+	    show under neither filter, only under All.
 	Returns:
-	  { success, invoices: [ ... ] }
+	  { success, invoices: [ ... ], has_more }
 	"""
 	_ensure_manager_dashboard_access()
 	limit = max(1, min(int(limit or 200), 500))
+	start = max(0, cint(start))
+	channel = (channel or "").strip().lower()
 	allowed = _current_user_allowed_profiles()
 	if not allowed:
 		# Passing the role gate but owning no branch used to return a bare empty
@@ -3858,6 +3869,7 @@ def get_manager_orders(
 		"custom_sales_invoice_state",
 		"sales_invoice_state",
 		"woo_order_id",
+		"custom_order_purpose",
 	]
 	# Build filters
 	filters: dict[str, Any] = {
@@ -3865,6 +3877,15 @@ def get_manager_orders(
 		"docstatus": 1,
 		"is_pos": 1,
 	}
+	# A list, so the purpose field can carry two conditions for B2C.
+	extra_filters: list[list[Any]] = []
+	if channel == "b2b":
+		extra_filters.append(["custom_order_purpose", "=", "B2B Supply"])
+	elif channel == "b2c":
+		# Frappe wraps "not in" / "not like" in IFNULL, so legacy blank
+		# purposes (consumer orders) stay in.
+		extra_filters.append(["custom_order_purpose", "not in", ["B2B Supply", "Employee"]])
+		extra_filters.append(["custom_order_purpose", "not like", "Sample%"])
 	# Optional state filter
 	try:
 		state_field = (
@@ -3890,11 +3911,17 @@ def get_manager_orders(
 
 	rows = frappe.get_all(
 		"Sales Invoice",
-		filters=filters,
+		filters=[[k, *(v if isinstance(v, list) else ["=", v])] for k, v in filters.items()] + extra_filters,
 		fields=fields,
-		order_by="posting_date desc, posting_time desc",
-		limit=limit,
+		# ``name`` breaks ties so a page boundary never repeats or skips an
+		# order posted in the same second.
+		order_by="posting_date desc, posting_time desc, name desc",
+		limit_start=start,
+		# One extra row says whether there is another page without a COUNT.
+		limit_page_length=limit + 1,
 	)
+	has_more = len(rows) > limit
+	rows = rows[:limit]
 	# Normalize payload
 	invs: list[dict[str, Any]] = []
 	for r in rows:
@@ -3912,9 +3939,10 @@ def get_manager_orders(
 				or r.get("sales_invoice_state")
 				or r.get("status"),
 				"branch": r.get(branch_filter_field),
+				"order_purpose": r.get("custom_order_purpose") or "",
 			}
 		)
-	return {"success": True, "invoices": invs}
+	return {"success": True, "invoices": invs, "has_more": has_more}
 
 
 @frappe.whitelist(allow_guest=False)
