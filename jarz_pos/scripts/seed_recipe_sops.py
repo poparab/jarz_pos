@@ -572,6 +572,108 @@ SPONGE_CAKE = {
 	],
 }
 
+# Ganache B, the official ganache since 2026-11-05 (owner, Molten trial sheet):
+# chocolate : cream : milk = 1 : 1 : 0.25, scaled to 3 Kg of cream.  Method as
+# on the trial sheet: boil the liquids, pour over the chopped chocolate in three
+# additions, season, stick-blend at 35-40 C without air.
+# BOM-Chocolate ganache-005 is 7.074 Kg per batch.
+_GANACHE_CHOC = "{{item:Belcolade Belgian chocolate 60%|grams}}"
+_GANACHE_MILK_CHOC = "{{item:Belcolade Milk Chocolate|grams}}"
+_GANACHE_ALL_CHOC = "{{item:Belcolade Belgian chocolate 60%+Belcolade Milk Chocolate|grams}}"
+CHOCOLATE_GANACHE = {
+	"item_code": "Chocolate ganache",
+	"version": 1,
+	"yield_percent": 100,
+	"prep_time_mins": 30,
+	"equipment": "Heatproof bowl, pot, stick blender, infrared thermometer, small scale",
+	"notes": (
+		"Ganache B, official since 2026-11-05 (owner). One BOM batch = 7.074 Kg: "
+		"chocolate 3 Kg (Belcolade 60% 2 + Belcolade milk 1), cream 3 Kg, fresh milk "
+		"0.75 Kg, glucose 283 g, vanilla 34 g, salt 7 g; chocolate : cream : milk = "
+		"1 : 1 : 0.25.\n"
+		"Every amount is a token on the BOM line, so the recipe sheet on the Bases "
+		"tab quotes the run actually being made."
+	),
+	"steps": [
+		{
+			"title": "Weigh and chop the chocolate",
+			"instruction": (
+				f"Weigh {_GANACHE_CHOC} dark chocolate 60% + {_GANACHE_MILK_CHOC} milk "
+				f"chocolate = {_GANACHE_ALL_CHOC} and chop it finely into a heatproof bowl.\n"
+				f"يوزن {_GANACHE_CHOC} شوكولاته دارك 60% + {_GANACHE_MILK_CHOC} شوكولاته "
+				f"ميلك = {_GANACHE_ALL_CHOC} و تتقطع صغير في بولة تستحمل الحرارة."
+			),
+			"duration_mins": 5,
+			"scaling_mode": "Per Batch",
+			"requires_confirmation": 1,
+		},
+		{
+			"title": "Bring cream, milk and glucose to the boil",
+			"instruction": (
+				"In a pot, bring {{item:dr baker cream|grams}} cream, {{item:fresh milk|grams}} "
+				"fresh milk and {{item:Glucose honey|grams}} glucose to the boil.\n"
+				"في حلة، تتحط {{item:dr baker cream|grams}} كريمة و {{item:fresh milk|grams}} "
+				"لبن فريش و {{item:Glucose honey|grams}} جلوكوز علي النار لحد ما تغلي."
+			),
+			"duration_mins": 10,
+			"scaling_mode": "Per Batch",
+			"requires_confirmation": 1,
+		},
+		{
+			"title": "Pour over the chocolate in 3 additions",
+			"instruction": (
+				"Pour the hot liquid over the chocolate in 3 additions, stirring from the "
+				"centre outwards each time until smooth.\n"
+				"تتصب الكريمة السخنة علي الشوكولاته علي 3 مرات، و كل مرة تتقلب من النص "
+				"للخارج لحد ما تبقي ناعمة."
+			),
+			"duration_mins": 5,
+			"scaling_mode": "Fixed",
+			"requires_confirmation": 1,
+		},
+		{
+			"title": "Add the vanilla and salt",
+			"instruction": (
+				"Add {{item:kamina vanilla|grams}} vanilla and {{item:Salt|grams}} salt. "
+				"Weigh both on the small scale.\n"
+				"يضاف {{item:kamina vanilla|grams}} فانيليا و {{item:Salt|grams}} ملح. "
+				"الاتنين يتوزنوا علي الميزان الصغير."
+			),
+			"duration_mins": 2,
+			"scaling_mode": "Per Batch",
+			"requires_confirmation": 1,
+		},
+		{
+			"title": "Stick-blend at 35–40°C with no air",
+			"instruction": (
+				"At 35–40°C, stick-blend with the blade kept under the surface so no air "
+				"goes in. Check the temperature with the infrared thermometer.\n"
+				"لما توصل 35 الي 40 درجة، تتضرب بالخلاط اليدوي و السكينة تحت السطح علي "
+				"طول عشان ميدخلش هوا. الحرارة تتقاس بالترمومتر الليزر."
+			),
+			"duration_mins": 5,
+			"scaling_mode": "Fixed",
+			"capture_type": "Temperature",
+			"capture_label": "Temperature when blended (°C)",
+			"capture_min": 35,
+			"capture_max": 40,
+			"requires_confirmation": 1,
+		},
+		{
+			"title": "Top the jars at the usual temperature",
+			"instruction": (
+				"Top the jars at the same temperature you used for the old ganache, "
+				"checked with the infrared thermometer.\n"
+				"البرطمانات تتغطي بالجاناش علي نفس درجة الحرارة اللي كنا بنستخدمها "
+				"للجاناش القديم، و الحرارة تتقاس بالترمومتر الليزر."
+			),
+			"duration_mins": 0,
+			"scaling_mode": "Fixed",
+			"requires_confirmation": 1,
+		},
+	],
+}
+
 # The Tiramisu jars, per the owner's method of 2026-11-07 (superseding the
 # 2026-10-08 one: brew 1:3, sugar = liquid x 0.3, syrup into the cream = the
 # sugar weight).
@@ -784,6 +886,7 @@ RECIPES: list[dict[str, Any]] = [
 	RED_VELVET_CAKE,
 	SAVOIARDI,
 	SPONGE_CAKE,
+	CHOCOLATE_GANACHE,
 	*TIRAMISU_SOPS,
 ]
 

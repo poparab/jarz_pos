@@ -318,6 +318,19 @@ BASE_BOMS = {
 			"oil": 0.18,
 		},
 	),
+	# BOM-Chocolate ganache-005 (ganache B, owner 2026-11-05): 7.074 Kg.
+	"Chocolate ganache": (
+		7.074,
+		{
+			"Belcolade Belgian chocolate 60%": 2.0,
+			"Belcolade Milk Chocolate": 1.0,
+			"dr baker cream": 3.0,
+			"fresh milk": 0.75,
+			"Glucose honey": 0.283,
+			"Salt": 0.007,
+			"kamina vanilla": 0.034,
+		},
+	),
 }
 
 
@@ -343,7 +356,10 @@ class TestBaseRecipes(unittest.TestCase):
 
 		versions = {r["item_code"]: r["version"] for r in seed.RECIPES if r["item_code"] in BASE_BOMS}
 		# Fudge Cake is v3 (Cake A) so the v2 method stays on file, inactive.
-		self.assertEqual({**{code: 2 for code in BASE_BOMS}, "Fudge Cake": 3}, versions)
+		# The ganache had no SOP before ganache B, so it starts at v1.
+		self.assertEqual(
+			{**{code: 2 for code in BASE_BOMS}, "Fudge Cake": 3, "Chocolate ganache": 1}, versions
+		)
 
 	def test_no_base_leaves_a_token_unresolved(self):
 		for item_code in BASE_BOMS:
@@ -434,6 +450,23 @@ class TestBaseRecipes(unittest.TestCase):
 				english, _, arabic = step["instruction"].partition("\n")
 				self.assertTrue(english.strip() and arabic.strip(), step["title"])
 				self.assertEqual(english.count("{{"), arabic.count("{{"), step["title"])
+
+	def test_ganache_one_batch(self):
+		rendered = render_base("Chocolate ganache")
+		first = rendered["steps"][0]["instruction_html"]
+		self.assertIn("2000 g dark chocolate 60% + 1000 g milk chocolate = 3000 g", first)
+		self.assertIn(
+			"3000 g cream, 750 g fresh milk and 283 g glucose", rendered["steps"][1]["instruction_html"]
+		)
+		self.assertIn("34 g vanilla and 7 g salt", rendered["steps"][3]["instruction_html"])
+		blend = rendered["steps"][4]
+		self.assertEqual((35, 40), (blend["capture_min"], blend["capture_max"]))
+
+	def test_ganache_scales_with_the_run(self):
+		# 3.537 Kg typed on the Bases tab = half a batch.
+		rendered = render_base("Chocolate ganache", batches=0.5)
+		self.assertIn("= 1500 g", rendered["steps"][0]["instruction_html"])
+		self.assertIn("375 g fresh milk", rendered["steps"][1]["instruction_html"])
 
 	def test_shared_cake_steps_are_separate_copies(self):
 		from jarz_pos.scripts import seed_recipe_sops as seed
