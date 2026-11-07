@@ -380,13 +380,78 @@ def _delivery_amount(invoice_doc) -> float:
 	return round(total, 2)
 
 
-def _order_check(promo_name: str, invoice_name: str, now_dt) -> dict:
+def _can_read_invoice(doc) -> bool:
+	"""Same gate the Kanban reads use: Sales Invoice read permission on this
+	document, then the user's branch (POS profile) scope."""
+	try:
+		if not frappe.has_permission("Sales Invoice", ptype="read", doc=doc):
+			return False
+	except Exception:
+		return False
+	try:
+		_ensure_branch_access(doc)
+	except Exception:
+		return False
+	return True
+
+
+def _ensure_branch_access(doc) -> None:
+	"""Raises when the order belongs to a branch the user does not work at."""
+	from jarz_pos.utils.access_control import ensure_profile_scoped_invoice_access
+
+	ensure_profile_scoped_invoice_access(doc, action_label="checking a promo code on this order")
+
+
+_TERRITORY_INCOME_FIELDS = ("shipping_income", "delivery_income", "courier_income", "shipping_income_amount")
+
+
+def _territory_delivery_income(territory) -> float:
+	"""The territory's configured delivery fee (same fields Kanban reads)."""
+	if not territory:
+		return 0.0
+	try:
+		terr = frappe.get_doc("Territory", territory)
+	except Exception:
+		return 0.0
+	for field_name in _TERRITORY_INCOME_FIELDS:
+		value = _val(terr, field_name)
+		if value is not None:
+			return round(_num(value), 2)
+	return 0.0
+
+
+def _waived_delivery(doc, current_codes, delivery_amount: float, is_pickup: bool) -> float:
+	"""Delivery fee a current Free Delivery code already removed from the order.
+
+	apply_promo_evaluation_to_invoice drops the shipping rows and does not add
+	the fee to custom_promo_discount_total, so replacing that code must put the
+	fee back. Uses the order's own delivery override, else its territory fee."""
+	if is_pickup or delivery_amount > 0 or not current_codes:
+		return 0.0
+	has_free_delivery = False
+	for code in current_codes:
+		name = _find_promo_name(code)
+		if name and (frappe.db.get_value("Jarz Promo Code", name, "discount_type") or "") == "Free Delivery":
+			has_free_delivery = True
+			break
+	if not has_free_delivery:
+		return 0.0
+	override = round(_num(_val(doc, "custom_delivery_income")), 2)
+	if override > 0:
+		return override
+	return _territory_delivery_income(_val(doc, "territory"))
+
+
+def _order_check(promo_name: str, invoice_name: str, now_dt, order_text: str = "") -> dict:
 	"""Evaluate this one code against the real invoice (never saved)."""
 	doc = frappe.get_doc("Sales Invoice", invoice_name)
+	if not _can_read_invoice(doc):
+		return {"error": "not_permitted", "order": order_text or invoice_name}
 
 	grand_total = round(_num(_val(doc, "grand_total")), 2)
 	current_discount = round(_num(_val(doc, "custom_promo_discount_total")), 2)
 	delivery_amount = _delivery_amount(doc)
+	current_codes = _promo._normalize_codes(_val(doc, "custom_promo_codes"))
 	customer = _val(doc, "customer")
 
 	customer_doc = None
@@ -404,6 +469,7 @@ def _order_check(promo_name: str, invoice_name: str, now_dt) -> dict:
 	else:
 		channel = (str(_val(doc, "custom_order_channel") or "").strip().lower()) or "desk"
 	is_pickup = bool(_val(doc, "custom_is_pickup") or _val(doc, "is_pickup") or 0)
+	waived_delivery = _waived_delivery(doc, current_codes, delivery_amount, is_pickup)
 
 	evaluation = _promo.evaluate_promo_codes(
 		doc,
@@ -421,9 +487,11 @@ def _order_check(promo_name: str, invoice_name: str, now_dt) -> dict:
 	free_delivery = bool(accepted and result.free_delivery)
 
 	if accepted:
-		new_total = grand_total + current_discount - discount_amount
+		# The order as if this code replaced its current codes: their discount
+		# and any delivery fee they waived come back, then this code applies.
+		new_total = grand_total + current_discount + waived_delivery - discount_amount
 		if free_delivery:
-			new_total -= delivery_amount
+			new_total -= delivery_amount + waived_delivery
 		new_total = max(round(new_total, 2), 0.0)
 		reason = None
 	else:
@@ -437,9 +505,10 @@ def _order_check(promo_name: str, invoice_name: str, now_dt) -> dict:
 		"docstatus": _int(_val(doc, "docstatus")),
 		"invoice_status": _val(doc, "status") or "",
 		"current_total": grand_total,
-		"current_codes": _promo._normalize_codes(_val(doc, "custom_promo_codes")),
+		"current_codes": current_codes,
 		"current_promo_discount": current_discount,
 		"delivery_amount": delivery_amount,
+		"waived_delivery": waived_delivery,
 		"accepted": accepted,
 		"reason": reason,
 		"discount_amount": discount_amount,
@@ -487,7 +556,7 @@ def lookup_promo_code(code=None, order=None):
 	if order_text:
 		invoice_name = _resolve_invoice_name(order_text)
 		if invoice_name:
-			order_check = _order_check(promo_name, invoice_name, now_dt)
+			order_check = _order_check(promo_name, invoice_name, now_dt, order_text)
 		else:
 			order_check = {"error": "order_not_found", "order": order_text}
 

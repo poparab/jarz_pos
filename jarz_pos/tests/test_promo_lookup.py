@@ -131,6 +131,9 @@ class _FakeDB:
 		self.site = site
 
 	def get_value(self, doctype, filters, fieldname=None, as_dict=False):
+		if doctype == "Jarz Promo Code" and isinstance(filters, str):
+			promo = self.site.promos.get(filters)
+			return getattr(promo, fieldname, None) if promo else None
 		if doctype == "Jarz Promo Code":
 			(field_name, value), = filters.items()
 			for promo in self.site.promos.values():
@@ -165,6 +168,11 @@ class _FakeSite:
 		self.db = _FakeDB(self)
 		self.utils = SimpleNamespace(now_datetime=lambda: NOW, get_datetime=lambda v: v)
 		self.get_doc_calls: list = []
+		self.territories: dict = {}
+		self.can_read = True
+
+	def has_permission(self, doctype, ptype="read", doc=None, **kwargs):
+		return self.can_read
 
 	# -- frappe surface -----------------------------------------------------
 	def _(self, msg):
@@ -193,6 +201,8 @@ class _FakeSite:
 			return self.invoices[name]
 		if doctype == "Customer":
 			return _Doc(name=name, **self.customers.get(name, {}))
+		if doctype == "Territory":
+			return _Doc(name=name, **self.territories[name])
 		raise KeyError(doctype)
 
 	def get_all(self, doctype, filters=None, fields=None, pluck=None, order_by=None, limit_page_length=None):
@@ -261,6 +271,15 @@ class _Base(unittest.TestCase):
 			patcher = mock.patch(target, self.site)
 			patcher.start()
 			self.addCleanup(patcher.stop)
+		self.branch_ok = True
+
+		def _branch(doc):
+			if not self.branch_ok:
+				raise _Thrown("not your branch")
+
+		patcher = mock.patch("jarz_pos.api.promo._ensure_branch_access", _branch)
+		patcher.start()
+		self.addCleanup(patcher.stop)
 
 	def lookup(self, code, order=None):
 		return api.lookup_promo_code(code=code, order=order)
@@ -583,3 +602,64 @@ class TestOrderCheck(_Base):
 
 if __name__ == "__main__":
 	unittest.main()
+
+
+class TestOrderAccessAndDelivery(_Base):
+	def test_order_without_read_permission_is_not_shown(self):
+		self.site.promos["P"] = _promo("P", discount_type="Percentage", discount_value=10)
+		self.site.invoices["SI-1"] = _invoice("SI-1", woo_order_id=900)
+		self.site.can_read = False
+		check = self.lookup("P", order="900")["order_check"]
+		self.assertEqual(check, {"error": "not_permitted", "order": "900"})
+
+	def test_order_from_another_branch_is_not_shown(self):
+		self.site.promos["P"] = _promo("P", discount_type="Percentage", discount_value=10)
+		self.site.invoices["SI-1"] = _invoice("SI-1")
+		self.branch_ok = False
+		check = self.lookup("P", order="SI-1")["order_check"]
+		self.assertEqual(check["error"], "not_permitted")
+		self.assertNotIn("customer_name", check)
+		self.assertNotIn("current_total", check)
+
+	def test_replacing_a_free_delivery_code_puts_the_fee_back(self):
+		# Current code FREESHIP already removed the 50 shipping row: 450 total.
+		self.site.promos["FREESHIP"] = _promo("FREESHIP", discount_type="Free Delivery", discount_value=0)
+		self.site.promos["P10"] = _promo("P10", discount_type="Percentage", discount_value=10)
+		self.site.territories["Zayed"] = {"shipping_income": 50.0}
+		self.site.invoices["SI-1"] = _invoice(
+			"SI-1", grand_total=450.0, taxes=[], territory="Zayed", custom_promo_codes='["FREESHIP"]'
+		)
+		check = self.lookup("P10", order="SI-1")["order_check"]
+		self.assertTrue(check["accepted"])
+		self.assertEqual(check["waived_delivery"], 50.0)
+		self.assertEqual(check["discount_amount"], 45.0)
+		self.assertEqual(check["new_total"], 455.0)  # 450 + 50 back - 45
+
+	def test_order_delivery_override_wins_over_territory_fee(self):
+		self.site.promos["FREESHIP"] = _promo("FREESHIP", discount_type="Free Delivery", discount_value=0)
+		self.site.promos["F20"] = _promo("F20", discount_type="Fixed Amount", discount_value=20)
+		self.site.territories["Zayed"] = {"shipping_income": 50.0}
+		self.site.invoices["SI-1"] = _invoice(
+			"SI-1", grand_total=450.0, taxes=[], territory="Zayed",
+			custom_delivery_income=70.0, custom_promo_codes='["FREESHIP"]',
+		)
+		check = self.lookup("F20", order="SI-1")["order_check"]
+		self.assertEqual(check["waived_delivery"], 70.0)
+		self.assertEqual(check["new_total"], 500.0)  # 450 + 70 - 20
+
+	def test_free_delivery_code_on_a_free_delivery_order_keeps_the_total(self):
+		self.site.promos["FREESHIP"] = _promo("FREESHIP", discount_type="Free Delivery", discount_value=0)
+		self.site.territories["Zayed"] = {"shipping_income": 50.0}
+		self.site.invoices["SI-1"] = _invoice(
+			"SI-1", grand_total=450.0, taxes=[], territory="Zayed", custom_promo_codes='["FREESHIP"]'
+		)
+		check = self.lookup("FREESHIP", order="SI-1")["order_check"]
+		self.assertTrue(check["accepted"])
+		self.assertEqual(check["new_total"], 450.0)
+
+	def test_no_fee_restored_without_a_current_free_delivery_code(self):
+		self.site.promos["P10"] = _promo("P10", discount_type="Percentage", discount_value=10)
+		self.site.territories["Zayed"] = {"shipping_income": 50.0}
+		self.site.invoices["SI-1"] = _invoice("SI-1", grand_total=450.0, taxes=[], territory="Zayed", custom_is_pickup=1)
+		check = self.lookup("P10", order="SI-1")["order_check"]
+		self.assertEqual(check["waived_delivery"], 0.0)
