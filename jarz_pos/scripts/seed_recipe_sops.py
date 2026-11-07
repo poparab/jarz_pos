@@ -674,6 +674,175 @@ CHOCOLATE_GANACHE = {
 	],
 }
 
+# S1-L cocoa soak syrup, owner decision 2026-11-07: the soak is 15% of the cake
+# weight, for the Molten and London cake jars only.  BOM-Cocoa soak syrup is
+# 1.824 Kg per batch; the optional instant coffee is not on the BOM.
+COCOA_SOAK_SYRUP = {
+	"item_code": "Cocoa soak syrup",
+	"version": 1,
+	"yield_percent": 100,
+	"prep_time_mins": 15,
+	"equipment": "Pot, whisk, strainer, scale, probe thermometer",
+	"notes": (
+		"S1-L syrup, chosen 2026-11-07 after the Molten trials: 40% less sugar than "
+		"the first syrup, more cocoa and a little salt. Dose = 15% of the cake "
+		"weight, Molten and London cake only. One BOM batch = 1.824 Kg. Optional: "
+		"1 g instant coffee per 300 g of syrup deepens the chocolate (not on the "
+		"BOM). Make it fresh each day and throw away what is left at the end of "
+		"the day."
+	),
+	"steps": [
+		{
+			"title": "Weigh the empty pot",
+			"instruction": ("Weigh the empty pot and write its weight.\nتتوزن الحلة فاضية و يتكتب وزنها."),
+			"duration_mins": 1,
+			"scaling_mode": "Fixed",
+			"capture_type": "Number",
+			"capture_label": "Empty pot weight (g)",
+			"requires_confirmation": 1,
+		},
+		{
+			"title": "Mix cocoa into the sugar, add the liquids",
+			"instruction": (
+				"Mix {{item:coco powder|grams}} cocoa into {{item:sugar|grams}} sugar so it "
+				"doesn't clump. Add {{item:Water (tap)|grams}} water, {{item:Glucose honey|grams}} "
+				"glucose and {{item:Salt|grams}} salt.\n"
+				"يتخلط {{item:coco powder|grams}} كاكاو مع {{item:sugar|grams}} سكر عشان "
+				"ميتكتلش. يضاف {{item:Water (tap)|grams}} ماء و {{item:Glucose honey|grams}} "
+				"جلوكوز و {{item:Salt|grams}} ملح."
+			),
+			"duration_mins": 3,
+			"scaling_mode": "Per Batch",
+			"requires_confirmation": 1,
+		},
+		{
+			"title": "Boil 1–2 min, stirring",
+			"instruction": (
+				"Bring to the boil and boil 1–2 min, stirring.\n" "يغلي دقيقة لدقيقتين مع التقليب."
+			),
+			"duration_mins": 5,
+			"scaling_mode": "Fixed",
+			"requires_confirmation": 1,
+		},
+		{
+			"title": "Vanilla, strain, top up to the full weight",
+			"instruction": (
+				"Off the heat, add {{item:kamina vanilla|grams}} vanilla and strain. Top up "
+				"with hot water until the syrup weighs {{item:Water (tap)+sugar+Glucose honey+"
+				"coco powder+Salt+kamina vanilla|grams}} plus the pot.\n"
+				"بعد ما يتشال من علي النار، يضاف {{item:kamina vanilla|grams}} فانيليا و "
+				"يتصفي. يتكمل بماء سخن لحد ما الشربات توزن {{item:Water (tap)+sugar+Glucose "
+				"honey+coco powder+Salt+kamina vanilla|grams}} غير وزن الحلة."
+			),
+			"duration_mins": 3,
+			"scaling_mode": "Per Batch",
+			"requires_confirmation": 1,
+		},
+		{
+			"title": "Cool to 40–50°C before soaking",
+			"instruction": (
+				"Cool to 40–50°C and pour it warm onto room-temperature cake. Throw away "
+				"what is left at the end of the day.\n"
+				"تبرد لحد 40 الي 50 درجة و تتصب دافية علي كيك في درجة حرارة الغرفة. "
+				"اللي يفضل منها آخر اليوم يترمي."
+			),
+			"duration_mins": 15,
+			"scaling_mode": "Fixed",
+			"capture_type": "Temperature",
+			"capture_label": "Syrup temperature when poured (°C)",
+			"capture_min": 40,
+			"capture_max": 50,
+			"requires_confirmation": 1,
+		},
+	],
+}
+
+# The Molten jars with the 15% soak (owner, 2026-11-07).  All sizes are soaked
+# in the same trays and filled in one session, so the three SOPs share their
+# steps word for word and ``get_recipe_sheet`` merges them: the tray step
+# quotes the whole run, the fill step one line per size.  Seeded only once the
+# jar BOM carries the soak line (``requires_bom_lines``), so a sheet never
+# shows a soak the stock doesn't follow.
+MOLTEN_SOAK_LINE = "Cocoa soak syrup"
+MOLTEN_STEPS = [
+	{
+		"title": "Soak the cake in trays",
+		"instruction": (
+			"Cake at room temperature, cut into jar-size pieces, no crumbs. Spread "
+			"{{item:Fudge Cake|grams}} cake in trays in one layer. Pour half of "
+			"{{item:Cocoa soak syrup|grams}} syrup (40–50°C) evenly with a spoon, wait "
+			"2 min, pour the rest. Do not stir.\n"
+			"الكيك في درجة حرارة الغرفة و متقطع علي مقاس البرطمان من غير فتافيت. يتفرد "
+			"{{item:Fudge Cake|grams}} كيك في الصواني طبقة واحدة. يتصب نص "
+			"{{item:Cocoa soak syrup|grams}} شربات (40 الي 50 درجة) بالمعلقة بالتساوي، "
+			"نستني دقيقتين و نصب الباقي. ممنوع التقليب."
+		),
+		"duration_mins": 5,
+		"scaling_mode": "Per Batch",
+		"requires_confirmation": 1,
+	},
+	{
+		"title": "Rest covered 15–30 min",
+		"instruction": (
+			"Cover and rest 15–30 min, until no liquid is left in the tray. Press "
+			"lightly with a flat spatula.\n"
+			"تتغطي و تستني 15 الي 30 دقيقة لحد ما ميفضلش سايل في الصينية. تتضغط "
+			"خفيف بسباتولا مفرودة."
+		),
+		"duration_mins": 30,
+		"scaling_mode": "Fixed",
+		"requires_confirmation": 1,
+	},
+	{
+		"title": "Fill each jar",
+		"instruction": (
+			"Each jar: {{item:Fudge Cake+Cocoa soak syrup|grams|each}} soaked cake, then "
+			"{{item:Chocolate ganache|grams|each}} ganache on top.\n"
+			"كل برطمان: {{item:Fudge Cake+Cocoa soak syrup|grams|each}} كيك متشرب، و "
+			"بعدين {{item:Chocolate ganache|grams|each}} جاناش علي الوش."
+		),
+		"duration_mins": 10,
+		"scaling_mode": "Per Unit",
+		"requires_confirmation": 1,
+	},
+	{
+		"title": "Chill uncovered, then lid",
+		"instruction": (
+			"Chill uncovered 30–60 min, then lid. Fridge at 5°C or below. No more "
+			"than 2 hours from soaking to the fridge (1 hour if the kitchen is "
+			"above 32°C).\n"
+			"البرطمانات تدخل التلاجة مكشوفة 30 الي 60 دقيقة و بعدين تتقفل. التلاجة "
+			"5 درجات أو أقل. من التشريب للتلاجة مش أكتر من ساعتين (ساعة لو المطبخ "
+			"أكتر من 32 درجة)."
+		),
+		"duration_mins": 60,
+		"scaling_mode": "Fixed",
+		"requires_confirmation": 1,
+	},
+]
+
+
+def build_molten_sop(item_code: str) -> dict[str, Any]:
+	return {
+		"item_code": item_code,
+		"version": 1,
+		"yield_percent": 100,
+		"prep_time_mins": 50,
+		"equipment": "Trays, spoon, flat spatula, scale, jars",
+		"notes": (
+			"Soak per the owner, 2026-11-07: Cocoa soak syrup at 15% of the cake "
+			"weight (Molten and London cake only). Soak only the cake you fill now. "
+			"Every figure in the steps comes from the jar BOM."
+		),
+		"requires_bom_lines": [MOLTEN_SOAK_LINE],
+		"steps": [dict(step) for step in MOLTEN_STEPS],
+	}
+
+
+MOLTEN_SOPS: list[dict[str, Any]] = [
+	build_molten_sop(item_code) for item_code in ("Molten Large", "Molten Medium", "Molten Small")
+]
+
 # The Tiramisu jars, per the owner's method of 2026-11-07 (superseding the
 # 2026-10-08 one: brew 1:3, sugar = liquid x 0.3, syrup into the cream = the
 # sugar weight).
@@ -887,7 +1056,9 @@ RECIPES: list[dict[str, Any]] = [
 	SAVOIARDI,
 	SPONGE_CAKE,
 	CHOCOLATE_GANACHE,
+	COCOA_SOAK_SYRUP,
 	*TIRAMISU_SOPS,
+	*MOLTEN_SOPS,
 ]
 
 
@@ -896,6 +1067,16 @@ RECIPES: list[dict[str, Any]] = [
 
 def _default_bom(item_code: str) -> str | None:
 	return frappe.db.get_value("BOM", {"item": item_code, "is_default": 1, "docstatus": 1}, "name")
+
+
+def _missing_bom_lines(item_code: str, codes: list[str]) -> list[str]:
+	"""Codes an SOP quotes that the item's default BOM does not carry yet."""
+	if not codes:
+		return []
+	bom = _default_bom(item_code)
+	if not bom:
+		return list(codes)
+	return [c for c in codes if not frappe.db.exists("BOM Item", {"parent": bom, "item_code": c})]
 
 
 def _apply(doc, recipe: dict[str, Any]) -> None:
@@ -968,6 +1149,13 @@ def run(dry_run: Any = False, items: Any = None) -> dict[str, Any]:
 		item_code = recipe["item_code"]
 		if not frappe.db.exists("Item", item_code):
 			skipped.append({"item_code": item_code, "reason": "item not found"})
+			continue
+
+		missing = _missing_bom_lines(item_code, recipe.get("requires_bom_lines") or [])
+		if missing:
+			skipped.append(
+				{"item_code": item_code, "reason": f"default BOM has no {', '.join(missing)} line yet"}
+			)
 			continue
 
 		existing = frappe.db.get_value(

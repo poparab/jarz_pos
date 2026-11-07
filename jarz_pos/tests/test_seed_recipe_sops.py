@@ -331,6 +331,18 @@ BASE_BOMS = {
 			"kamina vanilla": 0.034,
 		},
 	),
+	# BOM-Cocoa soak syrup-001 (S1-L, owner 2026-11-07): 1.824 Kg.
+	"Cocoa soak syrup": (
+		1.824,
+		{
+			"Water (tap)": 1.26,
+			"sugar": 0.36,
+			"Glucose honey": 0.12,
+			"coco powder": 0.072,
+			"Salt": 0.006,
+			"kamina vanilla": 0.006,
+		},
+	),
 }
 
 
@@ -358,7 +370,13 @@ class TestBaseRecipes(unittest.TestCase):
 		# Fudge Cake is v3 (Cake A) so the v2 method stays on file, inactive.
 		# The ganache had no SOP before ganache B, so it starts at v1.
 		self.assertEqual(
-			{**{code: 2 for code in BASE_BOMS}, "Fudge Cake": 3, "Chocolate ganache": 1}, versions
+			{
+				**{code: 2 for code in BASE_BOMS},
+				"Fudge Cake": 3,
+				"Chocolate ganache": 1,
+				"Cocoa soak syrup": 1,
+			},
+			versions,
 		)
 
 	def test_no_base_leaves_a_token_unresolved(self):
@@ -468,10 +486,94 @@ class TestBaseRecipes(unittest.TestCase):
 		self.assertIn("= 1500 g", rendered["steps"][0]["instruction_html"])
 		self.assertIn("375 g fresh milk", rendered["steps"][1]["instruction_html"])
 
+	def test_soak_syrup_one_batch(self):
+		rendered = render_base("Cocoa soak syrup")
+		second = rendered["steps"][1]["instruction_html"]
+		self.assertIn("Mix 72 g cocoa into 360 g sugar", second)
+		self.assertIn("1260 g water, 120 g glucose and 6 g salt", second)
+		self.assertIn("until the syrup weighs 1824 g plus the pot", rendered["steps"][3]["instruction_html"])
+		cool = rendered["steps"][4]
+		self.assertEqual((40, 50), (cool["capture_min"], cool["capture_max"]))
+
 	def test_shared_cake_steps_are_separate_copies(self):
 		from jarz_pos.scripts import seed_recipe_sops as seed
 
 		self.assertIsNot(seed.FUDGE_CAKE["steps"][1], seed.RED_VELVET_CAKE["steps"][0])
+
+
+# Molten jar BOM lines in Kg with the 15% soak (owner, 2026-11-07): soak =
+# 0.15 x the cake line, ganache unchanged.
+MOLTEN_BOMS = {
+	"Molten Large": {"Fudge Cake": 0.105, "Cocoa soak syrup": 0.01575, "Chocolate ganache": 0.075},
+	"Molten Medium": {"Fudge Cake": 0.075, "Cocoa soak syrup": 0.01125, "Chocolate ganache": 0.045},
+	"Molten Small": {"Fudge Cake": 0.05, "Cocoa soak syrup": 0.0075, "Chocolate ganache": 0.03},
+}
+
+
+def render_molten(item_code, jars=10):
+	from jarz_pos.scripts import seed_recipe_sops as seed
+	from jarz_pos.services.sop_rendering import render_sop
+
+	recipe = next(r for r in seed.RECIPES if r["item_code"] == item_code)
+	qty = MOLTEN_BOMS[item_code]
+	return recipe, render_sop(
+		recipe,
+		batches=jars,
+		units=jars,
+		component_qty_map=qty,
+		uom_map={code: "Kg" for code in qty},
+		name_map={code: code for code in qty},
+	)
+
+
+class TestMoltenSoak(unittest.TestCase):
+	def test_three_sizes_share_the_steps_word_for_word(self):
+		from jarz_pos.scripts import seed_recipe_sops as seed
+
+		steps = [next(r for r in seed.RECIPES if r["item_code"] == code)["steps"] for code in MOLTEN_BOMS]
+		self.assertEqual(steps[0], steps[1])
+		self.assertEqual(steps[0], steps[2])
+		self.assertIsNot(steps[0][0], steps[1][0])
+
+	def test_every_token_resolves(self):
+		for code in MOLTEN_BOMS:
+			_, rendered = render_molten(code)
+			self.assertEqual([], rendered["unresolved_tokens"], code)
+
+	def test_ten_medium_jars(self):
+		_, rendered = render_molten("Molten Medium")
+		tray = rendered["steps"][0]["instruction_html"]
+		self.assertIn("Spread 750 g cake", tray)
+		self.assertIn("Pour half of 112.5 g syrup", tray)
+
+	def test_one_jar_line_per_size(self):
+		for code, soaked, ganache in (
+			("Molten Large", "120.8 g", "75 g"),
+			("Molten Medium", "86.2 g", "45 g"),  # 86.25 in binary floating point
+			("Molten Small", "57.5 g", "30 g"),
+		):
+			_, rendered = render_molten(code)
+			fill = rendered["steps"][2]["instruction_html"]
+			self.assertIn(f"Each jar: {soaked} soaked cake, then {ganache} ganache", fill, code)
+
+	def test_soak_is_fifteen_percent_of_the_cake(self):
+		for lines in MOLTEN_BOMS.values():
+			self.assertAlmostEqual(0.15, lines["Cocoa soak syrup"] / lines["Fudge Cake"])
+
+	def test_every_step_is_bilingual_with_equal_tokens(self):
+		from jarz_pos.scripts import seed_recipe_sops as seed
+
+		for step in seed.MOLTEN_STEPS:
+			english, _, arabic = step["instruction"].partition("\n")
+			self.assertTrue(english.strip() and arabic.strip(), step["title"])
+			self.assertEqual(english.count("{{"), arabic.count("{{"), step["title"])
+
+	def test_molten_needs_the_soak_line(self):
+		from jarz_pos.scripts import seed_recipe_sops as seed
+
+		for code in MOLTEN_BOMS:
+			recipe = next(r for r in seed.RECIPES if r["item_code"] == code)
+			self.assertEqual(["Cocoa soak syrup"], recipe["requires_bom_lines"])
 
 
 class TestItemsFilter(unittest.TestCase):
@@ -484,11 +586,14 @@ class TestItemsFilter(unittest.TestCase):
 		self.assertEqual(["A", "B"], _parse_items("A, B ,,A"))
 		self.assertEqual(["A", "B"], _parse_items(["A", " B", "A"]))
 
-	def _run(self, **kwargs):
+	def _run(self, bom="BOM-X", bom_lines=True, **kwargs):
 		from jarz_pos.scripts import seed_recipe_sops as seed
 
-		with patch.object(seed, "frappe") as mock_frappe:
-			mock_frappe.db.exists.return_value = True
+		with (
+			patch.object(seed, "frappe") as mock_frappe,
+			patch.object(seed, "_default_bom", return_value=bom),
+		):
+			mock_frappe.db.exists.side_effect = lambda doctype, *a, **k: doctype != "BOM Item" or bom_lines
 			mock_frappe.db.get_value.return_value = None
 			mock_frappe.new_doc.return_value = MagicMock(name="doc")
 			result = seed.run(dry_run=True, **kwargs)
@@ -512,6 +617,23 @@ class TestItemsFilter(unittest.TestCase):
 		result, _ = self._run(items="Tiramisu Large,Nope")
 		self.assertEqual(["Tiramisu Large"], result["created"])
 		self.assertEqual(["Nope"], result["unmatched"])
+
+	def test_molten_waits_for_the_soak_line_on_the_jar_bom(self):
+		result, _ = self._run(bom_lines=False, items="Molten Medium,Cocoa soak syrup")
+		self.assertEqual(["Cocoa soak syrup"], result["created"])
+		self.assertEqual(
+			[{"item_code": "Molten Medium", "reason": "default BOM has no Cocoa soak syrup line yet"}],
+			result["skipped"],
+		)
+
+	def test_molten_seeds_once_the_soak_line_is_there(self):
+		result, _ = self._run(items="Molten Large,Molten Medium,Molten Small")
+		self.assertEqual(["Molten Large", "Molten Medium", "Molten Small"], result["created"])
+
+	def test_no_default_bom_also_holds_molten_back(self):
+		result, _ = self._run(bom=None, items="Molten Small")
+		self.assertEqual([], result["created"])
+		self.assertEqual("Molten Small", result["skipped"][0]["item_code"])
 
 
 if __name__ == "__main__":
