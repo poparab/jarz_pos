@@ -103,6 +103,24 @@ MONEY_TOLERANCE = 0.5
 #: `available_months` = this many months back, plus the current one.
 AVAILABLE_MONTHS_BACK = 12
 
+#: Up to and including this day of the month, a board opened WITHOUT an explicit
+#: month shows the PREVIOUS month; after it, the current one. Jarz pays in
+#: arrears: salaries go out around the 10th for the month before
+#: (``employee_link.SALARY_PAY_DAY``) and rent is settled early in the month for
+#: the month just gone. Opening on the current month made every one of those
+#: payments land on the wrong board — in 2026-10/11 September's salaries were
+#: paid on the October board and October's on the November board, each keyed a
+#: month late, and had to be repaired by hand. Only the no-month default of
+#: ``get_monthly_expenses`` follows this; every pay endpoint receives an explicit
+#: month, and ``recurring_expenses._month_bounds`` (shared with the Desk page) is
+#: untouched.
+BOARD_ARREARS_UNTIL_DAY = 20
+
+#: ``Employee.status`` values that mean the person has gone. An off-payroll row
+#: for one of them is flagged ``left`` so the client can fold it into a separate
+#: "Left staff" section instead of the live payroll list.
+LEFT_EMPLOYEE_STATUSES = frozenset({"Left", "Inactive"})
+
 #: A `day_of_month` above this does not exist in February. See
 #: `_normalized_day_of_month` for why the API refuses rather than clamps.
 MAX_DAY_OF_MONTH = 28
@@ -314,6 +332,48 @@ def _available_months(anchor_key: str, back: int = AVAILABLE_MONTHS_BACK) -> lis
 		total = base - offset
 		keys.append(f"{total // 12:04d}-{(total % 12) + 1:02d}")
 	return keys
+
+
+def _default_board_month(today: date) -> str:
+	"""The ``YYYY-MM`` a board opened without a month should show. Pure.
+
+	The previous month while ``today.day <= BOARD_ARREARS_UNTIL_DAY`` (the
+	arrears window — see the constant), otherwise the current month. January
+	walks back into the previous year's December.
+	"""
+	if today.day <= BOARD_ARREARS_UNTIL_DAY:
+		if today.month == 1:
+			return f"{today.year - 1}-12"
+		return f"{today.year:04d}-{today.month - 1:02d}"
+	return f"{today.year:04d}-{today.month:02d}"
+
+
+def _iso_date(value: Any) -> str | None:
+	"""``YYYY-MM-DD`` for a date-ish value, ``None`` for an empty one."""
+	if not value:
+		return None
+	try:
+		return getdate(value).isoformat()
+	except Exception:
+		return str(value)[:10] or None
+
+
+def _is_left_staff(status: Any, relieving_date: Any, month_start: date | None) -> bool:
+	"""Has this (off-payroll) person left, as far as the board month is concerned? Pure.
+
+	True when ``Employee.status`` is Left/Inactive, or when the relieving date is
+	before the board month's first day. Only ever asked about OFF-payroll rows:
+	someone relieved inside the month is still on payroll for it and stays in
+	the main list.
+	"""
+	if str(status or "").strip() in LEFT_EMPLOYEE_STATUSES:
+		return True
+	if relieving_date and month_start:
+		try:
+			return getdate(relieving_date) < getdate(month_start)
+		except Exception:
+			return False
+	return False
 
 
 def _due_date_for_month(day_of_month: Any, anchor: date) -> str | None:
@@ -858,6 +918,7 @@ def _build_payroll_rows(
 	off_payroll_rows: Sequence[dict[str, Any]] | None = None,
 	days_per_month: int = DAYS_PER_MONTH,
 	tolerance: float = MONEY_TOLERANCE,
+	month_start: date | None = None,
 ) -> list[dict[str, Any]]:
 	"""Per-employee salary money for one month. Pure — no DB access.
 
@@ -887,6 +948,13 @@ def _build_payroll_rows(
 	nonetheless carry an advance, an order or a penalty. They get a row with
 	``gross_due`` 0 so their debt is visible; production has two (Kareem Mamdouh
 	and the CEO), and an advance to either must not be invisible.
+
+	``left`` flags an off-payroll row whose person has GONE (stub carries
+	``employee_status`` Left/Inactive, or a ``relieving_date`` before
+	``month_start``). The row is still returned and still counted — the debt
+	stays visible — but the client folds it into a separate "Left staff"
+	section, and it sorts after every other row. On-payroll rows are never
+	``left``: someone relieved inside the month is owed pro-rated pay.
 	"""
 	paid_linked_by_employee = paid_linked_by_employee or {}
 	payments_by_employee = payments_by_employee or {}
@@ -946,6 +1014,10 @@ def _build_payroll_rows(
 			net_payable = 0.0
 
 		has_slip = bool(slips_by_employee.get(employee))
+		left = bool(
+			off_payroll
+			and _is_left_staff(raw.get("employee_status"), raw.get("relieving_date"), month_start)
+		)
 		rows.append(
 			{
 				"employee": employee,
@@ -972,6 +1044,8 @@ def _build_payroll_rows(
 				"deductions_total": _money(penalty_total + advance_total + order_total),
 				"net_payable": _money(net_payable),
 				"off_payroll": off_payroll,
+				"relieving_date": _iso_date(raw.get("relieving_date")),
+				"left": left,
 				"payment_status": _payment_status(due_amount, paid_amount, due_amount > 0, tolerance),
 				"has_salary_slip": has_slip,
 				"salary_slip": (slips_by_employee.get(employee) or {}).get("name"),
@@ -981,9 +1055,13 @@ def _build_payroll_rows(
 		)
 	# Off-payroll rows tie-break AFTER payroll rows: they always have
 	# `remaining` 0, so without the flag they would interleave with paid staff
-	# by name alone and read as part of the payroll.
+	# by name alone and read as part of the payroll. Left staff sort after
+	# EVERY other row: the flag leads the key, so a non-left row always comes
+	# first whatever its balances (a left row is off-payroll, so its
+	# `remaining` is 0 anyway).
 	rows.sort(
 		key=lambda r: (
+			r["left"],
 			-flt(r["remaining"]),
 			r["off_payroll"],
 			-flt(r["deductions_total"]),
@@ -1674,6 +1752,8 @@ def _off_payroll_stubs(
 		except Exception:
 			_log("monthly_expenses: off-payroll employee names")
 
+	exit_info = _employee_exit_info(employees)
+
 	return [
 		{
 			"employee": employee,
@@ -1684,9 +1764,43 @@ def _off_payroll_stubs(
 			"base": 0.0,
 			"variable": 0.0,
 			"monthly": 0.0,
+			# Read by `_build_payroll_rows` to flag the row `left`.
+			"employee_status": (exit_info.get(employee) or {}).get("status"),
+			"relieving_date": (exit_info.get(employee) or {}).get("relieving_date"),
 		}
 		for employee in employees
 	]
+
+
+def _employee_exit_info(employees: Sequence[str]) -> dict[str, dict[str, Any]]:
+	"""``employee -> {status, relieving_date}`` in ONE query, for off-payroll rows.
+
+	``Employee`` is an HRMS doctype. A failed read degrades to ``{}`` — every row
+	then reads as not-left and stays in the main list, which is the safe
+	direction: a debt shown in the wrong section beats a debt hidden.
+	"""
+	wanted = sorted({str(e).strip() for e in (employees or []) if str(e or "").strip()})
+	if not wanted:
+		return {}
+	try:
+		rows = frappe.get_all(
+			"Employee",
+			filters={"name": ["in", wanted]},
+			fields=["name", "status", "relieving_date"],
+			limit_page_length=0,
+		)
+	except Exception:
+		_log("monthly_expenses: off-payroll employee status")
+		return {}
+	info: dict[str, dict[str, Any]] = {}
+	for row in rows or []:
+		try:
+			name = row.get("name")
+		except Exception:
+			continue
+		if name:
+			info[name] = {"status": row.get("status"), "relieving_date": row.get("relieving_date")}
+	return info
 
 
 def _empty_payroll() -> dict[str, Any]:
@@ -1930,6 +2044,7 @@ def _compute_month(month: str | None, company: str | None) -> dict[str, Any]:
 		orders_by_employee=orders_by_employee,
 		settled_by_employee=settled_by_employee,
 		off_payroll_rows=off_payroll_rows,
+		month_start=month_start,
 	)
 
 	payroll_unlinked = _unlinked_by_account(
@@ -2002,9 +2117,20 @@ def _compute_month(month: str | None, company: str | None) -> dict[str, Any]:
 
 @frappe.whitelist()
 def get_monthly_expenses(month: str | None = None, company: str | None = None) -> dict[str, Any]:
-	"""Everything the Monthly Expenses screen shows for one month."""
+	"""Everything the Monthly Expenses screen shows for one month.
+
+	With no ``month`` the board opens on ``_default_board_month(today)`` — the
+	PREVIOUS month through the 20th, because salaries and rent are paid in
+	arrears (see ``BOARD_ARREARS_UNTIL_DAY``). ``month`` in the response is the
+	month actually shown; ``current_month`` is today's, for labelling.
+	"""
 	_ensure_manager()
 	_require_period_fields()
+
+	board_today = getdate()
+	current_month = board_today.strftime("%Y-%m")
+	if not month:
+		month = _default_board_month(board_today)
 
 	context = _compute_month(month, company)
 	month_key = context["month"]
@@ -2012,7 +2138,7 @@ def get_monthly_expenses(month: str | None = None, company: str | None = None) -
 	month_end: date = context["month_end"]
 	company = context["company"]
 
-	months = _available_months(getdate().strftime("%Y-%m"))
+	months = _available_months(current_month)
 	if month_key not in months:
 		months = sorted(set(months) | {month_key})
 
@@ -2026,6 +2152,7 @@ def get_monthly_expenses(month: str | None = None, company: str | None = None) -
 	return {
 		"success": True,
 		"month": month_key,
+		"current_month": current_month,
 		"month_label": _month_label(month_key),
 		"month_start": month_start.isoformat(),
 		"month_end": month_end.isoformat(),

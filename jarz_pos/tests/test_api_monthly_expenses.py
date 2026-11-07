@@ -2182,6 +2182,270 @@ class TestOffPayrollRows(unittest.TestCase):
 		self.assertFalse(self._rows()["HR-EMP-00001"]["off_payroll"])
 
 
+# ── the board's default month (arrears) ───────────────────────────────────
+
+
+class TestDefaultBoardMonth(unittest.TestCase):
+	"""Salaries (~10th) and rent are paid in arrears, so a board opened with no
+	month shows the PREVIOUS month through the 20th. In 2026-10/11 opening on the
+	current month keyed every salary payment a month late."""
+
+	def _month(self, today):
+		from jarz_pos.api.monthly_expenses import _default_board_month
+
+		return _default_board_month(today)
+
+	def test_day_5_opens_the_previous_month(self):
+		self.assertEqual(self._month(date(2026, 11, 5)), "2026-10")
+
+	def test_day_20_still_opens_the_previous_month(self):
+		self.assertEqual(self._month(date(2026, 11, 20)), "2026-10")
+
+	def test_day_21_opens_the_current_month(self):
+		self.assertEqual(self._month(date(2026, 11, 21)), "2026-11")
+
+	def test_early_january_opens_the_previous_december(self):
+		self.assertEqual(self._month(date(2026, 1, 5)), "2025-12")
+
+	def test_late_january_stays_in_january(self):
+		self.assertEqual(self._month(date(2026, 1, 25)), "2026-01")
+
+	def test_the_threshold_is_the_published_constant(self):
+		from jarz_pos.api.monthly_expenses import BOARD_ARREARS_UNTIL_DAY
+
+		self.assertEqual(BOARD_ARREARS_UNTIL_DAY, 20)
+
+
+class TestGetMonthlyExpensesDefaultMonth(unittest.TestCase):
+	"""The endpoint itself, with the loaders mocked: no ``month`` means the
+	arrears default reaches ``_compute_month``; an explicit one is untouched."""
+
+	def _call(self, today, month=None):
+		from jarz_pos.api import monthly_expenses
+
+		seen = {}
+
+		def _compute(month_arg, company):
+			seen["month"] = month_arg
+			year, mon = (int(p) for p in month_arg.split("-"))
+			return {
+				"month": month_arg,
+				"month_start": date(year, mon, 1),
+				"month_end": date(year, mon, 28),
+				"company": "JARZ",
+				"currency": "EGP",
+				"registry": [],
+				"leftovers": {},
+				"payroll": {"rows": []},
+				"deductions": {},
+				"summary": {},
+				"registry_present": False,
+				"expense_accounts": [],
+			}
+
+		with (
+			patch.object(monthly_expenses, "frappe", MagicMock()),
+			patch.object(monthly_expenses, "_ensure_manager"),
+			patch.object(monthly_expenses, "_require_period_fields"),
+			patch.object(monthly_expenses, "getdate", return_value=today),
+			patch.object(monthly_expenses, "_compute_month", side_effect=_compute),
+			patch.object(monthly_expenses, "_month_label", side_effect=lambda m: m),
+			patch.object(monthly_expenses, "_cashlike_accounts", return_value=[]),
+			patch.object(monthly_expenses, "_serialize_payment_sources", return_value=[]),
+			patch.object(monthly_expenses, "_build_categories", return_value=[]),
+			patch.object(monthly_expenses, "_cost_centers", return_value=[]),
+			patch.object(monthly_expenses, "_registry_categories", return_value=[]),
+			patch.object(monthly_expenses, "_build_gaps", return_value=[]),
+			patch.object(monthly_expenses, "_is_manager", return_value=True),
+		):
+			payload = monthly_expenses.get_monthly_expenses(month=month)
+		return payload, seen["month"]
+
+	def test_no_month_on_the_7th_opens_the_previous_month(self):
+		payload, computed = self._call(date(2026, 11, 7))
+		self.assertEqual(computed, "2026-10")
+		self.assertEqual(payload["month"], "2026-10")
+		self.assertEqual(payload["current_month"], "2026-11")
+		self.assertIn("2026-10", [m["month"] for m in payload["available_months"]])
+
+	def test_no_month_after_the_20th_opens_the_current_month(self):
+		payload, computed = self._call(date(2026, 11, 25))
+		self.assertEqual(computed, "2026-11")
+		self.assertEqual(payload["month"], "2026-11")
+		self.assertEqual(payload["current_month"], "2026-11")
+
+	def test_an_explicit_month_is_never_overridden(self):
+		payload, computed = self._call(date(2026, 11, 7), month="2026-11")
+		self.assertEqual(computed, "2026-11")
+		self.assertEqual(payload["month"], "2026-11")
+
+
+# ── left staff: flagged, still listed, sorted last ────────────────────────
+
+
+class TestLeftStaffFlag(unittest.TestCase):
+	"""Someone who has LEFT but still owes an advance or a staff order stays in
+	``payroll.rows`` (the debt must be visible) with ``left: True``, so the client
+	can fold them into a collapsed "Left staff" section."""
+
+	MONTH_START = date(2026, 10, 1)
+
+	LEFT_STUB = {
+		"employee": "HR-EMP-00020",
+		"employee_name": "Gone Person",
+		"base": 0.0,
+		"variable": 0.0,
+		"monthly": 0.0,
+		"employee_status": "Left",
+		"relieving_date": date(2026, 8, 15),
+	}
+
+	CEO_STUB = {
+		"employee": "HR-EMP-00002",
+		"employee_name": "The CEO",
+		"base": 0.0,
+		"variable": 0.0,
+		"monthly": 0.0,
+		"employee_status": "Active",
+		"relieving_date": None,
+	}
+
+	def _rows(self, employees=None, off_payroll_rows=(), **kwargs):
+		kwargs.setdefault("month_start", self.MONTH_START)
+		return _payroll(employees=employees, off_payroll_rows=list(off_payroll_rows), **kwargs)
+
+	def test_a_left_off_payroll_stub_is_flagged_left(self):
+		rows = self._rows(
+			off_payroll_rows=[self.LEFT_STUB],
+			advances_by_employee={"HR-EMP-00020": [_advance(employee="HR-EMP-00020", paid=1200.0)]},
+		)
+		row = rows["HR-EMP-00020"]
+		self.assertTrue(row["off_payroll"])
+		self.assertTrue(row["left"])
+		self.assertEqual(row["relieving_date"], "2026-08-15")
+		# Still present, debt intact: flagged, not dropped.
+		self.assertEqual(row["advance_total"], 1200.0)
+
+	def test_an_inactive_status_alone_is_left(self):
+		stub = dict(self.LEFT_STUB, employee_status="Inactive", relieving_date=None)
+		row = self._rows(off_payroll_rows=[stub])["HR-EMP-00020"]
+		self.assertTrue(row["left"])
+		self.assertIsNone(row["relieving_date"])
+
+	def test_a_relieving_date_before_the_month_is_left_even_if_still_active(self):
+		stub = dict(self.LEFT_STUB, employee_status="Active", relieving_date="2026-09-30")
+		self.assertTrue(self._rows(off_payroll_rows=[stub])["HR-EMP-00020"]["left"])
+
+	def test_an_active_off_payroll_stub_is_not_left(self):
+		# The CEO draws no salary and carries an advance; he has not left.
+		rows = self._rows(
+			off_payroll_rows=[self.CEO_STUB],
+			advances_by_employee={"HR-EMP-00002": [_advance(employee="HR-EMP-00002", paid=5000.0)]},
+		)
+		row = rows["HR-EMP-00002"]
+		self.assertTrue(row["off_payroll"])
+		self.assertFalse(row["left"])
+		self.assertIsNone(row["relieving_date"])
+
+	def test_an_on_payroll_row_relieved_inside_the_month_is_not_left(self):
+		# Relieved on 10 Oct: still owed 10/30 of October, stays in the main list.
+		leaver = _employee(
+			"HR-EMP-00003", base=3000.0, variable=0.0, monthly=1000.0, relieving_date=date(2026, 10, 10)
+		)
+		row = self._rows(employees=[leaver])["HR-EMP-00003"]
+		self.assertFalse(row["off_payroll"])
+		self.assertFalse(row["left"])
+		self.assertEqual(row["relieving_date"], "2026-10-10")
+		self.assertEqual(row["due_amount"], 1000.0)
+
+	def test_an_on_payroll_row_is_never_left_whatever_its_status(self):
+		odd = _employee("HR-EMP-00004", employee_status="Left", relieving_date=date(2026, 9, 1))
+		self.assertFalse(self._rows(employees=[odd])["HR-EMP-00004"]["left"])
+
+	def test_every_row_carries_both_keys(self):
+		rows = self._rows(off_payroll_rows=[self.CEO_STUB])
+		for row in rows.values():
+			self.assertIn("left", row)
+			self.assertIn("relieving_date", row)
+
+	def test_left_rows_sort_after_every_other_row(self):
+		from jarz_pos.api.monthly_expenses import _build_payroll_rows
+
+		# A fully paid salaried employee (remaining 0) and the CEO (off-payroll,
+		# remaining 0) must both come before the leaver, whose name sorts first
+		# alphabetically and whose debt is the largest.
+		rows = _build_payroll_rows(
+			[_employee("HR-EMP-00001"), _employee("HR-EMP-00005")],
+			salary_account="Salary - J",
+			paid_linked_by_employee={"HR-EMP-00005": 6750.0},
+			off_payroll_rows=[dict(self.LEFT_STUB, employee_name="AAA Leaver"), self.CEO_STUB],
+			advances_by_employee={
+				"HR-EMP-00020": [_advance(employee="HR-EMP-00020", paid=90000.0)],
+				"HR-EMP-00002": [_advance(employee="HR-EMP-00002", paid=100.0)],
+			},
+			month_start=self.MONTH_START,
+		)
+		order = [r["employee"] for r in rows]
+		self.assertEqual(order[-1], "HR-EMP-00020")
+		self.assertEqual([r["left"] for r in rows], [False, False, False, True])
+
+	def test_the_money_totals_do_not_change_with_the_flag(self):
+		from jarz_pos.api.monthly_expenses import _summarize
+
+		advances = {"HR-EMP-00020": [_advance(employee="HR-EMP-00020", paid=1200.0)]}
+		flagged = list(self._rows(off_payroll_rows=[self.LEFT_STUB], advances_by_employee=advances).values())
+		plain_stub = {k: v for k, v in self.LEFT_STUB.items() if k not in ("employee_status", "relieving_date")}
+		plain = list(self._rows(off_payroll_rows=[plain_stub], advances_by_employee=advances).values())
+		self.assertEqual(len(flagged), len(plain))
+		self.assertEqual(_summarize([], flagged, 0.0, 0.0), _summarize([], plain, 0.0, 0.0))
+
+
+class TestOffPayrollStubsCarryExitInfo(unittest.TestCase):
+	"""The stub is where `employee_status` / `relieving_date` come from: ONE
+	Employee query for every off-payroll id, degrading to not-left on failure."""
+
+	def test_one_query_for_all_ids_and_the_fields_reach_the_stub(self):
+		from jarz_pos.api import monthly_expenses
+
+		fake = MagicMock()
+		fake.get_all.return_value = [
+			{"name": "HR-EMP-00020", "status": "Left", "relieving_date": date(2026, 8, 15)},
+			{"name": "HR-EMP-00002", "status": "Active", "relieving_date": None},
+		]
+		with (
+			patch.object(monthly_expenses, "frappe", fake),
+			patch.object(monthly_expenses, "employee_display_names", return_value={}),
+		):
+			stubs = monthly_expenses._off_payroll_stubs(["HR-EMP-00002", "HR-EMP-00020"])
+
+		self.assertEqual(fake.get_all.call_count, 1)
+		args, kwargs = fake.get_all.call_args
+		self.assertEqual(args[0], "Employee")
+		self.assertEqual(sorted(kwargs["filters"]["name"][1]), ["HR-EMP-00002", "HR-EMP-00020"])
+		by_id = {s["employee"]: s for s in stubs}
+		self.assertEqual(by_id["HR-EMP-00020"]["employee_status"], "Left")
+		self.assertEqual(by_id["HR-EMP-00020"]["relieving_date"], date(2026, 8, 15))
+		self.assertEqual(by_id["HR-EMP-00002"]["employee_status"], "Active")
+
+	def test_a_failed_employee_read_degrades_to_not_left(self):
+		from jarz_pos.api import monthly_expenses
+
+		fake = MagicMock()
+		fake.get_all.side_effect = RuntimeError("HRMS is not installed")
+		with (
+			patch.object(monthly_expenses, "frappe", fake),
+			patch.object(monthly_expenses, "employee_display_names", return_value={}),
+		):
+			stubs = monthly_expenses._off_payroll_stubs(["HR-EMP-00020"])
+			rows = monthly_expenses._build_payroll_rows(
+				[], off_payroll_rows=stubs, month_start=date(2026, 10, 1)
+			)
+
+		self.assertEqual(len(rows), 1)
+		self.assertIsNone(stubs[0]["employee_status"])
+		self.assertFalse(rows[0]["left"])
+
+
 class TestDeductionsRollUp(unittest.TestCase):
 	def _deductions(self, rows=None, **kwargs):
 		from jarz_pos.api.monthly_expenses import _build_deductions
