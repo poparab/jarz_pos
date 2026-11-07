@@ -15,20 +15,22 @@ from unittest.mock import MagicMock, patch
 
 JARS = 10
 
-# Per-jar BOM lines in Kg (the stock UOM).  Medium is 16/3 g of grinds etc.;
-# Small is exactly 2/3 of Medium.
+# Per-jar BOM lines in Kg (the stock UOM), per the owner's 2026-11-07 method:
+# liquid coffee Large 26 g / Medium 18 g = 3 x the grinds, sugar = 20 % of the
+# liquid, cream 97 / 70 g = mix + 30 % of the liquid.  Small is exactly 2/3 of
+# Medium.
 MEDIUM = {
-	"Coffee beans": 0.016 / 3,
-	"powder sugar": 0.0048,
-	"Cheesecake Mix": 0.0652,
+	"Coffee beans": 0.006,
+	"powder sugar": 0.0036,
+	"Cheesecake Mix": 0.0646,
 	"Savoiardi": 0.028,
 	"coco powder": 0.002,
 }
 BOM_PER_JAR = {
 	"Tiramisu Large": {
-		"Coffee beans": 0.008,
-		"powder sugar": 0.0072,
-		"Cheesecake Mix": 0.0898,
+		"Coffee beans": 0.026 / 3,
+		"powder sugar": 0.0052,
+		"Cheesecake Mix": 0.0892,
 		"Savoiardi": 0.040,
 		"coco powder": 0.003,
 	},
@@ -59,6 +61,10 @@ def step_text(rendered, number):
 	return f"{step['title']}\n{step['instruction_html']}"
 
 
+def english(rendered, number):
+	return step_text(rendered, number).split("\n")[1]
+
+
 class TestTiramisuRecipes(unittest.TestCase):
 	def test_the_three_jar_sizes_are_seeded_and_the_old_single_recipe_is_gone(self):
 		from jarz_pos.scripts import seed_recipe_sops as seed
@@ -73,7 +79,7 @@ class TestTiramisuRecipes(unittest.TestCase):
 		versions = {
 			r["item_code"]: r["version"] for r in seed.RECIPES if r["item_code"].startswith("Tiramisu")
 		}
-		self.assertEqual({"Tiramisu Large": 2, "Tiramisu Medium": 3, "Tiramisu Small": 2}, versions)
+		self.assertEqual({"Tiramisu Large": 3, "Tiramisu Medium": 4, "Tiramisu Small": 3}, versions)
 
 	def test_all_sizes_share_the_same_steps_word_for_word(self):
 		# The recipe sheet merges SOPs whose steps are identical; the sizes are
@@ -95,67 +101,115 @@ class TestTiramisuRecipes(unittest.TestCase):
 			for step in rendered["steps"]:
 				self.assertNotIn("{{", step["title"] + step["instruction_html"], item_code)
 
+	def test_the_bom_matches_the_jar_spec(self):
+		# The spec derives every figure from the liquid target; the BOM lines
+		# production gets must agree with it line for line.
+		from jarz_pos.scripts import seed_recipe_sops as seed
+
+		for item_code, portions in seed.TIRAMISU_JAR_PORTIONS.items():
+			spec = seed.tiramisu_jar_spec(portions)
+			bom = BOM_PER_JAR[item_code]
+			self.assertAlmostEqual(spec["grinds"], bom["Coffee beans"] * 1000, places=3, msg=item_code)
+			self.assertAlmostEqual(spec["sugar"], bom["powder sugar"] * 1000, places=3, msg=item_code)
+			self.assertAlmostEqual(spec["mix"], bom["Cheesecake Mix"] * 1000, places=3, msg=item_code)
+			self.assertAlmostEqual(spec["savoiardi"], bom["Savoiardi"] * 1000, places=3, msg=item_code)
+			self.assertAlmostEqual(spec["cocoa"], bom["coco powder"] * 1000, places=3, msg=item_code)
+
 	def test_large_run_of_ten_jars(self):
 		_, rendered = render_recipe("Tiramisu Large")
 
-		self.assertIn("80 g", step_text(rendered, 1))  # grinds
-		self.assertIn("240 g", step_text(rendered, 1))  # liquid = 3 x grinds
-		self.assertIn("72 g", step_text(rendered, 2))  # sugar
-		self.assertIn("898 g", step_text(rendered, 3))  # cheesecake mix
-		self.assertIn("72 g", step_text(rendered, 3))  # syrup into the cream = sugar weight
-		self.assertIn("970 g", step_text(rendered, 3))  # cream = mix + syrup
-		self.assertIn("240 g", step_text(rendered, 3))  # the rest goes onto the savoiardi
+		self.assertEqual(
+			"Brew 86.7 g of coffee grinds with 433.3 g of water (1 to 5). It gives "
+			"260 g of liquid coffee. Weigh the liquid: if it is short brew a little "
+			"more, if it is over keep only 260 g.",
+			english(rendered, 1),
+		)
+		self.assertEqual(
+			"When the coffee is done, dissolve 52 g of powder sugar in it (20% of "
+			"the liquid), then let it cool.",
+			english(rendered, 2),
+		)
+		self.assertEqual(
+			"Mix 78 g of the sweet coffee (30% of the liquid) into 892 g of "
+			"cheesecake mix = 970 g of cream. The rest of the sweet coffee (234 g) "
+			"is for the savoiardi.",
+			english(rendered, 3),
+		)
 
 	def test_medium_run_of_ten_jars(self):
 		_, rendered = render_recipe("Tiramisu Medium")
 
-		self.assertIn("53.3 g", step_text(rendered, 1))
-		self.assertIn("160 g", step_text(rendered, 1))
-		self.assertIn("48 g", step_text(rendered, 2))
-		self.assertIn("652 g", step_text(rendered, 3))
-		self.assertIn("700 g", step_text(rendered, 3))
+		self.assertIn("60 g of coffee grinds with 300 g of water", english(rendered, 1))
+		self.assertIn("180 g of liquid coffee", english(rendered, 1))
+		self.assertIn("dissolve 36 g of powder sugar", english(rendered, 2))
+		self.assertIn("Mix 54 g of the sweet coffee", english(rendered, 3))
+		self.assertIn("646 g of cheesecake mix = 700 g of cream", english(rendered, 3))
+		self.assertIn("(162 g) is for the savoiardi", english(rendered, 3))
 
 	def test_small_run_of_ten_jars(self):
 		_, rendered = render_recipe("Tiramisu Small")
 
-		self.assertIn("35.6 g", step_text(rendered, 1))
-		self.assertIn("106.7 g", step_text(rendered, 1))
-		self.assertIn("32 g", step_text(rendered, 2))
-		self.assertIn("434.7 g", step_text(rendered, 3))
-		self.assertIn("466.7 g", step_text(rendered, 3))
+		self.assertIn("40 g of coffee grinds with 200 g of water", english(rendered, 1))
+		self.assertIn("120 g of liquid coffee", english(rendered, 1))
+		self.assertIn("dissolve 24 g of powder sugar", english(rendered, 2))
+		self.assertIn("Mix 36 g of the sweet coffee", english(rendered, 3))
+		self.assertIn("430.7 g of cheesecake mix = 466.7 g of cream", english(rendered, 3))
+		self.assertIn("(108 g) is for the savoiardi", english(rendered, 3))
+
+	def test_sweet_coffee_splits_exactly_into_cream_and_savoiardi(self):
+		# liquid + sugar = cream share + savoiardi share, per jar, every size.
+		from jarz_pos.scripts import seed_recipe_sops as seed
+
+		for item_code, portions in seed.TIRAMISU_JAR_PORTIONS.items():
+			spec = seed.tiramisu_jar_spec(portions)
+			self.assertAlmostEqual(
+				spec["liquid"] + spec["sugar"], spec["cream_coffee"] + spec["savoiardi_coffee"], msg=item_code
+			)
+			self.assertAlmostEqual(spec["liquid"] * 0.2, spec["sugar"], msg=item_code)
+			self.assertAlmostEqual(spec["liquid"] * 0.3, spec["cream_coffee"], msg=item_code)
+			self.assertAlmostEqual(spec["grinds"] * 5, spec["water"], msg=item_code)
 
 	def test_run_totals_scale_with_the_jar_count(self):
-		_, one = render_recipe("Tiramisu Large", jars=1)
-		_, ten = render_recipe("Tiramisu Large", jars=10)
+		_, one = render_recipe("Tiramisu Medium", jars=1)
+		_, ten = render_recipe("Tiramisu Medium", jars=10)
 
-		self.assertIn("8 g", step_text(one, 1))
-		self.assertIn("24 g", step_text(one, 1))
-		self.assertIn("80 g", step_text(ten, 1))
-		self.assertIn("240 g", step_text(ten, 1))
+		self.assertIn("6 g of coffee grinds with 30 g of water", english(one, 1))
+		self.assertIn("18 g of liquid coffee", english(one, 1))
+		self.assertIn("60 g of coffee grinds with 300 g of water", english(ten, 1))
+		self.assertIn("180 g of liquid coffee", english(ten, 1))
 
 	def test_the_jar_step_quotes_one_jar_whatever_the_run(self):
 		expectations = {
-			"Tiramisu Large": ("40 g", "24 g", "97 g", "3 g"),
-			"Tiramisu Medium": ("28 g", "16 g", "70 g", "2 g"),
-			"Tiramisu Small": ("18.7 g", "10.7 g", "46.7 g", "1.3 g"),
+			"Tiramisu Large": ("40 g", "23.4 g", "97 g", "3 g"),
+			"Tiramisu Medium": ("28 g", "16.2 g", "70 g", "2 g"),
+			"Tiramisu Small": ("18.7 g", "10.8 g", "46.7 g", "1.3 g"),
 		}
 		for item_code, (savoiardi, syrup, cream, cocoa) in expectations.items():
 			for jars in (1, 10):
 				_, rendered = render_recipe(item_code, jars=jars)
-				english = step_text(rendered, 4).split("\n")[1]
 				self.assertEqual(
 					f"{savoiardi} savoiardi + {syrup} coffee, then {cream} cream, "
 					f"then {cocoa} cocoa on top.",
-					english,
+					english(rendered, 4),
 					(item_code, jars),
 				)
+
+	def test_arabic_lines_carry_the_same_figures(self):
+		_, rendered = render_recipe("Tiramisu Large")
+		arabic = step_text(rendered, 1).split("\n")[2]
+		for figure in ("86.7 g", "433.3 g", "260 g"):
+			self.assertIn(figure, arabic)
+		arabic = step_text(rendered, 3).split("\n")[2]
+		for figure in ("78 g", "892 g", "970 g", "234 g"):
+			self.assertIn(figure, arabic)
 
 	def test_notes_keep_the_per_jar_spec(self):
 		from jarz_pos.scripts import seed_recipe_sops as seed
 
 		recipe = next(r for r in seed.RECIPES if r["item_code"] == "Tiramisu Small")
-		self.assertIn("cream 46.7 g, savoiardi 18.7 g", recipe["notes"])
-		self.assertIn("savoiardi 10.7 g, cocoa 1.3 g", recipe["notes"])
+		self.assertIn("grinds 4 g, water 20 g, liquid coffee 12 g, sugar 2.4 g", recipe["notes"])
+		self.assertIn("into the cream 3.6 g, sweet coffee onto the savoiardi 10.8 g", recipe["notes"])
+		self.assertIn("cream 46.7 g, savoiardi 18.7 g, cocoa 1.3 g", recipe["notes"])
 
 	def test_the_liquid_coffee_weigh_in_has_no_fixed_bounds(self):
 		# The figure scales with the run, so a min/max would reject real runs.
@@ -171,8 +225,9 @@ class TestTiramisuRecipes(unittest.TestCase):
 
 		for recipe in seed.TIRAMISU_SOPS:
 			for step in recipe["steps"]:
-				english, _, arabic = step["instruction"].partition("\n")
-				self.assertTrue(english.strip() and arabic.strip(), step["title"])
+				english_text, _, arabic = step["instruction"].partition("\n")
+				self.assertTrue(english_text.strip() and arabic.strip(), step["title"])
+				self.assertEqual(english_text.count("{{"), arabic.count("{{"), step["title"])
 				self.assertEqual(1, step["requires_confirmation"])
 
 	def test_bowl_steps_are_fixed_and_jar_steps_per_unit(self):
@@ -191,8 +246,8 @@ class TestTiramisuRecipes(unittest.TestCase):
 		from jarz_pos.scripts import seed_recipe_sops as seed
 
 		for recipe in seed.TIRAMISU_SOPS:
+			self.assertIn("2026-11-07", recipe["notes"])
 			self.assertIn("2026-10-08", recipe["notes"])
-			self.assertIn("2026-08-08", recipe["notes"])
 
 
 # One BOM batch per base, as on production 2026-10-08 (eggs in piece, the rest

@@ -468,6 +468,59 @@ class TestSumTokens(unittest.TestCase):
 		self.assertEqual("100 g", out)
 
 
+class TestWeightedSumParts(unittest.TestCase):
+	# The Tiramisu cream: the mix plus 30 % of the liquid coffee = 0.9 x grinds.
+	def test_a_part_can_carry_its_own_weight(self):
+		out, unresolved = render("{{item:MIX+COFFEE*0.9|grams}}", **JAR)
+		self.assertEqual("970 g", out)  # 898 + 0.9 x 80
+		self.assertEqual([], unresolved)
+
+	def test_the_weight_combines_with_batches_multiplier_and_each(self):
+		out, _ = render("{{item:MIX+COFFEE*0.9|grams}}", batches=2, **JAR)
+		self.assertEqual("1940 g", out)
+		out, _ = render("{{item:MIX+COFFEE*0.9|grams|x2}}", **JAR)
+		self.assertEqual("1940 g", out)
+		out, _ = render("{{item:MIX+COFFEE*0.9|grams|each}}", batches=2, units_per_batch=10, **JAR)
+		self.assertEqual("97 g", out)
+
+	def test_spaces_and_a_leading_dot_are_accepted(self):
+		out, _ = render("{{item:MIX + COFFEE * .9|grams}}", **JAR)
+		self.assertEqual("970 g", out)
+
+	def test_a_single_weighted_code(self):
+		out, unresolved = render("{{item:COFFEE*2.7|grams}}", **JAR)
+		self.assertEqual("216 g", out)
+		self.assertEqual([], unresolved)
+
+	def test_a_zero_or_malformed_weight_is_unresolved(self):
+		for text in (
+			"{{item:MIX+COFFEE*0|grams}}",
+			"{{item:MIX+COFFEE*|grams}}",
+			"{{item:MIX+COFFEE*x|grams}}",
+		):
+			out, unresolved = render(text, **JAR)
+			self.assertEqual(text, out)
+			self.assertEqual(1, len(unresolved), text)
+
+	def test_a_weighted_unknown_part_is_unresolved(self):
+		out, unresolved = render("{{item:MIX+NOPE*0.9|grams}}", **JAR)
+		self.assertEqual("{{item:MIX+NOPE*0.9|grams}}", out)
+		self.assertEqual(["MIX+NOPE*0.9"], unresolved)
+
+	def test_a_code_that_really_contains_a_star_resolves_as_itself(self):
+		params = {
+			"component_qty_map": {"A*2": 0.1, "A": 1},
+			"uom_map": {"A*2": "Kg", "A": "Kg"},
+			"name_map": {"A*2": "Odd", "A": "A"},
+		}
+		out, _ = render("{{item:A*2|grams}}", **params)
+		self.assertEqual("100 g", out)
+
+	def test_the_name_of_a_weighted_sum_joins_the_names(self):
+		out, _ = render("{{item:MIX+COFFEE*0.9|name}}", **JAR)
+		self.assertEqual("Cheesecake Mix + Coffee beans", out)
+
+
 class TestFormatQuantity(unittest.TestCase):
 	def test_mass_is_shown_in_grams(self):
 		from jarz_pos.services.sop_rendering import format_quantity

@@ -572,55 +572,106 @@ SPONGE_CAKE = {
 	],
 }
 
-# The Tiramisu jars, per the owner's method of 2026-10-08 (superseding the
-# 2026-08-08 "half a shot per jar" note, which is why the old single-recipe
-# TIRAMISU_ASSEMBLY for the Medium is gone).
+# The Tiramisu jars, per the owner's method of 2026-11-07 (superseding the
+# 2026-10-08 one: brew 1:3, sugar = liquid x 0.3, syrup into the cream = the
+# sugar weight).
 #
-#   grinds -> liquid coffee at 1:3 by weight        (16 g -> 48 g)
-#   powder sugar        = liquid x 0.3, dissolved in the hot coffee
-#   syrup into the cream = the SUGAR weight, folded into the cheesecake mix
-#   syrup onto savoiardi = the rest, i.e. the liquid weight
+#   brew       grinds : water = 1 : 5 by weight, giving liquid = 3 x grinds
+#              (1 kg grinds + 5 kg water -> 3 kg liquid coffee)
+#   liquid     Large 26 g, Medium 18 g per jar; Small = 2/3 of Medium (12 g)
+#   sugar      = 20 % of the liquid (0.6 x grinds), dissolved once brewed
+#   cream      = cheesecake mix + 30 % of the liquid as sweet coffee (0.9 x grinds)
+#   savoiardi  = the rest of the sweet coffee (liquid + sugar - cream share,
+#                i.e. 90 % of the liquid = 2.7 x grinds)
+#
+# The cream weight per jar stays 97 / 70 / 46.7 g, so the mix line drops by
+# the coffee folded into it.  Water is not a BOM line (tap water, not stocked);
+# the brew step quotes it as 5 x the grinds.
 #
 # Every size is made in the same session: one pot of coffee, one bowl of
 # cream, then the jars.  So the three SOPs share ONE set of steps, word for
 # word, and ``get_recipe_sheet`` merges them into a single sheet: the bowl
 # steps quote the whole run (all sizes summed) and the jar step, written with
 # ``|each`` tokens, prints one line per size.  Nothing in the steps is static
-# text any more - every figure follows the jar BOM.
+# text - every figure follows the jar BOM.
 #
 # Per-jar spec in grams, kept for the notes and checked by the tests against
-# what the ``|each`` tokens render.  ``version`` was bumped when the steps
-# became shared (L 1->2, M 2->3, S 1->2) so the per-size v1/v2 stay on file.
+# what the ``|each`` tokens render.  ``version`` is bumped per method change
+# (L 2->3, M 3->4, S 2->3) so the earlier SOPs stay on file.
+_SMALL = 2 / 3
 TIRAMISU_JAR_PORTIONS: dict[str, dict[str, Any]] = {
-	"Tiramisu Large": {"version": 2, "cream": 97, "syrup": 24, "savoiardi": 40, "cocoa": 3},
-	"Tiramisu Medium": {"version": 3, "cream": 70, "syrup": 16, "savoiardi": 28, "cocoa": 2},
+	"Tiramisu Large": {
+		"version": 3,
+		"liquid": 26,
+		"cream": 97,
+		"savoiardi": 40,
+		"cocoa": 3,
+	},
+	"Tiramisu Medium": {
+		"version": 4,
+		"liquid": 18,
+		"cream": 70,
+		"savoiardi": 28,
+		"cocoa": 2,
+	},
 	# Small is exactly 2/3 of the Medium.
 	"Tiramisu Small": {
-		"version": 2,
-		"cream": 70 * 2 / 3,
-		"syrup": 16 * 2 / 3,
-		"savoiardi": 28 * 2 / 3,
-		"cocoa": 2 * 2 / 3,
+		"version": 3,
+		"liquid": 18 * _SMALL,
+		"cream": 70 * _SMALL,
+		"savoiardi": 28 * _SMALL,
+		"cocoa": 2 * _SMALL,
 	},
 }
 
+# Ratios on the grinds (the BOM line every coffee figure is quoted from).
+TIRAMISU_WATER_PER_GRIND = 5
+TIRAMISU_LIQUID_PER_GRIND = 3
+TIRAMISU_SUGAR_SHARE = 0.2  # of the liquid
+TIRAMISU_CREAM_COFFEE_SHARE = 0.3  # of the liquid
+
+
+def tiramisu_jar_spec(portions: dict[str, Any]) -> dict[str, float]:
+	"""Every per-jar figure in grams, derived from the liquid target."""
+	liquid = float(portions["liquid"])
+	sugar = liquid * TIRAMISU_SUGAR_SHARE
+	cream_coffee = liquid * TIRAMISU_CREAM_COFFEE_SHARE
+	return {
+		"grinds": liquid / TIRAMISU_LIQUID_PER_GRIND,
+		"water": liquid / TIRAMISU_LIQUID_PER_GRIND * TIRAMISU_WATER_PER_GRIND,
+		"liquid": liquid,
+		"sugar": sugar,
+		"cream_coffee": cream_coffee,
+		"savoiardi_coffee": liquid + sugar - cream_coffee,
+		"mix": float(portions["cream"]) - cream_coffee,
+		"cream": float(portions["cream"]),
+		"savoiardi": float(portions["savoiardi"]),
+		"cocoa": float(portions["cocoa"]),
+	}
+
+
 _GRINDS = "{{item:Coffee beans|grams}}"
+_WATER = "{{item:Coffee beans|grams|x5}}"
 _LIQUID = "{{item:Coffee beans|grams|x3}}"
 _SUGAR = "{{item:powder sugar|grams}}"
 _MIX = "{{item:Cheesecake Mix|grams}}"
-# The cream is the mix plus the sweet coffee folded into it (= the sugar weight).
-_CREAM = "{{item:Cheesecake Mix+powder sugar|grams}}"
+# 30 % of the liquid = 0.9 x the grinds; the rest of the sweet coffee
+# (liquid 3 + sugar 0.6 - 0.9) = 2.7 x the grinds.
+_CREAM_COFFEE = "{{item:Coffee beans|grams|x0.9}}"
+_SAVOIARDI_COFFEE = "{{item:Coffee beans|grams|x2.7}}"
+# The cream is the mix plus the sweet coffee folded into it.
+_CREAM = "{{item:Cheesecake Mix+Coffee beans*0.9|grams}}"
 
 TIRAMISU_STEPS: list[dict[str, Any]] = [
 	{
 		"title": "Brew the coffee",
 		"instruction": (
-			f"Brew {_GRINDS} of coffee grinds into {_LIQUID} of liquid coffee "
-			"(1 to 3). Weigh the liquid: if it is short brew a little more, if "
-			f"it is over keep only {_LIQUID}.\n"
-			f"اعمل {_LIQUID} قهوة سايلة من {_GRINDS} بن مطحون (1 لـ 3). "
-			"اوزن القهوة السايلة: لو ناقصة اعمل شوية كمان، و لو زادت خد "
-			f"{_LIQUID} بس."
+			f"Brew {_GRINDS} of coffee grinds with {_WATER} of water (1 to 5). "
+			f"It gives {_LIQUID} of liquid coffee. Weigh the liquid: if it is "
+			f"short brew a little more, if it is over keep only {_LIQUID}.\n"
+			f"اعمل {_GRINDS} بن مطحون على {_WATER} مية (1 لـ 5). "
+			f"هيطلع {_LIQUID} قهوة سايلة. اوزن القهوة السايلة: لو ناقصة اعمل "
+			f"شوية كمان، و لو زادت خد {_LIQUID} بس."
 		),
 		"duration_mins": 8,
 		"scaling_mode": "Fixed",
@@ -631,9 +682,10 @@ TIRAMISU_STEPS: list[dict[str, Any]] = [
 	{
 		"title": "Sweeten the coffee",
 		"instruction": (
-			f"Dissolve {_SUGAR} of powder sugar in the hot coffee, then let it "
-			"cool.\n"
-			f"دوب {_SUGAR} سكر بودر في القهوة و هي سخنة، و سيبها تبرد."
+			f"When the coffee is done, dissolve {_SUGAR} of powder sugar in it "
+			"(20% of the liquid), then let it cool.\n"
+			f"لما القهوة تخلص، دوب فيها {_SUGAR} سكر بودر (20% من القهوة "
+			"السايلة)، و سيبها تبرد."
 		),
 		"duration_mins": 5,
 		"scaling_mode": "Fixed",
@@ -642,11 +694,12 @@ TIRAMISU_STEPS: list[dict[str, Any]] = [
 	{
 		"title": "Make the cream in one bowl",
 		"instruction": (
-			f"Mix {_MIX} of cheesecake mix with {_SUGAR} of the sweet coffee = "
-			f"{_CREAM} of cream. The rest of the coffee ({_LIQUID}) is for the "
-			"savoiardi.\n"
-			f"اخلط {_MIX} خليط تشيز كيك مع {_SUGAR} من القهوة المحلاة = "
-			f"{_CREAM} كريمة. باقي القهوة ({_LIQUID}) للسافوياردي."
+			f"Mix {_CREAM_COFFEE} of the sweet coffee (30% of the liquid) into "
+			f"{_MIX} of cheesecake mix = {_CREAM} of cream. The rest of the "
+			f"sweet coffee ({_SAVOIARDI_COFFEE}) is for the savoiardi.\n"
+			f"اخلط {_CREAM_COFFEE} من القهوة المحلاة (30% من القهوة السايلة) "
+			f"مع {_MIX} خليط تشيز كيك = {_CREAM} كريمة. باقي القهوة المحلاة "
+			f"({_SAVOIARDI_COFFEE}) للسافوياردي."
 		),
 		"duration_mins": 10,
 		"scaling_mode": "Fixed",
@@ -656,12 +709,12 @@ TIRAMISU_STEPS: list[dict[str, Any]] = [
 		"title": "Fill each jar",
 		"instruction": (
 			"{{item:Savoiardi|grams|each}} savoiardi + "
-			"{{item:Coffee beans|grams|x3|each}} coffee, then "
-			"{{item:Cheesecake Mix+powder sugar|grams|each}} cream, then "
+			"{{item:Coffee beans|grams|x2.7|each}} coffee, then "
+			"{{item:Cheesecake Mix+Coffee beans*0.9|grams|each}} cream, then "
 			"{{item:coco powder|grams|each}} cocoa on top.\n"
 			"{{item:Savoiardi|grams|each}} سافوياردي + "
-			"{{item:Coffee beans|grams|x3|each}} قهوة، بعدين "
-			"{{item:Cheesecake Mix+powder sugar|grams|each}} كريمة، بعدين "
+			"{{item:Coffee beans|grams|x2.7|each}} قهوة، بعدين "
+			"{{item:Cheesecake Mix+Coffee beans*0.9|grams|each}} كريمة، بعدين "
 			"{{item:coco powder|grams|each}} كاكاو على الوش."
 		),
 		"duration_mins": 1,
@@ -688,10 +741,7 @@ def _grams(value: float) -> str:
 
 def build_tiramisu_sop(item_code: str, portions: dict[str, Any]) -> dict[str, Any]:
 	"""One Tiramisu jar SOP: the shared steps plus this size's spec in the notes."""
-	cream = _grams(portions["cream"])
-	syrup = _grams(portions["syrup"])
-	savoiardi = _grams(portions["savoiardi"])
-	cocoa = _grams(portions["cocoa"])
+	spec = {key: _grams(value) for key, value in tiramisu_jar_spec(portions).items()}
 
 	return {
 		"item_code": item_code,
@@ -700,20 +750,23 @@ def build_tiramisu_sop(item_code: str, portions: dict[str, Any]) -> dict[str, An
 		"prep_time_mins": 30,
 		"equipment": "Coffee brewer, scales, mixing bowl, jars",
 		"notes": (
-			"Method per the owner, 2026-10-08, superseding the 2026-08-08 "
-			"half-shot note.\n"
-			"Coffee grinds become liquid coffee at 1:3 by weight (16 g -> 48 g). "
+			"Method per the owner, 2026-11-07, superseding 2026-10-08 (brew 1:3, "
+			"sugar = liquid x 0.3, syrup into the cream = the sugar weight).\n"
+			"Brew coffee grinds with water at 1:5 by weight; it gives liquid "
+			"coffee at 3 x the grinds (1 kg grinds + 5 kg water -> 3 kg liquid). "
 			"Extraction varies, so the kitchen weighs the liquid: the liquid "
-			"weight is what the recipe needs. Powder sugar = liquid x 0.3, "
-			"dissolved in the hot coffee. An amount of sweetened coffee equal to "
-			"the SUGAR weight is folded into the cheesecake mix to make the "
-			"tiramisu cream; the rest (= the liquid weight) goes onto the "
-			"savoiardi.\n"
+			"weight is what the recipe needs. Powder sugar = 20% of the liquid, "
+			"dissolved once the coffee is done. 30% of the liquid weight, as sweet "
+			"coffee, goes into the cheesecake mix to make the tiramisu cream; the "
+			"rest of the sweet coffee goes onto the savoiardi.\n"
 			"All sizes are made together, so every Tiramisu SOP has the same "
 			"steps and the app shows them as one sheet.\n"
-			f"Per jar: cream {cream}, savoiardi {savoiardi}, coffee syrup onto "
-			f"the savoiardi {syrup}, cocoa {cocoa}. Every figure in the steps "
-			"comes from the jar BOM."
+			f"Per jar: grinds {spec['grinds']}, water {spec['water']}, liquid "
+			f"coffee {spec['liquid']}, sugar {spec['sugar']}, sweet coffee into "
+			f"the cream {spec['cream_coffee']}, sweet coffee onto the savoiardi "
+			f"{spec['savoiardi_coffee']}, cheesecake mix {spec['mix']}, cream "
+			f"{spec['cream']}, savoiardi {spec['savoiardi']}, cocoa {spec['cocoa']}. "
+			"Every figure in the steps comes from the jar BOM."
 		),
 		# A copy per SOP: ``_apply`` only reads, but shared dicts invite a
 		# later edit that changes all three sizes by accident.

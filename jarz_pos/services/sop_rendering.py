@@ -109,6 +109,9 @@ _MULTIPLIABLE_VARIANTS = frozenset({"qty", "grams", "count"})
 _MULTIPLIER_RE = re.compile(r"^x(\d+(?:\.\d+)?|\.\d+)$", re.IGNORECASE)
 _EACH = "each"
 _SUM_SEPARATOR = "+"
+# ``A+B*0.9``: a weight on one part of a sum (see ``_resolve_parts``).
+_PART_WEIGHT_SEPARATOR = "*"
+_PART_WEIGHT_RE = re.compile(r"^(.*?)\s*\*\s*(\d+(?:\.\d+)?|\.\d+)$")
 
 # Stock UOM -> grams per unit, matched case-insensitively.  Deliberately small:
 # a UOM that is not a unit of mass (Nos, Litre, Box) must NOT be guessed at.
@@ -328,26 +331,46 @@ def _lookup_code(
 	return lowered.get(code.strip().lower())
 
 
+def _split_weight(part: str) -> tuple[str, float] | None:
+	"""``"Coffee beans*0.9"`` -> ``("Coffee beans", 0.9)``; plain -> weight 1."""
+	match = _PART_WEIGHT_RE.match(part)
+	if not match:
+		return part, 1.0
+	weight = float(match.group(2))
+	if weight <= 0:
+		return None
+	return match.group(1).strip(), weight
+
+
 def _resolve_parts(
 	code: str,
 	component_qty_map: Mapping[str, Any],
 	name_map: Mapping[str, Any],
 	uom_map: Mapping[str, Any],
 	lowered: Mapping[str, str],
-) -> list[str] | None:
-	"""The component code(s) a token names, or ``None`` if any is unknown."""
+) -> list[tuple[str, float]] | None:
+	"""The ``(component, weight)`` pairs a token names, or ``None`` if any is unknown.
+
+	A part may carry its own weight, ``A+B*0.9`` = A plus 0.9 x B, for an
+	amount that is one line plus a share of another (the Tiramisu cream is the
+	mix plus 30 % of the brewed coffee).  The whole code is tried first, so an
+	item whose name really contains ``+`` or ``*`` still resolves as itself.
+	"""
 	whole = _lookup_code(code, component_qty_map, name_map, uom_map, lowered)
 	if whole is not None:
-		return [whole]
-	if _SUM_SEPARATOR not in code:
+		return [(whole, 1.0)]
+	if _SUM_SEPARATOR not in code and _PART_WEIGHT_SEPARATOR not in code:
 		return None
-	resolved: list[str] = []
-	for part in code.split(_SUM_SEPARATOR):
-		part = part.strip()
-		found = _lookup_code(part, component_qty_map, name_map, uom_map, lowered) if part else None
+	resolved: list[tuple[str, float]] = []
+	for raw in code.split(_SUM_SEPARATOR):
+		split = _split_weight(raw.strip())
+		if split is None or not split[0]:
+			return None
+		part, weight = split
+		found = _lookup_code(part, component_qty_map, name_map, uom_map, lowered)
 		if found is None:
 			return None
-		resolved.append(found)
+		resolved.append((found, weight))
 	return resolved
 
 
@@ -428,9 +451,9 @@ def render_instruction(
 		else:
 			scale = batch_count * multiplier
 
-		quantities = [to_float(component_qty_map.get(p), 0.0) * scale for p in parts]
-		uoms = [str(uom_map.get(p) or "").strip() for p in parts]
-		name_text = " + ".join(str(name_map.get(p) or p).strip() for p in parts)
+		quantities = [to_float(component_qty_map.get(p), 0.0) * scale * w for p, w in parts]
+		uoms = [str(uom_map.get(p) or "").strip() for p, _w in parts]
+		name_text = " + ".join(str(name_map.get(p) or p).strip() for p, _w in parts)
 
 		if variant == "grams":
 			grams = [to_grams(q, u) for q, u in zip(quantities, uoms, strict=False)]
