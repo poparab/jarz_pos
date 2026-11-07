@@ -14,6 +14,8 @@ never in a URL, and is never put in a message or a log.
 """
 
 import json
+import re
+import time
 from datetime import date, datetime, timedelta, timezone
 
 import frappe
@@ -30,6 +32,10 @@ DEFAULT_DAYS = 7
 MAX_DAYS = 400
 CACHE_SECONDS = 15 * 60
 HTTP_TIMEOUT = 30
+REPORT_BUDGET_SECONDS = 60
+ACCOUNT_RE = re.compile(r"^act_\d+$")
+VERSION_RE = re.compile(r"^v\d+\.\d+$")
+SLOW_MESSAGE = "Meta is responding slowly; try again in a minute."
 MAX_PAGES = 40
 IDS_CHUNK = 50
 # The same preference the marketing dashboard uses: first type present wins, never a sum.
@@ -341,11 +347,38 @@ def _graph_get(session_get, url: str, params: dict, token: str) -> dict:
 		body = resp.json()
 	except ValueError:
 		body = {}
+	if resp.status_code < 400 and not isinstance(body, dict):
+		raise MetaError("Unexpected reply from Meta.")
 	if resp.status_code >= 400 or (isinstance(body, dict) and body.get("error")):
 		err = body.get("error", {}) if isinstance(body, dict) else {}
 		message = _scrub(err.get("error_user_msg") or err.get("message") or f"HTTP {resp.status_code}", token)
 		raise MetaError(message)
 	return body
+
+
+def with_deadline(session_get, budget=REPORT_BUDGET_SECONDS, clock=time.monotonic):
+	"""Wrap ``session_get`` so all calls made through it share one time budget.
+
+	The deadline lives in this closure (one per report build), so nothing leaks between
+	requests. Each call's timeout is capped to the remaining budget; once it is spent the
+	next call raises ``MetaError`` without touching the network.
+	"""
+	deadline = clock() + budget
+
+	def limited(url, params=None, headers=None, timeout=None):
+		remaining = deadline - clock()
+		if remaining <= 0:
+			raise MetaError(SLOW_MESSAGE)
+		try:
+			return session_get(
+				url, params=params, headers=headers, timeout=min(timeout or HTTP_TIMEOUT, remaining)
+			)
+		except requests.Timeout:
+			if deadline - clock() <= 0:
+				raise MetaError(SLOW_MESSAGE) from None
+			raise
+
+	return limited
 
 
 def _graph_all(session_get, url: str, params: dict, token: str) -> list:
@@ -465,13 +498,26 @@ def _ensure_allowed() -> None:
 		frappe.throw(_("You are not allowed to see the Meta Ads report."), frappe.PermissionError)
 
 
+def clean_account(value) -> str:
+	"""``act_<digits>``; a bare number gets the prefix; anything else is the default."""
+	value = str(value or "").strip()
+	if value.isascii() and value.isdigit():
+		value = f"act_{value}"
+	return value if ACCOUNT_RE.match(value) else DEFAULT_ACCOUNT
+
+
+def clean_version(value) -> str:
+	value = str(value or "").strip()
+	return value if VERSION_RE.match(value) else DEFAULT_VERSION
+
+
 def _read_settings() -> dict:
 	doc = frappe.get_doc("Meta CAPI Settings")
 	token = doc.get_password("ads_access_token", raise_exception=False)
 	return {
 		"token": (token or "").strip(),
-		"account": (doc.get("ads_account_id") or DEFAULT_ACCOUNT).strip(),
-		"version": (doc.get("ads_api_version") or DEFAULT_VERSION).strip(),
+		"account": clean_account(doc.get("ads_account_id")),
+		"version": clean_version(doc.get("ads_api_version")),
 	}
 
 
@@ -490,8 +536,15 @@ def _empty_response(configured, level, start, end, notes):
 	}
 
 
-def build_report(session_get, settings, erp_fetch, level, start, end, campaign_id=None, adset_id=None) -> dict:
-	"""The whole report from injected collaborators (Graph GET and ERP lookup)."""
+def build_report(
+	session_get, settings, erp_fetch, level, start, end, campaign_id=None, adset_id=None,
+	budget=REPORT_BUDGET_SECONDS, clock=time.monotonic,
+) -> dict:
+	"""The whole report from injected collaborators (Graph GET, ERP lookup, clock).
+
+	All Graph calls share one ``budget`` (seconds); see ``with_deadline``.
+	"""
+	session_get = with_deadline(session_get, budget, clock)
 	base_url = f"https://graph.facebook.com/{settings['version']}"
 	account, token = settings["account"], settings["token"]
 

@@ -10,6 +10,7 @@ import types
 import unittest
 from datetime import date
 from types import SimpleNamespace
+from unittest import mock
 
 try:  # pragma: no cover - depends on the environment
 	import frappe  # noqa: F401
@@ -308,6 +309,167 @@ class BuildReportTest(unittest.TestCase):
 		rep = m.build_report(get, self.SETTINGS, lambda n, s, e: None, "ad", date(2026, 11, 1), date(2026, 11, 7))
 		self.assertEqual(rep["totals"]["erp_orders"], 0)
 		self.assertTrue(any("UTM" in n for n in rep["notes"]))
+
+
+class FakeClock:
+	def __init__(self):
+		self.now = 1000.0
+
+	def __call__(self):
+		return self.now
+
+
+class DeadlineTest(unittest.TestCase):
+	def test_timeout_is_capped_to_remaining_budget(self):
+		clock, seen = FakeClock(), []
+
+		def get(url, params=None, headers=None, timeout=None):
+			seen.append(timeout)
+			clock.now += 50
+			return FakeResp({"data": []})
+
+		limited = m.with_deadline(get, budget=60, clock=clock)
+		limited("u", params={}, headers={}, timeout=30)
+		limited("u", params={}, headers={}, timeout=30)
+		self.assertEqual(seen, [30, 10])
+
+	def test_exhausted_budget_raises_without_calling_graph(self):
+		clock, calls = FakeClock(), []
+
+		def get(url, params=None, headers=None, timeout=None):
+			calls.append(1)
+			clock.now += 61
+			return FakeResp({"data": []})
+
+		limited = m.with_deadline(get, budget=60, clock=clock)
+		limited("u", params={}, headers={})
+		with self.assertRaises(m.MetaError) as ctx:
+			limited("u", params={}, headers={})
+		self.assertEqual(str(ctx.exception), "Meta is responding slowly; try again in a minute.")
+		self.assertEqual(len(calls), 1)
+
+	def test_timeout_after_deadline_reports_slow(self):
+		clock = FakeClock()
+
+		def get(url, params=None, headers=None, timeout=None):
+			clock.now += 100
+			raise m.requests.Timeout()
+
+		with self.assertRaises(m.MetaError) as ctx:
+			m._graph_get(m.with_deadline(get, 60, clock), "u", {}, "T")
+		self.assertIn("responding slowly", str(ctx.exception))
+
+	def test_build_report_stops_when_budget_spent(self):
+		clock = FakeClock()
+		inner, _calls = BuildReportTest()._graph(BuildReportTest.AD_ROWS)
+
+		def get(url, params=None, headers=None, timeout=None):
+			clock.now += 40
+			return inner(url, params=params, headers=headers, timeout=timeout)
+
+		with self.assertRaises(m.MetaError) as ctx:
+			m.build_report(
+				get, BuildReportTest.SETTINGS, lambda n, s, e: {}, "ad", date(2026, 11, 1), date(2026, 11, 7),
+				clock=clock,
+			)
+		self.assertIn("responding slowly", str(ctx.exception))
+
+	def test_budget_is_per_build_not_global(self):
+		clock = FakeClock()
+		inner, _calls = BuildReportTest()._graph(BuildReportTest.AD_ROWS)
+		for _ in range(3):
+			clock.now += 1000
+			m.build_report(
+				inner, BuildReportTest.SETTINGS, lambda n, s, e: {}, "ad", date(2026, 11, 1), date(2026, 11, 7),
+				clock=clock,
+			)
+
+
+class GraphBodyTest(unittest.TestCase):
+	def test_non_dict_2xx_body_is_rejected(self):
+		for body in ([1, 2], "x", None, 5):
+			with self.assertRaises(m.MetaError) as ctx:
+				m._graph_get(lambda *a, **k: FakeResp(body), "u", {}, "T")
+			self.assertEqual(str(ctx.exception), "Unexpected reply from Meta.")
+
+
+class SettingsTest(unittest.TestCase):
+	def _read(self, account, version, token="tok"):
+		values = {"ads_account_id": account, "ads_api_version": version}
+		doc = SimpleNamespace(get=lambda k: values.get(k), get_password=lambda *a, **k: token)
+		with mock.patch.object(m.frappe, "get_doc", create=True, return_value=doc):
+			return m._read_settings()
+
+	def test_valid_values_kept_and_bare_number_prefixed(self):
+		self.assertEqual(self._read("act_42", "v20.1")["account"], "act_42")
+		s = self._read(" 12345 ", " v19.0 ")
+		self.assertEqual((s["account"], s["version"]), ("act_12345", "v19.0"))
+
+	def test_garbage_falls_back_to_defaults(self):
+		for bad in ("act_", "act_12x", "../x", "abc", "act_1/insights", "12 34"):
+			self.assertEqual(self._read(bad, "x")["account"], m.DEFAULT_ACCOUNT, bad)
+		for bad in ("23.0", "v23", "v23.0/../x", "latest", "v1.2.3"):
+			self.assertEqual(self._read("", bad)["version"], m.DEFAULT_VERSION, bad)
+
+	def test_empty_uses_defaults_and_token_stripped(self):
+		s = self._read(None, None, token="  tok  ")
+		self.assertEqual((s["account"], s["version"], s["token"]), (m.DEFAULT_ACCOUNT, m.DEFAULT_VERSION, "tok"))
+
+
+class EndpointTest(unittest.TestCase):
+	def setUp(self):
+		self.cache = SimpleNamespace(store={}, sets=[])
+		self.cache.get_value = lambda key: self.cache.store.get(key)
+		self.cache.set_value = lambda key, val, **k: self.cache.sets.append(key)
+		self.roles = []
+		self.token = "tok"
+		self.build_calls = []
+
+		def throw(msg, exc=None, *a, **k):
+			raise (exc or Exception)(msg)
+
+		def fake_build(*a, **k):
+			self.build_calls.append(a)
+			return {"configured": True, "rows": ["fresh"]}
+
+		patches = [
+			mock.patch.object(m.frappe, "get_roles", create=True, side_effect=lambda user=None: self.roles),
+			mock.patch.object(m.frappe, "session", SimpleNamespace(user="u@x"), create=True),
+			mock.patch.object(m.frappe, "throw", throw, create=True),
+			mock.patch.object(m.frappe, "PermissionError", PermissionError, create=True),
+			mock.patch.object(m.frappe, "cache", lambda: self.cache, create=True),
+			mock.patch.object(m, "_read_settings", lambda: {"token": self.token, "account": "act_1", "version": "v23.0"}),
+			mock.patch.object(m, "build_report", fake_build),
+		]
+		for p in patches:
+			p.start()
+			self.addCleanup(p.stop)
+
+	def test_no_role_is_permission_error(self):
+		self.roles = []
+		with self.assertRaises(PermissionError):
+			m.get_ads_report()
+		self.assertEqual(self.build_calls, [])
+
+	def test_meta_capi_manager_passes_gate(self):
+		self.roles = ["Meta CAPI Manager"]
+		self.assertEqual(m.get_ads_report()["rows"], ["fresh"])
+
+	def test_empty_token_is_unconfigured_without_graph_call(self):
+		self.roles, self.token = ["Meta CAPI Manager"], ""
+		rep = m.get_ads_report()
+		self.assertFalse(rep["configured"])
+		self.assertEqual(rep["rows"], [])
+		self.assertEqual(self.build_calls, [])
+
+	def test_cached_value_skips_graph_unless_refresh(self):
+		self.roles = ["Meta CAPI Manager"]
+		start, end = m.resolve_dates(None, None, m._cairo_now().date())
+		self.cache.store[m._cache_key("ad", start, end, None, None)] = {"configured": True, "rows": ["cached"]}
+		self.assertEqual(m.get_ads_report()["rows"], ["cached"])
+		self.assertEqual(self.build_calls, [])
+		self.assertEqual(m.get_ads_report(refresh="1")["rows"], ["fresh"])
+		self.assertEqual(len(self.build_calls), 1)
 
 
 if __name__ == "__main__":
