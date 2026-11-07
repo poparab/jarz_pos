@@ -17,6 +17,7 @@ import json
 import re
 import time
 from datetime import date, datetime, timedelta, timezone
+from urllib.parse import unquote_plus
 
 import frappe
 import requests
@@ -175,16 +176,27 @@ def normalise_level(level) -> str:
 	return level if level in LEVELS else "ad"
 
 
+def name_key(value) -> str:
+	"""Comparable form of an ad name: lower case, whitespace collapsed."""
+	return " ".join(str(value or "").split()).lower()
+
+
+def utm_key(value) -> str:
+	"""Comparable form of a stored utm_content. The site keeps it URL-encoded
+	(``Fixable+image``, ``Fixable%20image``), so decode before comparing."""
+	return name_key(unquote_plus(str(value or "")))
+
+
 def allocate_erp(ad_rows: list, erp_by_name: dict) -> dict:
 	"""Give each ERP ad name to exactly one delivering ad, so no order is counted twice.
 
 	``ad_rows`` need ``id``, ``name`` and ``spend``. Where several ads share a name the
 	highest-spend one gets the ERP figures. Returns ``{ad_id: (orders, revenue)}``.
 	"""
-	lowered = {str(k).strip().lower(): v for k, v in (erp_by_name or {}).items() if k}
+	lowered = {name_key(k): v for k, v in (erp_by_name or {}).items() if k}
 	best = {}
 	for ad in ad_rows:
-		key = str(ad.get("name") or "").strip().lower()
+		key = name_key(ad.get("name"))
 		if key not in lowered:
 			continue
 		current = best.get(key)
@@ -454,11 +466,14 @@ def fetch_entity_meta(session_get, base_url, account, token, level, ids, with_cr
 
 
 def fetch_erp_by_name(names: list, start: date, end: date) -> dict | None:
-	"""{ad name (lower): (orders, revenue)}; None when the Woo UTM column is absent."""
+	"""{ad name key: (orders, revenue)}; None when the Woo UTM column is absent.
+
+	utm_content is stored URL-encoded (``Fixable+image``), so every UTM in the range is
+	grouped in SQL and decoded here before matching the ad names."""
 	if not frappe.db.has_column("Sales Invoice", "woo_utm_content"):
 		return None
-	names = [n for n in dict.fromkeys(names) if n]
-	if not names:
+	wanted = {name_key(n) for n in names if n}
+	if not wanted:
 		return {}
 	rows = frappe.db.sql(
 		"""
@@ -466,15 +481,17 @@ def fetch_erp_by_name(names: list, start: date, end: date) -> dict | None:
 		FROM `tabSales Invoice`
 		WHERE docstatus = 1 AND is_return = 0
 			AND posting_date BETWEEN %(start)s AND %(end)s
-			AND woo_utm_content IN %(names)s
+			AND IFNULL(woo_utm_content, '') != ''
 		GROUP BY woo_utm_content
 		""",
-		{"start": start, "end": end, "names": tuple(names)},
+		{"start": start, "end": end},
 		as_dict=True,
 	)
 	out = {}
 	for r in rows:
-		key = str(r["woo_utm_content"]).strip().lower()
+		key = utm_key(r["woo_utm_content"])
+		if key not in wanted:
+			continue
 		prev = out.get(key, (0, 0.0))
 		out[key] = (prev[0] + int(r["orders"]), prev[1] + float(r["revenue"]))
 	return out

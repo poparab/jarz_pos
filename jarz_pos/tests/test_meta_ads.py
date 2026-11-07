@@ -149,6 +149,27 @@ class ErpAllocationTest(unittest.TestCase):
 		self.assertTrue(m.duplicate_ad_names(ADS))
 		self.assertFalse(m.duplicate_ad_names(ADS[:2]))
 
+	def test_utm_key_decodes_stored_utm(self):
+		# Production stores utm_content URL-encoded ("Fixable+image"); found 2026-11-07.
+		self.assertEqual(m.utm_key("Fixable+image"), "fixable image")
+		self.assertEqual(m.utm_key("Fixable%20Video"), "fixable video")
+		self.assertEqual(m.utm_key("E08_first_spoon_changed_it"), "e08_first_spoon_changed_it")
+		self.assertEqual(m.name_key("  Fixable   Image "), "fixable image")
+
+	def test_fetch_erp_matches_encoded_utm(self):
+		rows = [
+			{"woo_utm_content": "Fixable+image", "orders": 9, "revenue": 4500},
+			{"woo_utm_content": "Fixable%20image", "orders": 1, "revenue": 500},
+			{"woo_utm_content": "E08_first_spoon_changed_it", "orders": 19, "revenue": 10195},
+			{"woo_utm_content": "{{ad.name}}", "orders": 1, "revenue": 300},
+		]
+		db = SimpleNamespace(has_column=lambda *a: True, sql=lambda *a, **k: rows)
+		with mock.patch.object(m.frappe, "db", db, create=True):
+			out = m.fetch_erp_by_name(["Fixable image", "E08_first_spoon_changed_it"], date(2026, 11, 1), date(2026, 11, 7))
+		self.assertEqual(out, {"fixable image": (10, 5000.0), "e08_first_spoon_changed_it": (19, 10195.0)})
+		alloc = m.allocate_erp([{"id": "f", "name": "Fixable image", "spend": 5}], out)
+		self.assertEqual(alloc, {"f": (10, 5000.0)})
+
 
 class BuildRowsTest(unittest.TestCase):
 	RAW = [
