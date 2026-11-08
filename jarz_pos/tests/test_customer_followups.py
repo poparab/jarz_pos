@@ -779,6 +779,99 @@ class AutoSendTest(unittest.TestCase):
 		self.assertEqual(set(f.AUTO_TEMPLATE_STEPS), set(f.TEMPLATE_BODIES))
 
 
+class _Row(dict):
+	__getattr__ = dict.get
+
+
+class AccountBlockTest(unittest.TestCase):
+	"""A 131042 (payment) failure arrives by webhook after the touch is Done.
+
+	On 3-7 Nov 2026 that lost 618 touches: none was retried and the sender
+	kept sending its full cap into the block.
+	"""
+
+	NOW = D(2026, 11, 8, 13, 5)
+
+	def test_error_code_of_reads_both_stored_shapes(self):
+		self.assertEqual(f.error_code_of("131042: Business eligibility payment issue"), "131042")
+		self.assertEqual(f.error_code_of("(#131009) Parameter value is not valid (code 131009)"), "131009")
+		self.assertEqual(f.error_code_of(""), "")
+		self.assertEqual(f.error_code_of("no WhatsApp number"), "")
+
+	def test_only_account_errors_block(self):
+		self.assertTrue(f.is_account_block("131042: Business eligibility payment issue"))
+		self.assertTrue(f.is_account_block("131031: Business Account locked"))
+		for recipient in ("131026: Message undeliverable", "131049: healthy ecosystem", "130472: experiment", None):
+			self.assertFalse(f.is_account_block(recipient))
+
+	def test_requeue_keeps_due_at_and_clears_the_send(self):
+		v = f.requeue_values(D(2026, 11, 3, 18, 0), self.NOW, "131042: Business eligibility payment issue", "old")
+		self.assertEqual(v["status"], "Pending")
+		self.assertNotIn("due_at", v)  # oldest due goes first once the block lifts
+		for field in ("wa_message_id", "wa_status", "wa_send_error"):
+			self.assertEqual(v[field], "")  # wa_send_error would hand it to staff instead
+		self.assertIsNone(v["done_at"])  # so it stops counting toward today's cap
+		self.assertTrue(v["notes"].startswith("old\n"))
+		self.assertIn("131042", v["notes"])
+
+	def test_stale_touch_is_not_requeued(self):
+		self.assertIsNone(f.requeue_values(self.NOW - datetime.timedelta(days=22), self.NOW, "131042: x", ""))
+		self.assertIsNone(f.requeue_values(None, self.NOW, "131042: x", ""))
+
+	def test_probe_limit(self):
+		self.assertEqual(f.probe_limit(150, False), 150)
+		self.assertEqual(f.probe_limit(150, True), 1)
+		self.assertEqual(f.probe_limit(0, True), 0)
+
+	def _status(self, row, status, error=None, paused_at=None):
+		db = MagicMock()
+		db.get_value.return_value = _Row(row)
+		with patch.object(f.frappe, "db", db, create=True), patch(
+			"frappe.utils.now_datetime", return_value=self.NOW
+		), patch.object(f, "_pause_sending") as pause, patch.object(f, "_resume_sending") as resume, patch.object(
+			f, "_send_paused_at", return_value=paused_at
+		):
+			ok = f.record_template_status("wamid.X", status, error)
+		return ok, db.set_value, pause, resume
+
+	def test_payment_failure_requeues_and_pauses(self):
+		row = {"name": "FUT-1", "wa_status": "", "status": "Done", "due_at": D(2026, 11, 7, 19, 0), "notes": ""}
+		ok, set_value, pause, _ = self._status(row, "failed", "131042: Business eligibility payment issue")
+		self.assertTrue(ok)
+		pause.assert_called_once_with(self.NOW)
+		values = set_value.call_args[0][2]
+		self.assertEqual((values["status"], values["wa_message_id"]), ("Pending", ""))
+
+	def test_recipient_failure_is_kept_as_before(self):
+		row = {"name": "FUT-1", "wa_status": "sent", "status": "Done", "due_at": D(2026, 11, 7, 19, 0)}
+		ok, set_value, pause, _ = self._status(row, "failed", "131026: Message undeliverable")
+		self.assertTrue(ok)
+		pause.assert_not_called()
+		values = set_value.call_args[0][2]
+		self.assertEqual(values["wa_status"], "failed")
+		self.assertNotIn("status", values)
+
+	def test_stale_payment_failure_stays_failed(self):
+		row = {"name": "FUT-1", "wa_status": "", "status": "Done", "due_at": D(2026, 10, 1, 19, 0)}
+		ok, set_value, pause, _ = self._status(row, "failed", "131042: Business eligibility payment issue")
+		pause.assert_called_once()  # the account is still blocked
+		self.assertEqual(set_value.call_args[0][2]["wa_status"], "failed")
+
+	def test_delivery_after_the_pause_lifts_it(self):
+		paused = D(2026, 11, 8, 13, 1)
+		row = {"name": "FUT-1", "wa_status": "", "status": "Done", "done_at": D(2026, 11, 8, 14, 0)}
+		_, _, _, resume = self._status(row, "delivered", paused_at=paused)
+		resume.assert_called_once()
+		# A late delivery of a message sent before the block does not lift it.
+		row["done_at"] = D(2026, 11, 8, 12, 59)
+		_, _, _, resume = self._status(row, "delivered", paused_at=paused)
+		resume.assert_not_called()
+		# Nor does "sent": Meta can report sent and then fail the same message.
+		row["done_at"] = D(2026, 11, 8, 14, 0)
+		_, _, _, resume = self._status(row, "sent", paused_at=paused)
+		resume.assert_not_called()
+
+
 class StopRepliesTest(unittest.TestCase):
 	def test_button_text_in_both_languages(self):
 		self.assertTrue(f.is_stop_reply("Stop messages"))

@@ -2329,22 +2329,120 @@ def opt_out_phone(phone: str | None) -> dict[str, Any]:
 
 _WA_STATUS_RANK = {"sent": 1, "delivered": 2, "read": 3}
 
+#: Meta failures about OUR account, not the recipient: 131042 payment method,
+#: 131031 account locked, 131048 spam rate limit. Meta accepts the send and
+#: reports these minutes later by webhook, after the touch is already Done. On
+#: 3-7 Nov 2026 a 131042 billing block failed 618 touches that way, silently,
+#: because nothing retried them and the sender kept going at its full cap.
+ACCOUNT_BLOCK_ERRORS = ("131042", "131031", "131048")
+#: While a block is on, each hourly run sends one probe touch instead of a batch.
+SEND_PAUSE_KEY = "jarz_followups:wa_send_paused_at"
+#: Backstop: a pause nobody clears expires, so sending resumes on its own.
+SEND_PAUSE_TTL_SECONDS = 6 * 3600
+#: A touch due longer ago than this is not put back in the queue: too stale to send.
+REQUEUE_MAX_AGE = _dt.timedelta(days=21)
+
+
+def error_code_of(error: Any) -> str:
+	"""The Meta code at the front of a stored error ("131042: Business ..."). Pure."""
+	head = str(error or "").strip().lstrip("(#").split(":")[0].split(")")[0].strip()
+	return head if head.isdigit() else ""
+
+
+def is_account_block(error: Any) -> bool:
+	"""Whether *error* blocks the whole WhatsApp account rather than one recipient. Pure."""
+	return error_code_of(error) in ACCOUNT_BLOCK_ERRORS
+
+
+def _send_paused_at() -> _dt.datetime | None:
+	try:
+		raw = frappe.cache().get_value(SEND_PAUSE_KEY)
+		return _to_datetime(raw) if raw else None
+	except Exception:
+		return None
+
+
+def _pause_sending(at: _dt.datetime) -> None:
+	try:
+		if not frappe.cache().get_value(SEND_PAUSE_KEY):
+			frappe.log_error(
+				"WhatsApp refused a follow-up for an account reason; auto-send is down to one probe "
+				"message an hour until Meta accepts one again. Check Business Settings > Billing.",
+				"followups: WhatsApp account blocked",
+			)
+		frappe.cache().set_value(SEND_PAUSE_KEY, _fmt_dt(at), expires_in_sec=SEND_PAUSE_TTL_SECONDS)
+	except Exception:
+		pass
+
+
+def _resume_sending() -> None:
+	try:
+		frappe.cache().delete_value(SEND_PAUSE_KEY)
+	except Exception:
+		pass
+
+
+def requeue_values(due_at: Any, now: _dt.datetime, error: str, notes: str | None) -> dict[str, Any] | None:
+	"""Field values that put an account-blocked touch back in the send queue. Pure.
+
+	The touch keeps its due_at, so it goes out first (oldest due) once the
+	block lifts; None when it is too stale to resend.
+	"""
+	due = _to_datetime(due_at) if due_at else None
+	if due is None or now - due > REQUEUE_MAX_AGE:
+		return None
+	note = "WhatsApp refused it for an account reason (%s) at %s; back in the queue." % (
+		str(error)[:80],
+		_fmt_dt(now)[:16],
+	)
+	return {
+		"status": "Pending",
+		"wa_message_id": "",
+		"wa_status": "",
+		"wa_status_at": None,
+		"wa_send_error": "",
+		"done_by": None,
+		"done_at": None,
+		"notes": ("%s\n%s" % (notes or "", note)).strip()[-2000:],
+	}
+
 
 def record_template_status(wamid: str | None, status: str | None, error: str | None = None) -> bool:
 	"""Store Meta's status for a follow-up template message on its touch. Never raises.
 
 	Templates go out without a chat message row, so the webhook's status lands
 	here instead. Statuses only move forward (sent < delivered < read); a
-	failure always wins and is kept with its error.
+	failure always wins and is kept with its error. An account-level failure
+	(:data:`ACCOUNT_BLOCK_ERRORS`) instead puts the touch back in the queue and
+	pauses the sender to one probe an hour; the first message Meta accepts
+	after that lifts the pause.
 	"""
 	try:
 		if not wamid or not status:
 			return False
-		row = frappe.db.get_value(TOUCH_DOCTYPE, {"wa_message_id": wamid}, ["name", "wa_status"], as_dict=True)
+		row = frappe.db.get_value(
+			TOUCH_DOCTYPE,
+			{"wa_message_id": wamid},
+			["name", "wa_status", "status", "due_at", "done_at", "notes"],
+			as_dict=True,
+		)
 		if not row:
 			return False
 		from frappe.utils import now_datetime
 
+		if status == "failed" and is_account_block(error):
+			now = now_datetime()
+			_pause_sending(now)
+			values = requeue_values(row.get("due_at"), now, str(error), row.get("notes"))
+			if values and row.get("status") == "Done":
+				frappe.db.set_value(TOUCH_DOCTYPE, row.name, values, update_modified=False)
+				return True
+		if status in ("delivered", "read"):
+			# Not "sent": Meta can report sent and then fail the same message.
+			paused = _send_paused_at()
+			done = _to_datetime(row.get("done_at")) if row.get("done_at") else None
+			if paused and done and done >= paused:
+				_resume_sending()
 		if status == "failed":
 			values = {"wa_status": "failed", "wa_status_at": now_datetime()}
 			if error:
@@ -2709,6 +2807,15 @@ def _mark_send_error(name: str, error: str) -> None:
 	frappe.db.set_value(TOUCH_DOCTYPE, name, "wa_send_error", str(error)[:500], update_modified=False)
 
 
+def probe_limit(room: int, paused: bool) -> int:
+	"""How many touches one sender run may send. Pure.
+
+	While the account is blocked (see :data:`ACCOUNT_BLOCK_ERRORS`) only one:
+	it is free if Meta refuses it again, and its delivery lifts the pause.
+	"""
+	return min(room, 1) if paused else room
+
+
 def send_due_template_messages() -> dict[str, Any]:
 	"""Hourly: send each due day-32 / day-50 message as its approved template. Never raises.
 
@@ -2716,7 +2823,8 @@ def send_due_template_messages() -> dict[str, Any]:
 	Sends only between quiet_end and quiet_start (so an overdue backlog never
 	goes out at night), at most auto_send_daily_cap a day, oldest due first.
 	A sent touch is Done with its wamid; a refused one keeps its error and
-	falls back to the staff worklist.
+	falls back to the staff worklist. While an account-level block is on
+	(record_template_status), each run sends a single probe touch.
 	"""
 	from frappe.utils import now_datetime
 
@@ -2758,9 +2866,10 @@ def send_due_template_messages() -> dict[str, Any]:
 		except Exception:
 			frappe.log_error(frappe.get_traceback(), "followups: changed-order sweep failed")
 		rows = [r for r in rows if auto_sendable(r, settings)]
-		rows = _drop_excluded(_drop_opted_out(rows), cancel=True)[:room]
+		paused = _send_paused_at() is not None
+		rows = _drop_excluded(_drop_opted_out(rows), cancel=True)[: probe_limit(room, paused)]
 		cust = _customer_info(r["customer"] for r in rows)
-		result["status"] = "ran"
+		result["status"] = "paused_probe" if paused else "ran"
 		for r in rows:
 			name = r["name"]
 			c = cust.get(r["customer"], {})
@@ -2786,6 +2895,8 @@ def send_due_template_messages() -> dict[str, Any]:
 					result["failed"] += 1
 					frappe.db.commit()  # nosemgrep: frappe-manual-commit -- one touch per commit
 					continue
+				if str(exc.code).split("/")[0] in ACCOUNT_BLOCK_ERRORS:
+					_pause_sending(now)
 				result["status"] = "stopped"
 				result["error"] = str(exc)
 				frappe.log_error("followups: WhatsApp template send stopped: %s" % exc, "followups: auto send")
