@@ -14,7 +14,9 @@ from __future__ import annotations
 import frappe
 from frappe import _
 from frappe.model.document import Document
-from frappe.utils import flt, getdate
+from frappe.utils import flt, getdate, today
+
+from jarz_pos.utils.recurring_amount import plan_history_change
 
 # Number of months each occurrence covers, used to normalise to a monthly run-rate.
 FREQUENCY_MONTHS = {
@@ -39,6 +41,7 @@ class JarzRecurringExpense(Document):
 	def validate(self):
 		self._validate_amount()
 		self._validate_period()
+		self._record_amount_history()
 		self._validate_day_of_month()
 		self._validate_expense_account()
 		self._set_defaults()
@@ -50,6 +53,49 @@ class JarzRecurringExpense(Document):
 		self.amount = flt(self.amount)
 		if self.amount <= 0:
 			frappe.throw(_("Amount per occurrence must be greater than zero."))
+
+	def _record_amount_history(self) -> None:
+		"""Keep the dated amount list in step with ``amount``.
+
+		A raise is recorded from ``flags.amount_effective_from`` (the API sets it)
+		or, failing that, from the current month, so past months keep the amount
+		that was due then — including for an old app build that only edits
+		``amount``. ``amount`` is then set to the rate in force today.
+		"""
+		before = None if self.is_new() else self.get_doc_before_save()
+		old_amount = (
+			before.amount
+			if before
+			else (None if self.is_new() else frappe.db.get_value(self.doctype, self.name, "amount"))
+		)
+		rows = [
+			{"effective_from": r.effective_from, "amount": r.amount, "note": r.note}
+			for r in self.get("amount_history") or []
+		]
+		notes = {str(getdate(r["effective_from"])): r.get("note") for r in rows if r.get("effective_from")}
+		try:
+			history, amount_today = plan_history_change(
+				rows,
+				is_new=self.is_new(),
+				old_amount=old_amount,
+				new_amount=self.amount,
+				start_date=self.start_date,
+				effective_from=self.flags.get("amount_effective_from"),
+				today_date=getdate(today()),
+			)
+		except ValueError as exc:
+			frappe.throw(_(str(exc)))
+		self.set("amount_history", [])
+		for entry in history:
+			self.append(
+				"amount_history",
+				{
+					"effective_from": entry["effective_from"],
+					"amount": entry["amount"],
+					"note": notes.get(str(entry["effective_from"])),
+				},
+			)
+		self.amount = amount_today
 
 	def _validate_period(self) -> None:
 		if not self.start_date:

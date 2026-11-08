@@ -92,6 +92,14 @@ from jarz_pos.utils.posting_datetime import (
 	join_posting_datetime,
 	split_posting_datetime,
 )
+from jarz_pos.utils.recurring_amount import (
+	amount_for_month,
+	attach_amount_history,
+	first_of_month,
+	history_payload,
+	normalize_effective_from,
+	parse_version_amount,
+)
 
 # ── constants ─────────────────────────────────────────────────────────────
 
@@ -244,6 +252,13 @@ _REQUEST_FIELDS = [
 	"company",
 ]
 
+# A pay-on-visit item with nothing paid yet. Neither is a debt: they never count
+# as unpaid, outstanding or remaining. Awaiting Visit still counts in the month's
+# expected total; No Visit (a past month nobody came for) expects nothing.
+STATUS_AWAITING_VISIT = "Awaiting Visit"
+STATUS_NO_VISIT = "No Visit"
+_WAITING_STATUSES = (STATUS_AWAITING_VISIT, STATUS_NO_VISIT)
+
 _REGISTRY_FIELDS = [
 	"name",
 	"expense_name",
@@ -262,6 +277,7 @@ _REGISTRY_FIELDS = [
 	"end_date",
 	"auto_repeat",
 	"notes",
+	"pay_on_visit",
 ]
 
 
@@ -824,8 +840,14 @@ def _build_registry_rows(
 	payable_accounts: Iterable[str] | None = None,
 	account_labels: dict[str, dict[str, str]] | None = None,
 	tolerance: float = MONEY_TOLERANCE,
+	today_date: date | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, float]]:
 	"""Compute the per-item money picture for one month. Pure — no DB access.
+
+	Each item owes ``amount_for_month`` (its dated rate history), never the single
+	current ``amount``: a raise must not turn an old, fully paid month into a
+	deficit. ``today_date`` only decides whether a ``pay_on_visit`` month is still
+	ahead of us (Awaiting Visit) or already gone (No Visit).
 
 	``paid_linked_by_item`` is PERIOD-scoped (what this period has been paid);
 	``linked_posted_by_account`` is POSTING-scoped (what this app put in this
@@ -837,6 +859,7 @@ def _build_registry_rows(
 	linked_posted_by_account = linked_posted_by_account or {}
 	account_labels = account_labels or {}
 	payable = set(payable_accounts) if payable_accounts is not None else None
+	current_month = first_of_month(today_date or getdate(today()))
 
 	prepared = [
 		{
@@ -859,13 +882,25 @@ def _build_registry_rows(
 		account = entry["expense_account"]
 		attr = attribution.get(name) or {}
 
-		due_amount = flt(raw.get("amount")) if due_this_month else 0.0
+		month_amount = amount_for_month(raw, month_start, month_end)
+		pay_on_visit = bool(raw.get("pay_on_visit"))
+		due_amount = month_amount if due_this_month else 0.0
 		paid_linked = flt(paid_linked_by_item.get(name))
 		paid_unlinked = flt(attr.get("paid_unlinked"))
 		paid_amount = paid_linked + paid_unlinked
 		remaining = due_amount - paid_amount
 		if remaining < 0:
 			remaining = 0.0
+
+		payment_status = _payment_status(due_amount, paid_amount, due_this_month, tolerance)
+		if pay_on_visit and due_this_month and payment_status == "Unpaid":
+			# Paid in cash when the crew comes, on no fixed day. Nothing paid yet is
+			# not a debt: the month is waiting (now/ahead) or nobody came (past).
+			if first_of_month(month_start) >= current_month:
+				payment_status = STATUS_AWAITING_VISIT
+			else:
+				payment_status = STATUS_NO_VISIT
+				remaining = 0.0
 
 		labels = account_labels.get(account) or {}
 		payable_here = True if payable is None else bool(account and account in payable)
@@ -877,11 +912,16 @@ def _build_registry_rows(
 				"category": raw.get("category"),
 				"status": raw.get("status"),
 				"amount": _money(raw.get("amount")),
+				"month_amount": _money(month_amount),
+				"amount_history": history_payload(raw),
+				"pay_on_visit": pay_on_visit,
 				"currency": raw.get("currency"),
 				"frequency": raw.get("frequency"),
 				"monthly_equivalent": _money(raw.get("monthly_equivalent")),
 				"day_of_month": raw.get("day_of_month"),
-				"due_date": _due_date_for_month(raw.get("day_of_month"), month_start),
+				"due_date": None
+				if pay_on_visit
+				else _due_date_for_month(raw.get("day_of_month"), month_start),
 				"expense_account": account,
 				"expense_account_label": labels.get("label") or account,
 				"expense_account_label_en": labels.get("label_en") or labels.get("label") or account,
@@ -899,7 +939,7 @@ def _build_registry_rows(
 				"paid_linked": _money(paid_linked),
 				"paid_unlinked": _money(paid_unlinked),
 				"remaining": _money(remaining),
-				"payment_status": _payment_status(due_amount, paid_amount, due_this_month, tolerance),
+				"payment_status": payment_status,
 				"shared_account": bool(attr.get("shared_account")),
 				"inferred": bool(attr.get("inferred")),
 				"account_payable": payable_here,
@@ -908,7 +948,14 @@ def _build_registry_rows(
 			}
 		)
 
-	rows.sort(key=lambda r: (r["payment_status"] == "Not Due", -flt(r["remaining"]), r["expense_name"] or ""))
+	rows.sort(
+		key=lambda r: (
+			r["payment_status"] == "Not Due",
+			r["payment_status"] in _WAITING_STATUSES,
+			-flt(r["remaining"]),
+			r["expense_name"] or "",
+		)
+	)
 	return rows, leftovers
 
 
@@ -1022,8 +1069,7 @@ def _build_payroll_rows(
 
 		has_slip = bool(slips_by_employee.get(employee))
 		left = bool(
-			off_payroll
-			and _is_left_staff(raw.get("employee_status"), raw.get("relieving_date"), month_start)
+			off_payroll and _is_left_staff(raw.get("employee_status"), raw.get("relieving_date"), month_start)
 		)
 		rows.append(
 			{
@@ -1160,7 +1206,7 @@ def _summarize(
 	the mirror-image sum, so the two together explain the difference.
 	"""
 	due = paid = remaining = overpaid = 0.0
-	counted = counted_paid = counted_partial = counted_unpaid = 0
+	counted = counted_paid = counted_partial = counted_unpaid = counted_waiting = 0
 
 	for row in list(registry_rows) + list(payroll_rows):
 		row_due = flt(row.get("due_amount"))
@@ -1172,12 +1218,19 @@ def _summarize(
 			paid += row_paid
 			overpaid += row_paid
 			continue
+		if status == STATUS_NO_VISIT:
+			# A past month nobody came for: nothing was expected, nothing is owed.
+			paid += row_paid
+			continue
 		counted += 1
 		due += row_due
 		paid += row_paid
-		remaining += max(row_due - row_paid, 0.0)
+		if status != STATUS_AWAITING_VISIT:
+			remaining += max(row_due - row_paid, 0.0)
 		overpaid += max(row_paid - row_due, 0.0)
-		if status in ("Paid", "Overpaid"):
+		if status == STATUS_AWAITING_VISIT:
+			counted_waiting += 1
+		elif status in ("Paid", "Overpaid"):
 			counted_paid += 1
 		elif status == "Partial":
 			counted_partial += 1
@@ -1196,6 +1249,7 @@ def _summarize(
 		"items_paid": counted_paid,
 		"items_partial": counted_partial,
 		"items_unpaid": counted_unpaid,
+		"items_awaiting_visit": counted_waiting,
 	}
 
 
@@ -1208,6 +1262,8 @@ def _build_categories(
 	for row in registry_rows:
 		due = flt(row.get("due_amount"))
 		paid = flt(row.get("paid_amount"))
+		if row.get("payment_status") == STATUS_NO_VISIT:
+			due = 0.0
 		if due <= tolerance and paid <= tolerance:
 			continue
 		key = row.get("category") or "Other"
@@ -1217,7 +1273,8 @@ def _build_categories(
 		)
 		bucket["due"] += due
 		bucket["paid"] += paid
-		bucket["remaining"] += max(due - paid, 0.0)
+		if row.get("payment_status") not in _WAITING_STATUSES:
+			bucket["remaining"] += max(due - paid, 0.0)
 		bucket["count"] += 1
 
 	payroll_due = flt(payroll.get("due"))
@@ -1421,13 +1478,27 @@ def _load_registry(company: str | None) -> list[dict[str, Any]]:
 	filters: dict[str, Any] = {}
 	if company:
 		filters["company"] = company
-	return frappe.get_all(
+	registry = frappe.get_all(
 		"Jarz Recurring Expense",
 		filters=filters,
 		fields=_REGISTRY_FIELDS,
 		order_by="category asc, expense_name asc",
 		limit_page_length=0,
 	)
+	# One extra query for every item's dated amounts, not one per item.
+	rates = (
+		frappe.get_all(
+			"Jarz Recurring Expense Rate",
+			filters={"parent": ["in", [r["name"] for r in registry]], "parenttype": "Jarz Recurring Expense"},
+			fields=["parent", "effective_from", "amount"],
+			order_by="effective_from asc",
+			limit_page_length=0,
+		)
+		if registry
+		else []
+	)
+	attach_amount_history(registry, rates)
+	return registry
 
 
 def _load_period_requests(month_key: str, company: str | None) -> list[dict[str, Any]]:
@@ -3289,7 +3360,26 @@ _EDITABLE_REGISTRY_FIELDS = (
 	"start_date",
 	"end_date",
 	"notes",
+	"pay_on_visit",
 )
+
+
+def _effective_month_flag(data: dict[str, Any], start_date: Any) -> date | None:
+	"""``amount_effective_from`` ('YYYY-MM' or a date) -> first of that month, or ``None``."""
+	raw = data.get("amount_effective_from")
+	if raw in (None, ""):
+		return None
+	try:
+		effective = normalize_effective_from(raw)
+	except ValueError as exc:
+		frappe.throw(_(str(exc)))
+	if start_date and effective < first_of_month(start_date):
+		frappe.throw(
+			_("The new amount cannot start in {0}, before this expense's start month ({1}).").format(
+				effective.strftime("%Y-%m"), first_of_month(start_date).strftime("%Y-%m")
+			)
+		)
+	return effective
 
 
 @frappe.whitelist()
@@ -3334,7 +3424,10 @@ def save_recurring_expense(payload: str | None = None, **kwargs) -> dict[str, An
 
 	for field in _EDITABLE_REGISTRY_FIELDS:
 		if field in data:
-			setattr(doc, field, data.get(field))
+			value = data.get(field)
+			if field == "pay_on_visit":
+				value = 1 if _as_bool(value) else 0
+			setattr(doc, field, value)
 
 	if not doc.expense_name:
 		frappe.throw(_("Expense name is required."))
@@ -3344,6 +3437,12 @@ def save_recurring_expense(payload: str | None = None, **kwargs) -> dict[str, An
 		frappe.throw(_("Start date is required."))
 
 	doc.expense_account = _validate_expense_ledger(doc.expense_account, doc.company)
+
+	# Only meaningful when the amount actually changes; the DocType's validate
+	# records the change (and defaults to the current month when this is unset).
+	effective = _effective_month_flag(data, doc.start_date)
+	if effective:
+		doc.flags.amount_effective_from = effective
 
 	# Recomputed here as well as in the DocType so the value returned to the
 	# caller is never a stale read-only field from before this save.
@@ -3357,6 +3456,44 @@ def save_recurring_expense(payload: str | None = None, **kwargs) -> dict[str, An
 	doc.reload()
 
 	context = _compute_month(data.get("month"), doc.company)
+	item = next((r for r in context["registry"] if r["name"] == doc.name), None)
+	return {"success": True, "name": doc.name, "item": item, "summary": context["summary"]}
+
+
+@frappe.whitelist()
+def remove_recurring_amount_change(name: str, effective_from: str) -> dict[str, Any]:
+	"""Delete one dated amount from a registry item's history (undo a raise).
+
+	The first row is the item's opening amount and cannot be removed. The current
+	``amount`` is recomputed from what is left, so past months fall back to the
+	rate that was in force before the removed row.
+	"""
+	_ensure_manager()
+	_require_period_fields()
+
+	name = (name or "").strip()
+	if not name:
+		frappe.throw(_("Recurring expense is required."))
+	try:
+		target = normalize_effective_from(effective_from)
+	except ValueError as exc:
+		frappe.throw(_(str(exc)))
+
+	_lock_row("Jarz Recurring Expense", name)
+	doc = frappe.get_doc("Jarz Recurring Expense", name)
+	rows = sorted(doc.get("amount_history") or [], key=lambda r: getdate(r.effective_from))
+	match = next((r for r in rows if getdate(r.effective_from) == target), None)
+	if not match:
+		frappe.throw(_("No amount change starts in {0}.").format(target.strftime("%Y-%m")))
+	if len(rows) <= 1 or match is rows[0]:
+		frappe.throw(_("The first amount is the starting amount of this expense and cannot be removed."))
+
+	doc.remove(match)
+	doc.flags.ignore_permissions = True
+	doc.save(ignore_permissions=True)
+	doc.reload()
+
+	context = _compute_month(None, doc.company)
 	item = next((r for r in context["registry"] if r["name"] == doc.name), None)
 	return {"success": True, "name": doc.name, "item": item, "summary": context["summary"]}
 

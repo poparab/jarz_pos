@@ -76,3 +76,6 @@ jarz_pos.Patches.v1_9.link_chats_by_typed_phone
 # Seed the Jarz Brand Fact table (the facts the chat AI may state) from the facts that were
 # hard-coded in the draft prompt and the ready answers. Skipped once any row exists.
 jarz_pos.Patches.v1_9.seed_brand_facts
+# Dated amounts for recurring expenses (a raise no longer rewrites past months): rebuild each
+# registry row's history from its Version log. Skips rows that already have history. Re-runnable.
+jarz_pos.Patches.v1_9.backfill_recurring_amount_history

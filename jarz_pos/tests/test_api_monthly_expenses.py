@@ -2394,7 +2394,9 @@ class TestLeftStaffFlag(unittest.TestCase):
 
 		advances = {"HR-EMP-00020": [_advance(employee="HR-EMP-00020", paid=1200.0)]}
 		flagged = list(self._rows(off_payroll_rows=[self.LEFT_STUB], advances_by_employee=advances).values())
-		plain_stub = {k: v for k, v in self.LEFT_STUB.items() if k not in ("employee_status", "relieving_date")}
+		plain_stub = {
+			k: v for k, v in self.LEFT_STUB.items() if k not in ("employee_status", "relieving_date")
+		}
 		plain = list(self._rows(off_payroll_rows=[plain_stub], advances_by_employee=advances).values())
 		self.assertEqual(len(flagged), len(plain))
 		self.assertEqual(_summarize([], flagged, 0.0, 0.0), _summarize([], plain, 0.0, 0.0))
@@ -3553,10 +3555,14 @@ class TestEarlierMonthAdvancesCarryOnlyOnceThatMonthIsPaid(unittest.TestCase):
 	def test_employees_still_owed_reads_remaining_through_compute_month(self):
 		from jarz_pos.api import monthly_expenses as me
 
-		ctx = {"payroll": {"rows": [
-			{"employee": "EMP-1", "remaining": 9000},
-			{"employee": "EMP-2", "remaining": 0.2},
-		]}}
+		ctx = {
+			"payroll": {
+				"rows": [
+					{"employee": "EMP-1", "remaining": 9000},
+					{"employee": "EMP-2", "remaining": 0.2},
+				]
+			}
+		}
 		with patch.object(me, "_compute_month", return_value=ctx) as compute:
 			self.assertEqual(me._employees_still_owed("2026-10", "JARZ"), {"EMP-1"})
 		compute.assert_called_once_with("2026-10", "JARZ", carry_check=False)
@@ -3588,3 +3594,288 @@ class TestAdvanceSettlementAllowList(unittest.TestCase):
 
 if __name__ == "__main__":
 	unittest.main()
+
+
+# ── dated amounts (a raise must not rewrite past months) ──────────────────
+
+RENT_HISTORY = [
+	{"effective_from": "2026-08-01", "amount": 5500.0},
+	{"effective_from": "2026-11-01", "amount": 6500.0},
+]
+
+
+class TestAmountForMonth(unittest.TestCase):
+	def _amount(self, raw, y, m):
+		import calendar
+
+		from jarz_pos.api.monthly_expenses import amount_for_month
+
+		return amount_for_month(raw, date(y, m, 1), date(y, m, calendar.monthrange(y, m)[1]))
+
+	def test_a_month_before_the_first_row_uses_the_first_amount(self):
+		raw = {"amount": 6500.0, "amount_history": RENT_HISTORY}
+		self.assertEqual(self._amount(raw, 2026, 5), 5500.0)
+
+	def test_a_month_between_two_rows_keeps_the_earlier_amount(self):
+		raw = {"amount": 6500.0, "amount_history": RENT_HISTORY}
+		self.assertEqual(self._amount(raw, 2026, 9), 5500.0)
+		self.assertEqual(self._amount(raw, 2026, 10), 5500.0)
+
+	def test_the_effective_month_and_later_use_the_new_amount(self):
+		raw = {"amount": 6500.0, "amount_history": RENT_HISTORY}
+		self.assertEqual(self._amount(raw, 2026, 11), 6500.0)
+		self.assertEqual(self._amount(raw, 2027, 3), 6500.0)
+
+	def test_no_history_falls_back_to_the_current_amount(self):
+		self.assertEqual(self._amount({"amount": 1200.0}, 2026, 9), 1200.0)
+		self.assertEqual(self._amount({"amount": 1200.0, "amount_history": []}, 2026, 9), 1200.0)
+
+	def test_rows_are_ordered_by_date_not_by_position(self):
+		raw = {"amount": 6500.0, "amount_history": list(reversed(RENT_HISTORY))}
+		self.assertEqual(self._amount(raw, 2026, 10), 5500.0)
+
+
+class TestRegistryRowsUseTheMonthAmount(unittest.TestCase):
+	def _row(self, month, paid, today=date(2026, 11, 8)):
+		import calendar
+
+		start = date(2026, month, 1)
+		end = date(2026, month, calendar.monthrange(2026, month)[1])
+		item = _item("REC-1", amount=6500.0, amount_history=RENT_HISTORY, start_date=date(2026, 8, 1))
+		rows, _left = _build(
+			[item],
+			start,
+			end,
+			paid_linked_by_item={"REC-1": paid},
+			gl_by_account={RENT_DOKKI: 0.0},
+			today_date=today,
+		)
+		return rows["REC-1"] if "REC-1" in rows else rows["PEST"]
+
+	def test_september_stays_paid_at_the_old_amount_after_a_november_raise(self):
+		row = self._row(9, 5500.0)
+		self.assertEqual(row["payment_status"], "Paid")
+		self.assertEqual(row["due_amount"], 5500.0)
+		self.assertEqual(row["remaining"], 0.0)
+		self.assertEqual(row["month_amount"], 5500.0)
+		self.assertEqual(row["amount"], 6500.0)
+
+	def test_november_owes_the_new_amount(self):
+		row = self._row(11, 5500.0)
+		self.assertEqual(row["payment_status"], "Partial")
+		self.assertEqual(row["remaining"], 1000.0)
+
+	def test_the_row_carries_the_history_for_the_app(self):
+		row = self._row(9, 5500.0)
+		self.assertEqual(row["amount_history"], RENT_HISTORY)
+		self.assertFalse(row["pay_on_visit"])
+
+	def test_the_overpay_guard_compares_against_the_period_being_paid(self):
+		from jarz_pos.api.monthly_expenses import _overpay_excess
+
+		row = self._row(9, 5500.0)
+		# September is settled at 5,500: another 1,000 is excess for September.
+		self.assertEqual(_overpay_excess(row["due_amount"], row["paid_amount"], 1000.0), 1000.0)
+
+	def test_the_summary_adds_up_the_month_amounts(self):
+		from jarz_pos.api.monthly_expenses import _summarize
+
+		summary = _summarize([self._row(9, 5500.0)], [], 0.0, 0.0)
+		self.assertEqual(summary["due"], 5500.0)
+		self.assertEqual(summary["remaining"], 0.0)
+
+
+class TestPayOnVisit(unittest.TestCase):
+	def _row(self, month, paid=0.0, today=date(2026, 11, 8)):
+		import calendar
+
+		start = date(2026, month, 1)
+		end = date(2026, month, calendar.monthrange(2026, month)[1])
+		item = _item("PEST", amount=1500.0, pay_on_visit=1, day_of_month=None, start_date=date(2026, 9, 1))
+		rows, _left = _build(
+			[item],
+			start,
+			end,
+			paid_linked_by_item={"PEST": paid},
+			gl_by_account={RENT_DOKKI: 0.0},
+			today_date=today,
+		)
+		return rows["REC-1"] if "REC-1" in rows else rows["PEST"]
+
+	def test_the_current_month_waits_for_the_visit(self):
+		row = self._row(11)
+		self.assertEqual(row["payment_status"], "Awaiting Visit")
+		self.assertIsNone(row["due_date"])
+		self.assertEqual(row["due_amount"], 1500.0)
+		self.assertTrue(row["can_pay"])
+
+	def test_a_future_month_waits_for_the_visit(self):
+		item = _item("PEST", amount=1500.0, pay_on_visit=1, start_date=date(2026, 9, 1))
+		rows, _l = _build([item], date(2027, 1, 1), date(2027, 1, 31), today_date=date(2026, 11, 8))
+		self.assertEqual(rows["PEST"]["payment_status"], "Awaiting Visit")
+
+	def test_a_past_month_nobody_came_for_is_not_a_debt(self):
+		row = self._row(10)
+		self.assertEqual(row["payment_status"], "No Visit")
+		self.assertEqual(row["remaining"], 0.0)
+
+	def test_a_paid_visit_reads_paid_in_any_month(self):
+		self.assertEqual(self._row(10, paid=1500.0)["payment_status"], "Paid")
+		self.assertEqual(self._row(11, paid=1500.0)["payment_status"], "Paid")
+
+	def test_waiting_items_are_not_unpaid_outstanding_or_counted_in_remaining(self):
+		from jarz_pos.api.monthly_expenses import _summarize
+
+		summary = _summarize([self._row(11), self._row(10)], [], 0.0, 0.0)
+		self.assertEqual(summary["remaining"], 0.0)
+		self.assertEqual(summary["items_unpaid"], 0)
+		self.assertEqual(summary["items_awaiting_visit"], 1)
+		# Awaiting Visit still belongs to the month's expected total; No Visit does not.
+		self.assertEqual(summary["due"], 1500.0)
+
+	def test_waiting_items_sort_after_unpaid_and_before_not_due(self):
+		unpaid = _item("RENT", account="Rent - Other - J", amount=900.0)
+		visit = _item("PEST", amount=1500.0, pay_on_visit=1, start_date=date(2026, 9, 1))
+		paused = _item("OLD", account="Rent - Old - J", status="Paused")
+		from jarz_pos.api.monthly_expenses import _build_registry_rows
+
+		rows, _l = _build_registry_rows(
+			[visit, paused, unpaid], date(2026, 11, 1), date(2026, 11, 30), today_date=date(2026, 11, 8)
+		)
+		self.assertEqual([r["name"] for r in rows], ["RENT", "PEST", "OLD"])
+
+
+class TestVersionAmountParser(unittest.TestCase):
+	def test_currency_strings_keep_digits_and_the_dot(self):
+		from jarz_pos.utils.recurring_amount import parse_version_amount
+
+		self.assertEqual(parse_version_amount("£ or ج.م 5,500.00"), 5500.0)
+		self.assertEqual(parse_version_amount("EGP 7,150.50"), 7150.5)
+		self.assertEqual(parse_version_amount(6500), 6500.0)
+		self.assertIsNone(parse_version_amount(None))
+		self.assertIsNone(parse_version_amount("n/a"))
+
+	def test_history_is_rebuilt_from_versions(self):
+		from jarz_pos.utils.recurring_amount import history_from_versions
+
+		versions = [
+			{"creation": "2026-09-02 10:00:00", "changed": [["notes", "a", "b"]]},
+			{
+				"creation": "2026-11-07 12:00:00",
+				"changed": [["amount", "£ or ج.م 3,000.00", "£ or ج.م 1,500.00"]],
+			},
+		]
+		history = history_from_versions(date(2026, 9, 1), 1500.0, versions)
+		self.assertEqual(
+			history,
+			[
+				{"effective_from": date(2026, 9, 1), "amount": 3000.0},
+				{"effective_from": date(2026, 11, 1), "amount": 1500.0},
+			],
+		)
+
+	def test_an_untouched_amount_is_one_row_at_the_current_amount(self):
+		from jarz_pos.utils.recurring_amount import history_from_versions
+
+		history = history_from_versions(date(2026, 8, 20), 800.0, [])
+		self.assertEqual(history, [{"effective_from": date(2026, 8, 1), "amount": 800.0}])
+
+	def test_two_changes_in_one_month_keep_the_later(self):
+		from jarz_pos.utils.recurring_amount import history_from_versions
+
+		versions = [
+			{"creation": "2026-11-02 10:00:00", "changed": [["amount", "100.00", "120.00"]]},
+			{"creation": "2026-11-20 10:00:00", "changed": [["amount", "120.00", "130.00"]]},
+		]
+		history = history_from_versions(date(2026, 1, 1), 130.0, versions)
+		self.assertEqual([h["amount"] for h in history], [100.0, 130.0])
+
+
+class TestRecordingAnAmountChange(unittest.TestCase):
+	def _plan(self, rows, **kw):
+		from jarz_pos.utils.recurring_amount import plan_history_change
+
+		kw.setdefault("start_date", date(2026, 8, 15))
+		kw.setdefault("today_date", date(2026, 11, 8))
+		kw.setdefault("is_new", False)
+		return plan_history_change(rows, **kw)
+
+	def test_a_new_expense_is_seeded_at_its_start_month(self):
+		rows, today = self._plan([], is_new=True, old_amount=None, new_amount=5500.0)
+		self.assertEqual(rows, [{"effective_from": date(2026, 8, 1), "amount": 5500.0}])
+		self.assertEqual(today, 5500.0)
+
+	def test_a_raise_without_history_seeds_the_old_amount_then_adds_the_new(self):
+		rows, today = self._plan([], old_amount=5500.0, new_amount=6500.0)
+		self.assertEqual(
+			rows,
+			[
+				{"effective_from": date(2026, 8, 1), "amount": 5500.0},
+				{"effective_from": date(2026, 11, 1), "amount": 6500.0},
+			],
+		)
+		self.assertEqual(today, 6500.0)
+
+	def test_an_explicit_effective_month_is_honoured(self):
+		rows, today = self._plan(
+			[{"effective_from": date(2026, 8, 1), "amount": 5500.0}],
+			old_amount=5500.0,
+			new_amount=6000.0,
+			effective_from="2026-10",
+		)
+		self.assertEqual([r["effective_from"] for r in rows], [date(2026, 8, 1), date(2026, 10, 1)])
+		self.assertEqual(today, 6000.0)
+
+	def test_a_second_change_in_the_same_month_replaces_the_row(self):
+		start = [
+			{"effective_from": date(2026, 8, 1), "amount": 5500.0},
+			{"effective_from": date(2026, 11, 1), "amount": 6500.0},
+		]
+		rows, today = self._plan(start, old_amount=6500.0, new_amount=6800.0)
+		self.assertEqual([r["amount"] for r in rows], [5500.0, 6800.0])
+		self.assertEqual(today, 6800.0)
+
+	def test_a_future_row_does_not_change_the_amount_in_force_today(self):
+		rows, today = self._plan(
+			[{"effective_from": date(2026, 8, 1), "amount": 5500.0}],
+			old_amount=5500.0,
+			new_amount=6000.0,
+			effective_from="2027-01",
+		)
+		self.assertEqual(today, 5500.0)
+
+	def test_an_unchanged_amount_leaves_the_history_alone(self):
+		start = [{"effective_from": date(2026, 8, 1), "amount": 5500.0}]
+		rows, _today = self._plan(start, old_amount=5500.0, new_amount=5500.0)
+		self.assertEqual(len(rows), 1)
+
+	def test_rows_are_normalised_to_the_first_and_clamped_to_the_start_month(self):
+		rows, _t = self._plan(
+			[{"effective_from": date(2026, 3, 17), "amount": 5000.0}],
+			old_amount=5000.0,
+			new_amount=5000.0,
+		)
+		self.assertEqual(rows[0]["effective_from"], date(2026, 8, 1))
+
+	def test_two_amounts_in_one_month_are_refused(self):
+		with self.assertRaises(ValueError):
+			self._plan(
+				[
+					{"effective_from": date(2026, 9, 1), "amount": 1.0},
+					{"effective_from": date(2026, 9, 20), "amount": 2.0},
+				],
+				old_amount=2.0,
+				new_amount=2.0,
+			)
+
+	def test_a_zero_amount_row_is_refused(self):
+		with self.assertRaises(ValueError):
+			self._plan([{"effective_from": date(2026, 9, 1), "amount": 0}], old_amount=1.0, new_amount=1.0)
+
+	def test_the_effective_month_accepts_year_month_and_dates(self):
+		from jarz_pos.utils.recurring_amount import normalize_effective_from
+
+		self.assertEqual(normalize_effective_from("2026-11"), date(2026, 11, 1))
+		self.assertEqual(normalize_effective_from("2026-11-19"), date(2026, 11, 1))
+		with self.assertRaises(ValueError):
+			normalize_effective_from("2026-13")

@@ -31,6 +31,9 @@
   "column_break_amount",
   "monthly_equivalent",
   "day_of_month",
+  "pay_on_visit",
+  "section_break_history",
+  "amount_history",
   "section_break_accounting",
   "expense_account",
   "cost_center",
@@ -141,6 +144,25 @@
    "fieldtype": "Int",
    "label": "Due Day of Month",
    "description": "1–31. Day the payment is normally due. Leave blank if it varies."
+  },
+  {
+   "fieldname": "pay_on_visit",
+   "fieldtype": "Check",
+   "label": "Paid when the service is done",
+   "default": "0",
+   "description": "No fixed due day: paid in cash on the visit. Until paid, the month shows Waiting for visit, not Unpaid."
+  },
+  {
+   "fieldname": "section_break_history",
+   "fieldtype": "Section Break",
+   "label": "Amount history"
+  },
+  {
+   "fieldname": "amount_history",
+   "fieldtype": "Table",
+   "label": "Amount History",
+   "options": "Jarz Recurring Expense Rate",
+   "description": "Each row is a rate from the first day of its month. Earlier months keep the earlier amount. Edit the Amount field above to raise from this month."
   },
   {
    "fieldname": "section_break_accounting",

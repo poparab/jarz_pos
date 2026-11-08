@@ -30,6 +30,7 @@ from frappe import _
 from frappe.utils import flt, getdate
 
 from jarz_pos.constants import ROLES
+from jarz_pos.utils.recurring_amount import amount_for_month, attach_amount_history, history_payload
 from jarz_pos.utils.settings_utils import raw_single_value
 
 SETTINGS_DOCTYPE = "Jarz POS Settings"
@@ -499,6 +500,24 @@ def get_recurring_expenses_overview(
 		],
 		order_by="category asc, monthly_equivalent desc",
 	)
+	# Each item owes the rate in force for THIS month, not its current amount.
+	rates = (
+		frappe.get_all(
+			"Jarz Recurring Expense Rate",
+			filters={
+				"parent": ["in", [r["name"] for r in registry_rows]],
+				"parenttype": "Jarz Recurring Expense",
+			},
+			fields=["parent", "effective_from", "amount"],
+			order_by="effective_from asc",
+			limit_page_length=0,
+		)
+		if registry_rows
+		else []
+	)
+	attach_amount_history(registry_rows, rates)
+	for row in registry_rows:
+		row["month_amount"] = amount_for_month(row, month_start, month_end)
 
 	registry_accounts = sorted({r["expense_account"] for r in registry_rows if r.get("expense_account")})
 	registry_posted_map = _gl_posted_by_account(registry_accounts, month_start, month_end, company)
@@ -511,7 +530,7 @@ def get_recurring_expenses_overview(
 		if _is_due_in_month(row, month_start, month_end):
 			acc = row.get("expense_account")
 			due_per_account[acc] = due_per_account.get(acc, 0) + 1
-			expected_per_account[acc] = expected_per_account.get(acc, 0.0) + flt(row.get("amount"))
+			expected_per_account[acc] = expected_per_account.get(acc, 0.0) + flt(row.get("month_amount"))
 
 	registry: list[dict[str, Any]] = []
 	registry_monthly_total = 0.0
@@ -530,7 +549,7 @@ def get_recurring_expenses_overview(
 		if (row.get("status") or "") == "Active":
 			registry_monthly_total += flt(row.get("monthly_equivalent"))
 		if due:
-			expected_this_month += flt(row.get("amount"))
+			expected_this_month += flt(row.get("month_amount"))
 			if status in ("Missing", "Partial"):
 				items_missing += 1
 			elif status in ("Posted", "Over"):
@@ -540,6 +559,8 @@ def get_recurring_expenses_overview(
 			{
 				**row,
 				"amount": flt(row.get("amount")),
+				"month_amount": flt(row.get("month_amount")),
+				"amount_history": history_payload(row),
 				"monthly_equivalent": flt(row.get("monthly_equivalent")),
 				"due_this_month": due,
 				"posted_amount": posted_amount,
