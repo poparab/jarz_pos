@@ -541,6 +541,160 @@ def _load_months() -> list[str]:
 	return months
 
 
+# ── Salary paid from Monthly Expenses ────────────────────────────────────────
+# Cash reaches staff two ways: an Employee Advance (this screen) and a salary
+# payment from the Monthly Expenses pay sheet (a submitted Jarz Expense Request
+# of kind Salary). Early in a month most of that cash is LAST month's salary
+# paid in instalments, so the pay-sheet route is how "advances" are really
+# handed out — in November 2026 every one of them went that way and this screen,
+# which only read Employee Advance, showed an empty month. Both are listed here,
+# each keyed on the day the cash was handed over, so a month on this screen
+# answers "what did staff receive this month" in one place.
+
+EXPENSE_REQUEST_DOCTYPE = "Jarz Expense Request"
+SALARY_KIND = "Salary"
+
+_SALARY_PAYMENT_FIELDS = [
+	"name",
+	"employee",
+	"expense_date",
+	"period_month",
+	"amount",
+	"currency",
+	"paying_account",
+	"payment_source_label",
+	"pos_profile",
+	"requested_by",
+	"owner",
+	"remarks",
+	"company",
+	"creation",
+]
+
+
+def _can_see_salary_payments() -> bool:
+	"""Salary amounts are visible on the Monthly Expenses board only, so they are
+	shown here to exactly the people that board admits — its own gate, imported
+	lazily (``monthly_expenses`` imports this module) and asked rather than
+	copied, so widening the board widens this list with it."""
+	try:
+		from jarz_pos.api.recurring_expenses import _ensure_manager
+
+		_ensure_manager()
+		return True
+	except frappe.PermissionError:
+		return False
+	except Exception:
+		_log(frappe.get_traceback(), "employee_advances._can_see_salary_payments")
+		return False
+
+
+def _collect_salary_payments(
+	month_bounds: tuple | None,
+	employee: str = "",
+	branch: str = "",
+	company: str = "",
+) -> list[dict[str, Any]]:
+	"""Submitted Salary payments from the pay sheet whose cash moved in the month.
+
+	``docstatus=1`` only: the pay sheet submits on create, and cancelling one is
+	how a payment is undone, so a cancelled row must drop out here too.
+	"""
+	filters: dict[str, Any] = {"docstatus": 1, "expense_kind": SALARY_KIND, "employee": ["is", "set"]}
+	if month_bounds:
+		filters["expense_date"] = ["between", list(month_bounds)]
+	if employee:
+		filters["employee"] = employee
+	if branch:
+		filters["pos_profile"] = branch
+	if company:
+		filters["company"] = company
+	try:
+		return (
+			frappe.get_all(
+				EXPENSE_REQUEST_DOCTYPE,
+				filters=filters,
+				fields=_SALARY_PAYMENT_FIELDS,
+				order_by="expense_date desc, creation desc",
+				limit_page_length=0,
+				ignore_permissions=True,
+			)
+			or []
+		)
+	except Exception:
+		_log(frappe.get_traceback(), "employee_advances._collect_salary_payments")
+		return []
+
+
+def _serialize_salary_payments(rows: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+	rows = list(rows or [])
+	if not rows:
+		return []
+
+	fallback_labels: dict[str, str] = {}
+	for row in rows:
+		account = str(row.get("paying_account") or "")
+		if account and account not in fallback_labels:
+			fallback_labels[account] = _fallback_label(row.get("payment_source_label"), account)
+	account_labels = _account_label_map(list(fallback_labels), fallback_labels) if fallback_labels else {}
+	employee_meta = _employee_meta([r.get("employee") for r in rows])
+	user_names = _user_full_names([r.get("requested_by") or r.get("owner") for r in rows])
+
+	out: list[dict[str, Any]] = []
+	for row in rows:
+		employee = str(row.get("employee") or "")
+		meta = employee_meta.get(employee) or {}
+		account = str(row.get("paying_account") or "")
+		payment_label = _fallback_label(
+			(account_labels.get(account) or {}).get("label"), fallback_labels.get(account, "")
+		)
+		bilingual = _bilingual_label_from_account(account, payment_label, account_labels)
+		salary_month = normalize_salary_month(row.get("period_month")) or ""
+		paid_by = str(row.get("requested_by") or row.get("owner") or "")
+		out.append(
+			{
+				"name": row.get("name"),
+				"employee": employee,
+				"employee_name": str(meta.get("employee_name") or employee),
+				"branch": meta.get("branch", ""),
+				"pos_profile": str(row.get("pos_profile") or ""),
+				"posting_date": _date_str(row.get("expense_date")),
+				"salary_month": salary_month,
+				"salary_month_label": _month_label(salary_month) if salary_month else "",
+				"amount": flt(row.get("amount"), 2),
+				"currency": str(row.get("currency") or ""),
+				"paying_account": account,
+				"payment_label": payment_label,
+				"payment_label_en": bilingual["label_en"],
+				"payment_label_ar": bilingual["label_ar"],
+				"paid_by": paid_by,
+				"paid_by_name": user_names.get(paid_by, paid_by),
+				"remarks": str(row.get("remarks") or ""),
+			}
+		)
+	return out
+
+
+def _salary_payment_months() -> list[str]:
+	"""Distinct ``YYYY-MM`` buckets holding a pay-sheet salary payment, bucketed
+	in Python for the same reason as :func:`_load_months`."""
+	try:
+		rows = (
+			frappe.get_all(
+				EXPENSE_REQUEST_DOCTYPE,
+				filters={"docstatus": 1, "expense_kind": SALARY_KIND, "employee": ["is", "set"]},
+				fields=["expense_date"],
+				limit_page_length=0,
+				ignore_permissions=True,
+			)
+			or []
+		)
+	except Exception:
+		_log(frappe.get_traceback(), "employee_advances._salary_payment_months")
+		return []
+	return sorted({str(r.get("expense_date"))[:7] for r in rows if r.get("expense_date")}, reverse=True)
+
+
 def _month_bounds(month_key: str) -> tuple | None:
 	"""``("YYYY-MM-01", "YYYY-MM-<last>")`` for a month key, or ``None``.
 
@@ -673,7 +827,12 @@ def get_employee_advance_bootstrap(filters: str | None = None) -> dict[str, Any]
 				"pending_amount": 0.0,
 				"approved_count": 0,
 				"outstanding_amount": 0.0,
+				"salary_paid_count": 0,
+				"salary_paid_amount": 0.0,
+				"handed_out_amount": 0.0,
 			},
+			"salary_payments_visible": False,
+			"salary_payments": [],
 			"applied_filters": {
 				"month": requested_month or current_month,
 				"status": status_filter,
@@ -685,6 +844,9 @@ def get_employee_advance_bootstrap(filters: str | None = None) -> dict[str, Any]
 	company = _default_company()
 
 	months = _load_months()
+	show_salary = _can_see_salary_payments()
+	if show_salary:
+		months = sorted(set(months) | set(_salary_payment_months()), reverse=True)
 	month_to_use = requested_month or current_month
 	if month_to_use not in months:
 		months.insert(0, month_to_use)
@@ -714,12 +876,26 @@ def get_employee_advance_bootstrap(filters: str | None = None) -> dict[str, Any]
 	# advances, which is small.
 	pending = [a for a in advances if a["docstatus"] == 0]
 	approved = [a for a in advances if a["docstatus"] == 1]
+	# A status filter names an Employee Advance status; a pay-sheet payment has
+	# none, so filtering by one hides them rather than mixing them in.
+	salary_payments: list[dict[str, Any]] = []
+	if show_salary and not status_filter:
+		salary_payments = _serialize_salary_payments(
+			_collect_salary_payments(
+				month_bounds, employee=employee_filter, branch=branch_filter, company=company
+			)
+		)
+	total_amount = flt(sum(a["amount"] for a in advances), 2)
+	salary_paid_amount = flt(sum(p["amount"] for p in salary_payments), 2)
 	summary = {
-		"total_amount": flt(sum(a["amount"] for a in advances), 2),
+		"total_amount": total_amount,
 		"pending_count": len(pending),
 		"pending_amount": flt(sum(a["amount"] for a in pending), 2),
 		"approved_count": len(approved),
 		"outstanding_amount": flt(sum(a["balance"] for a in approved), 2),
+		"salary_paid_count": len(salary_payments),
+		"salary_paid_amount": salary_paid_amount,
+		"handed_out_amount": flt(total_amount + salary_paid_amount, 2),
 	}
 
 	# Only pass ``branch`` down to the employee picker when Employee.branch is
@@ -758,6 +934,8 @@ def get_employee_advance_bootstrap(filters: str | None = None) -> dict[str, Any]
 		"employees": list_active_employees(branch=employee_branch, company=company),
 		"payment_sources": _payment_sources(company, can_approve),
 		"advances": advances,
+		"salary_payments_visible": show_salary,
+		"salary_payments": salary_payments,
 		"summary": summary,
 		"applied_filters": {
 			"month": month_to_use,

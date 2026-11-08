@@ -1343,3 +1343,206 @@ class TestRequestSalaryMonth(unittest.TestCase):
 	def test_garbage_is_refused(self):
 		with self.assertRaises(Exception):
 			self._resolve("September")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Salary paid from the Monthly Expenses pay sheet
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestSalaryPaymentsOnAdvances(unittest.TestCase):
+	"""November 2026: every cash hand-out to staff went through the pay sheet as
+	October salary, and this screen — which read Employee Advance only — showed an
+	empty month. The bootstrap now lists those payments too, to managers only."""
+
+	PAYMENT = {
+		"name": "JEXP-00149",
+		"employee": "HR-EMP-00007",
+		"employee_name": "Belal",
+		"branch": "",
+		"pos_profile": "",
+		"posting_date": "2026-11-05",
+		"salary_month": "2026-10",
+		"salary_month_label": "October 2026",
+		"amount": 1580.0,
+		"currency": "EGP",
+		"paying_account": "Cash - J",
+		"payment_label": "Cash",
+		"payment_label_en": "Cash",
+		"payment_label_ar": "",
+		"paid_by": "kareem@example.com",
+		"paid_by_name": "Kareem",
+		"remarks": "",
+	}
+
+	def _bootstrap(self, *, can_see=True, filters=None, advances=None, payments=None):
+		from datetime import date
+
+		from jarz_pos.api import employee_advances as mod
+
+		mock_frappe = _mock_frappe([ROLES.JARZ_MANAGER], user="manager@example.com")
+		collect = MagicMock(return_value=[{"name": "JEXP-00149"}])
+		serialize = MagicMock(return_value=list(payments if payments is not None else [self.PAYMENT]))
+		with (
+			patch(f"{MODULE}.frappe", mock_frappe),
+			patch(f"{MODULE}.flt", _flt),
+			patch(f"{MODULE}.hrms_available", return_value=True),
+			patch(f"{MODULE}.getdate", return_value=date(2026, 11, 8)),
+			patch(f"{MODULE}.today", return_value="2026-11-08"),
+			patch(f"{MODULE}._default_company", return_value="Jarz"),
+			patch(f"{MODULE}._company_currency", return_value="EGP"),
+			patch(f"{MODULE}._load_months", return_value=["2026-11", "2026-09"]),
+			patch(f"{MODULE}._salary_payment_months", return_value=["2026-11", "2026-10"]),
+			patch(f"{MODULE}._can_see_salary_payments", return_value=can_see),
+			patch(f"{MODULE}._month_bounds", return_value=("2026-11-01", "2026-11-30")),
+			patch(f"{MODULE}._month_label", side_effect=lambda m: m),
+			patch(f"{MODULE}._advance_has_field", return_value=True),
+			patch(f"{MODULE}._collect_advances", return_value=[]),
+			patch(f"{MODULE}._serialize_advances", return_value=list(advances or [])),
+			patch(f"{MODULE}._collect_salary_payments", collect),
+			patch(f"{MODULE}._serialize_salary_payments", serialize),
+			patch(f"{MODULE}.list_active_employees", return_value=[]),
+			patch(f"{MODULE}._payment_sources", return_value=[]),
+			patch(f"{MODULE}._salary_month_options", return_value=["2026-11", "2026-10"]),
+		):
+			result = mod.get_employee_advance_bootstrap(filters)
+		return result, collect
+
+	def test_manager_sees_salary_paid_in_the_month(self):
+		advance = {"amount": 500.0, "balance": 500.0, "docstatus": 1}
+		result, collect = self._bootstrap(advances=[advance])
+
+		self.assertTrue(result["salary_payments_visible"])
+		self.assertEqual([p["name"] for p in result["salary_payments"]], ["JEXP-00149"])
+		self.assertEqual(result["summary"]["salary_paid_count"], 1)
+		self.assertEqual(result["summary"]["salary_paid_amount"], 1580.0)
+		self.assertEqual(result["summary"]["total_amount"], 500.0, "advances total stays advances only")
+		self.assertEqual(result["summary"]["handed_out_amount"], 2080.0)
+		# Keyed on the day the cash moved, inside the month shown.
+		self.assertEqual(collect.call_args.args[0], ("2026-11-01", "2026-11-30"))
+		# A month holding only pay-sheet payments is still offered in the picker.
+		self.assertIn("2026-10", [m["id"] for m in result["months"]])
+
+	def test_filters_reach_the_salary_query(self):
+		_, collect = self._bootstrap(filters={"employee": "HR-EMP-00007", "branch": "Dokki"})
+		self.assertEqual(collect.call_args.kwargs["employee"], "HR-EMP-00007")
+		self.assertEqual(collect.call_args.kwargs["branch"], "Dokki")
+		self.assertEqual(collect.call_args.kwargs["company"], "Jarz")
+
+	def test_non_manager_sees_no_salary(self):
+		result, collect = self._bootstrap(can_see=False)
+		self.assertFalse(result["salary_payments_visible"])
+		self.assertEqual(result["salary_payments"], [])
+		self.assertEqual(result["summary"]["salary_paid_amount"], 0.0)
+		self.assertNotIn("2026-10", [m["id"] for m in result["months"]])
+		collect.assert_not_called()
+
+	def test_status_filter_hides_salary_payments(self):
+		result, collect = self._bootstrap(filters={"status": "Paid"})
+		self.assertTrue(result["salary_payments_visible"])
+		self.assertEqual(result["salary_payments"], [])
+		collect.assert_not_called()
+
+	def test_hrms_absent_carries_the_new_keys(self):
+		from datetime import date
+
+		from jarz_pos.api.employee_advances import get_employee_advance_bootstrap
+
+		with (
+			patch(f"{MODULE}.frappe", _mock_frappe([ROLES.JARZ_MANAGER])),
+			patch(f"{MODULE}.hrms_available", return_value=False),
+			patch(f"{MODULE}.getdate", return_value=date(2026, 11, 8)),
+		):
+			result = get_employee_advance_bootstrap()
+		self.assertEqual(result["salary_payments"], [])
+		self.assertFalse(result["salary_payments_visible"])
+		self.assertEqual(result["summary"]["handed_out_amount"], 0.0)
+
+
+class TestSalaryPaymentQuery(unittest.TestCase):
+	def test_reads_submitted_salary_payments_by_cash_date(self):
+		from jarz_pos.api import employee_advances as mod
+
+		mock_frappe = _mock_frappe([ROLES.JARZ_MANAGER])
+		mock_frappe.get_all.return_value = [{"name": "JEXP-00149"}]
+		with patch(f"{MODULE}.frappe", mock_frappe):
+			rows = mod._collect_salary_payments(
+				("2026-11-01", "2026-11-30"), employee="HR-EMP-00007", branch="Dokki"
+			)
+
+		self.assertEqual(rows, [{"name": "JEXP-00149"}])
+		args, kwargs = mock_frappe.get_all.call_args
+		self.assertEqual(args[0], "Jarz Expense Request")
+		filters = kwargs["filters"]
+		self.assertEqual(filters["docstatus"], 1, "a cancelled payment must drop out")
+		self.assertEqual(filters["expense_kind"], "Salary")
+		self.assertEqual(filters["expense_date"], ["between", ["2026-11-01", "2026-11-30"]])
+		self.assertEqual(filters["employee"], "HR-EMP-00007")
+		self.assertEqual(filters["pos_profile"], "Dokki")
+		self.assertNotIn("company", filters, "no company filter when none is known")
+
+	def test_query_failure_is_an_empty_list(self):
+		from jarz_pos.api import employee_advances as mod
+
+		mock_frappe = _mock_frappe([ROLES.JARZ_MANAGER])
+		mock_frappe.get_all.side_effect = RuntimeError("boom")
+		with patch(f"{MODULE}.frappe", mock_frappe), patch(f"{MODULE}._log"):
+			self.assertEqual(mod._collect_salary_payments(None), [])
+
+	def test_serializer_shape(self):
+		from jarz_pos.api import employee_advances as mod
+
+		row = {
+			"name": "JEXP-00149",
+			"employee": "HR-EMP-00007",
+			"expense_date": "2026-11-05",
+			"period_month": "2026-10",
+			"amount": 1580,
+			"currency": "EGP",
+			"paying_account": "Cash - J",
+			"payment_source_label": "Cash",
+			"pos_profile": "",
+			"requested_by": "kareem@example.com",
+			"owner": "kareem@example.com",
+			"remarks": "Belal salary 2026-10",
+		}
+		with (
+			patch(f"{MODULE}.flt", _flt),
+			patch(f"{MODULE}._account_label_map", return_value={}),
+			patch(
+				f"{MODULE}._employee_meta",
+				return_value={"HR-EMP-00007": {"employee_name": "Belal", "branch": "Dokki"}},
+			),
+			patch(f"{MODULE}._user_full_names", return_value={"kareem@example.com": "Kareem"}),
+			patch(f"{MODULE}._month_label", side_effect=lambda m: f"label:{m}"),
+		):
+			out = mod._serialize_salary_payments([row])
+
+		self.assertEqual(len(out), 1)
+		p = out[0]
+		self.assertEqual(p["employee_name"], "Belal")
+		self.assertEqual(p["branch"], "Dokki")
+		self.assertEqual(p["posting_date"], "2026-11-05")
+		self.assertEqual(p["salary_month"], "2026-10")
+		self.assertEqual(p["salary_month_label"], "label:2026-10")
+		self.assertEqual(p["amount"], 1580.0)
+		self.assertEqual(p["payment_label"], "Cash")
+		self.assertEqual(p["paid_by_name"], "Kareem")
+		self.assertEqual(mod._serialize_salary_payments([]), [])
+
+
+class TestSalaryPaymentGate(unittest.TestCase):
+	"""Same people as the Monthly Expenses board, asked through its own gate."""
+
+	def _can_see(self, roles):
+		from jarz_pos.api import employee_advances as mod
+
+		mock = _mock_frappe(roles)
+		with patch(f"{MODULE}.frappe", mock), patch("jarz_pos.api.recurring_expenses.frappe", mock):
+			return mod._can_see_salary_payments()
+
+	def test_manager_can_see(self):
+		self.assertTrue(self._can_see([ROLES.JARZ_MANAGER]))
+
+	def test_line_manager_cannot(self):
+		self.assertFalse(self._can_see(["JARZ Line Manager"]))
