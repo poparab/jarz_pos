@@ -455,6 +455,7 @@ def get_branch_replenishment(
 	sold = _resolve_sales(branch_warehouses, item_codes, sales_days)
 
 	source_available = {code: stock.get((source, code), 0.0) for code in item_codes}
+	pending_moves = _resolve_pending_moves(branch_warehouses, item_codes)
 
 	return plan.build_plan(
 		generated_on=_generated_on(),
@@ -467,7 +468,58 @@ def get_branch_replenishment(
 		source_available=source_available,
 		on_hand=stock,
 		sold=sold,
+		pending_moves=pending_moves,
 	)
+
+
+def _resolve_pending_moves(
+	warehouses: Sequence[str],
+	item_codes: Sequence[str],
+) -> dict[tuple[str, str, str], float]:
+	"""ONE query: jars already requested branch-to-branch and not yet confirmed.
+
+	A pending Jarz Stock Handover moves no stock, so the Bins alone would keep
+	suggesting a move that has already been asked for.  Keyed
+	``(from_warehouse, to_warehouse, item_code)``.  A failed read degrades to
+	"nothing pending" rather than hiding the whole screen.
+	"""
+	warehouses = sorted({str(w) for w in warehouses if w})
+	item_codes = sorted({str(c) for c in item_codes if c})
+	if not warehouses or not item_codes:
+		return {}
+
+	try:
+		rows = frappe.db.sql(
+			"""
+            SELECT h.from_warehouse AS from_warehouse,
+                   h.to_warehouse AS to_warehouse,
+                   i.item_code AS item_code,
+                   SUM(i.qty) AS qty
+            FROM `tabJarz Stock Handover` h
+            JOIN `tabJarz Stock Handover Item` i
+              ON i.parent = h.name AND i.parenttype = 'Jarz Stock Handover'
+            WHERE h.status = 'Pending'
+              AND h.from_warehouse IN %(warehouses)s
+              AND h.to_warehouse IN %(warehouses)s
+              AND i.item_code IN %(codes)s
+            GROUP BY h.from_warehouse, h.to_warehouse, i.item_code
+            """,
+			{"warehouses": warehouses, "codes": item_codes},
+			as_dict=True,
+		)
+	except Exception:
+		_log_failure(
+			"JARZ Replenishment - pending handover read failed",
+			f"warehouses={warehouses}\n{_traceback()}",
+		)
+		return {}
+
+	return {
+		(str(row["from_warehouse"]), str(row["to_warehouse"]), str(row["item_code"])): plan.to_float(
+			row.get("qty"), 0.0
+		)
+		for row in rows or []
+	}
 
 
 # ── Production round resolvers ──────────────────────────────────────────

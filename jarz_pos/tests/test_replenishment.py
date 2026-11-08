@@ -542,7 +542,7 @@ class TestBranchMoves(unittest.TestCase):
 		{"warehouse": "6th of october - J", "branch": "6th of october"},
 	]
 
-	def _plan(self, *, factory, on_hand, sold):
+	def _plan(self, *, factory, on_hand, sold, pending=None):
 		return plan.build_plan(
 			generated_on="2026-11-08 09:00:00",
 			company="Jarz",
@@ -554,7 +554,30 @@ class TestBranchMoves(unittest.TestCase):
 			source_available={"LOTUS-L": factory},
 			on_hand=on_hand,
 			sold=sold,
+			pending_moves=pending,
 		)
+
+	def test_a_requested_move_is_not_suggested_again(self):
+		# Same shop pair as below; 16 already requested and still pending.
+		payload = self._plan(
+			factory=0,
+			on_hand={("Nasr city - J", "LOTUS-L"): 2, ("Dokki - J", "LOTUS-L"): 30},
+			sold={("Nasr city - J", "LOTUS-L"): 42, ("Dokki - J", "LOTUS-L"): 14},
+			pending={("Dokki - J", "Nasr city - J", "LOTUS-L"): 16},
+		)
+		self.assertEqual([], payload["branch_moves"])
+		self.assertEqual(0, self._row(payload, "Dokki - J")["spare_qty"])
+		self.assertEqual(40, self._row(payload, "Nasr city - J")["short_by"])
+
+	def test_a_partly_requested_move_suggests_only_the_rest(self):
+		payload = self._plan(
+			factory=0,
+			on_hand={("Nasr city - J", "LOTUS-L"): 2, ("Dokki - J", "LOTUS-L"): 30},
+			sold={("Nasr city - J", "LOTUS-L"): 42, ("Dokki - J", "LOTUS-L"): 14},
+			pending={("Dokki - J", "Nasr city - J", "LOTUS-L"): 10},
+		)
+		self.assertEqual([6], [m["qty"] for m in payload["branch_moves"]])
+		self.assertEqual(6, self._row(payload, "Dokki - J")["spare_qty"])
 
 	def _row(self, payload, warehouse):
 		for branch in payload["branches"]:

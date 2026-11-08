@@ -475,6 +475,7 @@ def spare_qty(row: Mapping[str, Any]) -> int:
 def plan_branch_moves(
 	rows_by_warehouse: Mapping[str, Mapping[str, dict[str, Any]]],
 	labels: Mapping[str, str],
+	pending: Mapping[tuple[str, str, str], Any] | None = None,
 ) -> list[dict[str, Any]]:
 	"""Where the factory cannot cover a branch, which other branch can.
 
@@ -484,7 +485,22 @@ def plan_branch_moves(
 	the most is served first from the branch with the most to spare; that keeps
 	a move to as few vans as possible.  Fills ``spare_qty`` on every row and
 	``move_in`` on the receiving rows, in place, and returns the flat list.
+
+	``pending`` is the jars already asked for and not yet confirmed, keyed
+	``(from_warehouse, to_warehouse, item_code)``.  A pending handover moves no
+	stock, so without it the Bins look unchanged and the same move would be
+	suggested — and requested — again: the giver's spare is reduced by what it
+	has been asked for, and the receiver's need by what is already coming.
 	"""
+	pending_out: dict[tuple[str, str], int] = {}
+	pending_in: dict[tuple[str, str], int] = {}
+	for (from_wh, to_wh, code), qty in (pending or {}).items():
+		jars = whole_jars(qty)
+		if jars <= 0:
+			continue
+		pending_out[(from_wh, code)] = pending_out.get((from_wh, code), 0) + jars
+		pending_in[(to_wh, code)] = pending_in.get((to_wh, code), 0) + jars
+
 	moves: list[dict[str, Any]] = []
 	item_codes = sorted({code for rows in rows_by_warehouse.values() for code in rows})
 	for code in item_codes:
@@ -494,11 +510,13 @@ def plan_branch_moves(
 			row = rows.get(code)
 			if row is None:
 				continue
-			row["spare_qty"] = spare_qty(row) if int(row.get("short_by") or 0) <= 0 else 0
+			own_spare = spare_qty(row) if int(row.get("short_by") or 0) <= 0 else 0
+			row["spare_qty"] = max(0, own_spare - pending_out.get((warehouse, code), 0))
 			if row["spare_qty"] > 0:
 				spare[warehouse] = row["spare_qty"]
-			if int(row.get("short_by") or 0) > 0:
-				short[warehouse] = int(row["short_by"])
+			still_short = int(row.get("short_by") or 0) - pending_in.get((warehouse, code), 0)
+			if still_short > 0:
+				short[warehouse] = still_short
 		if not spare or not short:
 			continue
 		for to_wh in sorted(short, key=lambda w: (-short[w], w)):
@@ -550,6 +568,7 @@ def build_plan(
 	on_hand: Mapping[tuple[str, str], Any],
 	sold: Mapping[tuple[str, str], Any],
 	notice: str | None = None,
+	pending_moves: Mapping[tuple[str, str, str], Any] | None = None,
 ) -> dict[str, Any]:
 	"""The whole endpoint payload, from plain data.  No database, no frappe.
 
@@ -586,7 +605,7 @@ def build_plan(
 		for b in branches or []
 		if str(b.get("warehouse") or "").strip()
 	}
-	branch_moves = plan_branch_moves(rows_by_warehouse, labels)
+	branch_moves = plan_branch_moves(rows_by_warehouse, labels, pending_moves)
 
 	branch_payloads: list[dict[str, Any]] = []
 	for branch in branches or []:
@@ -627,7 +646,8 @@ def build_plan(
 		"branches": branch_payloads,
 		# Shop-to-shop moves that close what the factory cannot.  Suggestions:
 		# each one is sent through ``submit_transfer`` as a pending handover the
-		# giving branch confirms, the same path every branch transfer takes.
+		# receiving branch confirms, the same path every branch transfer takes.
+		# Moves already requested and still pending are not suggested again.
 		"branch_moves": branch_moves,
 		"summary": summary,
 		"notice": notice,
