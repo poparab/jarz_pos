@@ -663,3 +663,612 @@ class TestOrderAccessAndDelivery(_Base):
 		self.site.invoices["SI-1"] = _invoice("SI-1", grand_total=450.0, taxes=[], territory="Zayed", custom_is_pickup=1)
 		check = self.lookup("P10", order="SI-1")["order_check"]
 		self.assertEqual(check["waived_delivery"], 0.0)
+
+
+class TestLookupPromoCodeShapeUnchanged(_Base):
+	"""``lookup_promo_code`` now splices the shared ``_code_summary_base``;
+	its keys, their order and values must be exactly what they were."""
+
+	def test_key_order_and_values(self):
+		self.site.promos["JARZ10"] = _promo(
+			"JARZ10",
+			title="Ten off",
+			usage_limit=3,
+			per_customer_limit=1,
+			customer="CUST-1",
+			customer_phone="01000000001",
+			woo_coupon_code="jarz10",
+			woo_coupon_id="77",
+			active_to=datetime.datetime(2026, 11, 30, 23, 59, 59),
+		)
+		self.site.redeem("JARZ10", "SI-1", customer="CUST-1")
+		out = self.lookup("jarz10")
+		self.assertEqual(
+			list(out),
+			[
+				"found", "code", "title", "description", "status", "discount_type", "discount_value",
+				"max_discount_amount", "min_order_amount", "min_on_whole_order", "applies_to", "scope",
+				"channels", "allow_pickup", "stackable", "usage_limit", "times_used", "remaining_uses",
+				"per_customer_limit", "active_from", "active_to", "customer", "customer_name",
+				"customer_phone", "woo_coupon_code", "on_website", "recent_uses", "order_check",
+			],
+		)
+		self.assertEqual(out["code"], "JARZ10")
+		self.assertEqual(out["status"], "active")
+		self.assertEqual(out["usage_limit"], 3)
+		self.assertEqual(out["times_used"], 1)
+		self.assertEqual(out["remaining_uses"], 2)
+		self.assertEqual(out["customer"], "CUST-1")
+		self.assertEqual(out["customer_name"], "Mona Ali")
+		self.assertEqual(out["customer_phone"], "01000000001")
+		self.assertTrue(out["on_website"])
+		self.assertEqual(out["woo_coupon_code"], "jarz10")
+		self.assertNotIn("personal", out)
+		self.assertNotIn("customer_times_used", out)
+
+
+# ---------------------------------------------------------------------------
+# lookup_customer_promos (feature promo-customer-lookup)
+# ---------------------------------------------------------------------------
+
+LATER = NOW + datetime.timedelta(days=30)
+EARLIER = NOW - datetime.timedelta(days=3)
+
+_SUMMARY_KEYS = {
+	"code", "title", "description", "status", "personal", "discount_type", "discount_value",
+	"max_discount_amount", "min_order_amount", "min_on_whole_order", "applies_to", "scope", "channels",
+	"allow_pickup", "stackable", "usage_limit", "times_used", "remaining_uses", "per_customer_limit",
+	"customer_times_used", "customer_remaining_uses", "active_from", "active_to", "on_website",
+	"woo_coupon_code",
+}
+_ENTRY_KEYS = {
+	"customer", "customer_name", "phone", "order_count", "last_order_date", "last_woo_order_id",
+	"active_codes", "public_codes", "inactive_codes", "used_codes",
+}
+
+
+def _strip_phone(value):
+	# Same separators the endpoint strips in SQL before its LIKE prefilter.
+	return "".join(ch for ch in str(value or "") if ch not in " -()./")
+
+
+def _rows_match(row, filters):
+	for key, want in (filters or {}).items():
+		have = row.get(key)
+		if isinstance(want, (list, tuple)):
+			op, arg = want[0], want[1]
+			if op == "in":
+				ok = have in arg
+			elif op == "is":
+				is_set = bool(str(have).strip()) if have is not None else False
+				ok = is_set if arg == "set" else not is_set
+			elif op == "!=":
+				ok = have != arg
+			else:
+				raise AssertionError(f"unsupported filter op {op!r}")
+		else:
+			ok = have == want
+		if not ok:
+			return False
+	return True
+
+
+class _CustomerDB(_FakeDB):
+	def get_value(self, doctype, filters, fieldname=None, as_dict=False):
+		self.site.get_value_log.append(doctype)
+		return super().get_value(doctype, filters, fieldname, as_dict)
+
+	def sql(self, query, values=None, as_dict=False):
+		return self.site.run_sql(" ".join(query.split()), values or {})
+
+
+class _CustomerSite(_FakeSite):
+	"""``_FakeSite`` plus customers, contacts and the SQL the lookup runs."""
+
+	def __init__(self):
+		super().__init__()
+		self.db = _CustomerDB(self)
+		self.customers = {}
+		self.contacts: list = []  # (customer, phone)
+		self.sql_log: list = []
+		self.get_all_log: list = []
+		self.get_value_log: list = []
+
+	# -- fixtures -------------------------------------------------------------
+	def add_customer(self, name, customer_name=None, mobile_no=None, disabled=0):
+		self.customers[name] = {"customer_name": customer_name or name, "mobile_no": mobile_no, "disabled": disabled}
+
+	def add_order(self, name, customer, posting_date, *, woo=0, docstatus=1, is_return=0, grand_total=500.0):
+		self.invoices[name] = _invoice(
+			name,
+			customer=customer,
+			posting_date=posting_date,
+			woo_order_id=woo,
+			docstatus=docstatus,
+			is_return=is_return,
+			grand_total=grand_total,
+			creation=datetime.datetime.combine(posting_date, datetime.time(10, 0)),
+		)
+
+	def redeem(self, code, invoice, *, status="Active", customer="CUST-X", creation="2026-11-01 10:00:00", woo=None, discount=0.0):
+		super().redeem(code, invoice, status=status, customer=customer, creation=creation, woo=woo)
+		self.redemptions[-1]["discount_applied"] = discount
+
+	def clear_logs(self):
+		self.sql_log.clear()
+		self.get_all_log.clear()
+		self.get_value_log.clear()
+		self.get_doc_calls.clear()
+
+	# -- frappe.db.sql --------------------------------------------------------
+	def _orders(self, customer):
+		return [
+			inv
+			for inv in self.invoices.values()
+			if inv.customer == customer and inv.docstatus == 1 and not int(inv.is_return or 0)
+		]
+
+	def run_sql(self, q, values):
+		self.sql_log.append(q)
+		if "FROM `tabContact Phone` cp" in q:
+			tail = values["pattern"].strip("%")
+			return [{"customer": c, "phone": p} for c, p in self.contacts if tail in _strip_phone(p)]
+		if "FROM `tabCustomer` WHERE" in q:
+			tail = values["pattern"].strip("%")
+			return [
+				{"name": n, "mobile_no": c["mobile_no"]}
+				for n, c in self.customers.items()
+				if tail in _strip_phone(c["mobile_no"])
+			]
+		if "c.customer_name LIKE" in q:
+			needle = values["like"].strip("%").replace("\\", "").lower()
+			hits = [
+				n for n, c in self.customers.items() if needle in n.lower() or needle in c["customer_name"].lower()
+			]
+
+			def _recent(n):
+				dates = [inv.posting_date for inv in self._orders(n)]
+				last = max(dates) if dates else None
+				return (last is None, -last.toordinal() if last else 0, n)
+
+			return [{"name": n} for n in sorted(hits, key=_recent)[: values["limit"]]]
+		if "FROM `tabDynamic Link` dl" in q:
+			return [{"customer": c, "phone": p} for c, p in self.contacts if c in values["customers"]]
+		if "AS order_count" in q:
+			out = []
+			for n in values["customers"]:
+				orders = self._orders(n)
+				if orders:
+					out.append(
+						{
+							"customer": n,
+							"order_count": len(orders),
+							"last_order_date": max(i.posting_date for i in orders),
+							"last_creation": max(i.creation for i in orders),
+							"last_woo_order_id": max(int(i.woo_order_id or 0) for i in orders),
+						}
+					)
+			return out
+		if "`tabJarz Promo Redemption`" in q:
+			per_customer = "customers" in values
+			counts: dict = {}
+			for r in self.redemptions:
+				if r["status"] != "Active" or r["promo_code"] not in values["codes"]:
+					continue
+				if per_customer and r["customer"] not in values["customers"]:
+					continue
+				key = (r["promo_code"], r["customer"]) if per_customer else (r["promo_code"],)
+				counts[key] = counts.get(key, 0) + 1
+			if per_customer:
+				return [{"promo_code": k[0], "customer": k[1], "n": v} for k, v in counts.items()]
+			return [{"promo_code": k[0], "n": v} for k, v in counts.items()]
+		raise AssertionError(f"unexpected SQL: {q}")
+
+	# -- frappe.get_all -------------------------------------------------------
+	def get_all(self, doctype, filters=None, fields=None, pluck=None, order_by=None, limit_page_length=None, **kwargs):
+		self.get_all_log.append(doctype)
+		if doctype == "Customer":
+			rows = [r for r in ({"name": n, **c} for n, c in self.customers.items()) if _rows_match(r, filters)]
+			if pluck:
+				return [r[pluck] for r in rows]
+			return [{f: r.get(f) for f in fields} for r in rows]
+		if doctype == "Jarz Promo Code":
+			return [
+				{f: getattr(p, f, None) for f in fields} for p in self.promos.values() if _rows_match(vars(p), filters)
+			]
+		if doctype in ("Jarz Promo Code Item", "Jarz Promotion Rule Channel"):
+			field = "item_scope" if doctype == "Jarz Promo Code Item" else "channels"
+			out = []
+			for p in self.promos.values():
+				for child in getattr(p, field) or []:
+					row = {"parent": p.name, "parenttype": "Jarz Promo Code", "parentfield": field, **vars(child)}
+					if _rows_match(row, filters):
+						out.append({f: row.get(f) for f in fields})
+			return out
+		if doctype == "Item":
+			return [
+				{"name": n, "item_name": label}
+				for n, label in self.item_names.items()
+				if _rows_match({"name": n}, filters)
+			]
+		if doctype == "Jarz Promo Redemption":
+			rows = sorted(
+				(r for r in self.redemptions if _rows_match(r, filters)), key=lambda r: r["creation"], reverse=True
+			)
+			return [dict(r) for r in rows[: limit_page_length or None]]
+		if doctype == "Sales Invoice" and filters and "name" in filters:
+			return [
+				{
+					"name": inv.name,
+					"customer_name": inv.customer_name,
+					"posting_date": getattr(inv, "posting_date", None),
+					"woo_order_id": inv.woo_order_id,
+					"grand_total": inv.grand_total,
+				}
+				for inv in self.invoices.values()
+				if inv.name in filters["name"][1]
+			]
+		return super().get_all(
+			doctype, filters=filters, fields=fields, pluck=pluck, order_by=order_by, limit_page_length=limit_page_length
+		)
+
+
+class _CustomerBase(unittest.TestCase):
+	def setUp(self):
+		self.site = _CustomerSite()
+		for target in ("jarz_pos.api.promo.frappe", "jarz_pos.services.promo_codes.frappe"):
+			patcher = mock.patch(target, self.site)
+			patcher.start()
+			self.addCleanup(patcher.stop)
+
+	def find(self, query):
+		return api.lookup_customer_promos(query=query)
+
+	@staticmethod
+	def entry(out, customer):
+		for row in out["customers"]:
+			if row["customer"] == customer:
+				return row
+		raise AssertionError(f"{customer!r} not in {[c['customer'] for c in out['customers']]}")
+
+	@staticmethod
+	def codes(rows):
+		return [row["code"] for row in rows]
+
+
+class TestCustomerLookupQuery(_CustomerBase):
+	def test_too_short_query_throws(self):
+		for query in (None, "", "   ", "ab", " a1 "):
+			with self.assertRaises(_Thrown, msg=repr(query)):
+				self.find(query)
+
+	def test_phone_mode_vs_name_mode(self):
+		self.site.add_customer("Amal Bedross", mobile_no="01225495533")
+		phone_queries = (
+			"0122 549-5533",
+			"(+20) 122 549 5533",
+			"+201225495533",
+			"٠١٢٢٥٤٩٥٥٣٣",  # Arabic-Indic digits
+		)
+		for query in phone_queries:
+			out = self.find(query)
+			self.assertEqual(out["match_type"], "phone", query)
+			self.assertEqual([c["customer"] for c in out["customers"]], ["Amal Bedross"], query)
+		for query in ("12345", "Amal", "Amal 0122", "  amal  "):
+			self.assertEqual(self.find(query)["match_type"], "name", query)
+		self.assertEqual(self.find("  Amal ")["query"], "Amal")
+		self.assertEqual([c["customer"] for c in self.find("Amal")["customers"]], ["Amal Bedross"])
+
+	def test_phone_matches_every_stored_format_and_contact_phones(self):
+		self.site.add_customer("CUST-A", "Amal", mobile_no="+20 122 549 5533")
+		self.site.add_customer("CUST-B", "Basma", mobile_no=None)
+		self.site.add_customer("CUST-C", "Camilia", mobile_no="201225495533")
+		self.site.add_customer("CUST-D", "Dina", mobile_no="01000000009")
+		self.site.contacts = [("CUST-B", "0122-549-5533"), ("GHOST", "01225495533")]
+
+		out = self.find("01225495533")
+		self.assertEqual(out["match_type"], "phone")
+		self.assertEqual(sorted(c["customer"] for c in out["customers"]), ["CUST-A", "CUST-B", "CUST-C"])
+		# No mobile_no: the first contact phone is shown.
+		self.assertEqual(self.entry(out, "CUST-B")["phone"], "0122-549-5533")
+		self.assertEqual(self.entry(out, "CUST-A")["phone"], "+20 122 549 5533")
+
+		# Fewer full digits: any part of the number matches - its end, its middle,
+		# or its start as staff type it with the leading 0.
+		for partial_query in ("549 5533", "549553", "0122549", "0122549553"):
+			partial = self.find(partial_query)
+			self.assertEqual(
+				sorted(c["customer"] for c in partial["customers"]),
+				["CUST-A", "CUST-B", "CUST-C"],
+				partial_query,
+			)
+		# Digits that are not in the number match nothing.
+		self.assertEqual(self.find("777888")["customers"], [])
+
+	def test_phone_mode_orders_by_most_recent_order_and_reports_stats(self):
+		self.site.add_customer("CUST-A", "Amal", mobile_no="01225495533")
+		self.site.add_customer("CUST-B", "Basma", mobile_no="+201225495533")
+		self.site.add_customer("CUST-C", "Camilia", mobile_no="201225495533")
+		self.site.add_order("SI-A1", "CUST-A", datetime.date(2026, 11, 1))
+		self.site.add_order("SI-C1", "CUST-C", datetime.date(2026, 11, 3), woo=21000)
+		self.site.add_order("SI-C2", "CUST-C", datetime.date(2026, 11, 5))
+		self.site.add_order("SI-C3", "CUST-C", datetime.date(2026, 11, 6), is_return=1)
+		self.site.add_order("SI-C4", "CUST-C", datetime.date(2026, 11, 7), docstatus=0)
+
+		out = self.find("01225495533")
+		self.assertEqual([c["customer"] for c in out["customers"]], ["CUST-C", "CUST-A", "CUST-B"])
+		c = self.entry(out, "CUST-C")
+		self.assertEqual(c["order_count"], 2)
+		self.assertEqual(c["last_order_date"], "2026-11-05")
+		self.assertEqual(c["last_woo_order_id"], 21000)
+		a = self.entry(out, "CUST-A")
+		self.assertEqual((a["order_count"], a["last_order_date"], a["last_woo_order_id"]), (1, "2026-11-01", None))
+		b = self.entry(out, "CUST-B")
+		self.assertEqual((b["order_count"], b["last_order_date"], b["last_woo_order_id"]), (0, None, None))
+
+	def test_name_mode_matches_name_and_docname_most_recent_order_first(self):
+		self.site.add_customer("Amal Bedross", mobile_no="01225495533")
+		self.site.add_customer("Amal Hassan", mobile_no="01000000002")
+		self.site.add_customer("KAMAL-001", "Karim", disabled=1)
+		self.site.add_customer("Sara", mobile_no="01000000003")
+		self.site.add_order("SI-1", "Amal Bedross", datetime.date(2026, 11, 1))
+		self.site.add_order("SI-2", "Amal Hassan", datetime.date(2026, 11, 6))
+		out = self.find("amal")
+		self.assertEqual(out["match_type"], "name")
+		self.assertFalse(out["truncated"])
+		self.assertEqual([c["customer"] for c in out["customers"]], ["Amal Hassan", "Amal Bedross", "KAMAL-001"])
+		self.assertEqual(self.entry(out, "KAMAL-001")["customer_name"], "Karim")
+
+	def test_name_mode_caps_at_ten_and_flags_truncated(self):
+		for i in range(1, 11):
+			self.site.add_customer(f"Sara {i:02d}")
+		out = self.find("Sara")
+		self.assertEqual(len(out["customers"]), 10)
+		self.assertFalse(out["truncated"])
+		self.site.add_customer("Sara 11")
+		out = self.find("Sara")
+		self.assertEqual(len(out["customers"]), 10)
+		self.assertTrue(out["truncated"])
+
+	def test_no_match_is_an_empty_list(self):
+		self.site.add_customer("Amal Bedross", mobile_no="01225495533")
+		self.assertEqual(
+			self.find("Nobody"), {"query": "Nobody", "match_type": "name", "truncated": False, "customers": []}
+		)
+		self.assertEqual(
+			self.find("01999999999"),
+			{"query": "01999999999", "match_type": "phone", "truncated": False, "customers": []},
+		)
+
+
+class TestCustomerLookupCodes(_CustomerBase):
+	def test_personal_code_matched_by_customer_link(self):
+		self.site.add_customer("Amal Bedross", mobile_no="01225495533")
+		self.site.add_customer("Zed", mobile_no="01000000077")
+		self.site.promos["BACK1"] = _promo("BACK1", customer="Amal Bedross", active_to=LATER)
+		self.site.promos["ZED1"] = _promo("ZED1", customer="Zed", customer_phone="01000000077")
+		amal = self.entry(self.find("Bedross"), "Amal Bedross")
+		self.assertEqual(self.codes(amal["active_codes"]), ["BACK1"])
+		self.assertTrue(amal["active_codes"][0]["personal"])
+		self.assertEqual(amal["public_codes"], [])
+		self.assertEqual(amal["inactive_codes"], [])
+
+	def test_personal_code_matched_by_phone_key_only(self):
+		# Woo forked a duplicate Customer; the code is locked to the duplicate
+		# but carries the phone, so the engine accepts it for this customer too.
+		self.site.add_customer("Amal Bedross", mobile_no=None)
+		self.site.add_customer("Amal Woo Dup", mobile_no="01009998888")
+		self.site.contacts = [("Amal Bedross", "01225495533")]
+		self.site.promos["DUP1"] = _promo("DUP1", customer="Amal Woo Dup", customer_phone="+201225495533")
+		self.site.promos["PH2"] = _promo("PH2", customer=None, customer_phone="0122 549 5533")
+		self.site.promos["OTHER"] = _promo("OTHER", customer_phone="01000000099")
+
+		amal = self.entry(self.find("Bedross"), "Amal Bedross")
+		self.assertEqual(sorted(self.codes(amal["active_codes"])), ["DUP1", "PH2"])
+		self.assertTrue(all(code["personal"] for code in amal["active_codes"]))
+
+		# Phone mode: a real Customer owns the key, so no pseudo entry.
+		out = self.find("01225495533")
+		self.assertEqual([c["customer"] for c in out["customers"]], ["Amal Bedross"])
+		self.assertEqual(sorted(self.codes(out["customers"][0]["active_codes"])), ["DUP1", "PH2"])
+
+	def test_pseudo_customer_for_phone_locked_code_without_customer(self):
+		self.site.promos["WB1"] = _promo("WB1", customer=None, customer_phone="01117778888", active_to=LATER)
+		self.site.promos["WB2"] = _promo(
+			"WB2", customer="GONE-CUST", customer_phone="+201117778888", active_to=EARLIER
+		)
+		self.site.promos["PUB"] = _promo("PUB")
+		for query in ("0111 777 8888", "7778888"):
+			out = self.find(query)
+			self.assertEqual(out["match_type"], "phone")
+			self.assertEqual(len(out["customers"]), 1, query)
+			pseudo = out["customers"][0]
+			self.assertEqual(set(pseudo), _ENTRY_KEYS)
+			self.assertIsNone(pseudo["customer"])
+			self.assertIsNone(pseudo["customer_name"])
+			self.assertEqual(pseudo["phone"], "01117778888")
+			self.assertEqual(
+				(pseudo["order_count"], pseudo["last_order_date"], pseudo["last_woo_order_id"]), (0, None, None)
+			)
+			self.assertEqual(self.codes(pseudo["active_codes"]), ["WB1"])
+			self.assertEqual(self.codes(pseudo["inactive_codes"]), ["WB2"])
+			self.assertEqual(self.codes(pseudo["public_codes"]), ["PUB"])
+			self.assertEqual(pseudo["used_codes"], [])
+		# Name mode never invents pseudo customers.
+		self.assertEqual(self.find("GONE")["customers"], [])
+
+	def test_pseudo_entry_follows_real_customers(self):
+		self.site.add_customer("Amal Bedross", mobile_no="01225495533")
+		self.site.promos["WB1"] = _promo("WB1", customer_phone="01117495533")
+		out = self.find("495533")
+		self.assertEqual([c["customer"] for c in out["customers"]], ["Amal Bedross", None])
+		self.assertEqual(self.codes(out["customers"][1]["active_codes"]), ["WB1"])
+		self.assertEqual(out["customers"][0]["active_codes"], [])
+
+	def test_active_vs_inactive_split_and_order(self):
+		self.site.add_customer("Mona Ali", mobile_no="01000000001")
+		mine = {"customer": "Mona Ali"}
+		self.site.promos.update(
+			{
+				"ACT1": _promo("ACT1", active_to=NOW + datetime.timedelta(days=10), **mine),
+				"ACT2": _promo("ACT2", active_to=NOW + datetime.timedelta(days=2), **mine),
+				"OPEN": _promo("OPEN", **mine),
+				"SOON": _promo("SOON", active_from=NOW + datetime.timedelta(days=1), **mine),
+				"EXP1": _promo("EXP1", active_to=NOW - datetime.timedelta(days=1), **mine),
+				"EXP2": _promo("EXP2", active_to=NOW - datetime.timedelta(days=5), **mine),
+				"USED": _promo("USED", usage_limit=1, active_to=NOW + datetime.timedelta(days=5), **mine),
+				"OFF": _promo("OFF", enabled=0, active_to=NOW + datetime.timedelta(days=20), **mine),
+			}
+		)
+		self.site.redeem("USED", "SI-U", customer="Mona Ali")
+		mona = self.entry(self.find("Mona"), "Mona Ali")
+		self.assertEqual(self.codes(mona["active_codes"]), ["ACT2", "ACT1", "OPEN", "SOON"])
+		self.assertEqual([c["status"] for c in mona["active_codes"]], ["active", "active", "active", "not_started"])
+		self.assertEqual(self.codes(mona["inactive_codes"]), ["OFF", "USED", "EXP1", "EXP2"])
+		self.assertEqual(
+			[c["status"] for c in mona["inactive_codes"]], ["disabled", "used_up", "expired", "expired"]
+		)
+		used = mona["inactive_codes"][1]
+		self.assertEqual((used["times_used"], used["remaining_uses"], used["customer_times_used"]), (1, 0, 1))
+
+	def test_inactive_codes_capped_at_ten(self):
+		self.site.add_customer("Mona Ali")
+		for i in range(12):
+			self.site.promos[f"OLD{i:02d}"] = _promo(
+				f"OLD{i:02d}", customer="Mona Ali", active_to=NOW - datetime.timedelta(days=i + 1)
+			)
+		mona = self.entry(self.find("Mona"), "Mona Ali")
+		self.assertEqual(self.codes(mona["inactive_codes"]), [f"OLD{i:02d}" for i in range(10)])
+
+	def test_public_code_hidden_once_the_customer_used_their_share(self):
+		self.site.add_customer("Mona Ali", mobile_no="01000000001")
+		self.site.add_customer("Sara Adel", mobile_no="01000000002")
+		self.site.add_customer("Zed", mobile_no="01000000077")
+		self.site.promos.update(
+			{
+				"PUB1": _promo("PUB1", per_customer_limit=1),
+				"PUB2": _promo("PUB2"),
+				"PUBX": _promo("PUBX", active_to=EARLIER),
+				"PUBOFF": _promo("PUBOFF", enabled=0),
+				"LOCKED": _promo("LOCKED", customer="Zed"),
+			}
+		)
+		self.site.redeem("PUB1", "SI-1", customer="Mona Ali")
+		self.site.redeem("PUB1", "SI-2", customer="Sara Adel", status="Reversed")
+
+		mona = self.entry(self.find("Mona"), "Mona Ali")
+		self.assertEqual(self.codes(mona["public_codes"]), ["PUB2"])
+		pub2 = mona["public_codes"][0]
+		self.assertFalse(pub2["personal"])
+		self.assertIsNone(pub2["customer_remaining_uses"])
+
+		sara = self.entry(self.find("Sara"), "Sara Adel")
+		self.assertEqual(self.codes(sara["public_codes"]), ["PUB1", "PUB2"])
+		pub1 = sara["public_codes"][0]
+		self.assertEqual((pub1["times_used"], pub1["customer_times_used"], pub1["customer_remaining_uses"]), (1, 0, 1))
+
+	def test_used_codes_rows_include_reversed(self):
+		self.site.add_customer("Mona Ali", mobile_no="01000000001")
+		self.site.add_customer("Sara Adel", mobile_no="01000000002")
+		self.site.promos["BACK1"] = _promo("BACK1", customer="Mona Ali")
+		self.site.promos["PUB1"] = _promo("PUB1")
+		self.site.add_order("SI-1", "Mona Ali", datetime.date(2026, 10, 31), woo=20240, grand_total=510.0)
+		self.site.add_order("SI-2", "Mona Ali", datetime.date(2026, 11, 2), grand_total=300.0)
+		self.site.redeem("BACK1", "SI-1", customer="Mona Ali", creation="2026-10-31 12:00:00", discount=90.0)
+		self.site.redeem(
+			"PUB1", "SI-2", customer="Mona Ali", status="Reversed", creation="2026-11-02 12:00:00", discount=30.0
+		)
+		self.site.redeem(
+			"PUB1", "SI-GONE", customer="Mona Ali", creation="2026-11-03 09:00:00", woo="21999", discount=25.0
+		)
+		self.site.redeem("PUB1", "SI-9", customer="Sara Adel", creation="2026-11-04 09:00:00")
+
+		mona = self.entry(self.find("Mona"), "Mona Ali")
+		self.assertEqual(
+			mona["used_codes"],
+			[
+				{
+					"code": "PUB1", "invoice": "SI-GONE", "woo_order_id": 21999, "date": "2026-11-03",
+					"status": "Active", "discount": 25.0, "order_total": None,
+				},
+				{
+					"code": "PUB1", "invoice": "SI-2", "woo_order_id": None, "date": "2026-11-02",
+					"status": "Reversed", "discount": 30.0, "order_total": 300.0,
+				},
+				{
+					"code": "BACK1", "invoice": "SI-1", "woo_order_id": 20240, "date": "2026-10-31",
+					"status": "Active", "discount": 90.0, "order_total": 510.0,
+				},
+			],
+		)
+
+	def test_used_codes_capped_at_twenty(self):
+		self.site.add_customer("Mona Ali")
+		self.site.promos["PUB1"] = _promo("PUB1")
+		for i in range(25):
+			self.site.redeem("PUB1", f"SI-{i}", customer="Mona Ali", creation=f"2026-10-{i + 1:02d} 10:00:00")
+		used = self.entry(self.find("Mona"), "Mona Ali")["used_codes"]
+		self.assertEqual(len(used), 20)
+		self.assertEqual(used[0]["invoice"], "SI-24")
+
+	def test_code_summary_shape_scope_and_channels(self):
+		self.site.add_customer("Mona Ali", mobile_no="01000000001")
+		self.site.item_names = {"LOTUS-L": "Lotus Large Jar"}
+		self.site.promos["BACK1"] = _promo(
+			"BACK1",
+			customer="Mona Ali",
+			title="Win-back one",
+			discount_value=15,
+			max_discount_amount=100,
+			min_order_amount=400,
+			applies_to="Specific Items",
+			item_scope=[SimpleNamespace(scope_type="Item", item_code="LOTUS-L", item_group=None)],
+			channels=[SimpleNamespace(channel="Woo"), SimpleNamespace(channel="flutter")],
+			usage_limit=1,
+			per_customer_limit=1,
+			active_from=datetime.datetime(2026, 10, 31, 0, 3, 4),
+			active_to=datetime.datetime(2026, 11, 30, 0, 3, 4),
+			woo_coupon_code="back1",
+			woo_coupon_id="555",
+		)
+		self.site.clear_logs()
+		out = self.find("Mona")
+		mona = self.entry(out, "Mona Ali")
+		self.assertEqual(set(mona), _ENTRY_KEYS)
+		code = mona["active_codes"][0]
+		self.assertEqual(set(code), _SUMMARY_KEYS)
+		self.assertEqual(code["scope"], [{"type": "Item", "name": "LOTUS-L", "label": "Lotus Large Jar"}])
+		self.assertEqual(code["channels"], ["woo", "flutter"])
+		self.assertEqual(code["active_from"], "2026-10-31 00:03:04")
+		self.assertEqual(code["active_to"], "2026-11-30 00:03:04")
+		self.assertEqual((code["remaining_uses"], code["customer_remaining_uses"]), (1, 1))
+		self.assertTrue(code["on_website"])
+		self.assertEqual(code["woo_coupon_code"], "back1")
+		# Batched: no per-code Item lookups and no per-code get_doc.
+		self.assertNotIn("Item", self.site.get_value_log)
+		self.assertEqual(self.site.get_doc_calls, [])
+
+	def test_query_count_does_not_grow_with_customers(self):
+		def add(i):
+			name = f"Nour {i}"
+			self.site.add_customer(name, mobile_no=f"0100000{i:04d}")
+			self.site.promos[f"N{i}A"] = _promo(f"N{i}A", customer=name)
+			self.site.promos[f"N{i}B"] = _promo(f"N{i}B", customer_phone=f"+20100000{i:04d}")
+			self.site.add_order(f"SI-N{i}", name, datetime.date(2026, 11, 1), woo=1000 + i)
+			self.site.redeem(f"N{i}A", f"SI-N{i}", customer=name)
+
+		def calls():
+			self.site.clear_logs()
+			out = self.find("Nour")
+			return len(out["customers"]), len(self.site.sql_log) + len(self.site.get_all_log) + len(
+				self.site.get_value_log
+			)
+
+		add(1)
+		add(2)
+		few, few_calls = calls()
+		for i in range(3, 9):
+			add(i)
+		many, many_calls = calls()
+		self.assertEqual((few, many), (2, 8))
+		self.assertEqual(few_calls, many_calls)

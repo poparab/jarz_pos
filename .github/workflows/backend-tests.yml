@@ -845,7 +845,11 @@ jobs:
             # no site: status precedence (disabled > not started > expired > used
             # up), scope labels, remaining uses from Active redemptions, and the
             # order check run through the real engine with the before_validate
-            # hook's channel / pickup rules, never saving the invoice.
+            # hook's channel / pickup rules, never saving the invoice. Also the
+            # customer lookup (feature promo-customer-lookup): phone vs name
+            # mode, personal codes by customer or phone key, phone-only pseudo
+            # customers, active/inactive split, per-customer public-code limit,
+            # used-code rows, and a query count that does not grow per customer.
             test_promo_lookup
           )
           rc=0
