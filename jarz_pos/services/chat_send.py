@@ -8,8 +8,10 @@ tested without Meta or a database:
 
 * **WhatsApp**: free text only inside the 24-hour window. After it a template
   message is needed, which this inbox does not send.
-* **Messenger / Instagram DM**: inside 24 hours a normal reply; from 24 hours to
-  7 days a reply tagged ``HUMAN_AGENT``; after 7 days nothing.
+* **Messenger / Instagram DM**: inside 24 hours a normal reply. From 24 hours to
+  7 days a reply tagged ``HUMAN_AGENT``, but only while
+  :data:`HUMAN_AGENT_APPROVED` is set. Meta refused that permission in App Review
+  (Nov 2026), so for now nothing goes out after 24 hours.
 * **Comments**: the first reply is a private (DM) reply, which Meta allows once
   per comment within 7 days; later replies, or any reply once the private window
   has closed, go public under the comment.
@@ -33,6 +35,10 @@ MAX_TEXT = 4096
 CHANNEL_MAX_TEXT = {cc.MESSENGER: 2000, cc.INSTAGRAM: 1000}
 HUMAN_AGENT_DAYS = 7
 DM_HOURS = 24
+#: Meta's Human Agent permission. It was refused in App Review, so any DM sent after
+#: 24 hours fails at Meta. The inbox refuses it first, with a reason staff can act
+#: on. Set to True once Meta approves it.
+HUMAN_AGENT_APPROVED = False
 
 ROUTE_WA = "wa_text"
 ROUTE_DM = "dm"
@@ -46,8 +52,14 @@ def decide_send_route(
 	window_expires_at: Any,
 	last_inbound_at: Any,
 	private_reply_sent: Any,
+	human_agent: bool | None = None,
 ) -> dict[str, Any]:
-	"""``{ok, route, tag, error}``. ``error`` is a code, see :func:`_route_error`."""
+	"""``{ok, route, tag, error}``. ``error`` is a code, see :func:`_route_error`.
+
+	``human_agent`` defaults to :data:`HUMAN_AGENT_APPROVED`.
+	"""
+	if human_agent is None:
+		human_agent = HUMAN_AGENT_APPROVED
 	expires = cc.to_dt(window_expires_at)
 	last_in = cc.to_dt(last_inbound_at)
 	if channel == cc.WHATSAPP:
@@ -60,6 +72,8 @@ def decide_send_route(
 		age = now - last_in
 		if age < _dt.timedelta(hours=DM_HOURS):
 			return {"ok": True, "route": ROUTE_DM, "tag": None, "error": None}
+		if not human_agent:
+			return {"ok": False, "route": None, "tag": None, "error": "dm_24h_closed"}
 		if age < _dt.timedelta(days=HUMAN_AGENT_DAYS):
 			return {"ok": True, "route": ROUTE_DM, "tag": "HUMAN_AGENT", "error": None}
 		return {"ok": False, "route": None, "tag": None, "error": "dm_window_closed"}
@@ -73,6 +87,12 @@ def decide_send_route(
 def _route_error(code: str | None) -> str:
 	if code == "wa_window_closed":
 		return _("The 24-hour WhatsApp window has closed. A template message is needed.")
+	if code == "dm_24h_closed":
+		return _(
+			"More than 24 hours have passed since the customer's last message, so Meta does not "
+			"allow a reply from Jarz. Reply from Meta Business Suite (Messenger) or the Instagram "
+			"app, or wait for the customer to write again."
+		)
 	if code == "dm_window_closed":
 		return _("The 7-day reply window has closed. The customer has to message first.")
 	if code == "no_inbound":

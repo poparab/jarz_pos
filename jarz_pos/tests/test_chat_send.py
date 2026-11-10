@@ -1,7 +1,8 @@
 """Chat inbox send rules (services/chat_send.py) -- pure functions, no site.
 
 Pins the reply-window decision per channel (WhatsApp 24h then template only;
-Messenger / Instagram 24h, then the HUMAN_AGENT tag up to 7 days; a comment
+Messenger / Instagram 24h, then the HUMAN_AGENT tag up to 7 days only when that
+permission is approved, otherwise nothing after 24h; a comment
 gets one private reply while its window is open, then public replies) and the
 per-channel text limits. Needs no chat table: it runs before ``bench migrate``
 in CI. Plain ``unittest.TestCase``; a stub ``frappe`` is registered when
@@ -51,8 +52,8 @@ H = datetime.timedelta(hours=1)
 D = datetime.timedelta(days=1)
 
 
-def route(channel, expires=None, last_in=None, private_sent=0):
-	return s.decide_send_route(channel, NOW, expires, last_in, private_sent)
+def route(channel, expires=None, last_in=None, private_sent=0, human_agent=None):
+	return s.decide_send_route(channel, NOW, expires, last_in, private_sent, human_agent)
 
 
 class WhatsAppRouteTest(unittest.TestCase):
@@ -77,16 +78,28 @@ class DirectMessageRouteTest(unittest.TestCase):
 			r = route(channel, last_in=NOW - 23 * H)
 			self.assertEqual((r["ok"], r["route"], r["tag"]), (True, s.ROUTE_DM, None), channel)
 
+	def test_human_agent_is_off_until_meta_approves(self):
+		self.assertFalse(s.HUMAN_AGENT_APPROVED)
+
+	def test_after_24h_is_refused_without_human_agent(self):
+		for channel in (cc.MESSENGER, cc.INSTAGRAM):
+			for age in (24 * H, 3 * D, 8 * D):
+				r = route(channel, last_in=NOW - age)
+				self.assertEqual((r["ok"], r["tag"], r["error"]), (False, None, "dm_24h_closed"), channel)
+
+	def test_refusal_reason_tells_staff_where_to_reply(self):
+		self.assertIn("Business Suite", s._route_error("dm_24h_closed"))
+
 	def test_day_two_to_seven_uses_human_agent_tag(self):
 		for channel in (cc.MESSENGER, cc.INSTAGRAM):
-			r = route(channel, last_in=NOW - 3 * D)
+			r = route(channel, last_in=NOW - 3 * D, human_agent=True)
 			self.assertEqual((r["ok"], r["route"], r["tag"]), (True, s.ROUTE_DM, "HUMAN_AGENT"), channel)
-			r = route(channel, last_in=NOW - 24 * H)
+			r = route(channel, last_in=NOW - 24 * H, human_agent=True)
 			self.assertEqual(r["tag"], "HUMAN_AGENT", channel)
 
 	def test_after_seven_days_is_closed(self):
 		for channel in (cc.MESSENGER, cc.INSTAGRAM):
-			r = route(channel, last_in=NOW - 7 * D)
+			r = route(channel, last_in=NOW - 7 * D, human_agent=True)
 			self.assertEqual((r["ok"], r["error"]), (False, "dm_window_closed"), channel)
 
 	def test_no_inbound_message_yet(self):
