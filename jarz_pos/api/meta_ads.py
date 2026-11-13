@@ -58,6 +58,8 @@ METRIC_KEYS = (
 	"erp_orders",
 	"erp_revenue",
 	"erp_roas",
+	"blended_revenue",
+	"blended_roas",
 )
 INSIGHT_FIELDS = ",".join(
 	[
@@ -106,8 +108,12 @@ def _ratio(numerator, denominator, scale=1.0) -> float:
 	return (numerator / denominator * scale) if denominator else 0.0
 
 
-def derive(m: dict) -> dict:
-	"""Fill the ratio metrics from the base counts and round. Never null, 0 on a zero denominator."""
+def derive(m: dict, blended_scale=0.0) -> dict:
+	"""Fill the ratio metrics from the base counts and round. Never null, 0 on a zero denominator.
+
+	``blended_scale`` (k = real retail sales / account-wide Meta purchase value) shares the
+	real sales out by Meta purchase value: ``blended_revenue`` = purchase_value x k.
+	"""
 	spend = num(m.get("spend"))
 	impressions = num(m.get("impressions"))
 	reach = num(m.get("reach"))
@@ -116,6 +122,7 @@ def derive(m: dict) -> dict:
 	value = num(m.get("purchase_value"))
 	erp_orders = num(m.get("erp_orders"))
 	erp_revenue = num(m.get("erp_revenue"))
+	blended_revenue = value * num(blended_scale)
 	return {
 		"spend": round(spend, 2),
 		"impressions": int(impressions),
@@ -132,6 +139,8 @@ def derive(m: dict) -> dict:
 		"erp_orders": int(erp_orders),
 		"erp_revenue": round(erp_revenue, 2),
 		"erp_roas": round(_ratio(erp_revenue, spend), 2),
+		"blended_revenue": round(blended_revenue, 2),
+		"blended_roas": round(_ratio(blended_revenue, spend), 2),
 	}
 
 
@@ -240,7 +249,7 @@ def aggregate_erp(level: str, ad_rows: list, allocation: dict) -> dict:
 	return {k: (v[0], v[1]) for k, v in out.items()}
 
 
-def build_rows(level: str, insight_rows: list, erp_by_entity: dict, meta: dict) -> list:
+def build_rows(level: str, insight_rows: list, erp_by_entity: dict, meta: dict, blended_scale=0.0) -> list:
 	"""Final response rows: only entities that delivered, metrics derived, sorted by spend."""
 	out = []
 	for raw in insight_rows:
@@ -263,7 +272,7 @@ def build_rows(level: str, insight_rows: list, erp_by_entity: dict, meta: dict) 
 			"adset_name": raw.get("adset_name") if level != "campaign" else None,
 			"thumbnail_url": info.get("thumbnail_url") if level == "ad" else None,
 		}
-		row.update(derive(base))
+		row.update(derive(base, blended_scale))
 		out.append(row)
 	out.sort(key=lambda r: (-r["spend"], str(r["id"])))
 	return out
@@ -326,6 +335,7 @@ def ad_rows_from_insights(raw_rows: list) -> list:
 				"campaign_id": raw.get("campaign_id"),
 				"campaign_name": raw.get("campaign_name"),
 				"spend": base["spend"],
+				"purchase_value": base["purchase_value"],
 			}
 		)
 	return out
@@ -510,14 +520,24 @@ BLENDED_NOTE = (
 	"Blended ROAS counts every website and in-shop/chat sale in the period against all Meta spend; "
 	"B2B, staff, samples, Talabat and orders after a WhatsApp follow-up are left out."
 )
+BLENDED_ROW_NOTE = (
+	"Per-row Blended ROAS shares the real retail sales out in proportion to Meta's purchase value; "
+	"it is an estimate, not a per-ad count."
+)
 
 
-def summarise_blended(rows: list, spend) -> dict:
+def blended_scale(revenue, meta_purchase_value) -> float:
+	"""k = real retail sales / account-wide Meta purchase value; 0 when Meta's value is 0."""
+	return _ratio(num(revenue), num(meta_purchase_value))
+
+
+def summarise_blended(rows: list, spend, meta_purchase_value=0.0) -> dict:
 	"""The ``blended`` object from rows of ``{channel, followup, orders, revenue}``.
 
 	Each invoice lands in exactly one group: b2b/staff/samples/talabat/partner keep their
 	own group even after a follow-up; only website/pos sales move to ``whatsapp_followup``.
-	All keys always present, zeros allowed, never null.
+	``meta_purchase_value`` is Meta's account-wide purchase value for the range (unfiltered),
+	from which ``scale`` is derived. All keys always present, zeros allowed, never null.
 	"""
 	acc = {g: [0, 0.0] for g in BLENDED_INCLUDED + BLENDED_EXCLUDED}
 	for r in rows or []:
@@ -532,6 +552,7 @@ def summarise_blended(rows: list, spend) -> dict:
 		acc[group][1] += num(r.get("revenue"))
 
 	spend = num(spend)
+	meta_value = num(meta_purchase_value)
 	orders = sum(acc[g][0] for g in BLENDED_INCLUDED)
 	revenue = sum(acc[g][1] for g in BLENDED_INCLUDED)
 
@@ -546,6 +567,8 @@ def summarise_blended(rows: list, spend) -> dict:
 		"avg_order_value": round(_ratio(revenue, orders), 2),
 		"included": items(BLENDED_INCLUDED),
 		"excluded": items(BLENDED_EXCLUDED),
+		"scale": round(blended_scale(revenue, meta_value), 4),
+		"meta_purchase_value": round(meta_value, 2),
 	}
 
 
@@ -695,6 +718,26 @@ def build_report(
 	allocation = allocate_erp(scoped_ads, erp_by_name)
 	erp_by_entity = aggregate_erp(level, scoped_ads, allocation)
 
+	# Blended ROAS is account-wide: spend and Meta purchase value come from the UNFILTERED
+	# ad rows, whatever the filters, so a filtered view gets its true share of real sales.
+	try:
+		blended_rows = blended_fetch(start, end) if blended_fetch else []
+		blended_notes = [BLENDED_NOTE, BLENDED_ROW_NOTE]
+	except Exception:
+		blended_rows = []
+		blended_notes = ["Blended ROAS is 0: the sales lookup failed (see Error Log)."]
+		try:
+			frappe.log_error(title="Meta Ads blended ROAS lookup failed", message=frappe.get_traceback())
+		except Exception:
+			pass
+	blended = summarise_blended(
+		blended_rows,
+		sum(num(a.get("spend")) for a in ad_rows),
+		sum(num(a.get("purchase_value")) for a in ad_rows),
+	)
+	# Full precision for the rows (blended["scale"] is rounded for display); 0 on a failed lookup.
+	scale = blended_scale(blended["revenue"], blended["meta_purchase_value"])
+
 	if level == "ad":
 		level_raw = [r for r in ad_raw if matches_filters(r, campaign_id, adset_id)]
 	else:
@@ -707,7 +750,7 @@ def build_report(
 
 	level_ids = [r.get(f"{level}_id") for r in level_raw if has_delivery(parse_insight_row(r))]
 	meta = fetch_entity_meta(session_get, base_url, account, token, level, level_ids, with_creative=(level == "ad"))
-	rows = build_rows(level, level_raw, erp_by_entity, meta)
+	rows = build_rows(level, level_raw, erp_by_entity, meta, scale)
 
 	# Filters: campaigns/ad sets with delivery, independent of the campaign filter.
 	filter_status = {}
@@ -722,18 +765,7 @@ def build_report(
 	if level != "ad" and len(rows) > 1:
 		notes.append("Total reach adds up each row's reach, so people seen in several rows are counted more than once.")
 
-	# Blended ROAS is account-wide: spend from the unfiltered ad rows, whatever the filters.
-	try:
-		blended_rows = blended_fetch(start, end) if blended_fetch else []
-		notes.append(BLENDED_NOTE)
-	except Exception:
-		blended_rows = []
-		notes.append("Blended ROAS is 0: the sales lookup failed (see Error Log).")
-		try:
-			frappe.log_error(title="Meta Ads blended ROAS lookup failed", message=frappe.get_traceback())
-		except Exception:
-			pass
-	blended = summarise_blended(blended_rows, sum(num(a.get("spend")) for a in ad_rows))
+	notes.extend(blended_notes)
 
 	currency = next((r.get("account_currency") for r in ad_raw if r.get("account_currency")), "EGP")
 	return {
@@ -743,7 +775,7 @@ def build_report(
 		"date_to": str(end),
 		"currency": currency,
 		"fetched_at": _cairo_now().strftime("%Y-%m-%d %H:%M:%S"),
-		"totals": derive(totals_base),
+		"totals": derive(totals_base, scale),
 		"rows": rows,
 		"filters": filters,
 		"blended": blended,

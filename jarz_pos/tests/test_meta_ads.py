@@ -367,9 +367,11 @@ class BlendedTest(unittest.TestCase):
 	def test_empty_is_all_zero_keys(self):
 		b = m.summarise_blended([], 0)
 		self.assertEqual(
-			set(b), {"spend", "orders", "revenue", "roas", "avg_order_value", "included", "excluded"}
+			set(b),
+			{"spend", "orders", "revenue", "roas", "avg_order_value", "included", "excluded", "scale", "meta_purchase_value"},
 		)
 		self.assertEqual((b["spend"], b["orders"], b["revenue"], b["roas"], b["avg_order_value"]), (0, 0, 0, 0, 0))
+		self.assertEqual((b["scale"], b["meta_purchase_value"]), (0, 0))
 		self.assertEqual(len(b["included"]), 2)
 		self.assertEqual(len(b["excluded"]), 6)
 		self.assertTrue(all(g["orders"] == 0 and g["revenue"] == 0 for g in b["included"] + b["excluded"]))
@@ -458,6 +460,98 @@ class BlendedTest(unittest.TestCase):
 			)
 		self.assertEqual(rep["blended"]["orders"], 0)
 		self.assertTrue(any("Blended ROAS is 0" in n for n in rep["notes"]))
+
+
+class BlendedRowsTest(unittest.TestCase):
+	"""Per-row Blended ROAS: real retail sales shared out by Meta purchase value."""
+
+	@staticmethod
+	def _ad_rows():
+		# a1: pv 900 (c1/s1), a2: pv 0 (c1/s1), a9: pv 600 (c2/s9). Account-wide Meta pv = 1500.
+		return [dict(r) for r in BuildReportTest.AD_ROWS] + [
+			{"campaign_id": "c2", "campaign_name": "WA", "adset_id": "s9", "adset_name": "Other",
+			 "ad_id": "a9", "ad_name": "Wa", "spend": "250", "impressions": "2500",
+			 "action_values": [{"action_type": "omni_purchase", "value": "600"}]},
+		]
+
+	CAMPAIGN_ROWS = [
+		{"campaign_id": "c1", "campaign_name": "Camp", "spend": "150", "impressions": "1500",
+		 "action_values": [{"action_type": "omni_purchase", "value": "900"}]},
+		{"campaign_id": "c2", "campaign_name": "WA", "spend": "250", "impressions": "2500",
+		 "action_values": [{"action_type": "omni_purchase", "value": "600"}]},
+	]
+
+	@staticmethod
+	def _sales(revenue):
+		return lambda s, e: [{"channel": "pos", "followup": 0, "orders": 4, "revenue": revenue}]
+
+	def _report(self, level="ad", level_rows=None, ad_rows=None, blended_fetch=None, **filters):
+		get, _calls = BuildReportTest()._graph(ad_rows or self._ad_rows(), level_rows)
+		return m.build_report(
+			get, BuildReportTest.SETTINGS, lambda n, s, e: {}, level, date(2026, 11, 1), date(2026, 11, 7),
+			blended_fetch=blended_fetch, **filters,
+		)
+
+	def test_derive_applies_scale(self):
+		d = m.derive({"spend": 100, "purchase_value": 900}, 0.5)
+		self.assertEqual((d["blended_revenue"], d["blended_roas"]), (450.0, 4.5))
+		d = m.derive({"spend": 0, "purchase_value": 900}, 0.5)
+		self.assertEqual((d["blended_revenue"], d["blended_roas"]), (450.0, 0))
+		d = m.derive({"spend": 100, "purchase_value": 900})
+		self.assertEqual((d["blended_revenue"], d["blended_roas"]), (0, 0))
+
+	def test_scale_uses_unfiltered_purchase_value_even_when_filtered(self):
+		rep = self._report(campaign_id="c1", adset_id="s1", blended_fetch=self._sales(800))
+		b = rep["blended"]
+		# k = 800 / 1500 (all ads), not 800 / 900 (the filtered ads).
+		self.assertEqual(b["meta_purchase_value"], 1500.0)
+		self.assertEqual(b["scale"], 0.5333)
+		rows = {r["id"]: r for r in rep["rows"]}
+		self.assertEqual(set(rows), {"a1", "a2"})
+		self.assertEqual((rows["a1"]["blended_revenue"], rows["a1"]["blended_roas"]), (480.0, 4.8))
+		self.assertEqual((rows["a2"]["blended_revenue"], rows["a2"]["blended_roas"]), (0, 0))
+		self.assertEqual((rep["totals"]["blended_revenue"], rep["totals"]["blended_roas"]), (480.0, 3.2))
+		self.assertIn(m.BLENDED_ROW_NOTE, rep["notes"])
+
+	def test_campaign_level_rows_carry_blended(self):
+		rep = self._report("campaign", self.CAMPAIGN_ROWS, blended_fetch=self._sales(800))
+		rows = {r["id"]: r for r in rep["rows"]}
+		self.assertEqual((rows["c1"]["blended_revenue"], rows["c1"]["blended_roas"]), (480.0, 3.2))
+		self.assertEqual((rows["c2"]["blended_revenue"], rows["c2"]["blended_roas"]), (320.0, 1.28))
+
+	def test_unfiltered_rows_sum_to_blended_revenue(self):
+		for level, level_rows in (("ad", None), ("campaign", self.CAMPAIGN_ROWS)):
+			rep = self._report(level, level_rows, blended_fetch=self._sales(97356.37))
+			total = sum(r["blended_revenue"] for r in rep["rows"])
+			self.assertAlmostEqual(total, rep["blended"]["revenue"], delta=0.02, msg=level)
+			self.assertAlmostEqual(rep["totals"]["blended_revenue"], rep["blended"]["revenue"], delta=0.01, msg=level)
+			self.assertTrue(all(set(m.METRIC_KEYS) <= set(r) for r in rep["rows"]))
+
+	def test_zero_purchase_value_gives_zero_scale(self):
+		rows = [dict(r) for r in BuildReportTest.AD_ROWS]
+		rows[0].pop("action_values")
+		rep = self._report(ad_rows=rows, blended_fetch=self._sales(800))
+		self.assertEqual((rep["blended"]["scale"], rep["blended"]["meta_purchase_value"]), (0, 0))
+		self.assertEqual(rep["blended"]["revenue"], 800.0)
+		self.assertTrue(all(r["blended_revenue"] == 0 and r["blended_roas"] == 0 for r in rep["rows"]))
+		self.assertEqual(rep["totals"]["blended_revenue"], 0)
+
+	def test_failed_lookup_gives_zero_scale(self):
+		def boom(s, e):
+			raise RuntimeError("db down")
+
+		with mock.patch.object(m.frappe, "log_error", create=True), \
+				mock.patch.object(m.frappe, "get_traceback", create=True, return_value="tb"):
+			rep = self._report(blended_fetch=boom)
+		self.assertEqual(rep["blended"]["scale"], 0)
+		self.assertEqual(rep["blended"]["meta_purchase_value"], 1500.0)
+		self.assertTrue(all(r["blended_revenue"] == 0 and r["blended_roas"] == 0 for r in rep["rows"]))
+		self.assertNotIn(m.BLENDED_ROW_NOTE, rep["notes"])
+
+	def test_empty_response_has_blended_keys(self):
+		rep = m._empty_response(False, "ad", date(2026, 11, 1), date(2026, 11, 7), [])
+		self.assertEqual((rep["totals"]["blended_revenue"], rep["totals"]["blended_roas"]), (0, 0))
+		self.assertEqual((rep["blended"]["scale"], rep["blended"]["meta_purchase_value"]), (0, 0))
 
 
 class FakeClock:
