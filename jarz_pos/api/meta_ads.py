@@ -497,6 +497,115 @@ def fetch_erp_by_name(names: list, start: date, end: date) -> dict | None:
 	return out
 
 
+# -- blended ROAS (every retail sale vs all Meta spend) -----------------------------
+
+#: Included in blended ROAS, in response order. ``woo`` channel -> ``website``.
+BLENDED_INCLUDED = ("website", "pos")
+#: Left out of blended ROAS, in response order.
+BLENDED_EXCLUDED = ("whatsapp_followup", "b2b", "staff", "samples", "talabat", "partner")
+_CHANNEL_TO_GROUP = {"woo": "website", "pos": "pos"}
+FOLLOWUP_TOUCH_DOCTYPE = "Jarz Follow-up Touch"
+FALLBACK_FOLLOWUP_WINDOW_DAYS = 30
+BLENDED_NOTE = (
+	"Blended ROAS counts every website and in-shop/chat sale in the period against all Meta spend; "
+	"B2B, staff, samples, Talabat and orders after a WhatsApp follow-up are left out."
+)
+
+
+def summarise_blended(rows: list, spend) -> dict:
+	"""The ``blended`` object from rows of ``{channel, followup, orders, revenue}``.
+
+	Each invoice lands in exactly one group: b2b/staff/samples/talabat/partner keep their
+	own group even after a follow-up; only website/pos sales move to ``whatsapp_followup``.
+	All keys always present, zeros allowed, never null.
+	"""
+	acc = {g: [0, 0.0] for g in BLENDED_INCLUDED + BLENDED_EXCLUDED}
+	for r in rows or []:
+		channel = str(r.get("channel") or "").strip().lower()
+		if channel in _CHANNEL_TO_GROUP:
+			group = "whatsapp_followup" if num(r.get("followup")) else _CHANNEL_TO_GROUP[channel]
+		elif channel in acc:
+			group = channel
+		else:
+			continue
+		acc[group][0] += int(num(r.get("orders")))
+		acc[group][1] += num(r.get("revenue"))
+
+	spend = num(spend)
+	orders = sum(acc[g][0] for g in BLENDED_INCLUDED)
+	revenue = sum(acc[g][1] for g in BLENDED_INCLUDED)
+
+	def items(groups):
+		return [{"group": g, "orders": int(acc[g][0]), "revenue": round(acc[g][1], 2)} for g in groups]
+
+	return {
+		"spend": round(spend, 2),
+		"orders": int(orders),
+		"revenue": round(revenue, 2),
+		"roas": round(_ratio(revenue, spend), 2),
+		"avg_order_value": round(_ratio(revenue, orders), 2),
+		"included": items(BLENDED_INCLUDED),
+		"excluded": items(BLENDED_EXCLUDED),
+	}
+
+
+def blended_sql(channel_expr: str, with_followup: bool, window_days: int) -> str:
+	"""One query: submitted, non-return invoices in the range grouped by (channel, follow-up flag).
+
+	The follow-up flag is 1 when the same customer had a WhatsApp follow-up that was sent
+	(``Done`` with a message id) in the ``window_days`` before the invoice was created --
+	the same window the Follow-up Results page credits orders with.
+	"""
+	if with_followup:
+		followup = f"""EXISTS (
+			SELECT 1 FROM `tab{FOLLOWUP_TOUCH_DOCTYPE}` t
+			WHERE t.customer = si.customer
+				AND t.status = 'Done'
+				AND IFNULL(t.wa_message_id, '') != ''
+				AND t.done_at >= DATE_SUB(si.creation, INTERVAL {int(window_days)} DAY)
+				AND t.done_at < si.creation
+		)"""
+	else:
+		followup = "0"
+	return f"""
+		SELECT {channel_expr} AS channel, ({followup}) AS followup,
+			COUNT(*) AS orders, COALESCE(SUM(si.grand_total), 0) AS revenue
+		FROM `tabSales Invoice` si
+		WHERE si.docstatus = 1 AND si.is_return = 0
+			AND si.posting_date BETWEEN %(start)s AND %(end)s
+		GROUP BY 1, 2
+	"""
+
+
+def _channel_expr() -> str:
+	from jarz_pos.api.ops_reports import _channel_sql
+
+	return _channel_sql("si")
+
+
+def _followup_window_days() -> int:
+	try:
+		from jarz_pos.services.customer_followups import ORDER_WINDOW_DAYS
+
+		return int(ORDER_WINDOW_DAYS)
+	except Exception:
+		return FALLBACK_FOLLOWUP_WINDOW_DAYS
+
+
+def _followup_available() -> bool:
+	if not frappe.db.exists("DocType", FOLLOWUP_TOUCH_DOCTYPE):
+		return False
+	return all(
+		frappe.db.has_column(FOLLOWUP_TOUCH_DOCTYPE, col) for col in ("customer", "status", "wa_message_id", "done_at")
+	)
+
+
+def fetch_blended(start: date, end: date) -> list:
+	"""Rows of ``{channel, followup, orders, revenue}`` for the range (one SQL query)."""
+	sql = blended_sql(_channel_expr(), _followup_available(), _followup_window_days())
+	return frappe.db.sql(sql, {"start": start, "end": end}, as_dict=True) or []
+
+
 # -- endpoint ----------------------------------------------------------------------
 
 
@@ -549,17 +658,20 @@ def _empty_response(configured, level, start, end, notes):
 		"totals": derive({}),
 		"rows": [],
 		"filters": {"campaigns": [], "adsets": []},
+		"blended": summarise_blended([], 0),
 		"notes": notes,
 	}
 
 
 def build_report(
 	session_get, settings, erp_fetch, level, start, end, campaign_id=None, adset_id=None,
-	budget=REPORT_BUDGET_SECONDS, clock=time.monotonic,
+	budget=REPORT_BUDGET_SECONDS, clock=time.monotonic, blended_fetch=None,
 ) -> dict:
-	"""The whole report from injected collaborators (Graph GET, ERP lookup, clock).
+	"""The whole report from injected collaborators (Graph GET, ERP lookup, blended lookup, clock).
 
 	All Graph calls share one ``budget`` (seconds); see ``with_deadline``.
+	``blended_fetch(start, end)`` returns ``{channel, followup, orders, revenue}`` rows; None
+	means no blended figures (all zeros).
 	"""
 	session_get = with_deadline(session_get, budget, clock)
 	base_url = f"https://graph.facebook.com/{settings['version']}"
@@ -610,6 +722,19 @@ def build_report(
 	if level != "ad" and len(rows) > 1:
 		notes.append("Total reach adds up each row's reach, so people seen in several rows are counted more than once.")
 
+	# Blended ROAS is account-wide: spend from the unfiltered ad rows, whatever the filters.
+	try:
+		blended_rows = blended_fetch(start, end) if blended_fetch else []
+		notes.append(BLENDED_NOTE)
+	except Exception:
+		blended_rows = []
+		notes.append("Blended ROAS is 0: the sales lookup failed (see Error Log).")
+		try:
+			frappe.log_error(title="Meta Ads blended ROAS lookup failed", message=frappe.get_traceback())
+		except Exception:
+			pass
+	blended = summarise_blended(blended_rows, sum(num(a.get("spend")) for a in ad_rows))
+
 	currency = next((r.get("account_currency") for r in ad_raw if r.get("account_currency")), "EGP")
 	return {
 		"configured": True,
@@ -621,6 +746,7 @@ def build_report(
 		"totals": derive(totals_base),
 		"rows": rows,
 		"filters": filters,
+		"blended": blended,
 		"notes": notes,
 	}
 
@@ -650,7 +776,10 @@ def get_ads_report(level=None, date_from=None, date_to=None, campaign_id=None, a
 			return cached
 
 	try:
-		report = build_report(requests.get, settings, fetch_erp_by_name, level, start, end, campaign_id, adset_id)
+		report = build_report(
+			requests.get, settings, fetch_erp_by_name, level, start, end, campaign_id, adset_id,
+			blended_fetch=fetch_blended,
+		)
 	except MetaError as exc:
 		frappe.throw(_("Meta Ads: {0}").format(_scrub(exc, settings["token"])))
 	frappe.cache().set_value(key, report, expires_in_sec=CACHE_SECONDS)

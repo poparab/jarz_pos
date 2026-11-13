@@ -332,6 +332,134 @@ class BuildReportTest(unittest.TestCase):
 		self.assertTrue(any("UTM" in n for n in rep["notes"]))
 
 
+class BlendedTest(unittest.TestCase):
+	ROWS = [
+		{"channel": "woo", "followup": 0, "orders": 112, "revenue": 56150},
+		{"channel": "woo", "followup": 1, "orders": 18, "revenue": 8587},
+		{"channel": "pos", "followup": 0, "orders": 80, "revenue": 41206},
+		{"channel": "pos", "followup": 1, "orders": 19, "revenue": 12131},
+		{"channel": "b2b", "followup": 1, "orders": 5, "revenue": 9000},
+		{"channel": "b2b", "followup": 0, "orders": 20, "revenue": 20393},
+		{"channel": "staff", "followup": 0, "orders": 4, "revenue": 1106},
+		{"channel": "samples", "followup": 0, "orders": 1, "revenue": 0},
+		{"channel": "talabat", "followup": 1, "orders": 10, "revenue": 3080},
+	]
+
+	def test_groups_and_followup_precedence(self):
+		b = m.summarise_blended(self.ROWS, 23456.78)
+		self.assertEqual([g["group"] for g in b["included"]], ["website", "pos"])
+		self.assertEqual(
+			[g["group"] for g in b["excluded"]],
+			["whatsapp_followup", "b2b", "staff", "samples", "talabat", "partner"],
+		)
+		inc = {g["group"]: (g["orders"], g["revenue"]) for g in b["included"]}
+		exc = {g["group"]: (g["orders"], g["revenue"]) for g in b["excluded"]}
+		self.assertEqual(inc, {"website": (112, 56150.0), "pos": (80, 41206.0)})
+		# Only website/pos move to whatsapp_followup; b2b and talabat keep their own group.
+		self.assertEqual(exc["whatsapp_followup"], (37, 20718.0))
+		self.assertEqual(exc["b2b"], (25, 29393.0))
+		self.assertEqual(exc["talabat"], (10, 3080.0))
+		self.assertEqual(exc["partner"], (0, 0.0))
+		self.assertEqual((b["orders"], b["revenue"], b["spend"]), (192, 97356.0, 23456.78))
+		self.assertEqual(b["roas"], 4.15)
+		self.assertEqual(b["avg_order_value"], 507.06)
+
+	def test_empty_is_all_zero_keys(self):
+		b = m.summarise_blended([], 0)
+		self.assertEqual(
+			set(b), {"spend", "orders", "revenue", "roas", "avg_order_value", "included", "excluded"}
+		)
+		self.assertEqual((b["spend"], b["orders"], b["revenue"], b["roas"], b["avg_order_value"]), (0, 0, 0, 0, 0))
+		self.assertEqual(len(b["included"]), 2)
+		self.assertEqual(len(b["excluded"]), 6)
+		self.assertTrue(all(g["orders"] == 0 and g["revenue"] == 0 for g in b["included"] + b["excluded"]))
+		self.assertIsInstance(b["orders"], int)
+
+	def test_zero_denominators(self):
+		b = m.summarise_blended([{"channel": "pos", "followup": 0, "orders": 2, "revenue": 300}], 0)
+		self.assertEqual((b["roas"], b["avg_order_value"]), (0, 150.0))
+		b = m.summarise_blended([{"channel": "b2b", "followup": 0, "orders": 2, "revenue": 300}], 100)
+		self.assertEqual((b["orders"], b["roas"], b["avg_order_value"]), (0, 0, 0))
+
+	def test_sql_has_followup_exists_with_30_day_window(self):
+		sql = m.blended_sql("'pos'", True, 30)
+		self.assertIn("EXISTS", sql)
+		self.assertIn("`tabJarz Follow-up Touch`", sql)
+		self.assertIn("INTERVAL 30 DAY", sql)
+		self.assertIn("t.status = 'Done'", sql)
+		self.assertIn("wa_message_id", sql)
+		self.assertIn("t.done_at < si.creation", sql)
+		self.assertIn("si.docstatus = 1 AND si.is_return = 0", sql)
+		self.assertIn("GROUP BY 1, 2", sql)
+		self.assertNotIn("EXISTS", m.blended_sql("'pos'", False, 30))
+
+	def test_fetch_blended_uses_window_and_skips_missing_doctype(self):
+		seen = []
+		db = SimpleNamespace(
+			exists=lambda *a: True,
+			has_column=lambda *a: True,
+			sql=lambda q, params=None, as_dict=False: seen.append((q, params)) or [],
+		)
+		with mock.patch.object(m.frappe, "db", db, create=True), \
+				mock.patch.object(m, "_channel_expr", lambda: "'pos'"), \
+				mock.patch.object(m, "_followup_window_days", lambda: 30):
+			m.fetch_blended(date(2026, 11, 1), date(2026, 11, 12))
+			db.exists = lambda *a: False
+			m.fetch_blended(date(2026, 11, 1), date(2026, 11, 12))
+		self.assertIn("`tabJarz Follow-up Touch`", seen[0][0])
+		self.assertIn("INTERVAL 30 DAY", seen[0][0])
+		self.assertEqual(seen[0][1], {"start": date(2026, 11, 1), "end": date(2026, 11, 12)})
+		self.assertNotIn("Follow-up Touch", seen[1][0])
+
+	def test_window_constant_falls_back_to_30(self):
+		self.assertEqual(m._followup_window_days(), 30)
+
+	def test_report_spend_ignores_campaign_and_adset_filters(self):
+		rows = [dict(r) for r in BuildReportTest.AD_ROWS] + [
+			{"campaign_id": "c2", "campaign_name": "WA", "adset_id": "s9", "adset_name": "Other",
+			 "ad_id": "a9", "ad_name": "Wa", "spend": "250", "impressions": "2500"},
+		]
+		get, _calls = BuildReportTest()._graph(rows)
+		seen = []
+
+		def blended(s, e):
+			seen.append((s, e))
+			return [{"channel": "pos", "followup": 0, "orders": 4, "revenue": 800}]
+
+		rep = m.build_report(
+			get, BuildReportTest.SETTINGS, lambda n, s, e: {}, "ad", date(2026, 11, 1), date(2026, 11, 7),
+			campaign_id="c1", adset_id="s1", blended_fetch=blended,
+		)
+		self.assertEqual(rep["totals"]["spend"], 150)
+		self.assertEqual(rep["blended"]["spend"], 400)
+		self.assertEqual(rep["blended"]["roas"], 2.0)
+		self.assertEqual(rep["blended"]["avg_order_value"], 200.0)
+		self.assertEqual(seen, [(date(2026, 11, 1), date(2026, 11, 7))])
+		self.assertIn(m.BLENDED_NOTE, rep["notes"])
+
+	def test_report_without_blended_fetch_is_zero_shape(self):
+		get, _calls = BuildReportTest()._graph(BuildReportTest.AD_ROWS)
+		rep = m.build_report(get, BuildReportTest.SETTINGS, lambda n, s, e: {}, "ad", date(2026, 11, 1), date(2026, 11, 7))
+		self.assertEqual(rep["blended"]["spend"], 150)
+		self.assertEqual(rep["blended"]["orders"], 0)
+		self.assertEqual(len(rep["blended"]["excluded"]), 6)
+
+	def test_failed_blended_lookup_does_not_break_report(self):
+		get, _calls = BuildReportTest()._graph(BuildReportTest.AD_ROWS)
+
+		def boom(s, e):
+			raise RuntimeError("db down")
+
+		with mock.patch.object(m.frappe, "log_error", create=True), \
+				mock.patch.object(m.frappe, "get_traceback", create=True, return_value="tb"):
+			rep = m.build_report(
+				get, BuildReportTest.SETTINGS, lambda n, s, e: {}, "ad", date(2026, 11, 1), date(2026, 11, 7),
+				blended_fetch=boom,
+			)
+		self.assertEqual(rep["blended"]["orders"], 0)
+		self.assertTrue(any("Blended ROAS is 0" in n for n in rep["notes"]))
+
+
 class FakeClock:
 	def __init__(self):
 		self.now = 1000.0
@@ -482,6 +610,10 @@ class EndpointTest(unittest.TestCase):
 		self.assertFalse(rep["configured"])
 		self.assertEqual(rep["rows"], [])
 		self.assertEqual(self.build_calls, [])
+		self.assertEqual(rep["blended"], m.summarise_blended([], 0))
+		self.assertEqual(rep["blended"]["roas"], 0)
+		self.assertEqual([g["group"] for g in rep["blended"]["included"]], ["website", "pos"])
+		self.assertEqual(len(rep["blended"]["excluded"]), 6)
 
 	def test_cached_value_skips_graph_unless_refresh(self):
 		self.roles = ["Meta CAPI Manager"]
