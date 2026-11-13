@@ -3641,7 +3641,34 @@ def get_manager_dashboard_summary(company: str | None = None) -> dict[str, Any]:
 			total += bal
 		except Exception:
 			balances.append({"name": p, "title": p, "cash_account": None, "balance": 0.0})
-	return {"success": True, "branches": balances, "total_balance": total}
+
+	# Cash still out with couriers: the same net figure the Shift Monitor
+	# shows (unsettled Courier Transactions, amount minus the courier's
+	# shipping), per branch. Additive fields — an older client ignores them.
+	courier_by_profile: dict[str, float] = {}
+	courier_total = 0.0
+	try:
+		from jarz_pos.services.courier_carry import get_carried_balances
+
+		carried = get_carried_balances(list(profiles))
+		for group in carried.get("couriers") or []:
+			prof = str(group.get("pos_profile") or "")
+			courier_by_profile[prof] = flt(courier_by_profile.get(prof, 0.0) + flt(group.get("net_balance")))
+		courier_total = flt(carried.get("total_net_balance"))
+	except Exception:
+		courier_by_profile, courier_total = {}, 0.0
+	for row in balances:
+		courier_bal = flt(courier_by_profile.get(row["name"], 0.0))
+		row["courier_balance"] = courier_bal
+		row["combined_balance"] = flt(flt(row.get("balance")) + courier_bal)
+
+	return {
+		"success": True,
+		"branches": balances,
+		"total_balance": total,
+		"total_courier_balance": courier_total,
+		"total_combined_balance": flt(total + courier_total),
+	}
 
 
 @frappe.whitelist(allow_guest=False)

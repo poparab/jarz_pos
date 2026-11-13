@@ -61,6 +61,15 @@ class TestManagerAPI(unittest.TestCase):
 		self.assertTrue(result.get("success"), "Should return success=True")
 		self.assertIn("branches", result, "Should include branches")
 		self.assertIn("total_balance", result, "Should include total_balance")
+		if result.get("branches"):
+			self.assertIn("total_courier_balance", result)
+			self.assertAlmostEqual(
+				result["total_combined_balance"],
+				result["total_balance"] + result["total_courier_balance"],
+				places=2,
+			)
+			for branch in result["branches"]:
+				self.assertIn("courier_balance", branch)
 
 		# Verify branches structure
 		self.assertIsInstance(result["branches"], list, "Branches should be a list")
