@@ -121,5 +121,46 @@ class TestSubassemblySplit(unittest.TestCase):
 		self.assertEqual({}, planning._resolve_phantom_bom_lines([]))
 
 
+class TestSplitFollowUps(unittest.TestCase):
+	def test_the_line_selection_reaches_the_phantom_rows(self):
+		selections = [{"original_item_code": "SUGAR", "selected_item_code": "SUGAR-B"}]
+		lines = [dict(LINES[0], material_selections=selections), LINES[1]]
+		rows = MagicMock(side_effect=lambda *a, **k: _mix_rows(*a, fetch_exploded=k["fetch_exploded"]))
+		with (
+			patch.object(planning, "_resolve_phantom_bom_lines", return_value=PHANTOMS),
+			patch.object(planning, "_resolve_bom_company", return_value="Jarz Co"),
+		):
+			planning.attach_subassembly_split(_rollup(), lines, "Jarz Co", rows)
+
+		first, second = rows.call_args_list
+		self.assertEqual(selections, first.kwargs["material_selections"])
+		# A line without a swap does not get an empty one.
+		self.assertNotIn("material_selections", second.kwargs)
+
+	def test_a_failed_split_still_returns_the_pick_list(self):
+		components = [
+			{"item_code": "SUGAR", "item_name": "Sugar", "stock_uom": "Kg", "required_qty": 1.0,
+			 "source_warehouse": "Raw Material - J", "available_qty": 5.0},
+		]
+		with (
+			patch.object(planning, "_resolve_required_material_rows", return_value=MagicMock(return_value=components)),
+			patch.object(planning, "_resolve_bom_company", return_value="Jarz Co"),
+			patch.object(planning, "_resolve_bin_stock_map", return_value={("SUGAR", "Raw Material - J"): 5.0}),
+			patch.object(planning, "attach_subassembly_split", side_effect=RuntimeError("boom")),
+			patch.object(planning, "_log_split_failure") as mock_log,
+		):
+			rollup = planning.build_basket_rollup(
+				[{"item_code": "CAKE", "bom_name": "BOM-CAKE", "item_qty": 1}], "Jarz Co"
+			)
+
+		self.assertEqual(["SUGAR"], [c["item_code"] for c in rollup["components"]])
+		self.assertNotIn("subassemblies", rollup)
+		mock_log.assert_called_once()
+
+	def test_the_logger_never_raises(self):
+		with patch.object(planning.frappe, "log_error", side_effect=RuntimeError("redis down")):
+			planning._log_split_failure()
+
+
 if __name__ == "__main__":
 	unittest.main()

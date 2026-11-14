@@ -1024,7 +1024,12 @@ def build_basket_rollup(lines: Sequence[dict[str, Any]], company: str) -> dict[s
 	# objects the ``components`` list holds, so a shortage carries the hint in
 	# both places without a second lookup.
 	attach_stock_elsewhere(rollup.get("shortages") or [], company)
-	attach_subassembly_split(rollup, lines, company, required_rows)
+	# Display only: the split must never cost the operator the pick list or
+	# its shortage gate, so a failure is logged and the rollup goes out as is.
+	try:
+		attach_subassembly_split(rollup, lines, company, required_rows)
+	except Exception:
+		_log_split_failure()
 	return rollup
 
 
@@ -1076,7 +1081,14 @@ def attach_subassembly_split(
 			sub["contributing_lines"].append(
 				{"line_index": index, "item_code": line.get("item_code"), "required_qty": sub_qty}
 			)
-			rows = required_rows(ph["bom_no"], _resolve_bom_company(ph["bom_no"]) or company, sub_qty, fetch_exploded=0)
+			kwargs: dict[str, Any] = {"fetch_exploded": 0}
+			# The line's ingredient swaps apply inside the phantom too (ERPNext
+			# exploded the mix into the same rows the selection rewrote), so a
+			# swapped mix ingredient is subtracted under its swapped code
+			# rather than counted twice.
+			if line.get("material_selections"):
+				kwargs["material_selections"] = line.get("material_selections")
+			rows = required_rows(ph["bom_no"], _resolve_bom_company(ph["bom_no"]) or company, sub_qty, **kwargs)
 			for row in rows:
 				code = row.get("item_code")
 				qty = float(row.get("required_qty") or 0)
@@ -1109,6 +1121,19 @@ def attach_subassembly_split(
 			contrib["direct_qty"] = direct
 			direct_total += direct
 		component["direct_qty"] = direct_total
+
+
+def _log_split_failure() -> None:
+	"""Log a failed sub-assembly split without ever raising.
+
+	``frappe.log_error`` can itself raise on v16 (its Sentry hook reads System
+	Settings outside a try), which would turn this best-effort guard back into
+	the 500 it exists to prevent.
+	"""
+	try:
+		frappe.log_error(title="Pick list sub-assembly split failed", message=frappe.get_traceback())
+	except Exception:
+		pass
 
 
 def _resolve_phantom_bom_lines(bom_names: list[Any]) -> dict[str, list[dict[str, Any]]]:
