@@ -521,6 +521,24 @@ class TestWeightedSumParts(unittest.TestCase):
 		self.assertEqual("Cheesecake Mix + Coffee beans", out)
 
 
+class TestNegativePartWeight(unittest.TestCase):
+	# The Mango layers: the jar's mango less the share stirred into the cream.
+	def test_a_negative_weight_subtracts(self):
+		out, unresolved = render("{{item:MIX+COFFEE*-0.5|grams}}", **JAR)
+		self.assertEqual("858 g", out)  # 898 - 0.5 x 80
+		self.assertEqual([], unresolved)
+
+	def test_it_combines_with_each(self):
+		out, _ = render("{{item:MIX+COFFEE*-0.5|grams|each}}", units_per_batch=10, **JAR)
+		self.assertEqual("85.8 g", out)
+
+	def test_a_total_below_zero_is_unresolved_not_printed(self):
+		for text in ("{{item:COFFEE+MIX*-1|grams}}", "{{item:COFFEE+MIX*-1|qty}}"):
+			out, unresolved = render(text, **JAR)
+			self.assertEqual(text, out)
+			self.assertEqual(1, len(unresolved), text)
+
+
 class TestFormatQuantity(unittest.TestCase):
 	def test_mass_is_shown_in_grams(self):
 		from jarz_pos.services.sop_rendering import format_quantity

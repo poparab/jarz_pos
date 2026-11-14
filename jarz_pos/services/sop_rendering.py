@@ -22,6 +22,7 @@ Token grammar
 ``{{item:COFFEE|qty|x0.3}}`` -> ``"0.024"``      (qty x 0.3, stock UOM)
 ``{{item:COFFEE|grams|each}}`` -> ``"8 g"``      (for ONE finished unit)
 ``{{item:MIX+SUGAR|grams}}``   -> ``"970 g"``    (both lines, summed)
+``{{item:MANGO+MIX*-0.2727|grams}}`` -> mango less 0.2727 x the mix
 ``{{item:eggs|count}}``        -> ``"45"``       (qty x batches, one decimal at most)
 
 ``count`` is ``qty`` for things the bench counts rather than weighs (eggs in
@@ -111,7 +112,7 @@ _EACH = "each"
 _SUM_SEPARATOR = "+"
 # ``A+B*0.9``: a weight on one part of a sum (see ``_resolve_parts``).
 _PART_WEIGHT_SEPARATOR = "*"
-_PART_WEIGHT_RE = re.compile(r"^(.*?)\s*\*\s*(\d+(?:\.\d+)?|\.\d+)$")
+_PART_WEIGHT_RE = re.compile(r"^(.*?)\s*\*\s*(-?(?:\d+(?:\.\d+)?|\.\d+))$")
 
 # Stock UOM -> grams per unit, matched case-insensitively.  Deliberately small:
 # a UOM that is not a unit of mass (Nos, Litre, Box) must NOT be guessed at.
@@ -337,7 +338,7 @@ def _split_weight(part: str) -> tuple[str, float] | None:
 	if not match:
 		return part, 1.0
 	weight = float(match.group(2))
-	if weight <= 0:
+	if weight == 0:
 		return None
 	return match.group(1).strip(), weight
 
@@ -353,7 +354,10 @@ def _resolve_parts(
 
 	A part may carry its own weight, ``A+B*0.9`` = A plus 0.9 x B, for an
 	amount that is one line plus a share of another (the Tiramisu cream is the
-	mix plus 30 % of the brewed coffee).  The whole code is tried first, so an
+	mix plus 30 % of the brewed coffee).  A weight may be negative, ``A+B*-0.27``
+	= A less 0.27 x B, for the share of a line left once part of it went
+	elsewhere (the Mango layers are the jar's mango less what was stirred into
+	the cream).  The whole code is tried first, so an
 	item whose name really contains ``+`` or ``*`` still resolves as itself.
 	"""
 	whole = _lookup_code(code, component_qty_map, name_map, uom_map, lowered)
@@ -461,12 +465,17 @@ def render_instruction(
 				# Not a unit of mass: refuse rather than print a wrong number.
 				_remember(unresolved, str(payload).strip())
 				return match.group(0)
+			if sum(grams) < 0:
+				# A negative part took more than the line holds: a BOM that
+				# no longer fits the recipe, never an amount to weigh out.
+				_remember(unresolved, str(payload).strip())
+				return match.group(0)
 			return _grams_text(sum(grams))
 		if variant == "name":
 			return name_text
 
 		# qty, count, uom and the full form quote ONE unit, so a sum must share it.
-		if len({u.lower() for u in uoms}) > 1:
+		if len({u.lower() for u in uoms}) > 1 or sum(quantities) < 0:
 			_remember(unresolved, str(payload).strip())
 			return match.group(0)
 		if variant == "count":

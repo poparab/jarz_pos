@@ -1049,6 +1049,101 @@ TIRAMISU_SOPS: list[dict[str, Any]] = [
 	build_tiramisu_sop(item_code, portions) for item_code, portions in TIRAMISU_JAR_PORTIONS.items()
 ]
 
+# The Mango jars, per the owner's recipe of 2026-11-09 (BOMs Mango Large-003 /
+# Medium-003 / Small-002): mango mix + cheesecake mix + savoiardi, part of the
+# mango stirred into the cream.  The owner's figures per jar:
+#
+#   Medium  mango 2 x 30 layers + 13.5 g into the cream = 73.5 g;
+#           cream 8 + 30 + 25 = 63 g (incl. that mango) -> mix 49.5 g;
+#           savoiardi 2 x 11 g
+#   Large   mango 2 x 45 + 17 = 107 g; cream 12 + 35 + 35 = 82 g -> mix 65 g;
+#           savoiardi 2 x 16 g
+#   Small   2/3 of the Medium
+#
+# Like Tiramisu, every size is made from ONE bowl of cream (owner, 2026-11-14:
+# "one bowl, like tiramisu"), so the mango goes into the bowl at one ratio:
+# the Medium's, 13.5 g per 49.5 g of mix = 3/11.  Medium and Small come out
+# exactly as written; a Large jar's cream carries 17.7 g of mango instead of
+# 17 g and its two layers 44.6 g instead of 45 g.  The jar's total mango is the
+# BOM line, untouched, so stock consumption does not move.  The layers are the
+# jar's mango less the share in the cream (a negative part weight).
+MANGO_CREAM_SHARE = 3 / 11  # mango stirred into the cream, per g of cheesecake mix
+MANGO_SIZES = ("Mango Large", "Mango Medium", "Mango Small")
+
+_MANGO_SHARE = "0.272727"
+_MANGO_HALF_SHARE = "0.136364"
+_MANGO = "{{item:Mango mix|grams}}"
+_MANGO_MIX = "{{item:Cheesecake Mix|grams}}"
+_MANGO_STIR = "{{item:Cheesecake Mix|grams|x" + _MANGO_SHARE + "}}"
+_MANGO_CREAM = "{{item:Cheesecake Mix|grams|x1.272727}}"
+_MANGO_LAYERS = "{{item:Mango mix+Cheesecake Mix*-" + _MANGO_SHARE + "|grams}}"
+_MANGO_LAYERS_EACH = "{{item:Mango mix+Cheesecake Mix*-" + _MANGO_SHARE + "|grams|each}}"
+_MANGO_LAYER_EACH = "{{item:Mango mix*0.5+Cheesecake Mix*-" + _MANGO_HALF_SHARE + "|grams|each}}"
+_MANGO_CREAM_EACH = "{{item:Cheesecake Mix|grams|x1.272727|each}}"
+_MANGO_SAVOIARDI_EACH = "{{item:Savoiardi|grams|each}}"
+
+MANGO_STEPS: list[dict[str, Any]] = [
+	{
+		"title": "Make the mango cream in one bowl",
+		"instruction": (
+			f"Weigh {_MANGO} of mango mix. Stir {_MANGO_STIR} of it into {_MANGO_MIX} "
+			f"of cheesecake mix = {_MANGO_CREAM} of mango cream. Keep the rest of the "
+			f"mango mix ({_MANGO_LAYERS}) for the mango layers.\n"
+			f"اوزن {_MANGO} خليط مانجا. قلّب {_MANGO_STIR} منه في {_MANGO_MIX} "
+			f"خليط تشيز كيك = {_MANGO_CREAM} كريمة مانجا. باقي خليط المانجا "
+			f"({_MANGO_LAYERS}) للطبقات."
+		),
+		"duration_mins": 10,
+		"scaling_mode": "Fixed",
+		"requires_confirmation": 1,
+	},
+	{
+		"title": "Fill each jar",
+		"instruction": (
+			f"{_MANGO_SAVOIARDI_EACH} savoiardi (two layers), {_MANGO_LAYERS_EACH} "
+			f"mango mix (two layers of {_MANGO_LAYER_EACH}), {_MANGO_CREAM_EACH} "
+			"mango cream (three layers).\n"
+			f"{_MANGO_SAVOIARDI_EACH} سافوياردي (طبقتين)، {_MANGO_LAYERS_EACH} "
+			f"خليط مانجا (طبقتين، كل طبقة {_MANGO_LAYER_EACH})، {_MANGO_CREAM_EACH} "
+			"كريمة مانجا (3 طبقات)."
+		),
+		"duration_mins": 1,
+		"scaling_mode": "Per Unit",
+		"requires_confirmation": 1,
+	},
+	{
+		"title": "Lid and label",
+		"instruction": ("Close each jar and stick on its label.\n" "اقفل كل برطمان و الزق الليبل بتاعه."),
+		"duration_mins": 1,
+		"scaling_mode": "Per Unit",
+		"requires_confirmation": 1,
+	},
+]
+
+
+def build_mango_sop(item_code: str) -> dict[str, Any]:
+	return {
+		"item_code": item_code,
+		"version": 1,
+		"yield_percent": 100,
+		"prep_time_mins": 25,
+		"equipment": "Mixing bowl, spatula, scale, jars",
+		"notes": (
+			"Recipe per the owner, 2026-11-09: mango mix + cheesecake mix + savoiardi. "
+			"Medium: mango 2 x 30 g layers + 13.5 g stirred into the cream; cream 63 g "
+			"incl. that mango (mix 49.5 g); savoiardi 2 x 11 g. Large: mango 2 x 45 g + "
+			"17 g; cream 82 g (mix 65 g); savoiardi 2 x 16 g. Small = 2/3 of Medium.\n"
+			"All sizes are made from one bowl of mango cream (owner, 2026-11-14), at the "
+			"Medium's ratio, 3/11 g of mango per g of mix: a Large jar gets 17.7 g of "
+			"mango in its cream and 2 x 44.6 g layers. Every figure in the steps comes "
+			"from the jar BOM."
+		),
+		"steps": [dict(step) for step in MANGO_STEPS],
+	}
+
+
+MANGO_SOPS: list[dict[str, Any]] = [build_mango_sop(item_code) for item_code in MANGO_SIZES]
+
 RECIPES: list[dict[str, Any]] = [
 	CHEESECAKE_MIX,
 	FUDGE_CAKE,
@@ -1059,6 +1154,7 @@ RECIPES: list[dict[str, Any]] = [
 	COCOA_SOAK_SYRUP,
 	*TIRAMISU_SOPS,
 	*MOLTEN_SOPS,
+	*MANGO_SOPS,
 ]
 
 

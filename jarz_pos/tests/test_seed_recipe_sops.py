@@ -576,6 +576,82 @@ class TestMoltenSoak(unittest.TestCase):
 			self.assertEqual(["Cocoa soak syrup"], recipe["requires_bom_lines"])
 
 
+MANGO_MEDIUM = {"Mango mix": 0.0735, "Cheesecake Mix": 0.0495, "Savoiardi": 0.022}
+MANGO_BOMS = {
+	"Mango Large": {"Mango mix": 0.107, "Cheesecake Mix": 0.065, "Savoiardi": 0.032},
+	"Mango Medium": MANGO_MEDIUM,
+	"Mango Small": {code: qty * 2 / 3 for code, qty in MANGO_MEDIUM.items()},
+}
+
+
+def render_mango(item_code, jars=JARS):
+	from jarz_pos.scripts import seed_recipe_sops as seed
+	from jarz_pos.services.sop_rendering import render_sop
+
+	recipe = next(r for r in seed.RECIPES if r["item_code"] == item_code)
+	qty = MANGO_BOMS[item_code]
+	return render_sop(
+		recipe,
+		batches=jars,
+		units=jars,
+		component_qty_map=qty,
+		uom_map={code: "Kg" for code in qty},
+		name_map={code: code for code in qty},
+	)
+
+
+class TestMangoOneBowl(unittest.TestCase):
+	def test_three_sizes_share_the_steps_word_for_word(self):
+		from jarz_pos.scripts import seed_recipe_sops as seed
+
+		steps = [next(r for r in seed.RECIPES if r["item_code"] == code)["steps"] for code in MANGO_BOMS]
+		self.assertEqual(steps[0], steps[1])
+		self.assertEqual(steps[0], steps[2])
+		self.assertIsNot(steps[0][0], steps[1][0])
+
+	def test_every_token_resolves(self):
+		for code in MANGO_BOMS:
+			self.assertEqual([], render_mango(code)["unresolved_tokens"], code)
+
+	def test_ten_medium_jars_make_one_bowl(self):
+		bowl = render_mango("Mango Medium")["steps"][0]["instruction_html"]
+		self.assertIn("Weigh 735 g of mango mix", bowl)
+		self.assertIn("Stir 135 g of it into 495 g of cheesecake mix = 630 g of mango cream", bowl)
+		self.assertIn("(600 g) for the mango layers", bowl)
+
+	def test_one_jar_line_per_size(self):
+		for code, layers, layer, cream, savoiardi in (
+			# Medium and Small exactly as the owner wrote them.
+			("Mango Medium", "60 g", "30 g", "63 g", "22 g"),
+			("Mango Small", "40 g", "20 g", "42 g", "14.7 g"),
+			# Large at the one-bowl ratio: 17.7 g in the cream, not 17.
+			("Mango Large", "89.3 g", "44.6 g", "82.7 g", "32 g"),
+		):
+			fill = render_mango(code)["steps"][1]["instruction_html"]
+			self.assertIn(
+				f"{savoiardi} savoiardi (two layers), {layers} mango mix (two layers of "
+				f"{layer}), {cream} mango cream",
+				fill,
+				code,
+			)
+
+	def test_the_jar_keeps_its_bom_mango(self):
+		from jarz_pos.scripts import seed_recipe_sops as seed
+
+		for lines in MANGO_BOMS.values():
+			stirred = lines["Cheesecake Mix"] * seed.MANGO_CREAM_SHARE
+			self.assertGreater(lines["Mango mix"] - stirred, 0)
+		self.assertAlmostEqual(0.0495 * seed.MANGO_CREAM_SHARE, 0.0135)
+
+	def test_every_step_is_bilingual_and_needs_confirmation(self):
+		from jarz_pos.scripts import seed_recipe_sops as seed
+
+		for step in seed.MANGO_STEPS:
+			english_line, arabic_line = step["instruction"].split("\n")
+			self.assertEqual(english_line.count("{{"), arabic_line.count("{{"), step["title"])
+			self.assertEqual(1, step["requires_confirmation"])
+
+
 class TestItemsFilter(unittest.TestCase):
 	def test_parse_items(self):
 		from jarz_pos.scripts.seed_recipe_sops import _parse_items
