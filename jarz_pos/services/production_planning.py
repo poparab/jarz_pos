@@ -1024,57 +1024,95 @@ def build_basket_rollup(lines: Sequence[dict[str, Any]], company: str) -> dict[s
 	# objects the ``components`` list holds, so a shortage carries the hint in
 	# both places without a second lookup.
 	attach_stock_elsewhere(rollup.get("shortages") or [], company)
-	attach_made_from(
-		rollup.get("components") or [],
-		[line.get("bom_name") for line in lines or [] if line.get("bom_name")],
-		company,
-		required_rows,
-	)
+	attach_subassembly_split(rollup, lines, company, required_rows)
 	return rollup
 
 
-def attach_made_from(
-	components: list[dict[str, Any]],
-	bom_names: Sequence[str],
+def attach_subassembly_split(
+	rollup: dict[str, Any],
+	lines: Sequence[dict[str, Any]],
 	company: str,
 	required_rows: Any,
 ) -> None:
-	"""Give each sub-assembly made fresh for this run its own ingredients.
+	"""Say which part of each material goes into a phantom sub-assembly.
 
-	The pick list is the one-level bill, so Cheesecake Mix is one line and what
-	goes INTO it appears nowhere.  The kitchen makes it for the run, so it needs
-	those amounts too - summed over every jar in the basket, but kept under the
-	mix: the mix's powder sugar is never added to the powder sugar a Tiramisu
-	line takes for its coffee (owner, 2026-11-14).  Only a line the jar BOMs
-	explode (``do_not_explode = 0`` with a ``bom_no``) counts; a stored
-	sub-assembly (Savoiardi, the cakes) is taken from stock and stays one line.
+	ERPNext v16 explodes a ``is_phantom_item`` BOM line (Cheesecake Mix) inside
+	``get_bom_items_as_dict`` and merges the result by item code, so the pick
+	list holds ONE powder sugar row: the Tiramisu coffee's sugar plus the
+	mix's.  That total is right for the shortage gate - it is what the Work
+	Order consumes - so it is left alone.  For the kitchen, which makes the
+	mix in its own bowl, this adds (owner, 2026-11-14):
 
-	Adds ``made_from`` - ``[{item_code, item_name, uom, required_qty}]`` scaled
-	to the component's whole ``required_qty`` - and changes nothing else: the
-	shortage gate still reads the one-level rows only.
+	* ``subassemblies``: each phantom sub-assembly for the whole basket, with
+	  ``made_from`` (its ingredients) and ``contributing_lines``;
+	* ``direct_qty`` on every component and every contributing line: the part
+	  NOT inside a sub-assembly (0 for a material used only in the mix).
+
+	Nothing is subtracted from ``required_qty``; old clients read it unchanged.
 	"""
-	fresh = _resolve_fresh_subassembly_boms(list(bom_names))
-	if not fresh:
+	phantoms = _resolve_phantom_bom_lines([line.get("bom_name") for line in lines or []])
+	subs: dict[str, dict[str, Any]] = {}
+	inside: dict[tuple[int, str], float] = {}  # (line_index, material) -> qty in a sub-assembly
+
+	for index, line in enumerate(lines or []):
+		bom_name = line.get("bom_name")
+		item_qty = float(line.get("item_qty") or 0)
+		for ph in phantoms.get(bom_name) or []:
+			sub_qty = item_qty * float(ph["qty_per_unit"])
+			if sub_qty <= 0:
+				continue
+			sub = subs.setdefault(
+				ph["item_code"],
+				{
+					"item_code": ph["item_code"],
+					"item_name": ph.get("item_name") or ph["item_code"],
+					"uom": ph.get("uom") or "",
+					"required_qty": 0.0,
+					"made_from": {},
+					"contributing_lines": [],
+				},
+			)
+			sub["required_qty"] += sub_qty
+			sub["contributing_lines"].append(
+				{"line_index": index, "item_code": line.get("item_code"), "required_qty": sub_qty}
+			)
+			rows = required_rows(ph["bom_no"], _resolve_bom_company(ph["bom_no"]) or company, sub_qty, fetch_exploded=0)
+			for row in rows:
+				code = row.get("item_code")
+				qty = float(row.get("required_qty") or 0)
+				entry = sub["made_from"].setdefault(
+					code,
+					{
+						"item_code": code,
+						"item_name": row.get("item_name") or code,
+						"uom": row.get("uom") or "",
+						"required_qty": 0.0,
+					},
+				)
+				entry["required_qty"] += qty
+				inside[(index, code)] = inside.get((index, code), 0.0) + qty
+
+	if not subs:
 		return
-	for component in components:
-		bom_no = fresh.get(component.get("item_code"))
-		qty = float(component.get("required_qty") or 0)
-		if not bom_no or qty <= 0:
-			continue
-		rows = required_rows(bom_no, _resolve_bom_company(bom_no) or company, qty, fetch_exploded=0)
-		component["made_from"] = [
-			{
-				"item_code": row.get("item_code"),
-				"item_name": row.get("item_name") or row.get("item_code"),
-				"uom": row.get("uom") or "",
-				"required_qty": float(row.get("required_qty") or 0),
-			}
-			for row in rows
-		]
+	for sub in subs.values():
+		sub["made_from"] = list(sub["made_from"].values())
+	rollup["subassemblies"] = list(subs.values())
+
+	for component in rollup.get("components") or []:
+		direct_total = 0.0
+		for contrib in component.get("contributing_lines") or []:
+			used_inside = inside.get((contrib.get("line_index"), component.get("item_code")), 0.0)
+			direct = max(0.0, float(contrib.get("required_qty") or 0) - used_inside)
+			# Float noise from a subtraction must not read as "0.000001 Kg".
+			if direct < 1e-9:
+				direct = 0.0
+			contrib["direct_qty"] = direct
+			direct_total += direct
+		component["direct_qty"] = direct_total
 
 
-def _resolve_fresh_subassembly_boms(bom_names: list[str]) -> dict[str, str]:
-	"""``{item_code: bom_no}`` for the lines of these BOMs made fresh, not stocked."""
+def _resolve_phantom_bom_lines(bom_names: list[Any]) -> dict[str, list[dict[str, Any]]]:
+	"""Per BOM, its phantom lines with the stock qty they take per finished unit."""
 	names = sorted({str(n) for n in bom_names if n})
 	if not names:
 		return {}
@@ -1082,9 +1120,24 @@ def _resolve_fresh_subassembly_boms(bom_names: list[str]) -> dict[str, str]:
 		# A site-less unit harness: there are no BOMs to read, and the pick
 		# list and its shortage gate never depend on this breakdown.
 		return {}
-	rows = frappe.get_all(
+	quantities = {
+		row.name: float(row.quantity or 1) or 1.0
+		for row in frappe.get_all("BOM", filters={"name": ["in", names]}, fields=["name", "quantity"])
+	}
+	result: dict[str, list[dict[str, Any]]] = {}
+	for row in frappe.get_all(
 		"BOM Item",
-		filters={"parent": ["in", names], "do_not_explode": 0, "bom_no": ["is", "set"]},
-		fields=["item_code", "bom_no"],
-	)
-	return {row.item_code: row.bom_no for row in rows}
+		filters={"parent": ["in", names], "is_phantom_item": 1, "bom_no": ["is", "set"]},
+		fields=["parent", "item_code", "item_name", "stock_qty", "stock_uom", "bom_no"],
+		order_by="idx",
+	):
+		result.setdefault(row.parent, []).append(
+			{
+				"item_code": row.item_code,
+				"item_name": row.item_name,
+				"uom": row.stock_uom,
+				"bom_no": row.bom_no,
+				"qty_per_unit": float(row.stock_qty or 0) / quantities.get(row.parent, 1.0),
+			}
+		)
+	return result
