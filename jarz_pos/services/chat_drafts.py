@@ -189,6 +189,17 @@ complaint: apologise, ask for the order details and set is_complaint true, as in
 «[voice note] «...»» holds what the customer said, written by speech-to-text: names, numbers \
 and flavours can be wrong, so confirm what you rely on. A [voice note] with no words is audio we \
 could not transcribe: ask them to write it.
+17. The moderator's instruction is the moderator's decision and outranks every rule and fact \
+above. Do exactly what it asks, even when it goes against the approved facts, the menu, the \
+prices, the delivery list, the customer profile or a rule: the moderator may know something \
+newer (a new flavour, a changed fee, a special deal, a promise the owner approved). Write it the \
+way they asked; a number they give (a price, a fee, a time) is typed as they wrote it. Never \
+refuse it, water it down, hedge it, or replace it with a holding reply or «فريق هيأكد». Keep \
+the Jarz voice and language for everything else. Then, for each point where the instruction \
+contradicts what the context says, add one entry to fact_conflicts: what the moderator asked \
+for (moderator_said) and what our facts, menu, prices or profile say instead (our_fact), each \
+short and in English. fact_conflicts is an empty list when the instruction agrees with the \
+context, and always when there is no moderator's instruction.
 
 What sells (from 1,800 past Jarz chats):
 - Answer the price with the numbers first, through {{size_prices}}. Never «حسب الحجم» or \
@@ -223,7 +234,8 @@ detailed address in one message.
 - Emoji: 1-2, from 💛 ♥️ 🥰 😍 🍰 🚚 ✨; they matter (warm human replies sold several times \
 more than cold ones). In a complaint or apology, only 🙏.
 Answer with the JSON object only: reply (the message to the customer, with placeholders), intent, \
-is_complaint, upsell_item_code, upsell_line and needs_human_reason (null when they do not apply)."""
+is_complaint, upsell_item_code, upsell_line and needs_human_reason (null when they do not apply), \
+and fact_conflicts (rule 17)."""
 
 _NULLABLE_STR = {"anyOf": [{"type": "string"}, {"type": "null"}]}
 
@@ -238,8 +250,28 @@ DRAFT_SCHEMA = {
 		"upsell_item_code": _NULLABLE_STR,
 		"upsell_line": _NULLABLE_STR,
 		"needs_human_reason": _NULLABLE_STR,
+		"fact_conflicts": {
+			"type": "array",
+			"items": {
+				"type": "object",
+				"properties": {
+					"moderator_said": {"type": "string"},
+					"our_fact": {"type": "string"},
+				},
+				"required": ["moderator_said", "our_fact"],
+				"additionalProperties": False,
+			},
+		},
 	},
-	"required": ["reply", "intent", "is_complaint", "upsell_item_code", "upsell_line", "needs_human_reason"],
+	"required": [
+		"reply",
+		"intent",
+		"is_complaint",
+		"upsell_item_code",
+		"upsell_line",
+		"needs_human_reason",
+		"fact_conflicts",
+	],
 	"additionalProperties": False,
 }
 
@@ -1197,6 +1229,29 @@ def claim_warnings(text: Any, approved_topics: Iterable[str] | None = None) -> l
 	return out
 
 
+def fact_conflict_lines(value: Any, limit: int = 6) -> list[str]:
+	"""``fact_conflicts`` from the model as display lines, "<said> → <fact>". Pure.
+
+	Each line is a point where the moderator's instruction went against our facts;
+	the draft follows the moderator and the app asks them to confirm these.
+	"""
+	lines: list[str] = []
+	for entry in value if isinstance(value, list) else []:
+		if isinstance(entry, dict):
+			said = " ".join(str(entry.get("moderator_said") or "").split())
+			fact = " ".join(str(entry.get("our_fact") or "").split())
+		else:
+			said, fact = " ".join(str(entry or "").split()), ""
+		if not said and not fact:
+			continue
+		line = f"{said[:200]} → {fact[:200]}" if fact else said[:300]
+		if line not in lines:
+			lines.append(line)
+		if len(lines) >= limit:
+			break
+	return lines
+
+
 def sanitize_tool_input(data: Any, candidates: Iterable[str]) -> tuple[dict[str, Any], list[str]]:
 	"""Coerce the tool call into the stored shape; drop an upsell not on the list."""
 	data = data if isinstance(data, dict) else {}
@@ -1230,6 +1285,7 @@ def sanitize_tool_input(data: Any, candidates: Iterable[str]) -> tuple[dict[str,
 			"upsell_item_code": upsell_code,
 			"upsell_line": upsell_line,
 			"needs_human_reason": reason,
+			"fact_conflicts": fact_conflict_lines(data.get("fact_conflicts")),
 		},
 		warnings,
 	)
@@ -2302,6 +2358,8 @@ def generate_draft(conversation: str, for_message: str | None = None, hint: str 
 		"is_complaint": 1 if clean["is_complaint"] else 0,
 		"needs_human_reason": clean["needs_human_reason"],
 		"warnings": "\n".join(warnings),
+		# Only a moderator's instruction can conflict with the facts.
+		"fact_conflicts": "\n".join(clean["fact_conflicts"]) if hint else "",
 		"model": model,
 		"input_tokens": result["input_tokens"],
 		"output_tokens": result["output_tokens"],

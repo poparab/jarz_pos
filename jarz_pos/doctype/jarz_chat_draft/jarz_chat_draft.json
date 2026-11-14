@@ -17,6 +17,7 @@
   "is_complaint",
   "needs_human_reason",
   "warnings",
+  "fact_conflicts",
   "is_planted",
   "planted_error",
   "real_draft",
@@ -111,6 +112,12 @@
    "description": "JSON list of strings."
   },
   {
+   "fieldname": "fact_conflicts",
+   "fieldtype": "Small Text",
+   "label": "Fact Conflicts",
+   "description": "Points where the moderator's instruction went against our facts; the draft followed the moderator. One per line."
+  },
+  {
    "fieldname": "is_planted",
    "fieldtype": "Check",
    "label": "Is Planted",
@@ -199,7 +206,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-10-16 21:30:00.000000",
+ "modified": "2026-11-14 17:43:33.568793",
  "modified_by": "Administrator",
  "module": "jarz pos",
  "name": "Jarz Chat Draft",

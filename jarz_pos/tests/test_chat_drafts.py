@@ -249,6 +249,34 @@ class SanitizeToolInputTest(unittest.TestCase):
 		self.assertFalse(clean["is_complaint"])
 		clean, _w = d.sanitize_tool_input({"intent": "shopping"}, [])
 		self.assertEqual(clean["intent"], "Other")
+		self.assertEqual(clean["fact_conflicts"], [])
+
+	def test_fact_conflicts_become_lines(self):
+		clean, _w = d.sanitize_tool_input(
+			{
+				"reply": "بنوصل في ساعة",
+				"intent": "Delivery",
+				"fact_conflicts": [
+					{"moderator_said": "Delivery within 1 hour", "our_fact": "Same day, no fixed hour"},
+					{"moderator_said": "Delivery within 1 hour", "our_fact": "Same day, no fixed hour"},
+					{"moderator_said": "  ", "our_fact": ""},
+					"Medium jar is 250",
+				],
+			},
+			self.CANDIDATES,
+		)
+		self.assertEqual(
+			clean["fact_conflicts"],
+			["Delivery within 1 hour → Same day, no fixed hour", "Medium jar is 250"],
+		)
+		self.assertEqual(d.fact_conflict_lines("not a list"), [])
+
+
+class ModeratorOverrideTest(unittest.TestCase):
+	def test_prompt_puts_the_moderator_above_the_facts(self):
+		self.assertIn("17. The moderator's instruction", d.SYSTEM_PROMPT)
+		self.assertIn("fact_conflicts", d.SYSTEM_PROMPT)
+		self.assertIn("fact_conflicts", d.DRAFT_SCHEMA["required"])
 
 
 class PlantedTest(unittest.TestCase):

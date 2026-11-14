@@ -83,6 +83,7 @@ DRAFT_FIELDS = (
 	"is_complaint",
 	"needs_human_reason",
 	"warnings",
+	"fact_conflicts",
 	"creation",
 	"for_message",
 	"is_planted",
@@ -299,6 +300,7 @@ def serialize_draft(row: Any) -> dict[str, Any]:
 		"is_complaint": bool(get("is_complaint")),
 		"needs_human_reason": get("needs_human_reason") or None,
 		"warnings": split_warnings(get("warnings")),
+		"fact_conflicts": split_warnings(get("fact_conflicts")),
 		"created_at": dt_str(get("creation")),
 		"for_message": get("for_message") or None,
 	}
