@@ -1024,4 +1024,67 @@ def build_basket_rollup(lines: Sequence[dict[str, Any]], company: str) -> dict[s
 	# objects the ``components`` list holds, so a shortage carries the hint in
 	# both places without a second lookup.
 	attach_stock_elsewhere(rollup.get("shortages") or [], company)
+	attach_made_from(
+		rollup.get("components") or [],
+		[line.get("bom_name") for line in lines or [] if line.get("bom_name")],
+		company,
+		required_rows,
+	)
 	return rollup
+
+
+def attach_made_from(
+	components: list[dict[str, Any]],
+	bom_names: Sequence[str],
+	company: str,
+	required_rows: Any,
+) -> None:
+	"""Give each sub-assembly made fresh for this run its own ingredients.
+
+	The pick list is the one-level bill, so Cheesecake Mix is one line and what
+	goes INTO it appears nowhere.  The kitchen makes it for the run, so it needs
+	those amounts too - summed over every jar in the basket, but kept under the
+	mix: the mix's powder sugar is never added to the powder sugar a Tiramisu
+	line takes for its coffee (owner, 2026-11-14).  Only a line the jar BOMs
+	explode (``do_not_explode = 0`` with a ``bom_no``) counts; a stored
+	sub-assembly (Savoiardi, the cakes) is taken from stock and stays one line.
+
+	Adds ``made_from`` - ``[{item_code, item_name, uom, required_qty}]`` scaled
+	to the component's whole ``required_qty`` - and changes nothing else: the
+	shortage gate still reads the one-level rows only.
+	"""
+	fresh = _resolve_fresh_subassembly_boms(list(bom_names))
+	if not fresh:
+		return
+	for component in components:
+		bom_no = fresh.get(component.get("item_code"))
+		qty = float(component.get("required_qty") or 0)
+		if not bom_no or qty <= 0:
+			continue
+		rows = required_rows(bom_no, _resolve_bom_company(bom_no) or company, qty, fetch_exploded=0)
+		component["made_from"] = [
+			{
+				"item_code": row.get("item_code"),
+				"item_name": row.get("item_name") or row.get("item_code"),
+				"uom": row.get("uom") or "",
+				"required_qty": float(row.get("required_qty") or 0),
+			}
+			for row in rows
+		]
+
+
+def _resolve_fresh_subassembly_boms(bom_names: list[str]) -> dict[str, str]:
+	"""``{item_code: bom_no}`` for the lines of these BOMs made fresh, not stocked."""
+	names = sorted({str(n) for n in bom_names if n})
+	if not names:
+		return {}
+	if getattr(frappe.local, "db", None) is None:
+		# A site-less unit harness: there are no BOMs to read, and the pick
+		# list and its shortage gate never depend on this breakdown.
+		return {}
+	rows = frappe.get_all(
+		"BOM Item",
+		filters={"parent": ["in", names], "do_not_explode": 0, "bom_no": ["is", "set"]},
+		fields=["item_code", "bom_no"],
+	)
+	return {row.item_code: row.bom_no for row in rows}
