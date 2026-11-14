@@ -14,7 +14,8 @@
   "app_version",
   "pos_profiles",
   "last_seen",
-  "enabled"
+  "enabled",
+  "update_channel"
  ],
  "fields": [
   {
@@ -70,11 +71,22 @@
    "fieldtype": "Check",
    "in_list_view": 1,
    "label": "Enabled"
+  },
+  {
+   "default": "Auto",
+   "description": "Auto follows the user's roles (Jarz POS Settings > Fast-update roles). Fast/Normal override it for this device.",
+   "fieldname": "update_channel",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Update channel",
+   "options": "Auto\nFast\nNormal",
+   "permlevel": 1
   }
  ],
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2025-10-16 00:00:00",
+ "modified": "2026-11-14 12:00:00",
  "modified_by": "Administrator",
  "module": "jarz pos",
  "name": "Jarz Mobile Device",
@@ -116,6 +128,23 @@
    "role": "POS Manager",
    "share": 1,
    "write": 1
+  },
+  {
+   "permlevel": 1,
+   "read": 1,
+   "role": "System Manager",
+   "write": 1
+  },
+  {
+   "permlevel": 1,
+   "read": 1,
+   "role": "POS Manager",
+   "write": 1
+  },
+  {
+   "permlevel": 1,
+   "read": 1,
+   "role": "POS User"
   }
  ],
  "sort_field": "modified",

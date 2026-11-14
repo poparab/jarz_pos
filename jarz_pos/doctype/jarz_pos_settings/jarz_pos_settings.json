@@ -108,6 +108,8 @@
   "column_break_mobile_release",
   "mobile_apk_download_url",
   "mobile_force_update_message",
+  "mobile_fast_update_roles",
+  "mobile_fast_force_restart",
   "roster_section",
   "roster_enforce_checkin",
   "roster_default_standard_hours",
@@ -804,6 +806,19 @@
    "description": "Shown on the blocking screen instead of the default text. Optional."
   },
   {
+   "fieldname": "mobile_fast_update_roles",
+   "fieldtype": "Small Text",
+   "label": "Fast-update roles",
+   "description": "One role per line. Users holding any of these roles get every app patch immediately (Shorebird track 'beta'). Everyone else gets patches when they are rolled out to staff. Empty = everyone on the normal channel."
+  },
+  {
+   "default": "0",
+   "fieldname": "mobile_fast_force_restart",
+   "fieldtype": "Check",
+   "label": "Force restart on fast channel",
+   "description": "Fast-channel devices must restart as soon as a patch is downloaded."
+  },
+  {
    "fieldname": "roster_section",
    "fieldtype": "Section Break",
    "label": "Shift Distribution (Roster)"
@@ -869,7 +884,7 @@
  "index_web_pages_for_search": 0,
  "issingle": 1,
  "links": [],
- "modified": "2026-10-21 12:00:00.000000",
+ "modified": "2026-11-14 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "jarz pos",
  "name": "Jarz POS Settings",

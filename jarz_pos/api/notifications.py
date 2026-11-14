@@ -1005,6 +1005,48 @@ def _prune_duplicate_mobile_device_rows(rows: Sequence[dict[str, Any]], keep_nam
 			)
 
 
+_DEVICE_UPDATE_CHANNEL_OVERRIDES = ("Fast", "Normal")
+
+
+def _inherit_update_channel_override(
+	rows: Sequence[dict[str, Any]], keep_name: str, user: str, payload: dict[str, Any]
+) -> dict[str, Any]:
+	"""Carry a per-device update-channel override onto the row that survives pruning.
+
+	Duplicate rows for one token are deleted on re-registration. If the row
+	holding a manager-set "Fast"/"Normal" override is not the one kept, the
+	override would silently vanish. Only runs when there are duplicates, and
+	fails safe to the unchanged payload (e.g. before the column is migrated).
+	"""
+	if len(rows) < 2:
+		return payload
+	try:
+		names = [row.get("name") for row in rows if row.get("name")]
+		detailed = frappe.get_all(
+			"Jarz Mobile Device",
+			filters={"name": ["in", names]},
+			fields=["name", "user", "update_channel"],
+		)
+		by_name = {d.get("name"): d for d in detailed or []}
+		kept = by_name.get(keep_name) or {}
+		if kept.get("update_channel") in _DEVICE_UPDATE_CHANNEL_OVERRIDES:
+			return payload
+		for same_user_only in (True, False):
+			for row in rows:
+				name = row.get("name")
+				if not name or name == keep_name:
+					continue
+				detail = by_name.get(name) or {}
+				if same_user_only and detail.get("user") != user:
+					continue
+				channel = detail.get("update_channel")
+				if channel in _DEVICE_UPDATE_CHANNEL_OVERRIDES:
+					return {**payload, "update_channel": channel}
+	except Exception:
+		return payload
+	return payload
+
+
 def _update_mobile_device_row(docname: str, payload: dict[str, Any]) -> Any:
 	values = dict(payload)
 	values["last_seen"] = frappe.utils.now_datetime()
@@ -1019,6 +1061,7 @@ def _upsert_mobile_device(payload: dict[str, Any]) -> Any:
 	selected = _select_mobile_device_row(rows, user)
 
 	if selected:
+		payload = _inherit_update_channel_override(rows, selected["name"], user, payload)
 		_prune_duplicate_mobile_device_rows(rows, selected["name"])
 		return _update_mobile_device_row(selected["name"], payload)
 
@@ -1032,6 +1075,7 @@ def _upsert_mobile_device(payload: dict[str, Any]) -> Any:
 		if not selected:
 			raise
 
+		payload = _inherit_update_channel_override(rows, selected["name"], user, payload)
 		_prune_duplicate_mobile_device_rows(rows, selected["name"])
 		return _update_mobile_device_row(selected["name"], payload)
 

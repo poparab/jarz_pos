@@ -373,3 +373,150 @@ def publish_android_release(
 		"download_url": url or _download_url(),
 		"changed": target != previous_minimum or target != previous_latest,
 	}
+
+
+# ---------------------------------------------------------------------------
+# Shorebird update channel
+#
+# Managers get every OTA patch at once ("fast" = Shorebird track "beta");
+# everyone else gets patches when they are promoted to staff ("normal" =
+# track "stable"). Purely advisory and additive: every failure answers the
+# normal channel, which is exactly what every device did before this existed.
+# ---------------------------------------------------------------------------
+
+TRACK_FAST = "beta"
+TRACK_NORMAL = "stable"
+
+CHANNEL_FAST = "fast"
+CHANNEL_NORMAL = "normal"
+
+_DEVICE_CHANNEL_OVERRIDES = {"Fast": CHANNEL_FAST, "Normal": CHANNEL_NORMAL}
+
+
+def _normal_channel() -> dict[str, Any]:
+	return {
+		"channel": CHANNEL_NORMAL,
+		"track": TRACK_NORMAL,
+		"force_restart": False,
+		"source": "default",
+	}
+
+
+def parse_fast_roles(raw: Any) -> set[str]:
+	"""Split the Small Text setting into role names: one per line, blanks dropped."""
+	if not raw or not isinstance(raw, str):
+		return set()
+	return {line.strip() for line in raw.splitlines() if line.strip()}
+
+
+def resolve_update_channel(
+	device_override: Any,
+	user_roles: Any,
+	fast_roles: Any,
+	force_restart_flag: Any,
+) -> dict[str, Any]:
+	"""Pure decision: which Shorebird track should this device follow?
+
+	``device_override`` is the device row's ``update_channel`` ("Fast" /
+	"Normal" decide; anything else - "Auto", None, junk - defers to roles).
+	``fast_roles`` is either the raw settings text or an iterable of role
+	names; matching against ``user_roles`` is exact and case-sensitive.
+	"""
+	try:
+		channel = None
+		source = "default"
+
+		override = _DEVICE_CHANNEL_OVERRIDES.get(str(device_override or "").strip())
+		if override:
+			channel, source = override, "device"
+		else:
+			wanted = parse_fast_roles(fast_roles) if isinstance(fast_roles, str) else {
+				str(role).strip() for role in (fast_roles or []) if str(role or "").strip()
+			}
+			held = {str(role) for role in (user_roles or []) if role}
+			if wanted and held & wanted:
+				channel, source = CHANNEL_FAST, "role"
+
+		if channel is None:
+			return _normal_channel()
+
+		fast = channel == CHANNEL_FAST
+		return {
+			"channel": channel,
+			"track": TRACK_FAST if fast else TRACK_NORMAL,
+			"force_restart": bool(fast and _as_flag(force_restart_flag)),
+			"source": source,
+		}
+	except Exception:
+		return _normal_channel()
+
+
+def _device_override_for_token(token: Any, user: str) -> str | None:
+	"""The update_channel of this user's device row for ``token``, if any.
+
+	A row registered to a different user is ignored: the token is re-registered
+	to whoever signs in next, so its override is not yet theirs to inherit.
+	"""
+	token = str(token or "").strip()
+	if not token:
+		return None
+	rows = frappe.get_all(
+		"Jarz Mobile Device",
+		filters={"token": token},
+		fields=["name", "user", "update_channel"],
+		order_by="enabled desc, modified desc",
+	)
+	for row in rows or []:
+		if row.get("user") != user:
+			continue
+		value = row.get("update_channel")
+		if value in _DEVICE_CHANNEL_OVERRIDES:
+			return value
+	return None
+
+
+def _safe_log_error(title: str) -> None:
+	try:
+		frappe.log_error(frappe.get_traceback(), title)
+	except Exception:
+		pass
+
+
+@frappe.whitelist()
+def get_update_channel(token: str | None = None) -> dict[str, Any]:
+	"""Tell the signed-in app which Shorebird track to check for patches.
+
+	Returns ``{"channel": "fast"|"normal", "track": "beta"|"stable",
+	"force_restart": bool, "source": "device"|"role"|"default"}``.
+	Never raises: any failure answers normal/stable/default.
+	"""
+	try:
+		user = getattr(getattr(frappe, "session", None), "user", None) or "Guest"
+		if user == "Guest":
+			return _normal_channel()
+
+		override = None
+		try:
+			override = _device_override_for_token(token, user)
+		except Exception:
+			# e.g. the column is not migrated yet - fall through to roles.
+			_safe_log_error("get_update_channel: device lookup failed")
+			override = None
+
+		try:
+			raw_roles = frappe.db.get_single_value("Jarz POS Settings", "mobile_fast_update_roles")
+		except Exception:
+			raw_roles = None
+		try:
+			force_flag = frappe.db.get_single_value("Jarz POS Settings", "mobile_fast_force_restart")
+		except Exception:
+			force_flag = 0
+
+		user_roles: list[str] = []
+		if override is None and parse_fast_roles(raw_roles):
+			user_roles = list(frappe.get_roles(user) or [])
+
+		return resolve_update_channel(override, user_roles, raw_roles or "", force_flag)
+	except Exception:
+		_safe_log_error("get_update_channel failed")
+		return _normal_channel()
