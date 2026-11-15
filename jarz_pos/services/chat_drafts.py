@@ -2306,7 +2306,8 @@ def generate_draft(conversation: str, for_message: str | None = None, hint: str 
 	conv = frappe.db.get_value(
 		cc.CONVERSATION,
 		conversation,
-		["name", "contact_name", "customer", "channel", "customer_summary", "contact_category_source"],
+		["name", "contact_name", "customer", "channel", "customer_summary"]
+		+ (["contact_category_source"] if cc.has_category_columns() else []),
 		as_dict=True,
 	)
 	if not conv:
@@ -2461,11 +2462,12 @@ def generate_draft(conversation: str, for_message: str | None = None, hint: str 
 
 	updates = {"intent": clean["intent"], "is_complaint": 1 if clean["is_complaint"] else 0}
 	# The AI's read of who is writing; never over a moderator's own choice.
-	updates.update(
-		category_updates(
-			conv.get("contact_category_source"), clean["contact_category"], clean["contact_category_reason"]
+	if cc.has_category_columns():
+		updates.update(
+			category_updates(
+				conv.get("contact_category_source"), clean["contact_category"], clean["contact_category_reason"]
+			)
 		)
-	)
 	frappe.db.set_value(cc.CONVERSATION, conversation, updates, update_modified=False)
 	cc.publish_chat_update(conversation, "draft", draft=cc.load_draft(visible))
 	return visible

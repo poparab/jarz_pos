@@ -54,7 +54,7 @@ def _int(value: Any, default: int, maximum: int) -> int:
 
 def _conversation_or_throw(name: Any) -> Any:
 	name = str(name or "").strip()
-	row = frappe.db.get_value(cc.CONVERSATION, name, list(cc.SUMMARY_FIELDS), as_dict=True) if name else None
+	row = frappe.db.get_value(cc.CONVERSATION, name, cc.summary_fields(), as_dict=True) if name else None
 	if not row:
 		frappe.throw(_("Conversation {0} not found.").format(name or "?"), frappe.DoesNotExistError)
 	return row
@@ -176,7 +176,7 @@ def get_conversations(
 		cc.CONVERSATION,
 		filters=filters,
 		or_filters=or_filters or None,
-		fields=list(cc.SUMMARY_FIELDS),
+		fields=cc.summary_fields(),
 		order_by="last_message_at desc, modified desc",
 		limit_page_length=limit_n + 1,
 		ignore_permissions=True,

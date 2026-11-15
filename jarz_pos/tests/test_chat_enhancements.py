@@ -495,6 +495,8 @@ class ApiTest(unittest.TestCase):
 				frappe, "db", SimpleNamespace(count=lambda *a, **k: 0, sql=lambda *a, **k: []), create=True
 			),
 			mock.patch.object(cc, "pending_draft_conversations", return_value=set()),
+			# cc.now() reads System Settings through the real frappe.db on a site.
+			mock.patch.object(cc, "now", return_value=datetime.datetime(2026, 11, 16, 12, 0)),
 		):
 			out = self.chat.get_conversations(**kwargs)
 		calls = [c for c in get_all.call_args_list if c.args[:1] == (cc.CONVERSATION,)]

@@ -56,6 +56,26 @@ SUMMARY_FIELDS = (
 	"contact_category_reason",
 )
 
+#: Columns added by chat-link-and-categories. A site that has the code but has not
+#: migrated yet (the deploy window, or the CI logic gate) lacks them.
+CATEGORY_COLUMNS = ("contact_category", "contact_category_source", "contact_category_reason")
+
+
+def has_category_columns() -> bool:
+	"""Whether the conversation table carries the contact-category columns. Never raises."""
+	try:
+		return bool(frappe.db.has_column(CONVERSATION, "contact_category_source"))
+	except Exception:
+		return True
+
+
+def summary_fields() -> list[str]:
+	"""SUMMARY_FIELDS that exist on this site, so a read never names a column migrate has not added."""
+	if has_category_columns():
+		return list(SUMMARY_FIELDS)
+	return [f for f in SUMMARY_FIELDS if f not in CATEGORY_COLUMNS]
+
+
 MESSAGE_FIELDS = (
 	"name",
 	"conversation",
@@ -258,7 +278,7 @@ def serialize_summary(
 
 def load_summary(name: str) -> dict[str, Any] | None:
 	try:
-		row = frappe.db.get_value(CONVERSATION, name, list(SUMMARY_FIELDS), as_dict=True)
+		row = frappe.db.get_value(CONVERSATION, name, summary_fields(), as_dict=True)
 	except Exception:
 		return None
 	return serialize_summary(row) if row else None

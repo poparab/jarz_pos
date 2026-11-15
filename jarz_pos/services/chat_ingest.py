@@ -787,7 +787,7 @@ def _find_conversation(channel: str, external_id: str) -> Any:
 	name = frappe.db.get_value(cc.CONVERSATION, {"channel_key": key}, "name")
 	if not name:
 		return None
-	fields = [*cc.SUMMARY_FIELDS, "alert_count", "source_post_id", "ad_referral", "last_outbound_at"]
+	fields = [*cc.summary_fields(), "alert_count", "source_post_id", "ad_referral", "last_outbound_at"]
 	return frappe.db.get_value(cc.CONVERSATION, name, fields, as_dict=True)
 
 
