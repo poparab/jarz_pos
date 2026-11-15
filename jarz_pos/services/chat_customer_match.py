@@ -567,6 +567,35 @@ PREFILL_SCHEMA = {
 }
 
 
+#: A line that only introduces the person ("اسمي …", "my name is …", "أنا …").
+_INTRO_LINE = re.compile(r"^\s*(?:اسمي|إسمي|انا اسمي|أنا اسمي|my name is|name\s*:|الاسم\s*:)", re.IGNORECASE)
+#: A leading address label.
+_ADDRESS_LABEL = re.compile(r"^\s*(?:العنوان|عنواني|address)\s*[:\-]?\s*", re.IGNORECASE)
+
+
+def clean_address(text: Any) -> str:
+	"""The address part of a customer's message. Pure.
+
+	Customers send "اسمي محمد ورقمي 010…" and "العنوان: 12 شارع 9 المعادي" in one message.
+	Lines that carry a phone number or only introduce the person are dropped, and a
+	leading "العنوان:" / "Address:" label is removed. Falls back to the whole text
+	when nothing would be left.
+	"""
+	from jarz_pos.services.chat_ingest import typed_phones
+
+	original = str(text or "").strip()
+	kept = []
+	for line in original.splitlines():
+		line = line.strip()
+		if not line:
+			continue
+		if typed_phones(line) or _INTRO_LINE.match(line):
+			continue
+		kept.append(_ADDRESS_LABEL.sub("", line).strip())
+	result = "\n".join(k for k in kept if k)
+	return result or original
+
+
 def apply_prefill_answer(
 	base: dict[str, Any],
 	raw: dict[str, Any],
@@ -599,7 +628,7 @@ def apply_prefill_answer(
 			out["mobile_no"] = said[0] if not out.get("mobile_no") else out["mobile_no"]
 	address_row = _row("address_message")
 	if address_row and str(address_row.get("body") or "").strip():
-		out["address"] = str(address_row["body"]).strip()[:500]
+		out["address"] = clean_address(address_row["body"])[:500]
 	pin = chat_order.location_from(_row("location_message"))
 	if not pin and address_row:
 		pin = chat_order.location_from(address_row)

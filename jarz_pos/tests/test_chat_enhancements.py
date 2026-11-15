@@ -970,5 +970,21 @@ class ClassifierTest(unittest.TestCase):
 			self.assertFalse(cl.enqueue_backlog())
 
 
+class CleanAddressTest(unittest.TestCase):
+	def test_drops_name_and_phone_lines_and_the_label(self):
+		text = "اسمي محمد حسن ورقمي 01143136328\nالعنوان: 12 شارع 9 المعادي، الدور التالت شقة 5"
+		self.assertEqual(m.clean_address(text), "12 شارع 9 المعادي، الدور التالت شقة 5")
+
+	def test_english_label(self):
+		self.assertEqual(m.clean_address("Address: 5 Road 9, Maadi"), "5 Road 9, Maadi")
+
+	def test_keeps_a_multi_line_address(self):
+		text = "12 شارع 9 المعادي\nبجوار مسجد السلام"
+		self.assertEqual(m.clean_address(text), text)
+
+	def test_falls_back_to_the_whole_text(self):
+		self.assertEqual(m.clean_address("01143136328"), "01143136328")
+
+
 if __name__ == "__main__":
 	unittest.main()
