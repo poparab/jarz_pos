@@ -51,6 +51,9 @@ SUMMARY_FIELDS = (
 	"window_expires_at",
 	"private_reply_sent",
 	"last_order",
+	"contact_category",
+	"contact_category_source",
+	"contact_category_reason",
 )
 
 MESSAGE_FIELDS = (
@@ -92,6 +95,9 @@ DRAFT_FIELDS = (
 )
 
 PREVIEW_CHARS = 140
+
+#: Who is writing (Jarz Chat Conversation.contact_category). Blank = not classified yet.
+CONTACT_CATEGORIES = ("Customer", "Supplier", "Content Creator", "Other")
 
 
 # ── small utilities ─────────────────────────────────────────────────────
@@ -244,6 +250,9 @@ def serialize_summary(
 		"window_open": window_open(get("window_expires_at"), at),
 		"has_pending_draft": bool(has_pending_draft),
 		"last_order": get("last_order") or None,
+		"contact_category": get("contact_category") or None,
+		"contact_category_source": get("contact_category_source") or None,
+		"contact_category_reason": get("contact_category_reason") or None,
 	}
 
 

@@ -42,6 +42,11 @@ from jarz_pos.services.chat_settings import (
 )
 
 INTENTS = ("Inquiry", "Order", "Complaint", "Other")
+CONTACT_CATEGORIES = cc.CONTACT_CATEGORIES
+#: Categories whose draft must not sell: a short holding reply and a human.
+NON_SELLING_CATEGORIES = ("Supplier", "Content Creator")
+CATEGORY_REASON_CHARS = 140
+HINT_CHARS = 500
 HISTORY_MESSAGES = 30
 #: Follow-ups and personal offers older than this are left out of the profile.
 FOLLOWUP_LOOKBACK_DAYS = 30
@@ -200,6 +205,16 @@ contradicts what the context says, add one entry to fact_conflicts: what the mod
 for (moderator_said) and what our facts, menu, prices or profile say instead (our_fact), each \
 short and in English. fact_conflicts is an empty list when the instruction agrees with the \
 context, and always when there is no moderator's instruction.
+18. Who is writing: set contact_category from the whole conversation. "Supplier" = they sell or \
+offer products or services TO Jarz (packaging, ingredients, equipment, printing, marketing or ads \
+agencies, delivery companies, software). "Content Creator" = an influencer, blogger, food \
+reviewer, UGC or video creator, or photographer offering content, a collab, a review or a barter. \
+"Customer" = they buy or ask as a buyer (also gifts and businesses ordering from us). "Other" = \
+job seekers, spam, a wrong number, or unclear. Use "Customer" whenever in doubt and when the \
+customer profile shows past orders. contact_category_reason is one short English line (under 140 \
+characters) saying why, or null for Customer. For a Supplier or Content Creator: never sell, never \
+upsell (upsell_item_code and upsell_line null), no prices; write a short polite holding reply in \
+their language («شكراً لتواصلك، هنوصل رسالتك للفريق») and fill needs_human_reason.
 
 What sells (from 1,800 past Jarz chats):
 - Answer the price with the numbers first, through {{size_prices}}. Never «حسب الحجم» or \
@@ -235,7 +250,7 @@ detailed address in one message.
 more than cold ones). In a complaint or apology, only 🙏.
 Answer with the JSON object only: reply (the message to the customer, with placeholders), intent, \
 is_complaint, upsell_item_code, upsell_line and needs_human_reason (null when they do not apply), \
-and fact_conflicts (rule 17)."""
+fact_conflicts (rule 17), contact_category and contact_category_reason (rule 18)."""
 
 _NULLABLE_STR = {"anyOf": [{"type": "string"}, {"type": "null"}]}
 
@@ -262,6 +277,8 @@ DRAFT_SCHEMA = {
 				"additionalProperties": False,
 			},
 		},
+		"contact_category": {"type": "string", "enum": list(CONTACT_CATEGORIES)},
+		"contact_category_reason": _NULLABLE_STR,
 	},
 	"required": [
 		"reply",
@@ -271,6 +288,8 @@ DRAFT_SCHEMA = {
 		"upsell_line",
 		"needs_human_reason",
 		"fact_conflicts",
+		"contact_category",
+		"contact_category_reason",
 	],
 	"additionalProperties": False,
 }
@@ -1252,6 +1271,32 @@ def fact_conflict_lines(value: Any, limit: int = 6) -> list[str]:
 	return lines
 
 
+def clean_contact_category(value: Any) -> str | None:
+	"""The category as one of :data:`CONTACT_CATEGORIES` (case-insensitive), else ``None``. Pure."""
+	text = " ".join(str(value or "").replace("_", " ").split()).lower()
+	for category in CONTACT_CATEGORIES:
+		if category.lower() == text:
+			return category
+	return None
+
+
+def category_updates(
+	current_source: Any, category: Any, reason: Any = None, source: str = "AI"
+) -> dict[str, Any]:
+	"""Conversation fields to write for an AI category; ``{}`` when staff set it by hand. Pure."""
+	if str(current_source or "") == "Manual":
+		return {}
+	clean = clean_contact_category(category)
+	if not clean:
+		return {}
+	text = " ".join(str(reason or "").split())[:CATEGORY_REASON_CHARS]
+	return {
+		"contact_category": clean,
+		"contact_category_source": source,
+		"contact_category_reason": text or None,
+	}
+
+
 def sanitize_tool_input(data: Any, candidates: Iterable[str]) -> tuple[dict[str, Any], list[str]]:
 	"""Coerce the tool call into the stored shape; drop an upsell not on the list."""
 	data = data if isinstance(data, dict) else {}
@@ -1277,6 +1322,16 @@ def sanitize_tool_input(data: Any, candidates: Iterable[str]) -> tuple[dict[str,
 		upsell_code = None
 		upsell_line = None
 	reason = str(data.get("needs_human_reason") or "").strip() or None
+	category = clean_contact_category(data.get("contact_category"))
+	category_reason = (
+		" ".join(str(data.get("contact_category_reason") or "").split())[:CATEGORY_REASON_CHARS] or None
+	)
+	if category in NON_SELLING_CATEGORIES:
+		# A supplier or a creator is never sold to, and a person must read it.
+		upsell_code = None
+		upsell_line = None
+		if not reason:
+			reason = f"{category}: {category_reason}" if category_reason else f"Looks like a {category}"
 	return (
 		{
 			"reply": str(data.get("reply") or "").strip(),
@@ -1286,6 +1341,8 @@ def sanitize_tool_input(data: Any, candidates: Iterable[str]) -> tuple[dict[str,
 			"upsell_line": upsell_line,
 			"needs_human_reason": reason,
 			"fact_conflicts": fact_conflict_lines(data.get("fact_conflicts")),
+			"contact_category": category,
+			"contact_category_reason": category_reason if category else None,
 		},
 		warnings,
 	)
@@ -2249,7 +2306,7 @@ def generate_draft(conversation: str, for_message: str | None = None, hint: str 
 	conv = frappe.db.get_value(
 		cc.CONVERSATION,
 		conversation,
-		["name", "contact_name", "customer", "channel", "customer_summary"],
+		["name", "contact_name", "customer", "channel", "customer_summary", "contact_category_source"],
 		as_dict=True,
 	)
 	if not conv:
@@ -2308,7 +2365,7 @@ def generate_draft(conversation: str, for_message: str | None = None, hint: str 
 		]
 		if hint:
 			hint_text = mask_text(hint, names) if mask else str(hint)
-			user_parts.append(f"Moderator's instruction for this draft: {hint_text[:500]}")
+			user_parts.append(f"Moderator's instruction for this draft: {hint_text[:HINT_CHARS]}")
 		user_parts.append(draft_request(last_direction, hint))
 		# The newest photos go in the final user turn, after the cached system context.
 		content = chat_media.user_content("\n\n".join(user_parts), chat_media.image_blocks(rows))
@@ -2360,6 +2417,7 @@ def generate_draft(conversation: str, for_message: str | None = None, hint: str 
 		"warnings": "\n".join(warnings),
 		# Only a moderator's instruction can conflict with the facts.
 		"fact_conflicts": "\n".join(clean["fact_conflicts"]) if hint else "",
+		"moderator_hint": " ".join(str(hint).split())[:HINT_CHARS] if hint else None,
 		"model": model,
 		"input_tokens": result["input_tokens"],
 		"output_tokens": result["output_tokens"],
@@ -2401,12 +2459,14 @@ def generate_draft(conversation: str, for_message: str | None = None, hint: str 
 	if visible is None:
 		visible = _insert_draft({**base, "status": "Pending", "is_planted": 0})
 
-	frappe.db.set_value(
-		cc.CONVERSATION,
-		conversation,
-		{"intent": clean["intent"], "is_complaint": 1 if clean["is_complaint"] else 0},
-		update_modified=False,
+	updates = {"intent": clean["intent"], "is_complaint": 1 if clean["is_complaint"] else 0}
+	# The AI's read of who is writing; never over a moderator's own choice.
+	updates.update(
+		category_updates(
+			conv.get("contact_category_source"), clean["contact_category"], clean["contact_category_reason"]
+		)
 	)
+	frappe.db.set_value(cc.CONVERSATION, conversation, updates, update_modified=False)
 	cc.publish_chat_update(conversation, "draft", draft=cc.load_draft(visible))
 	return visible
 

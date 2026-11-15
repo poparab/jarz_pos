@@ -830,6 +830,14 @@ jobs:
             # transcript lines, the transcription request, and which job follows a media
             # message (download, then transcribe, then one draft). Mocked: no network.
             test_chat_media
+            # Chat link flow and categories (feature chat-link-and-categories). Mocked:
+            # Arabic name folding, handle cleaning, candidate ranking (phone beats name,
+            # name hint <= 0.5, one-tap suggestion only from a phone), the contact category
+            # on the draft call (schema, no selling to a supplier, Manual never overwritten),
+            # set_contact_category, the category inbox filter and counts,
+            # create_customer_from_chat (existing mobile creates nothing), unlink,
+            # get_fact_overrides, and the standalone classifier (never raises per chat).
+            test_chat_enhancements
             # The roles payload the mobile app routes on, incl. manager_home
             # (feature manager-home-bar): always a bool, follows the User
             # field, False on a site that has not migrated it yet.

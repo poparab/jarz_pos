@@ -18,6 +18,7 @@
   "needs_human_reason",
   "warnings",
   "fact_conflicts",
+  "moderator_hint",
   "is_planted",
   "planted_error",
   "real_draft",
@@ -118,6 +119,12 @@
    "description": "Points where the moderator's instruction went against our facts; the draft followed the moderator. One per line."
   },
   {
+   "fieldname": "moderator_hint",
+   "fieldtype": "Small Text",
+   "label": "Moderator Hint",
+   "description": "The instruction the moderator typed for this draft (first 500 characters)."
+  },
+  {
    "fieldname": "is_planted",
    "fieldtype": "Check",
    "label": "Is Planted",
@@ -206,7 +213,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-11-14 17:43:33.568793",
+ "modified": "2026-11-16 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "jarz pos",
  "name": "Jarz Chat Draft",

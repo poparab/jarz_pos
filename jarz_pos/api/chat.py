@@ -112,8 +112,13 @@ def get_conversations(
 	limit: int | str | None = 30,
 	before: str | None = None,
 	exclude_closed: int | str | None = 0,
+	category: str | None = None,
 ) -> dict[str, Any]:
 	"""Inbox list, newest activity first. ``before`` is a ``last_message_at`` cursor.
+
+	``category`` filters by who is writing: ``Supplier``, ``Content Creator``,
+	``Other``, or ``Customer`` (which also includes chats not classified yet).
+	``category_counts`` counts the Supplier and Content Creator chats still in play.
 
 	``exclude_closed`` with ``status="all"`` is the app's "Open" tab: every chat
 	still in play, waiting (Open) or already replied to (Answered).
@@ -136,6 +141,16 @@ def get_conversations(
 		filters.append([cc.CONVERSATION, "assigned_to", "=", frappe.session.user])
 	if before:
 		filters.append([cc.CONVERSATION, "last_message_at", "<", before])
+	category = str(category or "").strip()
+	if category:
+		if category not in cc.CONTACT_CATEGORIES:
+			frappe.throw(_("Unknown category: {0}").format(category))
+		if category == "Customer":
+			# Customer = Customer or not classified yet; "not in" is null-safe in Frappe.
+			others = [c for c in cc.CONTACT_CATEGORIES if c != "Customer"]
+			filters.append([cc.CONVERSATION, "contact_category", "not in", others])
+		else:
+			filters.append([cc.CONVERSATION, "contact_category", "=", category])
 
 	or_filters: list[list[Any]] = []
 	term = str(search or "").strip()
@@ -174,7 +189,39 @@ def get_conversations(
 		"conversations": [cc.serialize_summary(r, r.name in pending, at) for r in rows],
 		"has_more": has_more,
 		"open_count": frappe.db.count(cc.CONVERSATION, {"status": "Open"}),
+		"category_counts": _category_counts(),
 	}
+
+
+def _customer_suggestion(conv: Any) -> dict[str, Any] | None:
+	"""The customer the chat's phone (or a typed one) points at, for the one-tap link. Never raises."""
+	if conv.customer:
+		return None
+	try:
+		from jarz_pos.services import chat_customer_match as match
+
+		return match.suggestion_for(conv.name)
+	except Exception:
+		return None
+
+
+def _category_counts() -> dict[str, int]:
+	"""Supplier and Content Creator chats that are not Closed. Never raises."""
+	counts = {"Supplier": 0, "Content Creator": 0}
+	try:
+		rows = frappe.db.sql(
+			"""
+			select contact_category, count(*)
+			from `tabJarz Chat Conversation`
+			where status != 'Closed' and contact_category in ('Supplier', 'Content Creator')
+			group by contact_category
+			"""
+		)
+		for name, number in rows or []:
+			counts[name] = int(number or 0)
+	except Exception:
+		pass
+	return counts
 
 
 @frappe.whitelist(methods=["POST"])
@@ -230,6 +277,7 @@ def get_conversation(name: str, limit: int | str | None = 50, before: str | None
 		"messages": [cc.serialize_message(r) for r in rows],
 		"draft": cc.pending_draft(conv.name),
 		"customer": cc.customer_card(conv.customer),
+		"customer_suggestion": _customer_suggestion(conv),
 		"has_more": has_more,
 	}
 
@@ -445,6 +493,90 @@ def regenerate_draft(conversation: str, hint: str | None = None) -> dict[str, An
 	return {"draft": cc.load_draft(name)}
 
 
+@frappe.whitelist(methods=["GET", "POST"])
+def get_fact_overrides(
+	from_date: str | None = None,
+	to_date: str | None = None,
+	limit: int | str | None = 100,
+	start: int | str | None = 0,
+) -> dict[str, Any]:
+	"""Moments a moderator told the AI something that is not in our facts, newest first.
+
+	Drafts whose ``fact_conflicts`` is set, in ``[from_date, to_date]`` (default:
+	the last 30 days), each with who asked, what they typed, the conflicts and
+	what finally went out. Planted check drafts are left out (their real twin shows).
+	"""
+	_gate()
+	limit_n = _int(limit, 100, _MAX_LIST)
+	try:
+		offset = max(0, int(start or 0))
+	except (TypeError, ValueError):
+		offset = 0
+	today = frappe.utils.getdate(cc.now())
+	first = frappe.utils.getdate(from_date) if from_date else frappe.utils.add_days(today, -30)
+	last = frappe.utils.getdate(to_date) if to_date else today
+	filters: list[list[Any]] = [
+		[cc.DRAFT, "fact_conflicts", "is", "set"],
+		[cc.DRAFT, "is_planted", "=", 0],
+		[cc.DRAFT, "creation", ">=", f"{first} 00:00:00"],
+		[cc.DRAFT, "creation", "<", f"{frappe.utils.add_days(last, 1)} 00:00:00"],
+	]
+	rows = frappe.get_all(
+		cc.DRAFT,
+		filters=filters,
+		fields=[
+			"name",
+			"conversation",
+			"creation",
+			"owner",
+			"moderator_hint",
+			"fact_conflicts",
+			"status",
+			"final_text",
+			"draft_text",
+		],
+		order_by="creation desc",
+		start=offset,
+		limit_page_length=limit_n + 1,
+		ignore_permissions=True,
+	)
+	total = frappe.db.count(cc.DRAFT, filters=filters)
+	has_more = len(rows) > limit_n
+	rows = rows[:limit_n]
+	convs: dict[str, Any] = {}
+	if rows:
+		convs = {
+			c.name: c
+			for c in frappe.get_all(
+				cc.CONVERSATION,
+				filters={"name": ["in", list({r.conversation for r in rows if r.conversation})]},
+				fields=["name", "contact_name", "channel"],
+				ignore_permissions=True,
+			)
+		}
+	return {
+		"rows": [
+			{
+				"draft": r.name,
+				"conversation": r.conversation,
+				"contact_name": (convs.get(r.conversation) or {}).get("contact_name") or None,
+				"channel": (convs.get(r.conversation) or {}).get("channel") or None,
+				"created_at": cc.dt_str(r.creation),
+				"requested_by": r.owner,
+				"requested_by_name": cc.full_name(r.owner),
+				"moderator_hint": r.moderator_hint or None,
+				"conflicts": cc.split_warnings(r.fact_conflicts),
+				"status": r.status,
+				"final_text": r.final_text or None,
+				"draft_text": r.draft_text or None,
+			}
+			for r in rows
+		],
+		"has_more": has_more,
+		"total": int(total or 0),
+	}
+
+
 # ── conversation state ──────────────────────────────────────────────────
 
 
@@ -492,6 +624,21 @@ def set_conversation_status(conversation: str, status: str) -> dict[str, Any]:
 	return {"conversation": summary}
 
 
+def _link(conv_name: str, customer: str) -> dict[str, Any]:
+	"""Point the conversation at *customer* (and its last order); returns the new summary."""
+	from jarz_pos.services.chat_ingest import _last_order
+
+	frappe.db.set_value(
+		cc.CONVERSATION,
+		conv_name,
+		{"customer": customer, "last_order": _last_order(customer)},
+		update_modified=True,
+	)
+	summary = cc.load_summary(conv_name)
+	cc.publish_chat_update(conv_name, "status", summary=summary)
+	return summary
+
+
 @frappe.whitelist(methods=["POST"])
 def link_customer(conversation: str, customer: str) -> dict[str, Any]:
 	"""Link the conversation to an existing Customer record."""
@@ -500,17 +647,127 @@ def link_customer(conversation: str, customer: str) -> dict[str, Any]:
 	customer = str(customer or "").strip()
 	if not customer or not frappe.db.exists("Customer", customer):
 		frappe.throw(_("Customer {0} not found.").format(customer or "?"), frappe.DoesNotExistError)
-	from jarz_pos.services.chat_ingest import _last_order
+	summary = _link(conv.name, customer)
+	return {"conversation": summary, "customer": cc.customer_card(customer)}
 
+
+@frappe.whitelist(methods=["POST"])
+def unlink_customer(conversation: str) -> dict[str, Any]:
+	"""Remove the chat's customer link (and its last order); the customer record is untouched."""
+	_gate()
+	conv = _conversation_or_throw(conversation)
 	frappe.db.set_value(
-		cc.CONVERSATION,
-		conv.name,
-		{"customer": customer, "last_order": _last_order(customer)},
-		update_modified=True,
+		cc.CONVERSATION, conv.name, {"customer": None, "last_order": None}, update_modified=True
 	)
 	summary = cc.load_summary(conv.name)
 	cc.publish_chat_update(conv.name, "status", summary=summary)
-	return {"conversation": summary, "customer": cc.customer_card(customer)}
+	return {"conversation": summary}
+
+
+@frappe.whitelist(methods=["GET", "POST"])
+def suggest_customers(conversation: str) -> dict[str, Any]:
+	"""Candidate customers for the chat (phone, typed phone, same contact, name) and a prefill.
+
+	``{"candidates": [...], "prefill": {...}}``; no AI. Never raises: on any
+	problem the lists are empty.
+	"""
+	_gate()
+	conv = _conversation_or_throw(conversation)
+	from jarz_pos.services import chat_customer_match as match
+
+	return match.suggest(conv.name)
+
+
+@frappe.whitelist(methods=["GET", "POST"])
+def get_new_customer_prefill(conversation: str) -> dict[str, Any]:
+	"""The "new customer" form filled from the chat by the AI (name, phone, address, area, pin).
+
+	One call, 20 s at most. When the AI fails the form without AI comes back with
+	``"ai": false`` and an ``"ai_error"`` line, never an error.
+	"""
+	_gate()
+	conv = _conversation_or_throw(conversation)
+	from jarz_pos.services import chat_customer_match as match
+
+	return match.ai_prefill(conv.name)
+
+
+@frappe.whitelist(methods=["POST"])
+def create_customer_from_chat(
+	conversation: str,
+	customer_name: str,
+	mobile_no: str,
+	address: str,
+	territory: str,
+	location_link: str | None = None,
+	latitude: float | str | None = None,
+	longitude: float | str | None = None,
+) -> dict[str, Any]:
+	"""Make a Customer from the chat and link the chat to it.
+
+	A mobile that already belongs to a customer (any spelling, Customer or a
+	linked Contact) creates nothing: ``{"existing": candidate, "conversation": ...}``
+	so the app can offer "Link to this one". Otherwise the POS's own
+	``create_customer`` runs (same validation and duplicate guards) and the chat
+	is linked: ``{"conversation", "customer", "created": true}``.
+	"""
+	_gate()
+	conv = _conversation_or_throw(conversation)
+	from jarz_pos.services import chat_customer_match as match
+	from jarz_pos.utils.phone import normalize_phone
+
+	name = " ".join(str(customer_name or "").split())
+	address = str(address or "").strip()
+	territory = str(territory or "").strip()
+	mobile = normalize_phone(mobile_no)
+	if not name or not mobile or not address or not territory:
+		frappe.throw(_("Name, mobile, address and area are required."))
+
+	found = match.customers_by_phone([mobile])
+	if found:
+		existing = match.candidates_for(found[:1])
+		if existing:
+			return {"existing": existing[0], "conversation": cc.load_summary(conv.name)}
+
+	from jarz_pos.api.customer import create_customer
+
+	created = create_customer(
+		customer_name=name,
+		mobile_no=mobile,
+		customer_primary_address=address,
+		territory_id=territory,
+		location_link=str(location_link or "").strip() or None,
+		latitude=latitude if latitude not in ("", None) else None,
+		longitude=longitude if longitude not in ("", None) else None,
+	)
+	summary = _link(conv.name, created["name"])
+	return {"conversation": summary, "customer": cc.customer_card(created["name"]), "created": True}
+
+
+@frappe.whitelist(methods=["POST"])
+def set_contact_category(conversation: str, category: str | None = "") -> dict[str, Any]:
+	"""Set who is writing by hand (``Customer``, ``Supplier``, ``Content Creator``, ``Other``).
+
+	A hand-set category is never overwritten by the AI. An empty *category*
+	clears it and hands the chat back to the AI (the next draft classifies it).
+	"""
+	_gate()
+	conv = _conversation_or_throw(conversation)
+	category = str(category or "").strip()
+	if category and category not in cc.CONTACT_CATEGORIES:
+		frappe.throw(_("Category must be one of: {0}.").format(", ".join(cc.CONTACT_CATEGORIES)))
+	if category:
+		values = {
+			"contact_category": category,
+			"contact_category_source": "Manual",
+			"contact_category_reason": None,
+		}
+	else:
+		values = {"contact_category": None, "contact_category_source": None, "contact_category_reason": None}
+	frappe.db.set_value(cc.CONVERSATION, conv.name, values, update_modified=True)
+	summary = cc.load_summary(conv.name)
+	cc.publish_chat_update(conv.name, "status", summary=summary)
+	return {"conversation": summary}
 
 
 @frappe.whitelist(methods=["POST"])

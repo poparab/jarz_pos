@@ -672,23 +672,18 @@ def _own_ids(settings: dict[str, Any]) -> set[str]:
 
 
 def _match_customer(phone: str | None) -> str | None:
+	"""The customer a chat's phone belongs to, or ``None``. Phone only, never by name.
+
+	Looks at ``Customer.mobile_no`` / ``phone`` and the phone rows of Contacts
+	linked to a Customer; when several customers share the number the one with
+	the most recent submitted invoice wins. Never raises.
+	"""
 	if not phone:
 		return None
 	try:
-		from jarz_pos.utils.phone import phone_variants
+		from jarz_pos.services.chat_customer_match import customer_from_phone
 
-		variants = phone_variants(phone)
-		if not variants:
-			return None
-		rows = frappe.get_all(
-			"Customer",
-			filters={"mobile_no": ["in", variants], "disabled": 0},
-			pluck="name",
-			order_by="modified desc",
-			limit_page_length=1,
-			ignore_permissions=True,
-		)
-		return rows[0] if rows else None
+		return customer_from_phone(phone)
 	except Exception:
 		return None
 
