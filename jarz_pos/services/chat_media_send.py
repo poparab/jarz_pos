@@ -460,7 +460,14 @@ def react(message_name: str, emoji: Any, user: str) -> dict[str, Any]:
 
 	try:
 		if conv.channel == cc.WHATSAPP:
-			meta.wa_send_reaction(conv.external_id, row.external_message_id, chosen)
+			own_id = meta.wa_send_reaction(conv.external_id, row.external_message_id, chosen)
+			# Its "sent" status must not read as a Business Suite reply (that marked the chat
+			# Answered); a placeholder that raced ahead of this line is removed.
+			cc.remember_not_a_reply(own_id)
+			if own_id:
+				from jarz_pos.services import chat_ingest as ingest
+
+				ingest.drop_status_only_placeholder(own_id)
 		else:
 			name = DM_REACTION_NAMES.get(chosen) if chosen else None
 			meta.dm_send_reaction(

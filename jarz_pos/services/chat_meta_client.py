@@ -192,9 +192,12 @@ def wa_send_media(
 	return str(wamid)
 
 
-def wa_send_reaction(to: str, wamid: str, emoji: str) -> None:
-	"""React to the customer's message ``wamid``; an empty ``emoji`` removes our reaction."""
-	_request(
+def wa_send_reaction(to: str, wamid: str, emoji: str) -> str | None:
+	"""React to the customer's message ``wamid``; an empty ``emoji`` removes our reaction.
+
+	Returns the reaction's own message id (WhatsApp sends status updates for it), or ``None``.
+	"""
+	data = _request(
 		"POST",
 		f"{_wa_phone_id()}/messages",
 		_wa_token(),
@@ -206,6 +209,9 @@ def wa_send_reaction(to: str, wamid: str, emoji: str) -> None:
 			"reaction": {"message_id": wamid, "emoji": emoji},
 		},
 	)
+	messages = (data.get("messages") or []) if isinstance(data, dict) else []
+	own = (messages[0] or {}).get("id") if messages else None
+	return str(own) if own else None
 
 
 def wa_send_template(to: str, name: str, language: str, components: list[dict[str, Any]]) -> str:

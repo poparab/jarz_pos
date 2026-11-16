@@ -1419,6 +1419,8 @@ def _record_status_only_reply(
 	reply = _status_only_reply_event(event)
 	if reply is None:
 		return None
+	if cc.is_not_a_reply(reply["external_message_id"]):
+		return None  # our own reaction: not a reply, never marks the chat Answered
 	conv = _find_conversation(cc.WHATSAPP, reply["external_id"])
 	if conv is None:
 		return None
@@ -1430,6 +1432,80 @@ def _record_status_only_reply(
 	if _app_send_in_flight(conv.name, when):
 		return None
 	return _persist_message(reply, settings, tz)
+
+
+def drop_status_only_placeholder(wamid: Any) -> str | None:
+	"""Remove the "Reply sent from Meta Business Suite" placeholder made for *wamid* (a
+	reaction, not a reply) and put its chat back to waiting when nobody answered after the
+	customer. Returns the conversation, or ``None`` when there was no placeholder. Never raises.
+	"""
+	if not wamid:
+		return None
+	try:
+		row = frappe.db.get_value(
+			cc.MESSAGE,
+			{"external_message_id": str(wamid), "raw_json": STATUS_ONLY_MARKER, "direction": "Outbound"},
+			["name", "conversation"],
+			as_dict=True,
+		)
+		if not row:
+			return None
+		frappe.delete_doc(cc.MESSAGE, row.name, ignore_permissions=True, force=True)
+		reopen_if_unanswered(row.conversation)
+		cc.publish_chat_update(row.conversation, "conversation")
+		return row.conversation
+	except Exception:
+		cc.safe_log_error("chat: dropping a reaction placeholder failed", f"id={mask_id(wamid)}")
+		return None
+
+
+def reopen_if_unanswered(conversation: str) -> bool:
+	"""Back to Open / waiting when the newest real message is the customer's (no reply after it)."""
+	conv = frappe.db.get_value(cc.CONVERSATION, conversation, ["name", "status"], as_dict=True)
+	if not conv or conv.status != "Answered":
+		return False
+	rows = frappe.get_all(
+		cc.MESSAGE,
+		filters={"conversation": conversation, "message_type": ["!=", "reaction"]},
+		fields=["direction", "timestamp"],
+		order_by="timestamp desc, creation desc",
+		limit_page_length=30,
+		ignore_permissions=True,
+	)
+	if not rows or rows[0].direction != "Inbound":
+		return False
+	waiting = rows[0].timestamp
+	for r in rows:
+		if r.direction != "Inbound":
+			break
+		waiting = r.timestamp
+	frappe.db.set_value(
+		cc.CONVERSATION,
+		conversation,
+		{"status": "Open", "waiting_since": waiting, "last_direction": "Inbound"},
+		update_modified=True,
+	)
+	return True
+
+
+def _apply_staff_reaction_echo(event: dict[str, Any]) -> bool:
+	"""A reaction staff put from the WhatsApp Business app on the phone (echo): show it as OUR
+	reaction on the customer's message, and never let its status become a reply placeholder."""
+	target = str(event.get("reaction_target") or "")
+	own_id = event.get("external_message_id")
+	cc.remember_not_a_reply(own_id)
+	drop_status_only_placeholder(own_id)
+	if not target or not cc.has_reaction_columns():
+		return bool(target)
+	row = frappe.db.get_value(
+		cc.MESSAGE, {"external_message_id": target}, ["name", "conversation"], as_dict=True
+	)
+	if not row:
+		return True  # the target never reached us: still not a bubble
+	emoji = str(event.get("body") or "").strip()[:32]
+	frappe.db.set_value(cc.MESSAGE, row.name, "staff_reaction", emoji or None, update_modified=True)
+	cc.publish_chat_update(row.conversation, "message", message=cc.load_message(row.name))
+	return True
 
 
 def _upgrade_status_only(event: dict[str, Any]) -> dict[str, Any] | None:
@@ -1839,6 +1915,9 @@ def process_webhook(payload: Any = None) -> dict[str, Any]:
 				elif kind == "contact":
 					if _apply_contact(event):
 						result["contacts"] = result.get("contacts", 0) + 1
+				elif kind == "message" and event.get("reaction_target") and event.get("direction") == "Outbound":
+					if _apply_staff_reaction_echo(event):
+						result["reactions"] = result.get("reactions", 0) + 1
 				elif kind == "reaction" or (kind == "message" and event.get("reaction_target")):
 					if _apply_customer_reaction(event):
 						result["reactions"] = result.get("reactions", 0) + 1

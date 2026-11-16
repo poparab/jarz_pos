@@ -107,6 +107,34 @@ def has_reaction_columns() -> bool:
 		return False
 
 
+#: WhatsApp gives a reaction its own message id, and its "sent" status for an id we never
+#: stored used to become a "Reply sent from Meta Business Suite" placeholder that marked the
+#: chat Answered (2026-11-16). Our reactions' ids are remembered here so their statuses are
+#: ignored.
+NOT_A_REPLY_PREFIX = "jarz_chat_not_reply:"
+NOT_A_REPLY_SECONDS = 3 * 24 * 3600
+
+
+def remember_not_a_reply(wamid: Any) -> None:
+	"""Mark a WhatsApp message id as ours but not a reply (a reaction). Never raises."""
+	if not wamid:
+		return
+	try:
+		frappe.cache().set_value(NOT_A_REPLY_PREFIX + str(wamid), 1, expires_in_sec=NOT_A_REPLY_SECONDS)
+	except Exception:
+		pass
+
+
+def is_not_a_reply(wamid: Any) -> bool:
+	"""True for an id :func:`remember_not_a_reply` stored. Never raises."""
+	if not wamid:
+		return False
+	try:
+		return bool(frappe.cache().get_value(NOT_A_REPLY_PREFIX + str(wamid)))
+	except Exception:
+		return False
+
+
 #: Columns added by chat-message-edit-delete. Missing until migrate has run on the site.
 REVISION_COLUMNS = ("deleted_at", "edited_at", "original_body")
 

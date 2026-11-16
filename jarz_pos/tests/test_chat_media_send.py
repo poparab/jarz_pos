@@ -850,3 +850,93 @@ class TranscriptTest(unittest.TestCase):
 
 if __name__ == "__main__":  # pragma: no cover
 	unittest.main()
+
+
+class ReactionIsNotAReplyTest(Harness):
+	"""2026-11-16 (CHAT-07784): a ❤️ from the app (or the phone) got its own WhatsApp id; its
+	"sent" status became a "Reply sent from Meta Business Suite" placeholder that marked the
+	chat Answered. Reaction ids are now remembered and their placeholders removed."""
+
+	call = GraphShapeTest.call
+
+	def setUp(self):
+		super().setUp()
+		self.rows[(cc.MESSAGE, "M1")] = _D(
+			{"name": "M1", "conversation": "CONV1", "direction": "Inbound", "external_message_id": "wamid.IN"}
+		)
+
+	def test_wa_reaction_returns_its_own_id(self):
+		own, _ = self.call(
+			meta.wa_send_reaction, "+2011", "wamid.X", "👍", response={"messages": [{"id": "wamid.R"}]}
+		)
+		self.assertEqual(own, "wamid.R")
+		none, _ = self.call(meta.wa_send_reaction, "+2011", "wamid.X", "👍", response={})
+		self.assertIsNone(none)
+
+	def test_app_reaction_id_is_remembered_and_any_placeholder_dropped(self):
+		self.with_conv(conv())
+		with (
+			mock.patch.object(meta, "wa_send_reaction", return_value="wamid.R"),
+			mock.patch.object(cc, "remember_not_a_reply") as remember,
+			mock.patch.object(ing, "drop_status_only_placeholder") as drop,
+		):
+			ms.react("M1", "❤️", "mod@x.com")
+		remember.assert_called_once_with("wamid.R")
+		drop.assert_called_once_with("wamid.R")
+
+	def test_status_of_a_remembered_reaction_makes_no_placeholder(self):
+		event = {
+			"kind": "status",
+			"channel": cc.WHATSAPP,
+			"external_message_id": "wamid.R",
+			"recipient": "2011",
+			"status": "sent",
+			"category": "service",
+			"timestamp": 1.0,
+		}
+		with (
+			mock.patch.object(cc, "is_not_a_reply", return_value=True),
+			mock.patch.object(ing, "_find_conversation") as find,
+		):
+			self.assertIsNone(ing._record_status_only_reply(event, {}, None))
+		find.assert_not_called()
+
+	def test_phone_reaction_echo_is_ours_not_the_customers(self):
+		self.rows[(cc.MESSAGE, "filter")] = _D({"name": "M9", "conversation": "CONV1"})
+		event = {
+			"kind": "message",
+			"direction": "Outbound",
+			"channel": cc.WHATSAPP,
+			"external_message_id": "wamid.R2",
+			"reaction_target": "wamid.IN",
+			"body": "❤️",
+		}
+		with (
+			mock.patch.object(cc, "remember_not_a_reply") as remember,
+			mock.patch.object(ing, "drop_status_only_placeholder") as drop,
+		):
+			self.assertTrue(ing._apply_staff_reaction_echo(event))
+		remember.assert_called_once_with("wamid.R2")
+		drop.assert_called_once_with("wamid.R2")
+		self.assertIn((cc.MESSAGE, "M9", "staff_reaction", "❤️"), self.sets)
+		self.assertNotIn((cc.MESSAGE, "M9", "customer_reaction", "❤️"), self.sets)
+
+	def test_echo_parse_keeps_direction_and_target(self):
+		value = {
+			"message_echoes": [
+				{
+					"to": "201111034268",
+					"id": "wamid.R3",
+					"timestamp": "1760608800",
+					"type": "reaction",
+					"reaction": {"message_id": "wamid.IN", "emoji": "❤️"},
+				}
+			]
+		}
+		payload = {
+			"object": "whatsapp_business_account",
+			"entry": [{"id": "WABA", "changes": [{"field": "smb_message_echoes", "value": value}]}],
+		}
+		events = ing.parse_webhook(payload)
+		self.assertEqual(events[0]["direction"], "Outbound")
+		self.assertEqual(events[0]["reaction_target"], "wamid.IN")
