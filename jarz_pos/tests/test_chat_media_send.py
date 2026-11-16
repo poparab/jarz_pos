@@ -486,7 +486,13 @@ class SendMediaFlowTest(Harness):
 
 	def test_instagram_uses_a_tokenised_public_url(self):
 		c = conv(cc.INSTAGRAM)
-		with mock.patch.object(meta, "ig_send_attachment_url", return_value="m_ig") as send:
+		import frappe.utils as frappe_utils
+
+		with (
+			mock.patch.object(meta, "ig_send_attachment_url", return_value="m_ig") as send,
+			# Under a real site (CI) get_url is the site's own host, not the stub's.
+			mock.patch.object(frappe_utils, "get_url", return_value="https://erp.example.com", create=True),
+		):
 			self.run_send(c, "a.png", "image/png", b"PNG", "")
 		args = send.call_args
 		self.assertEqual(args.args[:2], ("PSID1", "image"))
