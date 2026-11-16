@@ -141,7 +141,7 @@ class PromptStyleTest(unittest.TestCase):
 		self.assertIn("CART-SIZE rule", p)
 		self.assertIn("never a generic", p)
 		self.assertIn("Never write a total", p)
-		self.assertIn("no shock-freezer", p)
+		self.assertNotIn("no shock-freezer", p)  # owner approved it, 2026-11-16
 		self.assertIn("LATEST messages", p)
 		self.assertIn("Never say a payment", p)
 
@@ -209,9 +209,6 @@ class SettleTest(unittest.TestCase):
 			gen.assert_not_called()
 
 
-if __name__ == "__main__":
-	unittest.main()
-
 
 class LiveJobNeverSleepsTest(unittest.TestCase):
 	"""The draft job shares the single short/default worker with webhook ingest: it must not wait."""
@@ -226,3 +223,63 @@ class LiveJobNeverSleepsTest(unittest.TestCase):
 		self.assertEqual(slept, [])
 		with mock.patch.object(d, "_inbound_quiet_state", return_value=("M2", 2.0, False)):
 			self.assertFalse(d.settle_before_draft("C", "M1", sleep=slept.append, settle=0))
+
+
+class SlotsFamiliesAreasTest(unittest.TestCase):
+	"""2026-11-16 owner asks: drafts read the real delivery slots, match flavours by family,
+	and know Masaken Sheraton is Heliopolis (EGMASRJD); shock-freezer is approved."""
+
+	def test_running_slot(self):
+		text = d.render_delivery_slots(
+			[
+				{"label": "Today, 10:00 PM - 11:30 PM", "is_current": True},
+				{"label": "Today, 12:00 AM - 01:00 AM", "is_current": False},
+			]
+		)
+		self.assertIn("A slot is running now: Today, 10:00 PM - 11:30 PM", text)
+		self.assertIn("Next slots: Today, 12:00 AM - 01:00 AM", text)
+
+	def test_closed_points_to_the_next_slot(self):
+		text = d.render_delivery_slots([{"label": "Tomorrow, 01:00 PM - 02:30 PM", "is_current": False}])
+		self.assertIn("No slot is running now", text)
+		self.assertIn("next slot: Tomorrow, 01:00 PM - 02:30 PM", text)
+
+	def test_no_slots_never_guesses(self):
+		self.assertIn("Do not name a time", d.render_delivery_slots([]))
+		self.assertIn("Do not name a time", d.render_delivery_slots(None))
+
+	def test_rule_8_reads_the_slots_and_rule_21_matches_flavours(self):
+		p = d.SYSTEM_PROMPT
+		self.assertIn('"Delivery slots" block', p)
+		self.assertIn("21. Flavour matching", p)
+		self.assertIn("SAME family", p)
+
+	def test_families_have_arabic_names(self):
+		text = d.render_flavour_families()
+		self.assertIn("Fruity: Blueberry / بلوبيري, Strawberry / فراولة, Mango / مانجا", text)
+		self.assertIn("Molten Cake / مولتن", text)
+		self.assertNotIn("Kunafa", text)
+
+	def test_sheraton_priced_as_heliopolis(self):
+		fees = {"egmasrjd": 50.0, "مصر الجديدة": 50.0}
+		lines = d.apply_area_aliases(fees)
+		self.assertEqual(fees["مساكن شيراتون"], 50.0)
+		self.assertIn("مساكن شيراتون = EGMASRJD", lines)
+
+	def test_alias_skipped_when_the_area_is_missing(self):
+		fees = {}
+		self.assertEqual(d.apply_area_aliases(fees), [])
+		self.assertEqual(fees, {})
+
+	def test_unreadable_message_wants_no_draft_and_hides_the_note(self):
+		self.assertTrue(d.needs_no_draft("unsupported", "note to staff"))
+		lines = d.transcript_lines(
+			[{"direction": "Inbound", "message_type": "unsupported", "body": "WhatsApp did not pass this on"}],
+			False,
+			[],
+		)
+		self.assertNotIn("did not pass", " ".join(lines))
+
+
+if __name__ == "__main__":
+	unittest.main()

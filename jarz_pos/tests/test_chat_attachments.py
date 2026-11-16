@@ -344,3 +344,40 @@ class WhatsAppUsernameUserTest(unittest.TestCase):
 	def test_normal_phone_sender_unchanged(self):
 		e = wa({"type": "text", "text": {"body": "hello"}})
 		self.assertEqual((e["external_id"], e["phone"], e["contact_name"]), ("201111034268", "201111034268", "Sara"))
+
+
+class WhatsAppUnavailableMessageTest(unittest.TestCase):
+	"""2026-11-16 (CHAT-07804): WhatsApp delivered error 131060 instead of the content. Staff now
+	see a note to read it on the phone, not a bare «Unsupported message»."""
+
+	def test_131060_says_read_it_on_the_phone(self):
+		e = wa(
+			{
+				"type": "unsupported",
+				"errors": [{"code": 131060, "title": "This message is unavailable."}],
+				"unsupported": {"type": "unknown"},
+			}
+		)
+		self.assertEqual(e["message_type"], "unsupported")
+		self.assertEqual(e["body"], ing.WA_UNAVAILABLE_NOTE)
+		self.assertIn("WhatsApp Business", e["body"])
+
+	def test_other_unknown_type_gets_the_generic_note(self):
+		e = wa({"type": "poll", "poll": {}})
+		self.assertEqual(e["message_type"], "unsupported")
+		self.assertEqual(e["body"], ing.WA_UNSUPPORTED_NOTE)
+
+	def test_real_edit_and_revoke_shapes_are_revisions_not_bubbles(self):
+		edit = {
+			"type": "edit",
+			"edit": {
+				"original_message_id": "wamid.ORIG",
+				"message": {"type": "text", "text": {"body": "عاوز معاد التوصيل الساعه 2"}},
+			},
+		}
+		self.assertEqual(
+			ing._wa_revision(edit),
+			{"revision": "edit", "target": "wamid.ORIG", "body": "عاوز معاد التوصيل الساعه 2"},
+		)
+		revoke = {"type": "revoke", "revoke": {"original_message_id": "wamid.ORIG"}}
+		self.assertEqual(ing._wa_revision(revoke), {"revision": "delete", "target": "wamid.ORIG", "body": ""})

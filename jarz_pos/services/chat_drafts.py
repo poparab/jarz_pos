@@ -168,9 +168,9 @@ reply itself may also carry ONE short line with it (e.g. «وممكن تزود �
 section of the context, in its wording and within its scope. A topic under "Not approved" is \
 never stated or guessed. No health, nutrition, diet, sugar-free or allergy-safety claims. Asked \
 whether it suits diabetics or a diet, about allergens, or how many people a jar serves: say a \
-team member will confirm. Never stretch a fact beyond its wording or scope: no shock-freezer, \
-no extra days, no «from production date», no process or ingredient-sourcing claim that is not \
-listed (if a moderator's instruction adds one, rule 17 applies: write it and report the conflict).
+team member will confirm. Never stretch a fact beyond its wording or scope: no extra days and \
+no process or ingredient-sourcing claim that is not listed (if a moderator's instruction adds \
+one, rule 17 applies: write it and report the conflict).
 5. Complaints (late, wrong, damaged, bad taste, rude courier...): apologise sincerely, ask for \
 the order details if missing, promise that the team will look into it. Never promise a refund, \
 replacement, discount or compensation. Set is_complaint true.
@@ -178,9 +178,14 @@ replacement, discount or compensation. Set is_complaint true.
 the context.
 7. When you are unsure, or the request needs a human (custom order, payment problem, refund \
 request, angry customer), still write a safe holding reply and fill needs_human_reason.
-8. State the delivery time only in the wording of the approved "Delivery time" fact. Never \
-promise faster, never a fixed hour. We deliver inside the listed areas only: no other \
-governorates.
+8. State the delivery time only in the wording of the approved "Delivery time" fact, and only \
+while the "Delivery slots" block says a slot is running now. That block is the real timetable: \
+when no slot is running (before opening, after the last slot), say the order goes out in the \
+next slot by its label, never «30 دقيقة» from now. Asked for a time («الساعة 2», «بكرة الصبح»), \
+match it to the slot that covers it, or offer the nearest one or two from the block. Use it as \
+insight too: late in the day with today's last slot close, tell them gently to confirm soon to \
+catch it. Never invent a slot or an hour outside the block, never promise faster or an exact \
+minute. We deliver inside the listed areas only: no other governorates.
 9. When a ready answer below matches the message, start from it.
 10. Never say «مش متواجدين», never answer in an English auto-reply style, never point to a \
 photo or a highlight for the prices, and never send the customer to the website instead of \
@@ -250,6 +255,11 @@ never «في الطريق» unless the order state says dispatched; never show a
 a few words. A bare «ok / تمام / شكرا» after the order is confirmed: at most two words back.
 20. Words staff cut, never use: third person «الفريق هيراجع» (say «هراجع» or «هنراجع»), «هنا في \
 الشات», and a repeated «ابعتلنا في رسالة واحدة»: ask for the missing detail once.
+21. Flavour matching: think about how the flavours go together, using "Flavour families". To \
+replace a paused flavour or one they did not like, suggest one from the SAME family first (fruit \
+for fruit, chocolate for chocolate). For several jars or a box they are mixing, balance it (a \
+fruity one with a chocolate one) unless they clearly love one family. A first order or a gift \
+with no preference: the favourites. One or two names, never the whole menu.
 
 What sells (from 1,800 past Jarz chats):
 - Answer the price with the numbers first, through {{size_prices}}. Never «حسب الحجم» or \
@@ -930,6 +940,50 @@ FLAVOUR_AR = {
 	"kunafa": "كنافة",
 	"carrot cake": "كاروت كيك",
 }
+#: Flavour families for swaps (same family) and mixes (across families), rule 21.
+#: Kunafa and Carrot Cake are never offered, so they belong to no family.
+FLAVOUR_FAMILIES: dict[str, tuple[str, ...]] = {
+	"Fruity": ("Blueberry", "Strawberry", "Mango"),
+	"Chocolate & nuts": ("Chocolate Hazelnut", "Molten Cake", "Pistachio"),
+	"Creamy & caramel": ("Lotus", "Tiramisu", "Red Velvet"),
+}
+
+
+def render_flavour_families() -> str:
+	"""One line per family, the Arabic name next to the English. Pure."""
+	lines = []
+	for family, flavours in FLAVOUR_FAMILIES.items():
+		shown = []
+		for flavour in flavours:
+			ar = FLAVOUR_AR.get(flavour.lower()) or FLAVOUR_AR.get(flavour.split()[0].lower(), "")
+			shown.append(f"{flavour} / {ar}" if ar else flavour)
+		lines.append(f"{family}: " + ", ".join(shown))
+	return "\n".join(lines)
+
+
+#: Places customers name that sit inside one of our delivery areas (owner, 2026-11-16):
+#: ``{what they write, lowercase: territory name}``. Quoted and priced as that territory.
+AREA_ALIASES: dict[str, str] = {
+	"مساكن شيراتون": "EGMASRJD",
+	"مساكن الشيراتون": "EGMASRJD",
+	"شيراتون": "EGMASRJD",
+	"masaken sheraton": "EGMASRJD",
+	"sheraton": "EGMASRJD",
+}
+
+
+def apply_area_aliases(fees: dict[str, float]) -> list[str]:
+	"""Price every alias whose territory has a fee (mutates *fees*); the prompt lines."""
+	lines = []
+	for alias, territory in AREA_ALIASES.items():
+		fee = fees.get(territory.lower())
+		if fee is None:
+			continue
+		fees[alias] = fee
+		lines.append(f"{alias} = {territory}")
+	return lines
+
+
 #: What customers write that means a flavour or size: understood, never echoed.
 CUSTOMER_ALIASES = (
 	"مانجو = Mango (say مانجا)",
@@ -1690,6 +1744,65 @@ def _item_arabic_names(codes: Iterable[str]) -> dict[str, str]:
 		return {}
 
 
+# ── delivery slots (the branch timetable, live per draft) ───────────────
+
+SLOTS_SHOWN = 6
+SLOTS_CACHE_SECONDS = 120
+SLOTS_CACHE_PREFIX = "jarz_chat_slots:v1:"
+
+
+def delivery_slots(profile: str | None) -> list[dict[str, Any]]:
+	"""The next delivery slots of *profile* (``label``, ``is_current``), cached 2 minutes. Never raises."""
+	if not profile:
+		return []
+	key = SLOTS_CACHE_PREFIX + str(profile)
+	try:
+		cached = frappe.cache().get_value(key)
+		if cached is not None:
+			return list(cached)
+	except Exception:
+		pass
+	try:
+		from jarz_pos.api.delivery_slots import get_available_delivery_slots
+
+		with _quiet():
+			slots = get_available_delivery_slots(profile) or []
+	except Exception:
+		slots = []
+	slim = [
+		{"label": str(s.get("label") or ""), "is_current": bool(s.get("is_current"))}
+		for s in slots[:SLOTS_SHOWN]
+		if s.get("label")
+	]
+	try:
+		frappe.cache().set_value(key, slim, expires_in_sec=SLOTS_CACHE_SECONDS)
+	except Exception:
+		pass
+	return slim
+
+
+def render_delivery_slots(slots: Iterable[dict[str, Any]] | None) -> str:
+	"""The "Delivery slots" block of the draft prompt (rule 8). Pure."""
+	slots = [s for s in slots or [] if s.get("label")]
+	if not slots:
+		return (
+			"Delivery slots: unavailable right now. Do not name a time or a slot; "
+			"say we will confirm the delivery time."
+		)
+	running = next((s for s in slots if s.get("is_current")), None)
+	upcoming = [s["label"] for s in slots if not s.get("is_current")]
+	lines = ["Delivery slots (the real timetable, rule 8):"]
+	if running:
+		lines.append(f"- A slot is running now: {running['label']}. An order confirmed now goes out in it.")
+	elif upcoming:
+		lines.append(f"- No slot is running now. An order confirmed now goes out in the next slot: {upcoming[0]}.")
+	else:
+		lines.append("- No slot is running now.")
+	if upcoming:
+		lines.append("- Next slots: " + "; ".join(upcoming))
+	return "\n".join(lines)
+
+
 def build_context(settings: dict[str, Any]) -> dict[str, Any]:
 	"""Menu, delivery fees, free-delivery offer and upsell candidates.
 
@@ -1698,7 +1811,7 @@ def build_context(settings: dict[str, Any]) -> dict[str, Any]:
 	for 10 minutes per POS profile: it is the cached prefix of every prompt.
 	"""
 	profile = settings.get("default_pos_profile") or ""
-	cache_key = f"{DRAFT_CONTEXT_CACHE_PREFIX}v9:{profile}"
+	cache_key = f"{DRAFT_CONTEXT_CACHE_PREFIX}v10:{profile}"
 	try:
 		cached = frappe.cache().get_value(cache_key)
 		if cached:
@@ -1766,6 +1879,7 @@ def build_context(settings: dict[str, Any]) -> dict[str, Any]:
 			fees[arabic.lower()] = fee
 			label = f"{row.name} / {arabic}"
 		territory_lines.append(label)
+	alias_lines = apply_area_aliases(fees)
 
 	threshold = _free_delivery_threshold()
 
@@ -1818,6 +1932,16 @@ def build_context(settings: dict[str, Any]) -> dict[str, Any]:
 		render_bundle_contents(bundles) or "(none)",
 		"## Delivery areas (use {{delivery_fee:TERRITORY_NAME}} with the exact name)",
 		"\n".join(territory_lines) or "(no delivery areas configured)",
+		*(
+			[
+				"## Places inside a delivery area (quote and price them as that area)",
+				"\n".join(alias_lines),
+			]
+			if alias_lines
+			else []
+		),
+		"## Flavour families (rule 21: swap within a family, mix across them)",
+		render_flavour_families(),
 		"## Free delivery",
 		"An order above {{free_delivery_threshold}} gets free delivery."
 		if threshold
@@ -1992,7 +2116,8 @@ def transcript_lines(
 		who = "Customer" if msg.get("direction") == "Inbound" else "Jarz"
 		mtype = str(msg.get("message_type") or "text")
 		body = str(msg.get("body") or "").strip()
-		if mtype == "location":
+		if mtype in ("location", "unsupported"):
+			# An unsupported message's body is our note to staff, never the customer's words.
 			body = ""
 		if msg.get("deleted_at"):
 			# Deleted for everyone: the model must not act on, or quote, the removed text.
@@ -2516,6 +2641,7 @@ def generate_draft(
 		user_parts = [
 			f"Channel: {conv.channel}",
 			"Now: " + now.strftime("%a %d %b %Y %H:%M"),
+			render_delivery_slots(delivery_slots(settings.get("default_pos_profile"))),
 			render_customer_profile(profile, now),
 		]
 		if conv.customer_summary:
@@ -2677,8 +2803,9 @@ _BARE_ACK = re.compile(
 
 
 def needs_no_draft(message_type: Any, body: Any) -> bool:
-	"""True for an inbound that wants no reply: a reaction, or a bare «ok / تمام / شكرا». Pure."""
-	if str(message_type or "").lower() == "reaction":
+	"""True for an inbound that wants no reply: a reaction, a message we cannot read
+	(staff read it on the phone), or a bare «ok / تمام / شكرا». Pure."""
+	if str(message_type or "").lower() in ("reaction", "unsupported"):
 		return True
 	text = " ".join(str(body or "").split())
 	return bool(text) and len(text.split()) <= 3 and bool(_BARE_ACK.match(text))

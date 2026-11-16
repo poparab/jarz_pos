@@ -291,7 +291,33 @@ def _wa_message_content(msg: dict[str, Any]) -> dict[str, Any]:
 	else:  # order, system, unsupported, unknown
 		out["message_type"] = "unsupported"
 		out["raw"] = msg
+		out["body"] = wa_unsupported_note(msg)
 	return out
+
+
+#: WhatsApp error 131060: Meta could not hand the message's content to the API (seen
+#: on the coexistence number). Only the WhatsApp Business app on the phone has it.
+WA_UNAVAILABLE_CODE = 131060
+WA_UNAVAILABLE_NOTE = (
+	"⚠️ واتساب ماوصّلش محتوى الرسالة دي للتطبيق. افتحها من WhatsApp Business على الموبايل. / "
+	"WhatsApp did not pass this message on — read it in WhatsApp Business on the phone."
+)
+WA_UNSUPPORTED_NOTE = (
+	"⚠️ نوع رسالة التطبيق مش بيعرضه (زي view once أو تصويت). افتحها من WhatsApp Business على الموبايل. / "
+	"A message type the app cannot show (e.g. view-once or a poll) — read it in WhatsApp Business on the phone."
+)
+
+
+def wa_unsupported_note(msg: Any) -> str:
+	"""What staff see instead of «Unsupported message» for a WhatsApp message we cannot show. Pure."""
+	errors = (msg or {}).get("errors") if isinstance(msg, dict) else None
+	for err in errors or []:
+		try:
+			if int((err or {}).get("code") or 0) == WA_UNAVAILABLE_CODE:
+				return WA_UNAVAILABLE_NOTE
+		except (TypeError, ValueError):
+			continue
+	return WA_UNSUPPORTED_NOTE
 
 
 #: Keys Meta may use for a WhatsApp user who hides their number (username users).
