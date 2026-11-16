@@ -416,11 +416,11 @@ GROUP_LABELS = {"EGZAYED": {"en": "EGZAYED", "ar": "الشيخ زايد"}, "Egyp
 class RenderBlocksTest(unittest.TestCase):
 	def test_menu_groups_shared_price_and_skips_free_items(self):
 		ar = d.render_menu(PRODUCTS, True)
-		# Flavours stay in English script; the catalog's "Redvelvet" reads "Red Velvet".
-		self.assertIn("• وسط 120 جنيه: Lotus، Red Velvet", ar)
+		# Arabic menu: flavours as Egyptians say them (FLAVOUR_AR).
+		self.assertIn("• وسط 120 جنيه: لوتس، ريد فيلفت", ar)
 		# Large has two prices, so one line per item, size suffix taken off the name.
-		self.assertIn("• Lotus كبير: 160 جنيه", ar)
-		self.assertIn("• Tiramisu كبير: 175 جنيه", ar)
+		self.assertIn("• لوتس كبير: 160 جنيه", ar)
+		self.assertIn("• تيراميسو كبير: 175 جنيه", ar)
 		self.assertNotIn("Spoon", ar)
 		en = d.render_menu(PRODUCTS, False)
 		self.assertIn("Medium 120 EGP: Lotus, Red Velvet", en)
