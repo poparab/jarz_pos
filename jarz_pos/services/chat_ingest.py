@@ -267,6 +267,7 @@ def _wa_message_content(msg: dict[str, Any]) -> dict[str, Any]:
 		reaction = msg.get("reaction") or {}
 		out["message_type"] = "reaction"
 		out["body"] = str(reaction.get("emoji") or "")
+		out["reaction_target"] = str(reaction.get("message_id") or "") or None
 	elif mtype == "button":
 		# A template quick-reply tap; a static button's payload is its text.
 		button = msg.get("button") or {}
@@ -302,7 +303,19 @@ def _parse_whatsapp(entry: dict[str, Any], events: list[dict[str, Any]]) -> None
 					continue
 				content = _wa_message_content(msg)
 				if content["message_type"] == "reaction" and not content["body"]:
-					continue  # a reaction removed
+					if content.get("reaction_target"):
+						# A reaction removed: clears the badge on our message, never a bubble.
+						events.append(
+							_event(
+								kind="reaction",
+								channel=cc.WHATSAPP,
+								external_id=wa_id,
+								external_message_id=str(msg["id"]),
+								reaction_target=content["reaction_target"],
+								body="",
+							)
+						)
+					continue
 				events.append(
 					_event(
 						channel=cc.WHATSAPP,
@@ -539,6 +552,45 @@ def _story_reply_prefix(message: dict[str, Any]) -> bool:
 	return isinstance(story, dict) and bool(story.get("url") or story.get("id"))
 
 
+#: Messenger / Instagram name a reaction; ``emoji`` is usually sent too.
+_DM_REACTION_EMOJI = {"love": "❤️", "like": "👍", "haha": "😂"}
+
+
+def _parse_dm_reaction(
+	item: dict[str, Any],
+	channel: str,
+	account_id: str,
+	own_ids: set[str],
+	sender: str,
+	ts: float,
+	events: list[dict[str, Any]],
+) -> None:
+	"""A customer's ``messaging[].reaction``: only ever attached to its target message."""
+	reaction = item.get("reaction") or {}
+	mid = str(reaction.get("mid") or "")
+	if not mid or not sender or sender == account_id or sender in own_ids:
+		return  # our own reaction echoing back, or nothing to attach to
+	removed = str(reaction.get("action") or "react").lower() == "unreact"
+	emoji = ""
+	if not removed:
+		emoji = str(reaction.get("emoji") or "") or _DM_REACTION_EMOJI.get(
+			str(reaction.get("reaction") or "").lower(), ""
+		)
+		if not emoji:
+			return
+	events.append(
+		_event(
+			kind="reaction",
+			channel=channel,
+			external_id=sender,
+			external_message_id=f"rx-{mid}-{int(ts * 1000)}",
+			reaction_target=mid,
+			body=emoji,
+			timestamp=ts,
+		)
+	)
+
+
 def _parse_messaging(
 	entry: dict[str, Any], channel: str, own_ids: set[str], events: list[dict[str, Any]]
 ) -> None:
@@ -564,8 +616,11 @@ def _parse_messaging(
 
 		message = item.get("message")
 		postback = item.get("postback")
+		if not message and not postback and item.get("reaction"):
+			_parse_dm_reaction(item, channel, account_id, own_ids, sender, ts, events)
+			continue
 		if not message and not postback:
-			continue  # read, reaction, referral-only, optin ...
+			continue  # read, referral-only, optin ...
 
 		is_echo = bool(message and message.get("is_echo"))
 		if not is_echo and own_ids and sender in own_ids and sender != recipient:
@@ -987,6 +1042,26 @@ def _message_exists(external_message_id: str | None) -> bool:
 	if not external_message_id:
 		return False
 	return bool(frappe.db.exists(cc.MESSAGE, {"external_message_id": external_message_id}))
+
+
+def _apply_customer_reaction(event: dict[str, Any]) -> bool:
+	"""Show the customer's reaction on the message it targets. ``False`` when it cannot.
+
+	``False`` (target unknown, or the reaction columns not migrated yet) lets the caller keep
+	today's behaviour: WhatsApp stores a standalone reaction message, Messenger / Instagram skip.
+	"""
+	target = str(event.get("reaction_target") or "")
+	if not target or not cc.has_reaction_columns():
+		return False
+	row = frappe.db.get_value(
+		cc.MESSAGE, {"external_message_id": target}, ["name", "conversation"], as_dict=True
+	)
+	if not row:
+		return False
+	emoji = str(event.get("body") or "").strip()[:32]
+	frappe.db.set_value(cc.MESSAGE, row.name, "customer_reaction", emoji or None, update_modified=True)
+	cc.publish_chat_update(row.conversation, "message", message=cc.load_message(row.name))
+	return True
 
 
 def _is_app_echo(conversation: str, body: str, when: _dt.datetime) -> bool:
@@ -1507,6 +1582,14 @@ def process_webhook(payload: Any = None) -> dict[str, Any]:
 				elif kind == "contact":
 					if _apply_contact(event):
 						result["contacts"] = result.get("contacts", 0) + 1
+				elif kind == "reaction" or (kind == "message" and event.get("reaction_target")):
+					if _apply_customer_reaction(event):
+						result["reactions"] = result.get("reactions", 0) + 1
+					elif kind == "message":
+						action = _persist_message(event, settings, tz)
+						if action:
+							actions.append(action)
+							result["messages"] += 1
 				elif kind == "history_progress":
 					_note_history_progress(event.get("status"))
 				elif kind == "history_error":

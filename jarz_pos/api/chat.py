@@ -241,7 +241,7 @@ def get_conversation(name: str, limit: int | str | None = 50, before: str | None
 	rows = frappe.get_all(
 		cc.MESSAGE,
 		filters=filters,
-		fields=list(cc.MESSAGE_FIELDS),
+		fields=cc.message_fields(),
 		order_by="timestamp desc, creation desc",
 		limit_page_length=limit_n + 1,
 		ignore_permissions=True,
@@ -272,8 +272,14 @@ def get_conversation(name: str, limit: int | str | None = 50, before: str | None
 					pass
 		cc.publish_chat_update(conv.name, "status")
 
+	from jarz_pos.services import chat_media_send as ms
+
+	summary = cc.load_summary(conv.name)
+	if summary is not None:
+		summary["can_send_media"] = ms.can_send_media(conv.channel)
+		summary["reaction_choices"] = ms.reaction_choices(conv.channel)
 	return {
-		"conversation": cc.load_summary(conv.name),
+		"conversation": summary,
 		"messages": [cc.serialize_message(r) for r in rows],
 		"draft": cc.pending_draft(conv.name),
 		"customer": cc.customer_card(conv.customer),
@@ -360,6 +366,57 @@ def send_message(conversation: str, text: str) -> dict[str, Any]:
 
 	message = send_text(conv.name, text, frappe.session.user)
 	return {"message": message}
+
+
+@frappe.whitelist(methods=["POST"])
+def send_media() -> dict[str, Any]:
+	"""Send one photo / video / voice note / file (multipart: ``conversation``, ``caption``, ``file``)."""
+	_gate()
+	conv = _conversation_or_throw(frappe.form_dict.get("conversation"))
+	upload = (getattr(frappe, "request", None) and frappe.request.files.get("file")) or None
+	if upload is None:
+		frappe.throw(_("No file was uploaded."))
+	from jarz_pos.services import chat_media_send as ms
+
+	content = upload.read()
+	message = ms.send_media(
+		conv.name,
+		frappe.session.user,
+		upload.filename or "",
+		content,
+		upload.mimetype or upload.content_type,
+		frappe.form_dict.get("caption"),
+	)
+	return {"message": message}
+
+
+@frappe.whitelist(methods=["POST"])
+def react_to_message(message: str, emoji: str | None = "") -> dict[str, Any]:
+	"""Put our emoji on a customer's message (``emoji=""`` removes it)."""
+	_gate()
+	from jarz_pos.services import chat_media_send as ms
+
+	return ms.react(str(message or "").strip(), emoji, frappe.session.user)
+
+
+# nosemgrep: guest-whitelisted-method -- serves one file for a random 1-hour token minted when staff send it on Instagram; the token is the credential, unknown / expired tokens get 404
+@frappe.whitelist(allow_guest=True, methods=["GET"])
+def media_link(token: str | None = None) -> Any:
+	"""Public, expiring link to a private chat file. Instagram fetches DM attachments by URL."""
+	from werkzeug.wrappers import Response
+
+	from jarz_pos.services import chat_media_send as ms
+
+	found = ms.resolve_media_token(token)
+	if found is None:
+		return Response("Not found", status=404, mimetype="text/plain")
+	content, mime, filename = found
+	response = Response(content, status=200, mimetype=mime)
+	safe = "".join(c for c in filename if c.isalnum() or c in "._- ") or "file"
+	response.headers["Content-Disposition"] = f'inline; filename="{safe}"'
+	response.headers["Cache-Control"] = "private, max-age=3600"
+	response.headers["X-Content-Type-Options"] = "nosniff"
+	return response
 
 
 @frappe.whitelist(methods=["POST"])

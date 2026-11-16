@@ -207,8 +207,11 @@ class WhatsAppParseTest(unittest.TestCase):
 				},
 			)
 		)
-		self.assertEqual([e["external_message_id"] for e in events], ["wamid.5"])
-		self.assertEqual(events[0]["message_type"], "reaction")
+		# The removal is not a message: it only clears the badge on the target (kind "reaction").
+		messages = [e for e in events if e["kind"] == "message"]
+		self.assertEqual([e["external_message_id"] for e in messages], ["wamid.5"])
+		self.assertEqual(messages[0]["message_type"], "reaction")
+		self.assertEqual([e["kind"] for e in events if e["kind"] != "message"], ["reaction"])
 
 	def test_button_and_interactive_become_text(self):
 		events = ing.parse_webhook(

@@ -22,6 +22,8 @@ from jarz_pos.services.chat_settings import get_chat_settings
 
 GRAPH_BASE = "https://graph.facebook.com"
 TIMEOUT = 15
+#: Uploading a video of up to 25 MB needs longer than a plain call.
+UPLOAD_TIMEOUT = 120
 #: Hard cap on a downloaded attachment (contract: 16 MB).
 MAX_MEDIA_BYTES = 16 * 1024 * 1024
 HUMAN_AGENT_TAG = "HUMAN_AGENT"
@@ -66,8 +68,16 @@ def _error_from_response(resp: Any) -> MetaApiError:
 
 
 def _request(
-	method: str, path_or_url: str, token: str, *, json_body: dict | None = None, params: dict | None = None
+	method: str,
+	path_or_url: str,
+	token: str,
+	*,
+	json_body: dict | None = None,
+	params: dict | None = None,
+	form: dict | None = None,
+	files: dict | None = None,
 ) -> dict[str, Any]:
+	"""One Graph call. ``form`` / ``files`` make it a multipart upload (``requests`` sets the boundary)."""
 	if not token:
 		raise MetaApiError("Meta access token is not configured in Jarz Chat Settings", "config")
 	url = path_or_url if path_or_url.startswith("http") else _url(path_or_url)
@@ -78,7 +88,9 @@ def _request(
 			headers={"Authorization": f"Bearer {token}"},
 			json=json_body,
 			params=params,
-			timeout=TIMEOUT,
+			data=form,
+			files=files,
+			timeout=UPLOAD_TIMEOUT if files else TIMEOUT,
 		)
 	except requests.RequestException as exc:
 		raise MetaApiError(f"Meta API unreachable: {type(exc).__name__}", "network") from None
@@ -123,6 +135,77 @@ def wa_send_text(to: str, text: str) -> str:
 	if not wamid:
 		raise MetaApiError("WhatsApp accepted the call but returned no message id", "no_id")
 	return str(wamid)
+
+
+def _wa_phone_id() -> str:
+	phone_id = _settings().get("whatsapp_phone_number_id")
+	if not phone_id:
+		raise MetaApiError("WhatsApp phone number id is not configured", "config")
+	return str(phone_id)
+
+
+def wa_upload_media(content: bytes, filename: str, mime: str) -> str:
+	"""Upload a file to WhatsApp (``POST /<phone_number_id>/media``). Returns the media id."""
+	data = _request(
+		"POST",
+		f"{_wa_phone_id()}/media",
+		_wa_token(),
+		form={"messaging_product": "whatsapp", "type": mime},
+		files={"file": (filename, content, mime)},
+	)
+	media_id = data.get("id")
+	if not media_id:
+		raise MetaApiError("WhatsApp accepted the upload but returned no media id", "no_id")
+	return str(media_id)
+
+
+def wa_media_payload(media_type: str, media_id: str, caption: str | None, filename: str | None) -> dict:
+	"""The type-specific object of a WhatsApp media message. Audio takes no caption."""
+	payload: dict[str, Any] = {"id": media_id}
+	if media_type != "audio" and caption:
+		payload["caption"] = caption
+	if media_type == "document" and filename:
+		payload["filename"] = filename
+	return payload
+
+
+def wa_send_media(
+	to: str, media_type: str, media_id: str, caption: str | None = None, filename: str | None = None
+) -> str:
+	"""Send an uploaded image / video / audio / document inside the 24h window. Returns the wamid."""
+	data = _request(
+		"POST",
+		f"{_wa_phone_id()}/messages",
+		_wa_token(),
+		json_body={
+			"messaging_product": "whatsapp",
+			"recipient_type": "individual",
+			"to": str(to or "").lstrip("+"),
+			"type": media_type,
+			media_type: wa_media_payload(media_type, media_id, caption, filename),
+		},
+	)
+	messages = data.get("messages") or []
+	wamid = (messages[0] or {}).get("id") if messages else None
+	if not wamid:
+		raise MetaApiError("WhatsApp accepted the call but returned no message id", "no_id")
+	return str(wamid)
+
+
+def wa_send_reaction(to: str, wamid: str, emoji: str) -> None:
+	"""React to the customer's message ``wamid``; an empty ``emoji`` removes our reaction."""
+	_request(
+		"POST",
+		f"{_wa_phone_id()}/messages",
+		_wa_token(),
+		json_body={
+			"messaging_product": "whatsapp",
+			"recipient_type": "individual",
+			"to": str(to or "").lstrip("+"),
+			"type": "reaction",
+			"reaction": {"message_id": wamid, "emoji": emoji},
+		},
+	)
 
 
 def wa_send_template(to: str, name: str, language: str, components: list[dict[str, Any]]) -> str:
@@ -318,6 +401,75 @@ def messenger_send(psid: str, text: str, tag: str | None = None) -> str:
 def ig_send(igsid: str, text: str, tag: str | None = None) -> str:
 	"""Send an Instagram DM reply. ``tag="HUMAN_AGENT"`` between 24h and 7 days."""
 	return _send_api({"id": igsid}, text, tag, instagram=True)
+
+
+def _dm_account(instagram: bool) -> str:
+	"""The edge account for a DM call: the linked Page for both (see :func:`_send_api`)."""
+	settings = _settings()
+	account = settings.get("facebook_page_id")
+	if instagram and not account:
+		account = settings.get("instagram_account_id")
+	return str(account or "me")
+
+
+def _dm_mid(data: dict[str, Any]) -> str:
+	mid = data.get("message_id") or data.get("id")
+	if not mid:
+		raise MetaApiError("Meta accepted the call but returned no message id", "no_id")
+	return str(mid)
+
+
+def messenger_send_attachment(
+	psid: str, attachment_type: str, content: bytes, filename: str, mime: str, tag: str | None = None
+) -> str:
+	"""Upload-and-send a file to a Messenger user (multipart ``filedata``). Returns the mid.
+
+	``attachment_type`` is Meta's ``image|video|audio|file``. The Page's echo webhook later
+	carries this same mid, which is how the inbox de-duplicates it.
+	"""
+	import json
+
+	form = {
+		"recipient": json.dumps({"id": psid}),
+		"message": json.dumps({"attachment": {"type": attachment_type, "payload": {"is_reusable": False}}}),
+		"messaging_type": "MESSAGE_TAG" if tag else "RESPONSE",
+	}
+	if tag:
+		form["tag"] = tag
+	data = _request(
+		"POST",
+		f"{_dm_account(False)}/messages",
+		_page_token(),
+		form=form,
+		files={"filedata": (filename, content, mime)},
+	)
+	return _dm_mid(data)
+
+
+def ig_send_attachment_url(igsid: str, attachment_type: str, url: str, tag: str | None = None) -> str:
+	"""Send an Instagram DM attachment by public URL (``image|video|audio``). Returns the mid."""
+	body: dict[str, Any] = {
+		"recipient": {"id": igsid},
+		"message": {"attachment": {"type": attachment_type, "payload": {"url": url}}},
+		"messaging_type": "MESSAGE_TAG" if tag else "RESPONSE",
+	}
+	if tag:
+		body["tag"] = tag
+	return _dm_mid(_request("POST", f"{_dm_account(True)}/messages", _page_token(), json_body=body))
+
+
+def dm_send_reaction(
+	user_id: str, mid: str, reaction: str | None, instagram: bool = False
+) -> None:
+	"""React to (``reaction="love"``) or un-react (``None``) a customer's DM ``mid``."""
+	body: dict[str, Any] = {"recipient": {"id": user_id}}
+	if reaction:
+		body["sender_action"] = "react"
+		body["payload"] = {"message_id": mid, "reaction": reaction}
+	else:
+		body["sender_action"] = "unreact"
+		body["payload"] = {"message_id": mid}
+	_request("POST", f"{_dm_account(instagram)}/messages", _page_token(), json_body=body)
 
 
 def comment_private_reply(comment_id: str, text: str, instagram: bool = False) -> str:

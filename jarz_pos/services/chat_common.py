@@ -94,6 +94,26 @@ MESSAGE_FIELDS = (
 	"draft",
 )
 
+#: Columns added by chat-media-send. Missing until migrate has run on the site.
+REACTION_COLUMNS = ("staff_reaction", "customer_reaction")
+
+
+def has_reaction_columns() -> bool:
+	"""Whether the message table carries the reaction columns. Never raises."""
+	try:
+		return bool(frappe.db.has_column(MESSAGE, "customer_reaction"))
+	except Exception:
+		return False
+
+
+def message_fields() -> list[str]:
+	"""MESSAGE_FIELDS (plus the reaction columns) that exist on this site."""
+	fields = list(MESSAGE_FIELDS)
+	if has_reaction_columns():
+		fields.extend(REACTION_COLUMNS)
+	return fields
+
+
 DRAFT_FIELDS = (
 	"name",
 	"conversation",
@@ -303,12 +323,14 @@ def serialize_message(row: Any) -> dict[str, Any]:
 		"sent_by_name": full_name(get("sent_by")),
 		"timestamp": dt_str(get("timestamp")),
 		"error": get("error") or None,
+		"staff_reaction": get("staff_reaction") or None,
+		"customer_reaction": get("customer_reaction") or None,
 	}
 
 
 def load_message(name: str) -> dict[str, Any] | None:
 	try:
-		row = frappe.db.get_value(MESSAGE, name, list(MESSAGE_FIELDS), as_dict=True)
+		row = frappe.db.get_value(MESSAGE, name, message_fields(), as_dict=True)
 	except Exception:
 		return None
 	return serialize_message(row) if row else None

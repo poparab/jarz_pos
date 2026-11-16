@@ -20,6 +20,8 @@
   "draft",
   "status",
   "error",
+  "staff_reaction",
+  "customer_reaction",
   "timestamp",
   "raw_json"
  ],
@@ -129,6 +131,24 @@
    "label": "Error"
   },
   {
+   "fieldname": "staff_reaction",
+   "fieldtype": "Data",
+   "label": "Staff Reaction",
+   "length": 32,
+   "read_only": 1,
+   "no_copy": 1,
+   "description": "Emoji our team put on this inbound message."
+  },
+  {
+   "fieldname": "customer_reaction",
+   "fieldtype": "Data",
+   "label": "Customer Reaction",
+   "length": 32,
+   "read_only": 1,
+   "no_copy": 1,
+   "description": "Emoji the customer put on this outbound message."
+  },
+  {
    "fieldname": "timestamp",
    "fieldtype": "Datetime",
    "label": "Timestamp",
@@ -146,7 +166,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-10-29 12:00:00.000000",
+ "modified": "2026-11-16 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "jarz pos",
  "name": "Jarz Chat Message",
