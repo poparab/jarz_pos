@@ -485,3 +485,19 @@ def comment_public_reply(comment_id: str, text: str, instagram: bool = False) ->
 	if not cid:
 		raise MetaApiError("Meta accepted the reply but returned no comment id", "no_id")
 	return str(cid)
+
+
+def delete_comment(comment_id: str, instagram: bool = False) -> None:
+	"""Delete a comment our Page / account wrote: ``DELETE /{comment_id}`` with the Page token.
+
+	Same token as :func:`comment_public_reply`. Facebook and Instagram both use the same edge.
+	"""
+	_request("DELETE", f"{comment_id}", _page_token())
+
+
+def edit_comment(comment_id: str, text: str) -> None:
+	"""Edit a Facebook comment our Page wrote: ``POST /{comment_id}`` with ``message``.
+
+	Instagram's Graph API has no comment edit; callers refuse it before getting here.
+	"""
+	_request("POST", f"{comment_id}", _page_token(), json_body={"message": text})

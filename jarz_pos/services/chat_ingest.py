@@ -32,6 +32,7 @@ import frappe
 
 from jarz_pos.services import chat_common as cc
 from jarz_pos.services import chat_media
+from jarz_pos.services import chat_revise as revise
 
 #: Bodies above this are refused before hashing. A WhatsApp ``history`` chunk
 #: (up to 180 days of chats at onboarding) is the largest payload Meta sends.
@@ -320,6 +321,60 @@ def _shape(value: Any, depth: int = 0) -> Any:
 	return type(value).__name__
 
 
+def _wa_text_of(value: Any) -> str:
+	"""Text out of an edit payload: ``{text: {body}}``, ``{body}``, ``{text: "..."}`` or a bare string."""
+	if isinstance(value, str):
+		return value
+	if not isinstance(value, dict):
+		return ""
+	text = value.get("text")
+	if isinstance(text, dict):
+		return str(text.get("body") or "")
+	return str(text or value.get("body") or "")
+
+
+def _wa_revision(msg: dict[str, Any]) -> dict[str, Any] | None:
+	"""A customer's WhatsApp delete / edit of an earlier message, or ``None`` for a normal message.
+
+	Meta's exact webhook shape is not verified live, so this accepts the plausible ones:
+	``type: "revoke"`` / a ``revoke`` object, ``type: "edit"`` / an ``edit`` object, and a
+	message whose ``context.id`` points at the original with ``edited`` set. Returns
+	``{"revision", "target", "body"}``; ``target`` is ``""`` when the shape is a revision
+	but names no original message (the caller logs it by structure).
+	"""
+	mtype = str(msg.get("type") or "")
+	context = msg.get("context") if isinstance(msg.get("context"), dict) else {}
+	revoke = msg.get("revoke") if isinstance(msg.get("revoke"), dict) else None
+	if mtype == "revoke" or revoke is not None:
+		holder = revoke or {}
+		target = (
+			holder.get("original_message_id") or holder.get("message_id") or holder.get("id") or context.get("id")
+		)
+		return {"revision": "delete", "target": str(target or ""), "body": ""}
+	edit = msg.get("edit") if isinstance(msg.get("edit"), dict) else None
+	if mtype == "edit" or edit is not None:
+		holder = edit or {}
+		target = holder.get("original_message_id") or holder.get("message_id") or context.get("id")
+		body = _wa_text_of(holder.get("message")) or _wa_text_of(holder) or _wa_text_of(msg)
+		return {"revision": "edit", "target": str(target or ""), "body": body}
+	if (msg.get("edited") or context.get("edited")) and context.get("id"):
+		return {"revision": "edit", "target": str(context["id"]), "body": _wa_text_of(msg)}
+	return None
+
+
+def _revision_event(channel: str, external_id: str, target: str, revision: str, body: str, ts: float):
+	return _event(
+		kind="revision",
+		channel=channel,
+		external_id=external_id,
+		external_message_id=f"rev-{target}-{revision}-{int(ts * 1000)}",
+		revision=revision,
+		revision_target=target,
+		body=body,
+		timestamp=ts,
+	)
+
+
 def _log_dropped_wa(field: str, msg: Any, contacts: list[Any]) -> None:
 	"""Record a WhatsApp message we could not place (no sender / id). Never raises."""
 	try:
@@ -347,6 +402,23 @@ def _parse_whatsapp(entry: dict[str, Any], events: list[dict[str, Any]]) -> None
 				# A WhatsApp user who chats by username may hide their number: no ``from``,
 				# only a business-scoped user id. Without this the whole chat was lost.
 				wa_id = str(msg.get("from") or _wa_user_id(msg, contacts if len(contacts) == 1 else []) or "")
+				revision = _wa_revision(msg) if isinstance(msg, dict) else None
+				if revision is not None:
+					# The customer deleted / edited an earlier message: change it, never a new bubble.
+					if revision["target"]:
+						events.append(
+							_revision_event(
+								cc.WHATSAPP,
+								wa_id,
+								revision["target"],
+								revision["revision"],
+								revision["body"],
+								_epoch(msg.get("timestamp")),
+							)
+						)
+					else:
+						_log_dropped_wa("messages", msg, contacts)
+					continue
 				if not wa_id or not msg.get("id"):
 					_log_dropped_wa("messages", msg, contacts)
 					continue
@@ -698,6 +770,15 @@ def _parse_messaging(
 
 		message = item.get("message")
 		postback = item.get("postback")
+		edit = item.get("message_edit")
+		if isinstance(edit, dict) and not message and not postback:
+			mid = str(edit.get("mid") or "")
+			text = str(edit.get("text") or "")
+			if mid and customer_side:
+				events.append(_revision_event(channel, sender, mid, "edit", text, ts))
+			else:
+				_log_dropped_wa("message_edit", item, [])
+			continue
 		if not message and not postback and item.get("reaction"):
 			_parse_dm_reaction(item, channel, account_id, own_ids, sender, ts, events)
 			continue
@@ -731,6 +812,11 @@ def _parse_messaging(
 			continue
 
 		if message.get("is_deleted") or message.get("is_unsupported"):
+			if message.get("is_deleted") and message.get("mid"):
+				# The customer unsent a message: mark it, never a new bubble.
+				events.append(_revision_event(channel, customer, str(message["mid"]), "delete", "", ts))
+			elif message.get("is_deleted"):
+				_log_dropped_wa("message_deleted", item, [])
 			if message.get("is_unsupported") and message.get("mid"):
 				events.append(
 					_event(
@@ -1721,6 +1807,9 @@ def process_webhook(payload: Any = None) -> dict[str, Any]:
 						status_conversations.add(upto[0])
 						status_messages.setdefault(upto[0], []).extend(upto[1])
 						result["statuses"] += len(upto[1])
+				elif kind == "revision":
+					if revise.apply_customer_revision(event):
+						result["revisions"] = result.get("revisions", 0) + 1
 				elif kind == "contact":
 					if _apply_contact(event):
 						result["contacts"] = result.get("contacts", 0) + 1

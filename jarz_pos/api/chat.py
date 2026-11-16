@@ -280,7 +280,7 @@ def get_conversation(name: str, limit: int | str | None = 50, before: str | None
 		summary["reaction_choices"] = ms.reaction_choices(conv.channel)
 	return {
 		"conversation": summary,
-		"messages": [cc.serialize_message(r) for r in rows],
+		"messages": [cc.serialize_message(r, conv.channel) for r in rows],
 		"draft": cc.pending_draft(conv.name),
 		"customer": cc.customer_card(conv.customer),
 		"customer_suggestion": _customer_suggestion(conv),
@@ -397,6 +397,24 @@ def react_to_message(message: str, emoji: str | None = "") -> dict[str, Any]:
 	from jarz_pos.services import chat_media_send as ms
 
 	return ms.react(str(message or "").strip(), emoji, frappe.session.user)
+
+
+@frappe.whitelist(methods=["POST"])
+def delete_message(message: str) -> dict[str, Any]:
+	"""Delete our public comment reply for everyone (Facebook / Instagram comments only)."""
+	_gate()
+	from jarz_pos.services import chat_revise as rv
+
+	return rv.delete_message(str(message or "").strip(), frappe.session.user)
+
+
+@frappe.whitelist(methods=["POST"])
+def edit_message(message: str, text: str) -> dict[str, Any]:
+	"""Edit our public Facebook comment reply (Instagram comments and DMs cannot be edited)."""
+	_gate()
+	from jarz_pos.services import chat_revise as rv
+
+	return rv.edit_message(str(message or "").strip(), text, frappe.session.user)
 
 
 # nosemgrep: guest-whitelisted-method -- serves one file for a random 1-hour token minted when staff send it on Instagram; the token is the credential, unknown / expired tokens get 404

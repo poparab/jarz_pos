@@ -22,6 +22,9 @@
   "error",
   "staff_reaction",
   "customer_reaction",
+  "deleted_at",
+  "edited_at",
+  "original_body",
   "timestamp",
   "raw_json"
  ],
@@ -149,6 +152,30 @@
    "description": "Emoji the customer put on this outbound message."
   },
   {
+   "fieldname": "deleted_at",
+   "fieldtype": "Datetime",
+   "label": "Deleted At",
+   "read_only": 1,
+   "no_copy": 1,
+   "description": "Set when the message was deleted for everyone (by us, or unsent by the customer). The body is kept."
+  },
+  {
+   "fieldname": "edited_at",
+   "fieldtype": "Datetime",
+   "label": "Edited At",
+   "read_only": 1,
+   "no_copy": 1,
+   "description": "Set when the text was edited (our Facebook comment reply, or the customer's message)."
+  },
+  {
+   "fieldname": "original_body",
+   "fieldtype": "Long Text",
+   "label": "Original Body",
+   "read_only": 1,
+   "no_copy": 1,
+   "description": "The text before the first edit, or the text that was deleted."
+  },
+  {
    "fieldname": "timestamp",
    "fieldtype": "Datetime",
    "label": "Timestamp",
@@ -166,7 +193,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-11-16 12:00:00.000000",
+ "modified": "2026-11-16 18:00:00.000000",
  "modified_by": "Administrator",
  "module": "jarz pos",
  "name": "Jarz Chat Message",

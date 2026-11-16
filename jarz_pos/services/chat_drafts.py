@@ -1994,6 +1994,9 @@ def transcript_lines(
 		body = str(msg.get("body") or "").strip()
 		if mtype == "location":
 			body = ""
+		if msg.get("deleted_at"):
+			# Deleted for everyone: the model must not act on, or quote, the removed text.
+			mtype, body = "text", "[deleted]"
 		if who == "Jarz" and body.startswith(SUITE_PLACEHOLDER_PREFIX):
 			who, body = "Jarz (sent from Business Suite, text not available)", ""
 			text = "..."
@@ -2251,7 +2254,7 @@ def _other_chat_parts(conv: Any, mask: bool, names: list[Any]) -> list[str]:
 			rows = frappe.get_all(
 				cc.MESSAGE,
 				filters={"conversation": other.name},
-				fields=["direction", "message_type", "body", "transcript", "timestamp"],
+				fields=["direction", "message_type", "body", "transcript", "timestamp", *cc.deleted_fields()],
 				order_by="timestamp desc, creation desc",
 				limit_page_length=OTHER_CHAT_MESSAGES,
 				ignore_permissions=True,
@@ -2496,6 +2499,7 @@ def generate_draft(
 				"media_file",
 				"media_mime",
 				"timestamp",
+				*cc.deleted_fields(),
 			],
 			order_by="timestamp desc, creation desc",
 			limit_page_length=HISTORY_MESSAGES,

@@ -131,7 +131,15 @@ def classify_conversation(name: str, publish: bool = False) -> dict[str, Any]:
 		rows = frappe.get_all(
 			cc.MESSAGE,
 			filters={"conversation": name},
-			fields=["name", "direction", "message_type", "body", "transcript", "timestamp"],
+			fields=[
+				"name",
+				"direction",
+				"message_type",
+				"body",
+				"transcript",
+				"timestamp",
+				*cc.deleted_fields(),
+			],
 			order_by="timestamp desc, creation desc",
 			limit_page_length=HISTORY_MESSAGES,
 			ignore_permissions=True,

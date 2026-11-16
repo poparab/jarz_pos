@@ -9,6 +9,7 @@ whichever path produced the data. Datetimes are always
 from __future__ import annotations
 
 import datetime as _dt
+import re
 from collections.abc import Iterable
 from typing import Any
 
@@ -106,12 +107,31 @@ def has_reaction_columns() -> bool:
 		return False
 
 
+#: Columns added by chat-message-edit-delete. Missing until migrate has run on the site.
+REVISION_COLUMNS = ("deleted_at", "edited_at", "original_body")
+
+
+def has_revision_columns() -> bool:
+	"""Whether the message table carries the edit / delete columns. Never raises."""
+	try:
+		return bool(frappe.db.has_column(MESSAGE, "original_body"))
+	except Exception:
+		return False
+
+
 def message_fields() -> list[str]:
-	"""MESSAGE_FIELDS (plus the reaction columns) that exist on this site."""
+	"""MESSAGE_FIELDS (plus the reaction and edit / delete columns) that exist on this site."""
 	fields = list(MESSAGE_FIELDS)
 	if has_reaction_columns():
 		fields.extend(REACTION_COLUMNS)
+	if has_revision_columns():
+		fields.extend(REVISION_COLUMNS)
 	return fields
+
+
+def deleted_fields() -> list[str]:
+	"""``["deleted_at"]`` when the column exists, else ``[]``: for AI transcript reads."""
+	return ["deleted_at"] if has_revision_columns() else []
 
 
 DRAFT_FIELDS = (
@@ -304,7 +324,7 @@ def load_summary(name: str) -> dict[str, Any] | None:
 	return serialize_summary(row) if row else None
 
 
-def serialize_message(row: Any) -> dict[str, Any]:
+def serialize_message(row: Any, channel: Any = None) -> dict[str, Any]:
 	get = row.get
 	media_file = str(get("media_file") or "")
 	return {
@@ -325,7 +345,44 @@ def serialize_message(row: Any) -> dict[str, Any]:
 		"error": get("error") or None,
 		"staff_reaction": get("staff_reaction") or None,
 		"customer_reaction": get("customer_reaction") or None,
+		"deleted_at": dt_str(get("deleted_at")),
+		"edited_at": dt_str(get("edited_at")),
+		"original_body": get("original_body") or None,
+		"can_delete": can_delete(row, channel),
+		"can_edit": can_edit(row, channel),
 	}
+
+
+_COMMENT_ID = re.compile(r"^\d+(?:_\d+)?$")
+
+
+def _staff_comment_reply(row: Any, channels: tuple[str, ...], conversation_channel: Any = None) -> bool:
+	get = row.get
+	if get("direction") != "Outbound" or get("status") not in ("sent", "delivered", "read"):
+		return False
+	if not get("external_message_id") or get("deleted_at"):
+		return False
+	if not _COMMENT_ID.match(str(get("external_message_id"))):
+		# A private reply in a comment chat is a DM ("m_..." / base64 mid), not a comment:
+		# Meta cannot delete or edit it. Comment ids are digits ("123" IG, "123_456" FB).
+		return False
+	channel = conversation_channel or get("channel")
+	if channel is None and get("conversation"):
+		try:
+			channel = frappe.db.get_value(CONVERSATION, get("conversation"), "channel")
+		except Exception:
+			channel = None
+	return channel in channels
+
+
+def can_delete(row: Any, channel: Any = None) -> bool:
+	"""Staff may delete this message for everyone: only our public comment replies."""
+	return _staff_comment_reply(row, COMMENT_CHANNELS, channel)
+
+
+def can_edit(row: Any, channel: Any = None) -> bool:
+	"""Staff may edit this message: only our Facebook comment replies (Instagram cannot)."""
+	return _staff_comment_reply(row, (FACEBOOK_COMMENT,), channel)
 
 
 def load_message(name: str) -> dict[str, Any] | None:
