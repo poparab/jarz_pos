@@ -287,19 +287,62 @@ def _wa_message_content(msg: dict[str, Any]) -> dict[str, Any]:
 	return out
 
 
+#: Keys Meta may use for a WhatsApp user who hides their number (username users).
+WA_USER_ID_KEYS = ("user_id", "bsuid", "business_scoped_user_id")
+
+
+def _wa_user_id(msg: dict[str, Any], contacts: list[Any], prefix: str = "from") -> str | None:
+	"""The sender (``prefix="from"``) or recipient (``"to"``) id when there is no phone number."""
+	for key in (f"{prefix}_user_id", f"{prefix}_bsuid", *(WA_USER_ID_KEYS if prefix == "from" else ())):
+		if msg.get(key):
+			return str(msg[key])
+	for c in contacts:
+		for key in ("wa_id", *WA_USER_ID_KEYS):
+			if isinstance(c, dict) and c.get(key):
+				return str(c[key])
+	return None
+
+
+def _shape(value: Any, depth: int = 0) -> Any:
+	"""Keys and types of a webhook object, never its text: enough to see a new shape."""
+	if depth > 3:
+		return "…"
+	if isinstance(value, dict):
+		return {str(k): _shape(v, depth + 1) for k, v in list(value.items())[:25]}
+	if isinstance(value, list):
+		return [_shape(value[0], depth + 1)] if value else []
+	return type(value).__name__
+
+
+def _log_dropped_wa(field: str, msg: Any, contacts: list[Any]) -> None:
+	"""Record a WhatsApp message we could not place (no sender / id). Never raises."""
+	try:
+		cc.safe_log_error(
+			"chat webhook: WhatsApp message dropped",
+			json.dumps({"field": field, "message": _shape(msg), "contacts": _shape(contacts)})[:3000],
+		)
+	except Exception:
+		pass
+
+
 def _parse_whatsapp(entry: dict[str, Any], events: list[dict[str, Any]]) -> None:
 	for change in entry.get("changes") or []:
 		field = change.get("field")
 		value = change.get("value") or {}
 		if field == "messages":
-			names = {
-				str(c.get("wa_id")): str((c.get("profile") or {}).get("name") or "")
-				for c in value.get("contacts") or []
-				if c.get("wa_id")
-			}
+			contacts = [c for c in value.get("contacts") or [] if isinstance(c, dict)]
+			names = {}
+			for c in contacts:
+				name = str((c.get("profile") or {}).get("name") or "")
+				for key in ("wa_id", *WA_USER_ID_KEYS):
+					if c.get(key):
+						names[str(c[key])] = name
 			for msg in value.get("messages") or []:
-				wa_id = str(msg.get("from") or "")
+				# A WhatsApp user who chats by username may hide their number: no ``from``,
+				# only a business-scoped user id. Without this the whole chat was lost.
+				wa_id = str(msg.get("from") or _wa_user_id(msg, contacts if len(contacts) == 1 else []) or "")
 				if not wa_id or not msg.get("id"):
+					_log_dropped_wa("messages", msg, contacts)
 					continue
 				content = _wa_message_content(msg)
 				if content["message_type"] == "reaction" and not content["body"]:
@@ -321,7 +364,7 @@ def _parse_whatsapp(entry: dict[str, Any], events: list[dict[str, Any]]) -> None
 						channel=cc.WHATSAPP,
 						external_id=wa_id,
 						contact_name=names.get(wa_id) or None,
-						phone=wa_id,
+						phone=str(msg.get("from") or "") or None,
 						external_message_id=str(msg["id"]),
 						timestamp=_epoch(msg.get("timestamp")),
 						referral=msg.get("referral") or None,
@@ -356,15 +399,16 @@ def _parse_whatsapp(entry: dict[str, Any], events: list[dict[str, Any]]) -> None
 		elif field in ("smb_message_echoes", "message_echoes"):
 			echoes = value.get("message_echoes") or value.get("messages") or []
 			for msg in echoes:
-				to = str(msg.get("to") or "")
+				to = str(msg.get("to") or _wa_user_id(msg, [], prefix="to") or "")
 				if not to or not msg.get("id"):
+					_log_dropped_wa(field, msg, [])
 					continue
 				content = _wa_message_content(msg)
 				events.append(
 					_event(
 						channel=cc.WHATSAPP,
 						external_id=to,
-						phone=to,
+						phone=str(msg.get("to") or "") or None,
 						direction="Outbound",
 						sent_via="Phone",
 						external_message_id=str(msg["id"]),
@@ -1007,7 +1051,7 @@ def _create_conversation(event: dict[str, Any], when: _dt.datetime) -> Any:
 	if channel == cc.WHATSAPP:
 		from jarz_pos.utils.phone import normalize_phone
 
-		phone = normalize_phone(event.get("phone") or external_id) or None
+		phone = normalize_phone(event.get("phone") or "") or None
 		customer = _match_customer(phone)
 		contact_name = contact_name or _cached_contact_name(external_id) or ""
 	doc = frappe.get_doc(

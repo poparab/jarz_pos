@@ -13,6 +13,7 @@ import sys
 import types
 import unittest
 from types import SimpleNamespace
+from unittest import mock
 
 try:  # pragma: no cover - depends on the environment
 	import frappe
@@ -285,3 +286,61 @@ class CommentPhotoTest(unittest.TestCase):
 
 if __name__ == "__main__":
 	unittest.main()
+
+
+def wa_value(field, value):
+	return {
+		"object": "whatsapp_business_account",
+		"entry": [{"id": "WABA", "changes": [{"field": field, "value": value}]}],
+	}
+
+
+class WhatsAppUsernameUserTest(unittest.TestCase):
+	"""2026-11-16: a customer chatting by WhatsApp username (no phone in the webhook) never
+	reached the app, inbound or our echoes. Their chat is now keyed by the user id."""
+
+	def test_message_without_from_uses_the_user_id(self):
+		value = {
+			"messaging_product": "whatsapp",
+			"contacts": [{"user_id": "EG.1A2B", "profile": {"name": "A.M569"}}],
+			"messages": [
+				{"from_user_id": "EG.1A2B", "id": "wamid.U1", "timestamp": "1760608800", "type": "text",
+					"text": {"body": "في توصيل المعادي الجديدة"}}
+			],
+		}
+		events = [e for e in ing.parse_webhook(wa_value("messages", value)) if e.get("kind") == "message"]
+		self.assertEqual(len(events), 1)
+		e = events[0]
+		self.assertEqual(e["external_id"], "EG.1A2B")
+		self.assertEqual(e["contact_name"], "A.M569")
+		self.assertIsNone(e["phone"])
+		self.assertEqual(e["body"], "في توصيل المعادي الجديدة")
+
+	def test_single_contact_user_id_is_the_fallback(self):
+		value = {
+			"contacts": [{"user_id": "EG.9Z", "profile": {"name": "Mona"}}],
+			"messages": [{"id": "wamid.U2", "timestamp": "1760608800", "type": "text", "text": {"body": "hi"}}],
+		}
+		events = [e for e in ing.parse_webhook(wa_value("messages", value)) if e.get("kind") == "message"]
+		self.assertEqual(events[0]["external_id"], "EG.9Z")
+
+	def test_echo_to_a_username_user(self):
+		value = {"message_echoes": [{"to_user_id": "EG.1A2B", "id": "wamid.E1", "timestamp": "1760608800",
+			"type": "text", "text": {"body": "Jarz Royal Feast"}}]}
+		events = [e for e in ing.parse_webhook(wa_value("smb_message_echoes", value)) if e.get("kind") == "message"]
+		self.assertEqual(events[0]["external_id"], "EG.1A2B")
+		self.assertEqual(events[0]["direction"], "Outbound")
+		self.assertIsNone(events[0]["phone"])
+
+	def test_unplaceable_message_is_logged_not_silently_lost(self):
+		value = {"messages": [{"id": "wamid.X", "type": "text", "text": {"body": "secret text"}}]}
+		with mock.patch.object(cc, "safe_log_error") as log:
+			events = [e for e in ing.parse_webhook(wa_value("messages", value)) if e.get("kind") == "message"]
+		self.assertEqual(events, [])
+		log.assert_called_once()
+		self.assertIn("dropped", log.call_args.args[0])
+		self.assertNotIn("secret text", log.call_args.args[1])  # shape only, never the text
+
+	def test_normal_phone_sender_unchanged(self):
+		e = wa({"type": "text", "text": {"body": "hello"}})
+		self.assertEqual((e["external_id"], e["phone"], e["contact_name"]), ("201111034268", "201111034268", "Sara"))
