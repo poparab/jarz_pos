@@ -842,6 +842,10 @@ jobs:
             # newest comment, a new comment re-opens the window and the private reply,
             # a refusal Meta repeats switches the chat to public, plain Arabic errors.
             test_chat_comment_reply
+            # Meta messages that were "Unsupported": WhatsApp document name / contacts,
+            # Messenger / IG location, links, story mention, reel, story reply, FB comment
+            # photo. The body carries the URL / phone so the app can link it.
+            test_chat_attachments
             # The roles payload the mobile app routes on, incl. manager_home
             # (feature manager-home-bar): always a bool, follows the User
             # field, False on a site that has not migrated it yet.

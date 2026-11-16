@@ -421,7 +421,7 @@ class MessagingParseTest(unittest.TestCase):
 						"attachments": [
 							{"type": "image", "payload": {"url": "https://cdn.example/a.jpg"}},
 							{"type": "file", "payload": {"url": "https://cdn.example/b.pdf"}},
-							{"type": "share", "payload": {"url": "https://example/post"}},
+							{"type": "something_new", "payload": {"url": "https://example/post"}},
 						],
 					},
 				}

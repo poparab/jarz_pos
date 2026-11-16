@@ -196,6 +196,39 @@ def _event(**kwargs: Any) -> dict[str, Any]:
 	return base
 
 
+def _merge_lines(text: str, extras: list[Any]) -> str:
+	"""``text`` followed by each non-empty extra line not already in it (no duplicates)."""
+	out = str(text or "").strip("\n")
+	seen = {ln.strip() for ln in out.split("\n")}
+	for extra in extras:
+		for line in str(extra or "").split("\n"):
+			line = line.strip()
+			if line and line not in seen:
+				out = f"{out}\n{line}" if out else line
+				seen.add(line)
+	return out
+
+
+def _wa_contact_block(contact: Any) -> str:
+	"""``Contact: <name>`` then one line per phone / email of one shared WhatsApp contact."""
+	if not isinstance(contact, dict):
+		return ""
+	name = contact.get("name") or {}
+	title = str(
+		name.get("formatted_name")
+		or " ".join(str(name.get(k) or "") for k in ("first_name", "last_name")).strip()
+		or ""
+	).strip()
+	extras: list[Any] = []
+	for phone in contact.get("phones") or []:
+		extras.append(str((phone or {}).get("phone") or (phone or {}).get("wa_id") or "").strip())
+	for mail in contact.get("emails") or []:
+		extras.append(str((mail or {}).get("email") or "").strip())
+	if not title and not any(extras):
+		return ""
+	return _merge_lines(f"Contact: {title}".strip(), extras)
+
+
 def _wa_message_content(msg: dict[str, Any]) -> dict[str, Any]:
 	"""``{message_type, body, media_id, media_mime, raw}`` for one WhatsApp message."""
 	mtype = str(msg.get("type") or "")
@@ -213,9 +246,19 @@ def _wa_message_content(msg: dict[str, Any]) -> dict[str, Any]:
 		out["message_type"] = mtype
 		out["media_id"] = media.get("id")
 		out["media_mime"] = media.get("mime_type")
-		out["body"] = str(
-			media.get("caption") or (media.get("filename") if mtype == "document" else "") or ""
-		)
+		caption = str(media.get("caption") or "")
+		if mtype == "document":
+			# Filename first, caption below it; neither is lost.
+			out["body"] = _merge_lines(str(media.get("filename") or ""), [caption])
+		else:
+			out["body"] = caption
+	elif mtype == "contacts":
+		blocks = [b for b in (_wa_contact_block(c) for c in msg.get("contacts") or []) if b]
+		if blocks:
+			out["body"] = "\n\n".join(blocks)
+		else:
+			out["message_type"] = "unsupported"
+			out["raw"] = msg
 	elif mtype == "location":
 		loc = msg.get("location") or {}
 		out["message_type"] = "location"
@@ -237,7 +280,7 @@ def _wa_message_content(msg: dict[str, Any]) -> dict[str, Any]:
 		# History-sync media: the file itself only follows for the last 14 days.
 		out["message_type"] = "unsupported"
 		out["raw"] = {"type": "media_placeholder"}
-	else:  # contacts, order, system, unsupported, unknown
+	else:  # order, system, unsupported, unknown
 		out["message_type"] = "unsupported"
 		out["raw"] = msg
 	return out
@@ -421,17 +464,79 @@ def is_history_payload(payload: Any) -> bool:
 		return False
 
 
+_TEXT_LINK_TYPES = ("fallback", "share", "template", "ig_post", "post", "ig_story", "story", "location")
+_VIDEO_URL_HINTS = (".mp4", ".mov", ".m4v", ".webm")
+STORY_REPLY_LINE = "↩ Replied to your story"
+STORY_MENTION_LINE = "Mentioned you in their story"
+
+
+def _attachment_lines(att: dict[str, Any]) -> list[str]:
+	"""Title / url lines of a link-like attachment (fallback, share, template, post)."""
+	payload = att.get("payload") if isinstance(att.get("payload"), dict) else {}
+	lines = [att.get("title"), payload.get("title"), att.get("url") or att.get("URL"), payload.get("url")]
+	for el in (payload.get("elements") or [])[:5]:
+		if not isinstance(el, dict):
+			continue
+		action = el.get("default_action") if isinstance(el.get("default_action"), dict) else {}
+		lines += [el.get("title"), el.get("subtitle"), el.get("item_url"), action.get("url")]
+	return [str(x).strip() for x in lines if x and str(x).strip()]
+
+
+def _is_video_url(url: Any) -> bool:
+	return str(url or "").split("?")[0].lower().endswith(_VIDEO_URL_HINTS)
+
+
+def _att(message_type: str, media_url: Any = None, raw: Any = None, lines: Any = None, exact: Any = None):
+	return {
+		"message_type": message_type,
+		"media_url": media_url,
+		"raw": raw,
+		"lines": list(lines or []),
+		"exact": exact,
+	}
+
+
+def _one_attachment(att: dict[str, Any]) -> dict[str, Any]:
+	"""``{message_type, media_url, raw, lines, exact}`` for one Messenger / IG attachment.
+
+	``lines`` are appended to the message text; ``exact`` replaces the body outright.
+	"""
+	atype = str(att.get("type") or "")
+	payload = att.get("payload") if isinstance(att.get("payload"), dict) else {}
+	mapped = _ATTACHMENT_TYPES.get(atype)
+	if mapped:
+		return _att(mapped, payload.get("url"))
+	if atype == "location":
+		coords = payload.get("coordinates") if isinstance(payload.get("coordinates"), dict) else {}
+		lat, lng = coords.get("lat"), coords.get("long", coords.get("lng"))
+		if lat is not None and lng is not None:
+			return _att("location", exact=f"{lat},{lng}")
+	elif atype == "story_mention" and payload.get("url"):
+		url = payload.get("url")
+		return _att("video" if _is_video_url(url) else "image", url, lines=[STORY_MENTION_LINE])
+	elif atype in ("ig_reel", "reel"):
+		lines = [att.get("title"), payload.get("title")]
+		lines += [payload.get(k) for k in ("link", "permalink", "share_url")]
+		lines = [str(x).strip() for x in lines if x and str(x).strip()]
+		if payload.get("url"):
+			return _att("video", payload.get("url"), lines=lines)
+		if lines:
+			return _att("text", lines=lines)
+	if atype in _TEXT_LINK_TYPES:
+		lines = _attachment_lines(att)
+		if lines:
+			return _att("text", lines=lines)
+	return _att("unsupported", raw=att)  # unknown type: keep the raw payload
+
+
 def _messaging_attachments(message: dict[str, Any]) -> list[dict[str, Any]]:
-	out = []
-	for att in message.get("attachments") or []:
-		atype = str(att.get("type") or "")
-		payload = att.get("payload") or {}
-		mapped = _ATTACHMENT_TYPES.get(atype)
-		if mapped:
-			out.append({"message_type": mapped, "media_url": payload.get("url"), "raw": None})
-		else:  # share, story_mention, ig_reel, template, fallback, location ...
-			out.append({"message_type": "unsupported", "media_url": None, "raw": att})
-	return out
+	return [_one_attachment(att) for att in message.get("attachments") or [] if isinstance(att, dict)]
+
+
+def _story_reply_prefix(message: dict[str, Any]) -> bool:
+	reply = message.get("reply_to")
+	story = reply.get("story") if isinstance(reply, dict) else None
+	return isinstance(story, dict) and bool(story.get("url") or story.get("id"))
 
 
 def _parse_messaging(
@@ -508,6 +613,8 @@ def _parse_messaging(
 		if not mid:
 			continue
 		text = str(message.get("text") or "")
+		if _story_reply_prefix(message):
+			text = f"{STORY_REPLY_LINE}\n{text}".strip()
 		attachments = _messaging_attachments(message)
 		if not attachments:
 			events.append(
@@ -524,6 +631,7 @@ def _parse_messaging(
 			)
 			continue
 		for index, att in enumerate(attachments):
+			att_body = att["exact"] or _merge_lines(text if index == 0 else "", att["lines"])
 			events.append(
 				_event(
 					channel=channel,
@@ -534,7 +642,7 @@ def _parse_messaging(
 					message_type=att["message_type"],
 					media_url=att["media_url"],
 					raw=att["raw"],
-					body=text if index == 0 else "",
+					body=att_body,
 					timestamp=ts,
 					referral=referral if index == 0 else None,
 				)
@@ -567,7 +675,10 @@ def _parse_feed(entry: dict[str, Any], own_ids: set[str], events: list[dict[str,
 				sent_via="Phone" if outbound else None,
 				external_message_id=comment_id,
 				message_type="comment",
-				body=str(value.get("message") or ""),
+				body=_merge_lines(
+					str(value.get("message") or ""),
+					[f"Photo: {value['photo']}"] if value.get("photo") else [],
+				),
 				timestamp=_epoch(value.get("created_time") or entry.get("time")),
 				post_id=post_id or None,
 			)

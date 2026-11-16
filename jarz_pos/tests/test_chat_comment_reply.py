@@ -83,8 +83,13 @@ class PrivateReplyTargetTest(unittest.TestCase):
 		meta = types.ModuleType("jarz_pos.services.chat_meta_client")
 		meta.comment_private_reply = mock.Mock(return_value="m_1")
 		meta.comment_public_reply = mock.Mock(return_value="c_1")
+		import jarz_pos.services as services_pkg
+
+		# Both: `from jarz_pos.services import chat_meta_client` reads the package attribute
+		# first once another test module has imported the real client.
 		with (
 			mock.patch.dict(sys.modules, {"jarz_pos.services.chat_meta_client": meta}),
+			mock.patch.object(services_pkg, "chat_meta_client", meta, create=True),
 			mock.patch.object(s, "private_reply_target", return_value="C_MOSTAFA"),
 		):
 			s._call_meta(self.conv(), s.ROUTE_PRIVATE, None, "hi")
