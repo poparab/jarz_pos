@@ -915,7 +915,7 @@ def _apply_status(event: dict[str, Any]) -> str | None:
 		from jarz_pos.services import customer_followups as followups
 
 		followups.record_template_status(event["external_message_id"], event.get("status"), event.get("error"))
-	new = str(event.get("status") or "")
+	new =str(event.get("status") or "")
 	if new == "failed":
 		frappe.db.set_value(
 			cc.MESSAGE,
@@ -1288,8 +1288,13 @@ def _persist_message(
 			if not conv.get("waiting_since") or conv.get("status") != "Open":
 				updates["waiting_since"] = when
 		if event["channel"] in cc.COMMENT_CHANNELS:
-			if not conv.get("window_expires_at"):
+			# The private reply goes to the person's newest comment (chat_send.private_reply_target),
+			# so its 7-day window and its one-private-reply allowance follow that comment, not the
+			# thread's first one. A comment older than the newest seen changes neither.
+			if mtype != "reaction" and (last_in is None or when > last_in):
 				updates["window_expires_at"] = when + _dt.timedelta(days=COMMENT_WINDOW_DAYS)
+				if int(conv.get("private_reply_sent") or 0):
+					updates["private_reply_sent"] = 0
 		else:
 			expires = when + _dt.timedelta(hours=DM_WINDOW_HOURS)
 			current = cc.to_dt(conv.get("window_expires_at"))

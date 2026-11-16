@@ -116,6 +116,74 @@ def validate_text(channel: str, text: Any) -> str:
 	return clean
 
 
+#: Meta's refusals of a private reply that will not change on a retry: 10900 the comment
+#: already has its one private reply, 10901 the comment is past its 7-day window.
+PRIVATE_REPLY_CLOSED_CODES = ("10900", "10901")
+PRIVATE_REPLY_PAGE_MARK = "private replies to facebook pages are not allowed"
+
+
+def private_reply_closed(exc: BaseException) -> bool:
+	"""Whether Meta refused a private reply for good (so the next Send should be public)."""
+	code = str(getattr(exc, "code", "") or "").split("/", 1)[0].strip()
+	if code in PRIVATE_REPLY_CLOSED_CODES:
+		return True
+	return PRIVATE_REPLY_PAGE_MARK in str(exc).lower()
+
+
+def friendly_send_error(exc: BaseException, route: str | None) -> str:
+	"""What staff read under a failed bubble: plain words in Arabic and English, not Meta's text."""
+	raw = str(exc)[:300] or type(exc).__name__
+	code = str(getattr(exc, "code", "") or "").split("/", 1)[0].strip()
+	if route == ROUTE_PRIVATE and private_reply_closed(exc):
+		if code == "10900":
+			why_ar, why_en = (
+				"التعليق ده اتبعتله رسالة خاصة قبل كده",
+				"This comment already got its private message",
+			)
+		elif code == "10901":
+			why_ar, why_en = "فات أكتر من 7 أيام على التعليق", "The comment is more than 7 days old"
+		else:
+			why_ar, why_en = "صاحب التعليق صفحة مش شخص", "The comment was written by a Page, not a person"
+		return (
+			f"{why_ar}، فميتا مش بتسمح برسالة خاصة. اضغط ابعت تاني والرد هيتنشر تحت التعليق.\n"
+			f"{why_en}, so Meta allows no private message. Press Send again to post the reply "
+			f"publicly under the comment. ({raw})"
+		)
+	if code == "200" and "permission" in raw.lower():
+		return (
+			"ميتا رفضت الرد لأن صلاحية الرد على التعليقات مش مفعلة. رد من Meta Business Suite.\n"
+			f"Meta refused: the app lacks the comment-reply permission. Reply from Meta Business Suite. ({raw})"
+		)
+	return raw
+
+
+def private_reply_target(conv: Any) -> str:
+	"""The comment a private reply answers: the newest comment the person wrote in this thread.
+
+	A comment chat is keyed by its thread's first comment, which may be someone else's
+	(the person replied inside another comment) and may be past its 7-day window. Meta
+	sends a private reply to the author of the comment it names, so it must be theirs.
+	Falls back to the thread's first comment when no inbound comment id is stored.
+	"""
+	try:
+		rows = frappe.get_all(
+			cc.MESSAGE,
+			filters={
+				"conversation": conv.name,
+				"direction": "Inbound",
+				"message_type": "comment",
+				"external_message_id": ["is", "set"],
+			},
+			pluck="external_message_id",
+			order_by="timestamp desc, creation desc",
+			limit_page_length=1,
+			ignore_permissions=True,
+		)
+	except Exception:
+		rows = []
+	return str(rows[0]) if rows and rows[0] else conv.external_id
+
+
 def _call_meta(conv: Any, route: str, tag: str | None, text: str) -> str:
 	from jarz_pos.services import chat_meta_client as meta
 
@@ -127,7 +195,7 @@ def _call_meta(conv: Any, route: str, tag: str | None, text: str) -> str:
 		return meta.messenger_send(conv.external_id, text, tag=tag)
 	instagram = conv.channel == cc.INSTAGRAM_COMMENT
 	if route == ROUTE_PRIVATE:
-		return meta.comment_private_reply(conv.external_id, text, instagram=instagram)
+		return meta.comment_private_reply(private_reply_target(conv), text, instagram=instagram)
 	return meta.comment_public_reply(conv.external_id, text, instagram=instagram)
 
 
@@ -248,8 +316,11 @@ def send_text(conversation: str, text: str, user: str, draft: str | None = None)
 	try:
 		external_id = _call_meta(conv, route["route"], route["tag"], clean)
 	except Exception as exc:
-		error = str(exc)[:500] or type(exc).__name__
+		error = friendly_send_error(exc, route["route"])[:500]
 		frappe.db.set_value(cc.MESSAGE, msg.name, {"status": "failed", "error": error}, update_modified=True)
+		if route["route"] == ROUTE_PRIVATE and private_reply_closed(exc):
+			# Retrying the private reply can only fail the same way; the next Send posts publicly.
+			frappe.db.set_value(cc.CONVERSATION, conv.name, "private_reply_sent", 1, update_modified=False)
 		frappe.db.commit()
 		cc.publish_chat_update(conv.name, "message", message=cc.load_message(msg.name))
 		frappe.db.commit()
