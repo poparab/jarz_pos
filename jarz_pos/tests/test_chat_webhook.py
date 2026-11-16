@@ -396,20 +396,19 @@ class MessagingParseTest(unittest.TestCase):
 			[("status", "m_a", "delivered"), ("status", "m_b", "delivered")],
 		)
 
-	def test_read_event_is_ignored(self):
-		self.assertEqual(
-			ing.parse_webhook(
-				page_payload(
-					{
-						"sender": {"id": "PSID1"},
-						"recipient": {"id": "PAGE1"},
-						"timestamp": 1,
-						"read": {"watermark": 1},
-					}
-				)
-			),
-			[],
+	def test_read_event_is_a_receipt_not_a_message(self):
+		# A read receipt becomes a read_upto event (test_chat_read_receipts), never a message.
+		events = ing.parse_webhook(
+			page_payload(
+				{
+					"sender": {"id": "PSID1"},
+					"recipient": {"id": "PAGE1"},
+					"timestamp": 1,
+					"read": {"watermark": 1},
+				}
+			)
 		)
+		self.assertEqual([e["kind"] for e in events], ["read_upto"])
 
 	def test_attachments_split_with_suffixed_ids(self):
 		events = ing.parse_webhook(

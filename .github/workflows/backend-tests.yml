@@ -846,6 +846,9 @@ jobs:
             # Messenger / IG location, links, story mention, reel, story reply, FB comment
             # photo. The body carries the URL / phone so the app can link it.
             test_chat_attachments
+            # Delivered / read receipts (feature chat-read-receipts): Messenger and Instagram read
+            # and delivery watermarks, rank-safe Outbound update, per-message live publish.
+            test_chat_read_receipts
             # Staff send photo / video / voice note / file and react to a message (feature
             # chat-media-send): type + cap rules, Graph call shapes per channel, the IG token link,
             # customer reactions on their target, and the pre-migrate column guard.

@@ -67,6 +67,12 @@ _UTC = _dt.timezone.utc
 
 _STATUS_RANK = {"queued": 0, "received": 0, "sent": 1, "delivered": 2, "read": 3}
 
+#: Statuses a Messenger / Instagram receipt may raise, by the status it sets.
+_RECEIPT_FROM = {"delivered": ("sent",), "read": ("sent", "delivered")}
+#: Messages named per receipt / re-published per conversation after a webhook.
+RECEIPT_NAMES_CAP = 50
+STATUS_PUBLISH_CAP = 20
+
 _WA_MEDIA_TYPES = ("image", "audio", "video", "document", "sticker")
 _ATTACHMENT_TYPES = {
 	"image": "image",
@@ -635,6 +641,25 @@ def _parse_dm_reaction(
 	)
 
 
+def _add_receipt_upto(
+	events: list[dict[str, Any]], channel: str, customer: str, status: str, watermark: Any, mid: Any
+) -> None:
+	"""One ``read_upto`` event: everything we sent before the watermark / ``mid`` is ``status``."""
+	cutoff = _epoch(watermark) if watermark else 0.0
+	if not cutoff and not mid:
+		return
+	events.append(
+		_event(
+			kind="read_upto",
+			channel=channel,
+			external_id=customer,
+			external_message_id=str(mid) if mid else None,
+			status=status,
+			timestamp=cutoff,
+		)
+	)
+
+
 def _parse_messaging(
 	entry: dict[str, Any], channel: str, own_ids: set[str], events: list[dict[str, Any]]
 ) -> None:
@@ -644,9 +669,12 @@ def _parse_messaging(
 		recipient = str((item.get("recipient") or {}).get("id") or "")
 		ts = _epoch(item.get("timestamp") or entry.get("time"))
 
+		customer_side = bool(sender) and sender not in own_ids and sender != account_id
+
 		delivery = item.get("delivery")
 		if delivery:
-			for mid in delivery.get("mids") or []:
+			mids = delivery.get("mids") or []
+			for mid in mids:
 				events.append(
 					_event(
 						kind="status",
@@ -655,6 +683,16 @@ def _parse_messaging(
 						status="delivered",
 						timestamp=ts,
 					)
+				)
+			if not mids and customer_side and delivery.get("watermark"):
+				_add_receipt_upto(events, channel, sender, "delivered", delivery.get("watermark"), None)
+			continue
+
+		read = item.get("read")
+		if read and not item.get("message"):
+			if customer_side:
+				_add_receipt_upto(
+					events, channel, sender, "read", read.get("watermark"), read.get("mid")
 				)
 			continue
 
@@ -1130,6 +1168,56 @@ def _is_app_echo(conversation: str, body: str, when: _dt.datetime) -> bool:
 
 
 def _apply_status(event: dict[str, Any]) -> str | None:
+	"""Apply one status event; returns the conversation when a row changed."""
+	changed = _apply_status_row(event)
+	return changed[0] if changed else None
+
+
+def _apply_read_upto(event: dict[str, Any], tz: str | None) -> tuple[str, list[str]] | None:
+	"""Raise every earlier Outbound message of the customer's thread to ``read`` / ``delivered``.
+
+	One UPDATE; never lowers a status, never touches failed / queued rows or Inbound
+	messages. Returns ``(conversation, updated names newest first, max 50)`` or ``None``.
+	"""
+	target = str(event.get("status") or "")
+	lower = _RECEIPT_FROM.get(target)
+	if not lower or not event.get("channel") or not event.get("external_id"):
+		return None
+	conv = frappe.db.get_value(
+		cc.CONVERSATION, {"channel_key": f"{event['channel']}:{event['external_id']}"}, "name"
+	)
+	if not conv:
+		return None
+	cutoffs = []
+	if event.get("timestamp"):
+		cutoffs.append(epoch_to_site(event["timestamp"], tz))
+	if event.get("external_message_id"):
+		# Instagram names the last message the customer read, not a time.
+		stamp = frappe.db.get_value(
+			cc.MESSAGE,
+			{"external_message_id": event["external_message_id"], "conversation": conv},
+			"timestamp",
+		)
+		if stamp:
+			cutoffs.append(stamp)
+	if not cutoffs:
+		return None
+	filters = {
+		"conversation": conv,
+		"direction": "Outbound",
+		"status": ["in", list(lower)],
+		"timestamp": ["<=", max(cutoffs)],
+	}
+	names = frappe.get_all(
+		cc.MESSAGE, filters=filters, pluck="name", order_by="timestamp desc, creation desc"
+	)
+	if not names:
+		return None
+	frappe.db.set_value(cc.MESSAGE, filters, "status", target, update_modified=True)
+	return conv, list(names)[:RECEIPT_NAMES_CAP]
+
+
+def _apply_status_row(event: dict[str, Any]) -> tuple[str, str] | None:
 	name = frappe.db.get_value(cc.MESSAGE, {"external_message_id": event["external_message_id"]}, "name")
 	if not name:
 		# A follow-up template has no chat message row: its status goes on the touch.
@@ -1137,7 +1225,9 @@ def _apply_status(event: dict[str, Any]) -> str | None:
 
 		followups.record_template_status(event["external_message_id"], event.get("status"), event.get("error"))
 		return None
-	row = frappe.db.get_value(cc.MESSAGE, name, ["status", "direction", "conversation", "sent_via"], as_dict=True)
+	row = frappe.db.get_value(
+		cc.MESSAGE, name, ["status", "direction", "conversation", "sent_via"], as_dict=True
+	)
 	if not row or row.direction != "Outbound":
 		return None
 	if row.sent_via == "System":
@@ -1153,10 +1243,10 @@ def _apply_status(event: dict[str, Any]) -> str | None:
 			{"status": "failed", "error": (event.get("error") or "failed")[:500]},
 			update_modified=True,
 		)
-		return row.conversation
+		return row.conversation, name
 	if new in _STATUS_RANK and _STATUS_RANK[new] > _STATUS_RANK.get(str(row.status or ""), 0):
 		frappe.db.set_value(cc.MESSAGE, name, "status", new, update_modified=True)
-		return row.conversation
+		return row.conversation, name
 	return None
 
 
@@ -1608,21 +1698,29 @@ def process_webhook(payload: Any = None) -> dict[str, Any]:
 		tz = _site_tz()
 		actions: list[dict[str, Any]] = []
 		status_conversations: set[str] = set()
+		status_messages: dict[str, list[str]] = {}  # conversation -> changed messages, newest first
 		for index, event in enumerate(events):
 			savepoint = f"chat_evt_{index}"
 			try:
 				frappe.db.savepoint(savepoint)
 				kind = event.get("kind")
 				if kind == "status":
-					conv = _apply_status(event)
-					if conv:
-						status_conversations.add(conv)
+					changed = _apply_status_row(event)
+					if changed:
+						status_conversations.add(changed[0])
+						status_messages.setdefault(changed[0], []).insert(0, changed[1])
 						result["statuses"] += 1
 					else:
 						action = _record_status_only_reply(event, settings, tz)
 						if action:
 							actions.append(action)
 							result["messages"] += 1
+				elif kind == "read_upto":
+					upto = _apply_read_upto(event, tz)
+					if upto:
+						status_conversations.add(upto[0])
+						status_messages.setdefault(upto[0], []).extend(upto[1])
+						result["statuses"] += len(upto[1])
 				elif kind == "contact":
 					if _apply_contact(event):
 						result["contacts"] = result.get("contacts", 0) + 1
@@ -1657,7 +1755,7 @@ def process_webhook(payload: Any = None) -> dict[str, Any]:
 					f"id={mask_id(event.get('external_message_id'))}\n{frappe.get_traceback()}",
 				)
 		frappe.db.commit()
-		_after_commit(actions, status_conversations)
+		_after_commit(actions, status_conversations, status_messages)
 	except Exception:
 		result["errors"] += 1
 		try:
@@ -1692,7 +1790,31 @@ def _confirm_stop(conversation: str) -> None:
 		cc.safe_log_error("chat: stop-messages confirmation failed")
 
 
-def _after_commit(actions: list[dict[str, Any]], status_conversations: set[str]) -> None:
+def _publish_status_change(conversation: str, names: list[str]) -> None:
+	"""Tell the open thread which messages changed status (newest first, capped).
+
+	Realtime only: a ``message`` event carries the refreshed summary and moves no
+	unread count, ``waiting_since`` or push. Falls back to the summary-only
+	``status`` event when no message row could be loaded.
+	"""
+	published = 0
+	for name in names[:STATUS_PUBLISH_CAP]:
+		try:
+			message = cc.load_message(name)
+			if message:
+				cc.publish_chat_update(conversation, "message", message=message)
+				published += 1
+		except Exception:
+			cc.safe_log_error("chat: status publish failed")
+	if not published:
+		cc.publish_chat_update(conversation, "status")
+
+
+def _after_commit(
+	actions: list[dict[str, Any]],
+	status_conversations: set[str],
+	status_messages: dict[str, list[str]] | None = None,
+) -> None:
 	for action in actions:
 		try:
 			if not action.get("quiet"):
@@ -1732,7 +1854,7 @@ def _after_commit(actions: list[dict[str, Any]], status_conversations: set[str])
 
 			push_new_message(action["conversation"], action["message"])
 	for conv in status_conversations:
-		cc.publish_chat_update(conv, "status")
+		_publish_status_change(conv, (status_messages or {}).get(conv) or [])
 	try:
 		frappe.db.commit()  # flushes the after_commit realtime queue
 	except Exception:
