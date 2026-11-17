@@ -297,6 +297,27 @@ class GraphShapeTest(Harness):
 			},
 		)
 
+	def test_username_user_goes_in_recipient_not_to(self):
+		"""A WhatsApp user who hides their number: Meta read the id in ``to`` as a phone (131026)."""
+		reply = {"messages": [{"id": "wamid.1"}]}
+		bsuid = "EG.1234567890123456"
+		sends = [
+			(meta.wa_send_text, (bsuid, "hi")),
+			(meta.wa_send_media, (bsuid, "image", "M1", None, None)),
+			(meta.wa_send_reaction, (bsuid, "wamid.X", "👍")),
+			(meta.wa_send_template, (bsuid, "t", "ar", [])),
+		]
+		for fn, args in sends:
+			_, call = self.call(fn, *args, response=reply)
+			body = call.kwargs["json"]
+			self.assertEqual(body["recipient"], bsuid, fn.__name__)
+			self.assertNotIn("to", body, fn.__name__)
+			self.assertEqual(body["recipient_type"], "individual")
+		_, call = self.call(meta.wa_send_text, "+20 111-034", "hi", response=reply)
+		self.assertEqual(call.kwargs["json"]["to"], "20111034")
+		self.assertNotIn("recipient", call.kwargs["json"])
+		self.assertEqual(meta.wa_address("EG.ENT.99"), {"recipient": "EG.ENT.99"})
+
 	def test_messenger_multipart(self):
 		mid, call = self.call(
 			meta.messenger_send_attachment,

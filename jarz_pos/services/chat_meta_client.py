@@ -113,6 +113,22 @@ def _page_token() -> str:
 # ── WhatsApp Cloud API ──────────────────────────────────────────────────
 
 
+def wa_address(to: Any) -> dict[str, str]:
+	"""Who a WhatsApp send goes to: ``{"to": <phone>}`` or ``{"recipient": <user id>}``.
+
+	A customer who hides their number reaches us with a business-scoped user id such as
+	``EG.1234567890123456`` instead of a phone. Meta reads ``to`` as a phone number only, so
+	that id there became the digits after ``EG.`` and failed with 131026 "Message
+	undeliverable"; the id has to go in ``recipient`` (and ``to`` must be absent, since Meta
+	uses ``to`` when both are sent).
+	"""
+	value = str(to or "").strip()
+	digits = value.lstrip("+").replace(" ", "").replace("-", "")
+	if digits.isdigit():
+		return {"to": digits}
+	return {"recipient": value}
+
+
 def wa_send_text(to: str, text: str) -> str:
 	"""Send a free-form text inside the 24h window. Returns the wamid."""
 	phone_id = _settings().get("whatsapp_phone_number_id")
@@ -125,7 +141,7 @@ def wa_send_text(to: str, text: str) -> str:
 		json_body={
 			"messaging_product": "whatsapp",
 			"recipient_type": "individual",
-			"to": str(to or "").lstrip("+"),
+			**wa_address(to),
 			"type": "text",
 			"text": {"preview_url": False, "body": text},
 		},
@@ -180,7 +196,7 @@ def wa_send_media(
 		json_body={
 			"messaging_product": "whatsapp",
 			"recipient_type": "individual",
-			"to": str(to or "").lstrip("+"),
+			**wa_address(to),
 			"type": media_type,
 			media_type: wa_media_payload(media_type, media_id, caption, filename),
 		},
@@ -204,7 +220,7 @@ def wa_send_reaction(to: str, wamid: str, emoji: str) -> str | None:
 		json_body={
 			"messaging_product": "whatsapp",
 			"recipient_type": "individual",
-			"to": str(to or "").lstrip("+"),
+			**wa_address(to),
 			"type": "reaction",
 			"reaction": {"message_id": wamid, "emoji": emoji},
 		},
@@ -226,7 +242,7 @@ def wa_send_template(to: str, name: str, language: str, components: list[dict[st
 		json_body={
 			"messaging_product": "whatsapp",
 			"recipient_type": "individual",
-			"to": str(to or "").lstrip("+"),
+			**wa_address(to),
 			"type": "template",
 			"template": {"name": name, "language": {"code": language}, "components": components},
 		},

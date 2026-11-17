@@ -494,7 +494,8 @@ def _parse_whatsapp(entry: dict[str, Any], events: list[dict[str, Any]]) -> None
 						channel=cc.WHATSAPP,
 						external_message_id=str(st["id"]),
 						status=str(st["status"]),
-						recipient=str(st.get("recipient_id") or "") or None,
+						# A customer who hides their number has a user id instead of recipient_id.
+						recipient=str(st.get("recipient_id") or st.get("recipient_user_id") or "") or None,
 						category=str(category or "").lower() or None,
 						error=error,
 						timestamp=_epoch(st.get("timestamp")),
