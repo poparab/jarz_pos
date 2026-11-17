@@ -24,6 +24,7 @@ from frappe import _
 from frappe.utils import add_days, getdate, today
 
 from jarz_pos.constants import ROLES
+from jarz_pos.utils.return_state import not_fully_returned_sql
 
 # Canonical display order for velocity trend buckets.
 TREND_ORDER = ["Accelerating", "Stable", "Declining", "New Item", "No Sales", "Unrated"]
@@ -135,6 +136,7 @@ def _velocity_rows(warehouse: str | None, branch: str | None, window_days: int) 
             JOIN `tabSales Invoice` si ON si.name = sii.parent
             WHERE si.docstatus = 1
               AND si.is_return = 0
+              AND {not_fully_returned_sql('si')}
               AND si.posting_date >= %(dwin)s
               {br_cond}
             GROUP BY sii.item_code
@@ -468,6 +470,7 @@ def get_inventory_analytics(
         JOIN `tabSales Invoice` si ON si.name = sii.parent
         WHERE si.docstatus = 1
           AND si.is_return = 0
+          AND {not_fully_returned_sql('si')}
           AND si.posting_date BETWEEN %(fd)s AND %(td)s
           {br_cond}
         GROUP BY sii.item_code, sii.item_name, sii.item_group

@@ -9,7 +9,8 @@ are **date-scoped** through ``tabSales Invoice``.
 Data sources:
   tabCustomer       — customer_segment, rfm_recency_days, rfm_frequency_count,
                       rfm_avg_order_value (populated by the nightly RFM job)
-  tabSales Invoice  — grand_total, posting_date (docstatus=1, is_return=0)
+  tabSales Invoice  — grand_total, posting_date (docstatus=1, is_return=0, and not a
+                      fully returned order, which counts as cancelled)
 
 Read-only.  Requires the JARZ Manager role.
 """
@@ -24,6 +25,7 @@ from frappe import _
 
 from jarz_pos.constants import ROLES
 from jarz_pos.utils.invoice_utils import get_area_label
+from jarz_pos.utils.return_state import not_fully_returned_sql
 
 # Canonical display order for the 8 RFM segments + fallbacks.
 SEGMENT_ORDER = [
@@ -109,13 +111,18 @@ def get_customer_analytics(
 	# Branch conditions ("" without a branch, so the queries are unchanged).
 	si_branch = "AND si.pos_profile = %(branch)s" if branch else ""
 	plain_branch = "AND pos_profile = %(branch)s" if branch else ""
+	# A fully returned order counts as cancelled: not a sale, order or customer activity.
+	si_live = not_fully_returned_sql("si")
+	plain_live = not_fully_returned_sql("")
+	bx_live = not_fully_returned_sql("bx")
 	# Customers of a branch = customers with at least one submitted invoice there.
 	customer_branch = (
-		"""AND EXISTS (
+		f"""AND EXISTS (
             SELECT 1 FROM `tabSales Invoice` bx
             WHERE bx.customer = c.name
               AND bx.docstatus = 1
               AND bx.is_return = 0
+              AND {bx_live}
               AND bx.pos_profile = %(branch)s
         )"""
 		if branch
@@ -155,6 +162,7 @@ def get_customer_analytics(
         JOIN `tabCustomer` c ON c.name = si.customer
         WHERE si.docstatus = 1
           AND si.is_return = 0
+          AND {si_live}
           AND si.posting_date BETWEEN %(fd)s AND %(td)s
           {si_branch}
         GROUP BY segment
@@ -202,6 +210,7 @@ def get_customer_analytics(
         JOIN `tabCustomer` c ON c.name = si.customer
         WHERE si.docstatus = 1
           AND si.is_return = 0
+          AND {si_live}
           AND si.posting_date BETWEEN %(fd)s AND %(td)s
           {si_branch}
         GROUP BY si.customer, c.customer_name, c.customer_segment, c.rfm_recency_days
@@ -254,6 +263,7 @@ def get_customer_analytics(
             SELECT customer, MIN(posting_date) AS first_date
             FROM `tabSales Invoice`
             WHERE docstatus = 1 AND is_return = 0 AND customer IS NOT NULL
+              AND {plain_live}
               {plain_branch}
             GROUP BY customer
         ) f
@@ -281,6 +291,7 @@ def get_customer_analytics(
         FROM `tabSales Invoice`
         WHERE docstatus = 1
           AND is_return = 0
+          AND {plain_live}
           AND posting_date BETWEEN %(fd)s AND %(td)s
           {plain_branch}
         """,

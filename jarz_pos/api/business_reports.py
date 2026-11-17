@@ -52,6 +52,7 @@ from frappe.utils import cint, flt, getdate
 
 from jarz_pos.api import financial_report as fr
 from jarz_pos.constants import ROLES
+from jarz_pos.utils.return_state import not_fully_returned_sql
 
 #: ``custom_order_purpose`` values that are not consumer orders (see
 #: ``financial_report.channel_for_purpose``). Promo comparisons are consumer-only.
@@ -208,7 +209,7 @@ def _talabat_sales(fd: date, td: date, company: str | None) -> tuple[float, int]
 	row = frappe.db.sql(
 		f"""
         SELECT COALESCE(SUM(base_net_total), 0),
-               COALESCE(SUM(CASE WHEN is_return = 0 THEN 1 ELSE 0 END), 0)
+               COALESCE(SUM(CASE WHEN is_return = 0 AND {not_fully_returned_sql('')} THEN 1 ELSE 0 END), 0)
         FROM `tabSales Invoice`
         WHERE docstatus = 1
           AND posting_date BETWEEN %(fd)s AND %(td)s
@@ -528,7 +529,9 @@ def get_promo_performance(
 	"""Promo code cost against what the orders brought in.
 
 	Scope: submitted, non-return **consumer** orders (B2B, staff and sample
-	orders are excluded so they do not distort the AOV comparison).
+	orders are excluded so they do not distort the AOV comparison). A fully
+	returned order counts as cancelled everywhere here, including as a
+	customer's first or later order.
 	Revenue = ``base_grand_total`` (what the customer paid, after the promo
 	discount, delivery included). A promo order = ``custom_promo_discount_total
 	> 0``. ``new_customers``: the promo order is the customer's first submitted
@@ -549,6 +552,7 @@ def get_promo_performance(
         SELECT COUNT(*) AS orders, COALESCE(SUM(si.base_grand_total), 0) AS revenue
         FROM `tabSales Invoice` si
         WHERE si.docstatus = 1 AND si.is_return = 0
+          AND {not_fully_returned_sql('si')}
           AND si.posting_date BETWEEN %(fd)s AND %(td)s
           AND {b2c}
           {branch_cond}
@@ -566,6 +570,7 @@ def get_promo_performance(
                CASE WHEN NOT EXISTS (
                    SELECT 1 FROM `tabSales Invoice` p
                    WHERE p.customer = si.customer AND p.docstatus = 1 AND p.is_return = 0
+                     AND {not_fully_returned_sql('p')}
                      AND p.name != si.name
                      AND (p.posting_date < si.posting_date
                           OR (p.posting_date = si.posting_date AND p.creation < si.creation))
@@ -573,6 +578,7 @@ def get_promo_performance(
                CASE WHEN EXISTS (
                    SELECT 1 FROM `tabSales Invoice` n
                    WHERE n.customer = si.customer AND n.docstatus = 1 AND n.is_return = 0
+                     AND {not_fully_returned_sql('n')}
                      AND n.name != si.name
                      AND IFNULL(n.custom_promo_discount_total, 0) = 0
                      AND (n.posting_date > si.posting_date
@@ -580,6 +586,7 @@ def get_promo_performance(
                ) THEN 1 ELSE 0 END AS repeated
         FROM `tabSales Invoice` si
         WHERE si.docstatus = 1 AND si.is_return = 0
+          AND {not_fully_returned_sql('si')}
           AND si.posting_date BETWEEN %(fd)s AND %(td)s
           AND IFNULL(si.custom_promo_discount_total, 0) > 0
           AND {b2c}

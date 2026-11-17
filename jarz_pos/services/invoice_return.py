@@ -1268,7 +1268,42 @@ def _stamp_return_state(
 			pass
 		update_submitted_sales_invoice_fields(inv, updates)
 
+	if fully:
+		_stamp_returned_cancellation_label(inv, reason_text)
+
 	return status
+
+
+#: Owner decision 2026-11-17: a fully returned order counts as a cancelled order
+#: everywhere. The invoice itself is never cancelled (block_cancel_if_dispatched
+#: has no bypass), so this label is how it reads as cancelled in Desk and in the
+#: cancellation columns of the reports.
+RETURNED_CANCELLATION_TYPE = "Returned - Cancelled"
+
+
+def _stamp_returned_cancellation_label(inv: Any, reason_text: str) -> None:
+	"""Label a fully returned original as cancelled. Cosmetic: never fails a return.
+
+	Written with db.set_value, outside the save above, on purpose: a Select
+	option a bench has not migrated yet would fail a full save(), and that must
+	not roll back a credit note and journal entries over a label.
+	"""
+	name = str(getattr(inv, "name", "") or "").strip()
+	if not name:
+		return
+	try:
+		meta = frappe.get_meta("Sales Invoice")
+		values: dict[str, Any] = {}
+		if meta.get_field("custom_cancellation_type"):
+			values["custom_cancellation_type"] = RETURNED_CANCELLATION_TYPE
+		if meta.get_field("custom_cancellation_reason"):
+			values["custom_cancellation_reason"] = f"Fully returned: {reason_text}"
+		if values:
+			frappe.db.set_value("Sales Invoice", name, values, update_modified=False)
+			for field, value in values.items():
+				inv.set(field, value)
+	except Exception:
+		frappe.log_error(frappe.get_traceback(), f"Return: cancellation label not written on {name}")
 
 
 def run_invoice_return(

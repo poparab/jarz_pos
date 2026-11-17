@@ -18,6 +18,7 @@ import json
 import frappe
 
 from jarz_pos.services import promo_codes as _promo
+from jarz_pos.utils.return_state import not_fully_returned_sql
 
 
 def _parse_json_param(value):
@@ -769,14 +770,16 @@ def _customers_matching_phone(matches, tail: str):
 def _customers_matching_name(text: str, limit: int) -> list[str]:
 	"""Customer names whose ``customer_name`` or docname contains ``text``
 	(disabled included), most recent submitted order first, then name."""
+	# nosemgrep: frappe-sql-format-injection -- only constant SQL fragments interpolated; values are bound parameters
 	rows = frappe.db.sql(
-		"""
+		f"""
 		SELECT c.name AS name
 		FROM `tabCustomer` c
 		LEFT JOIN `tabSales Invoice` si
 			ON si.customer = c.name
 			AND si.docstatus = 1
 			AND si.is_return = 0
+			AND {not_fully_returned_sql('si')}
 		WHERE c.customer_name LIKE %(like)s OR c.name LIKE %(like)s
 		GROUP BY c.name
 		ORDER BY MAX(si.posting_date) IS NULL, MAX(si.posting_date) DESC, MAX(si.creation) DESC, c.name ASC
@@ -789,13 +792,15 @@ def _customers_matching_name(text: str, limit: int) -> list[str]:
 
 
 def _order_stats(names) -> dict:
-	"""Submitted, non-return Sales Invoice stats per customer. Woo order ids
-	only grow, so MAX is the customer's latest Woo order."""
+	"""Submitted, non-return Sales Invoice stats per customer (a fully returned
+	order counts as cancelled and is left out). Woo order ids only grow, so MAX
+	is the customer's latest Woo order."""
 	names = [n for n in names if n]
 	if not names:
 		return {}
+	# nosemgrep: frappe-sql-format-injection -- only a constant SQL fragment interpolated; values are bound parameters
 	rows = frappe.db.sql(
-		"""
+		f"""
 		SELECT customer,
 			COUNT(*) AS order_count,
 			MAX(posting_date) AS last_order_date,
@@ -803,6 +808,7 @@ def _order_stats(names) -> dict:
 			MAX(woo_order_id) AS last_woo_order_id
 		FROM `tabSales Invoice`
 		WHERE docstatus = 1 AND is_return = 0 AND customer IN %(customers)s
+			AND {not_fully_returned_sql('')}
 		GROUP BY customer
 		""",
 		{"customers": tuple(names)},

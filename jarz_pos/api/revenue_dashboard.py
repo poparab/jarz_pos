@@ -63,6 +63,7 @@ from jarz_pos.api.financial_report import (
 )
 from jarz_pos.api.ops_reports import _channel_sql, _f, _r, _si_col
 from jarz_pos.constants import ROLES
+from jarz_pos.utils.return_state import fully_returned_sql, not_fully_returned_sql
 
 # ── constants ─────────────────────────────────────────────────────────────
 
@@ -883,6 +884,9 @@ def _daily_rows(
 	"""
 	cond = _cond(company, branch)
 	source = _channel_sql("si")
+	# A fully returned order counts as cancelled: not an order, not order net, no discount
+	# (its credit note already nets `net` to zero; it shows under `cancelled`).
+	live = not_fully_returned_sql("si")
 	# nosemgrep: frappe-sql-format-injection -- only constant fragments, schema-probed column names and constant alias/param names interpolated; values are bound parameters
 	return frappe.db.sql(
 		f"""
@@ -892,11 +896,11 @@ def _daily_rows(
                si.posting_date AS posting_date,
                CASE WHEN si.posting_time > %(cutoff)s THEN 1 ELSE 0 END AS late_flag,
                SUM(si.base_net_total) AS net,
-               SUM(CASE WHEN si.is_return = 0 THEN 1 ELSE 0 END) AS orders,
-               SUM(CASE WHEN si.is_return = 0 THEN si.base_net_total ELSE 0 END) AS order_net,
+               SUM(CASE WHEN si.is_return = 0 AND {live} THEN 1 ELSE 0 END) AS orders,
+               SUM(CASE WHEN si.is_return = 0 AND {live} THEN si.base_net_total ELSE 0 END) AS order_net,
                SUM(CASE WHEN si.is_return = 1 THEN 1 ELSE 0 END) AS returns,
                SUM(CASE WHEN si.is_return = 1 THEN si.base_net_total ELSE 0 END) AS returns_value,
-               SUM(CASE WHEN si.is_return = 0
+               SUM(CASE WHEN si.is_return = 0 AND {live}
                         THEN si.base_discount_amount + IFNULL((
                             SELECT SUM(GREATEST(sii.discount_amount, 0) * sii.qty) * IFNULL(si.conversion_rate, 1)
                             FROM `tabSales Invoice Item` sii
@@ -915,21 +919,26 @@ def _daily_rows(
 
 
 def _cancelled(fd: date, td: date, company: str | None, branch: str | None) -> dict[str, Any]:
-	"""Cancelled non-return invoices in range, amendments excluded (as daily close)."""
+	"""Cancelled non-return invoices in range, amendments excluded (as daily close),
+	plus fully returned orders (a full return counts as a cancellation)."""
 	cond = _cond(company, branch)
 	cancel_type = _si_col("custom_cancellation_type", "si", "''")
+	fully_returned = fully_returned_sql("si")
 	# nosemgrep: frappe-sql-format-injection -- only constant fragments, schema-probed column names and constant alias/param names interpolated; values are bound parameters
 	rows = frappe.db.sql(
 		f"""
         SELECT COUNT(*) AS cancelled, COALESCE(SUM(si.base_net_total), 0) AS cancelled_value
         FROM `tabSales Invoice` si
-        WHERE si.docstatus = 2
-          AND si.is_return = 0
-          AND si.posting_date BETWEEN %(fd)s AND %(td)s
-          AND IFNULL({cancel_type}, '') != 'Amended'
-          AND si.name NOT IN (
-              SELECT a.amended_from FROM `tabSales Invoice` a
-              WHERE IFNULL(a.amended_from, '') != ''
+        WHERE si.posting_date BETWEEN %(fd)s AND %(td)s
+          AND (
+              (si.docstatus = 2
+               AND si.is_return = 0
+               AND IFNULL({cancel_type}, '') != 'Amended'
+               AND si.name NOT IN (
+                   SELECT a.amended_from FROM `tabSales Invoice` a
+                   WHERE IFNULL(a.amended_from, '') != ''
+               ))
+              OR {fully_returned}
           )
           {cond}
         """,
@@ -949,6 +958,7 @@ def _dimension_rows(fd: date, td: date, company: str | None, branch: str | None)
 	cond = _cond(company, branch)
 	method = _si_col("custom_payment_method", "si", "''")
 	pickup = _si_col("custom_is_pickup", "si", "0")
+	live = not_fully_returned_sql("si")
 	# nosemgrep: frappe-sql-format-injection -- only constant fragments, schema-probed column names and constant alias/param names interpolated; values are bound parameters
 	return frappe.db.sql(
 		f"""
@@ -958,8 +968,8 @@ def _dimension_rows(fd: date, td: date, company: str | None, branch: str | None)
                HOUR(si.posting_time) AS order_hour,
                IFNULL({pickup}, 0) AS pickup_flag,
                SUM(si.base_net_total) AS net,
-               SUM(CASE WHEN si.is_return = 0 THEN 1 ELSE 0 END) AS orders,
-               SUM(CASE WHEN si.is_return = 0 THEN si.base_net_total ELSE 0 END) AS order_net
+               SUM(CASE WHEN si.is_return = 0 AND {live} THEN 1 ELSE 0 END) AS orders,
+               SUM(CASE WHEN si.is_return = 0 AND {live} THEN si.base_net_total ELSE 0 END) AS order_net
         FROM `tabSales Invoice` si
         WHERE si.docstatus = 1
           AND si.posting_date BETWEEN %(fd)s AND %(td)s
@@ -999,13 +1009,14 @@ def _product_rows(fd: date, td: date, company: str | None, branch: str | None) -
 def _b2b_customer_rows(fd: date, td: date, company: str | None, branch: str | None) -> list[dict[str, Any]]:
 	"""Top B2B Supply customers by net sales, credit notes netted."""
 	cond = _cond(company, branch)
+	live = not_fully_returned_sql("si")
 	# nosemgrep: frappe-sql-format-injection -- only constant fragments, an integer constant and constant alias/param names interpolated; values are bound parameters
 	return frappe.db.sql(
 		f"""
         SELECT si.customer AS customer,
                MAX(si.customer_name) AS customer_name,
                SUM(si.base_net_total) AS net_sales,
-               SUM(CASE WHEN si.is_return = 0 THEN 1 ELSE 0 END) AS orders
+               SUM(CASE WHEN si.is_return = 0 AND {live} THEN 1 ELSE 0 END) AS orders
         FROM `tabSales Invoice` si
         WHERE si.docstatus = 1
           AND si.posting_date BETWEEN %(fd)s AND %(td)s
@@ -1025,9 +1036,12 @@ def _customer_counts(fd: date, td: date, company: str | None, branch: str | None
 
 	"New" = the customer's first-ever submitted non-return invoice (any branch)
 	falls inside the range. The first-invoice subquery only looks at customers
-	present in the range.
+	present in the range. A fully returned order counts as cancelled, so it is
+	neither a customer's order in range nor their first order.
 	"""
 	cond = _cond(company, branch)
+	live_si = not_fully_returned_sql("si")
+	live_x = not_fully_returned_sql("x")
 	# nosemgrep: frappe-sql-format-injection -- only constant fragments and constant alias/param names interpolated; values are bound parameters
 	rows = frappe.db.sql(
 		f"""
@@ -1038,6 +1052,7 @@ def _customer_counts(fd: date, td: date, company: str | None, branch: str | None
             FROM `tabSales Invoice` si
             WHERE si.docstatus = 1
               AND si.is_return = 0
+              AND {live_si}
               AND si.posting_date BETWEEN %(fd)s AND %(td)s
               AND IFNULL(si.customer, '') != ''
               {cond}
@@ -1047,11 +1062,13 @@ def _customer_counts(fd: date, td: date, company: str | None, branch: str | None
             FROM `tabSales Invoice` x
             WHERE x.docstatus = 1
               AND x.is_return = 0
+              AND {live_x}
               AND x.customer IN (
                   SELECT si.customer
                   FROM `tabSales Invoice` si
                   WHERE si.docstatus = 1
                     AND si.is_return = 0
+                    AND {live_si}
                     AND si.posting_date BETWEEN %(fd)s AND %(td)s
                     {cond}
               )

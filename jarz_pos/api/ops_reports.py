@@ -40,6 +40,7 @@ from frappe import _
 from frappe.utils import cint, get_first_day, getdate, now_datetime, nowdate
 
 from jarz_pos.constants import ACCOUNTS, ROLES
+from jarz_pos.utils.return_state import fully_returned_sql, not_fully_returned_sql
 
 # ── constants ─────────────────────────────────────────────────────────────
 
@@ -346,7 +347,9 @@ def build_daily_close(
 	"""Assemble the daily-close payload from grouped rows.
 
 	``invoice_rows``: branch, channel, hour, orders, return_count, net_sales,
-	gross_net, returns_net, grand_total, outstanding.
+	gross_net, returns_net, grand_total, outstanding and optionally ``orders_net``
+	(non-return net of the counted orders only -- a fully returned order is
+	counted as cancelled -- falling back to ``gross_net``).
 	``shipping_rows``: branch, amount. ``cancelled_rows``: branch, cancelled.
 	``payment_rows``: branch, mode, amount.
 	"""
@@ -355,6 +358,7 @@ def build_daily_close(
 		"net_sales": 0.0,
 		"grand_total": 0.0,
 		"gross": 0.0,
+		"orders_net": 0.0,
 		"returns_net": 0.0,
 		"return_count": 0,
 		"outstanding": 0.0,
@@ -377,6 +381,7 @@ def build_daily_close(
 		totals["net_sales"] += net
 		totals["grand_total"] += _f(row.get("grand_total"))
 		totals["gross"] += _f(row.get("gross_net"))
+		totals["orders_net"] += _f(row.get("orders_net", row.get("gross_net")))
 		totals["returns_net"] += _f(row.get("returns_net"))
 		totals["return_count"] += int(row.get("return_count") or 0)
 		totals["outstanding"] += _f(row.get("outstanding"))
@@ -462,7 +467,7 @@ def build_daily_close(
 			# Positive magnitude of credit notes; already netted out of net_sales.
 			"returns": _r(-totals["returns_net"]),
 			"cancelled": int(cancelled_total),
-			"avg_order_value": _r(totals["gross"] / orders) if orders else 0.0,
+			"avg_order_value": _r(totals["orders_net"] / orders) if orders else 0.0,
 			# additive
 			"gross_sales": _r(totals["gross"]),
 			"returns_count": int(totals["return_count"]),
@@ -485,14 +490,16 @@ def get_daily_close(date_from=None, date_to=None, branch=None):
 	* Selection: ``docstatus = 1`` and ``posting_date`` in range; credit notes
 	  (``is_return = 1``) are included with their negative values, so
 	  ``net_sales`` is net of returns. Branch = ``Sales Invoice.pos_profile``.
-	* ``orders`` counts non-return invoices; ``avg_order_value`` = non-return
-	  net sales / orders; ``returns`` = credit-note net value as a positive
+	* ``orders`` counts non-return invoices, except a fully returned order
+	  (``custom_return_status = 'Fully Returned'``), which counts as cancelled;
+	  ``avg_order_value`` = net sales of the counted orders / orders; ``returns`` = credit-note net value as a positive
 	  number; ``grand_total`` includes tax and shipping.
 	* ``shipping_income`` = invoice tax rows described ``Shipping Income%``
 	  (``base_tax_amount``), the same source as the P&L report.
 	* ``cancelled`` = cancelled (``docstatus = 2``) non-return invoices in range,
 	  excluding amendments (``custom_cancellation_type = 'Amended'`` or an
-	  invoice that has an ``amended_from`` successor).
+	  invoice that has an ``amended_from`` successor), plus fully returned
+	  originals in range.
 	* ``payments`` by Mode of Payment = POS payment rows (``is_pos`` invoices,
 	  ``Sales Invoice Payment.base_amount``) + submitted Payment Entries
 	  allocated against the invoices in range (``Pay`` entries count negative),
@@ -510,6 +517,8 @@ def get_daily_close(date_from=None, date_to=None, branch=None):
 	cond = _scope_sql("si.pos_profile", scope, params)
 	branch_expr = "IFNULL(NULLIF(si.pos_profile, ''), %(nb)s)"
 	channel = _channel_sql("si")
+	live = not_fully_returned_sql("si")
+	fully_returned = fully_returned_sql("si")
 
 	# nosemgrep: frappe-sql-format-injection -- only constant fragments, schema-probed column names and generated scope clauses interpolated; values are bound parameters
 	invoice_rows = frappe.db.sql(
@@ -517,10 +526,11 @@ def get_daily_close(date_from=None, date_to=None, branch=None):
         SELECT {branch_expr} AS branch,
                {channel} AS channel,
                HOUR(si.posting_time) AS `hour`,
-               SUM(CASE WHEN si.is_return = 0 THEN 1 ELSE 0 END) AS orders,
+               SUM(CASE WHEN si.is_return = 0 AND {live} THEN 1 ELSE 0 END) AS orders,
                SUM(CASE WHEN si.is_return = 1 THEN 1 ELSE 0 END) AS return_count,
                SUM(si.base_net_total) AS net_sales,
                SUM(CASE WHEN si.is_return = 0 THEN si.base_net_total ELSE 0 END) AS gross_net,
+               SUM(CASE WHEN si.is_return = 0 AND {live} THEN si.base_net_total ELSE 0 END) AS orders_net,
                SUM(CASE WHEN si.is_return = 1 THEN si.base_net_total ELSE 0 END) AS returns_net,
                SUM(si.base_grand_total) AS grand_total,
                SUM(CASE WHEN si.is_return = 0 THEN si.outstanding_amount ELSE 0 END) AS outstanding
@@ -557,13 +567,16 @@ def get_daily_close(date_from=None, date_to=None, branch=None):
 		f"""
         SELECT {branch_expr} AS branch, COUNT(*) AS cancelled
         FROM `tabSales Invoice` si
-        WHERE si.docstatus = 2
-          AND si.is_return = 0
-          AND si.posting_date BETWEEN %(fd)s AND %(td)s
-          AND IFNULL({cancel_type}, '') != 'Amended'
-          AND si.name NOT IN (
-              SELECT a.amended_from FROM `tabSales Invoice` a
-              WHERE IFNULL(a.amended_from, '') != ''
+        WHERE si.posting_date BETWEEN %(fd)s AND %(td)s
+          AND (
+              (si.docstatus = 2
+               AND si.is_return = 0
+               AND IFNULL({cancel_type}, '') != 'Amended'
+               AND si.name NOT IN (
+                   SELECT a.amended_from FROM `tabSales Invoice` a
+                   WHERE IFNULL(a.amended_from, '') != ''
+               ))
+              OR {fully_returned}
           )
           {cond}
         GROUP BY branch
@@ -971,6 +984,8 @@ def _cancel_reason(row: dict[str, Any]) -> str:
 		if first:
 			return first[:140]
 	ctype = str(row.get("cancellation_type") or "").strip()
+	if not ctype and cint(row.get("fully_returned")):
+		return "Fully returned"
 	return ctype or "Unspecified"
 
 
@@ -989,7 +1004,8 @@ def build_fulfilment_sla(
 
 	``rows``: name, customer, customer_name, creation, docstatus, branch, state,
 	purpose, is_pickup, delivery_date, time_from, duration, slot_label,
-	delivered_at, cancellation_type, cancellation_reason.
+	delivered_at, cancellation_type, cancellation_reason and optionally
+	``fully_returned`` (1 = a fully returned original, counted as cancelled).
 	"""
 	returned = set(returned)
 	totals = {"orders": 0, "delivered": 0, "cancelled": 0, "returned": 0, "late": 0, "open_late": 0}
@@ -1020,7 +1036,10 @@ def build_fulfilment_sla(
 		day["orders"] += 1
 		br["orders"] += 1
 
-		is_cancelled = int(row.get("docstatus") or 0) == 2 or state == STATE_CANCELLED
+		# A fully returned order counts as cancelled, like a docstatus-2 invoice.
+		is_cancelled = (
+			int(row.get("docstatus") or 0) == 2 or state == STATE_CANCELLED or bool(cint(row.get("fully_returned")))
+		)
 		if is_cancelled:
 			totals["cancelled"] += 1
 			br["cancelled"] += 1
@@ -1182,7 +1201,9 @@ def get_fulfilment_sla(date_from=None, date_to=None, branch=None, late_threshold
 	far past the deadline the order was delivered (or is, if still open);
 	``late`` is worst first, capped at 100.
 
-	``returned`` = orders with a submitted credit note or in the Returned state.
+	``returned`` = orders with a submitted credit note or in the Returned state,
+	except a fully returned order, which counts as cancelled (``cancelled`` and
+	``cancellations``, reason "Fully returned" unless a reason was recorded).
 	``cancellations`` groups cancelled orders on the first line of
 	``custom_cancellation_reason``, else ``custom_cancellation_type``.
 	"""
@@ -1202,6 +1223,7 @@ def get_fulfilment_sla(date_from=None, date_to=None, branch=None, late_threshold
 	params: dict[str, Any] = {"start": start, "end": end, "nb": NO_BRANCH}
 	cond = _scope_sql(branch_expr, scope, params)
 	cancel_type = _si_col("custom_cancellation_type", "si", "''")
+	fully_returned = fully_returned_sql("si")
 
 	rows = (
 		# nosemgrep: frappe-sql-format-injection -- only constant fragments, schema-probed column names and generated scope clauses interpolated; values are bound parameters
@@ -1218,7 +1240,8 @@ def get_fulfilment_sla(date_from=None, date_to=None, branch=None, late_threshold
                {_si_col("custom_delivery_slot_label")} AS slot_label,
                {_si_col("custom_delivered_at")} AS delivered_at,
                {cancel_type} AS cancellation_type,
-               {_si_col("custom_cancellation_reason")} AS cancellation_reason
+               {_si_col("custom_cancellation_reason")} AS cancellation_reason,
+               CASE WHEN {fully_returned} THEN 1 ELSE 0 END AS fully_returned
         FROM `tabSales Invoice` si
         WHERE si.is_return = 0
           AND si.docstatus IN (1, 2)

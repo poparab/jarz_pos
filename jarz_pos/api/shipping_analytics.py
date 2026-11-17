@@ -15,6 +15,7 @@ from frappe.utils import date_diff, get_first_day, get_last_day, getdate, nowdat
 
 from jarz_pos.constants import ROLES
 from jarz_pos.utils.invoice_utils import get_area_label, get_woo_order_ids
+from jarz_pos.utils.return_state import not_fully_returned_sql
 
 # What the customer was actually billed for delivery on invoice ``si``: its
 # ``Shipping Income (...)`` tax row. No row means the order billed nothing.
@@ -238,6 +239,7 @@ def get_summary_kpis(from_date=None, to_date=None, branch=None, as_of=None):
         FROM `tabSales Invoice` si
         WHERE si.docstatus = 1
           AND si.is_return = 0
+          AND {not_fully_returned_sql('si')}
           AND si.posting_date BETWEEN %(fd)s AND %(td)s
           {_when(branch, _SI_BRANCH)}
     """,
@@ -307,6 +309,7 @@ def get_cost_by_territory(from_date=None, to_date=None, branch=None):
         FROM `tabSales Invoice` si
         WHERE si.docstatus = 1
           AND si.is_return = 0
+          AND {not_fully_returned_sql('si')}
           AND si.posting_date BETWEEN %(fd)s AND %(td)s
           AND si.territory IS NOT NULL
           AND si.territory != ''
@@ -351,6 +354,7 @@ def get_cost_by_sub_territory(from_date=None, to_date=None, branch=None):
         FROM `tabSales Invoice`
         WHERE docstatus = 1
           AND is_return = 0
+          AND {not_fully_returned_sql('')}
           AND posting_date BETWEEN %(fd)s AND %(td)s
           {_when(branch, _PLAIN_BRANCH)}
         GROUP BY custom_sub_territory
@@ -392,6 +396,7 @@ def get_cost_by_pos_profile(from_date=None, to_date=None, branch=None):
         FROM `tabSales Invoice` si
         WHERE si.docstatus = 1
           AND si.is_return = 0
+          AND {not_fully_returned_sql('si')}
           AND si.posting_date BETWEEN %(fd)s AND %(td)s
           {_when(branch, _SI_BRANCH)}
         GROUP BY si.pos_profile
@@ -536,6 +541,7 @@ def get_custom_shipping_breakdown(from_date=None, to_date=None, branch=None):
 		f"""
         SELECT COUNT(*) AS n FROM `tabSales Invoice`
         WHERE docstatus = 1 AND is_return = 0 AND IFNULL(custom_is_pickup, 0) = 0
+          AND {not_fully_returned_sql('')}
           AND posting_date BETWEEN %(fd)s AND %(td)s
           {_when(branch, _PLAIN_BRANCH)}
     """,
@@ -681,6 +687,7 @@ def get_daily_trend(from_date=None, to_date=None, branch=None):
         FROM `tabSales Invoice` si
         WHERE si.docstatus = 1
           AND si.is_return = 0
+          AND {not_fully_returned_sql('si')}
           AND si.posting_date BETWEEN %(fd)s AND %(td)s
           {_when(branch, _SI_BRANCH)}
         GROUP BY si.posting_date
@@ -715,6 +722,7 @@ def get_pickup_vs_delivery_split(from_date=None, to_date=None, branch=None):
         FROM `tabSales Invoice`
         WHERE docstatus = 1
           AND is_return = 0
+          AND {not_fully_returned_sql('')}
           AND posting_date BETWEEN %(fd)s AND %(td)s
           {_when(branch, _PLAIN_BRANCH)}
         GROUP BY custom_is_pickup
@@ -770,7 +778,10 @@ def get_unsettled_courier_balances(as_of=None, branch=None):
         SELECT
             ct.party_type,
             ct.party,
-            COUNT(*)                               AS order_count,
+            -- Orders, not rows: the compensating negative row a return posts
+            -- (see invoice_return._compensating_courier_transaction) is a reversal.
+            SUM(CASE WHEN IFNULL(ct.amount, 0) < 0 OR IFNULL(ct.shipping_amount, 0) < 0
+                     THEN 0 ELSE 1 END)            AS order_count,
             COALESCE(SUM(ct.shipping_amount), 0)   AS total_owed,
             MIN(ct.date)                           AS oldest_date
         FROM `tabCourier Transaction` ct
@@ -823,6 +834,7 @@ def get_alerts_data(from_date=None, to_date=None, branch=None):
             FROM `tabSales Invoice` si
             WHERE si.docstatus = 1
               AND si.is_return = 0
+              AND {not_fully_returned_sql('si')}
               AND si.posting_date BETWEEN %(fd)s AND %(td)s
               AND si.territory IS NOT NULL AND si.territory != ''
               {_when(branch, _SI_BRANCH)}
@@ -987,6 +999,7 @@ def get_pickup_delivery_trend(from_date=None, to_date=None, branch=None):
         FROM `tabSales Invoice`
         WHERE docstatus = 1
           AND is_return = 0
+          AND {not_fully_returned_sql('')}
           AND posting_date BETWEEN %(fd)s AND %(td)s
           {_when(branch, _PLAIN_BRANCH)}
         GROUP BY posting_date

@@ -41,6 +41,7 @@ from frappe import _
 from frappe.utils import flt, get_first_day, getdate, nowdate
 
 from jarz_pos.constants import ROLES
+from jarz_pos.utils.return_state import not_fully_returned_sql
 
 # ── channel mapping ───────────────────────────────────────────────────────
 
@@ -438,7 +439,7 @@ def _invoice_rows(fd: date, td: date, company: str | None, branch: str | None = 
 		f"""
         SELECT custom_order_purpose AS purpose, posting_date,
                SUM(base_net_total) AS net,
-               SUM(CASE WHEN is_return = 0 THEN 1 ELSE 0 END) AS orders,
+               SUM(CASE WHEN is_return = 0 AND {not_fully_returned_sql('')} THEN 1 ELSE 0 END) AS orders,
                SUM(CASE WHEN is_return = 1 THEN 1 ELSE 0 END) AS returns,
                SUM(CASE WHEN is_return = 1 THEN base_net_total ELSE 0 END) AS returns_value
         FROM `tabSales Invoice`
@@ -530,7 +531,7 @@ def _branch_rows(
 	sales = frappe.db.sql(
 		f"""
         SELECT {label} AS branch, si.custom_order_purpose AS purpose,
-               SUM(CASE WHEN si.is_return = 0 THEN 1 ELSE 0 END) AS orders,
+               SUM(CASE WHEN si.is_return = 0 AND {not_fully_returned_sql('si')} THEN 1 ELSE 0 END) AS orders,
                SUM(si.base_net_total) AS revenue
         FROM `tabSales Invoice` si
         WHERE si.docstatus = 1

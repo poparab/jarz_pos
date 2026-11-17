@@ -12,7 +12,8 @@ Product types:
 
 Cancelled invoice filter: docstatus = 1 (Submitted).
   docstatus=0 = Draft, docstatus=1 = Submitted, docstatus=2 = Cancelled.
-  is_return = 0 additionally excludes credit notes/returns.
+  is_return = 0 additionally excludes credit notes/returns, and a fully returned
+  original (custom_return_status = 'Fully Returned') counts as cancelled, so it is excluded too.
 
 Cost of goods (since 2026-10): the cost actually posted for the line —
 ``Sales Invoice Item.incoming_rate × stock_qty`` on an ``update_stock`` invoice,
@@ -36,6 +37,7 @@ from frappe import _
 
 from jarz_pos.constants import ROLES
 from jarz_pos.utils.invoice_utils import get_area_label
+from jarz_pos.utils.return_state import not_fully_returned_sql
 
 # ── Item group sets ──────────────────────────────────────────────────────
 _SMALL_GROUPS: set[str] = {"Small"}
@@ -113,6 +115,8 @@ def _lines_sql(branch: str | None) -> str:
 
 	dn_join, cost_expr = actual_line_cost_sql("fd", "td")
 	branch_cond = "AND si.pos_profile = %(branch)s" if branch else ""
+	# A fully returned order counts as cancelled: its lines are not product sales.
+	not_returned_cond = not_fully_returned_sql("si")
 	return f"""
         SELECT sii.item_code,
                sii.item_name,
@@ -150,6 +154,7 @@ def _lines_sql(branch: str | None) -> str:
         {dn_join}
         WHERE si.docstatus = 1
           AND si.is_return = 0
+          AND {not_returned_cond}
           AND si.posting_date BETWEEN %(fd)s AND %(td)s
           {branch_cond}
           AND (

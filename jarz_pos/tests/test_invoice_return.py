@@ -465,5 +465,51 @@ class TestEmployeeOrderReturns(unittest.TestCase):
 		mock_frappe.db.savepoint.assert_called_once()
 
 
+class TestReturnedCancellationLabel(unittest.TestCase):
+	"""A full return labels the original as cancelled (owner decision 2026-11-17);
+	a partial one does not, and a failed label write never fails the return."""
+
+	def _stamp(self, *, fully):
+		inv = _invoice()
+		with (
+			patch.object(ir, "_completes_the_order", return_value=fully),
+			patch.object(ir, "_returned_column_updates", return_value={}),
+			patch.object(ir, "update_submitted_sales_invoice_fields"),
+			patch.object(ir, "frappe") as mock_frappe,
+		):
+			status = ir._stamp_return_state(
+				inv,
+				requested={"row-1": 1.0},
+				returned_before={},
+				reason="Customer refused",
+				notes=None,
+				return_total=-500.0,
+			)
+		return status, mock_frappe
+
+	def test_full_return_is_labelled_returned_cancelled(self):
+		status, mock_frappe = self._stamp(fully=True)
+
+		self.assertEqual(status, "Fully Returned")
+		mock_frappe.db.set_value.assert_called_once()
+		_, name, values = mock_frappe.db.set_value.call_args.args
+		self.assertEqual(name, "ACC-SINV-2026-00001")
+		self.assertEqual(values["custom_cancellation_type"], "Returned - Cancelled")
+		self.assertIn("Customer refused", values["custom_cancellation_reason"])
+
+	def test_partial_return_is_not_labelled(self):
+		status, mock_frappe = self._stamp(fully=False)
+
+		self.assertEqual(status, "Partially Returned")
+		mock_frappe.db.set_value.assert_not_called()
+
+	def test_a_failed_label_write_does_not_fail_the_return(self):
+		inv = _invoice()
+		with patch.object(ir, "frappe") as mock_frappe:
+			mock_frappe.db.set_value.side_effect = RuntimeError("db down")
+			ir._stamp_returned_cancellation_label(inv, "x")  # must not raise
+		mock_frappe.log_error.assert_called_once()
+
+
 if __name__ == "__main__":
 	unittest.main()

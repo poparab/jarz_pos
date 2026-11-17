@@ -4,7 +4,8 @@ B2B Sales & Clients Analytics API — Jarz POS ERPNext Desk / mobile dashboard.
 Aggregates the B2B commercial funnel into a single management payload:
 
   Sales    — Sales Invoice ``docstatus=1 AND is_return=0 AND
-             custom_order_purpose='B2B Supply'`` scoped to the date range.
+             custom_order_purpose='B2B Supply'`` scoped to the date range;
+             a fully returned order counts as cancelled and is excluded.
   Clients  — Customer ``customer_group IN ('B2B','Distributor')`` (current
              state), with RFM fields (customer_segment, rfm_recency_days,
              rfm_frequency_count, rfm_avg_order_value) driving the at-risk feed.
@@ -31,6 +32,7 @@ from frappe import _
 
 from jarz_pos.constants import ROLES
 from jarz_pos.utils.invoice_utils import get_area_label
+from jarz_pos.utils.return_state import not_fully_returned_sql
 
 # ── Customer groups that count as B2B clients ────────────────────────────
 _B2B_GROUPS = ("B2B", "Distributor")
@@ -40,13 +42,16 @@ _B2B_GROUPS = ("B2B", "Distributor")
 # in September 2026 on production, B2B Supply revenue was 54,808 but customers
 # in the B2B groups accounted for 13,340 of it; the rest went to customers left
 # in "Individual" or with no group. Needs %(groups)s and %(purpose)s bound.
-_B2B_CLIENT_COND = """(
+# A fully returned order counts as cancelled, so it does not make a buyer a client.
+def _b2b_client_cond() -> str:
+	return f"""(
     c.customer_group IN %(groups)s
     OR EXISTS (
         SELECT 1 FROM `tabSales Invoice` b2b_si
         WHERE b2b_si.customer = c.name
           AND b2b_si.docstatus = 1
           AND b2b_si.is_return = 0
+          AND {not_fully_returned_sql('b2b_si')}
           AND b2b_si.custom_order_purpose = %(purpose)s
     )
 )"""
@@ -198,8 +203,9 @@ def get_b2b_analytics(
 # ---------------------------------------------------------------------------
 def _sales_totals(params: dict[str, str]) -> dict[str, Any]:
 	"""Headline B2B revenue / order count / distinct clients + BOM cost."""
+	# nosemgrep: frappe-sql-format-injection -- only constant SQL fragments interpolated; values are bound parameters
 	row = frappe.db.sql(
-		"""
+		f"""
         SELECT
             COUNT(*)                          AS orders,
             COALESCE(SUM(grand_total), 0)     AS revenue,
@@ -207,6 +213,7 @@ def _sales_totals(params: dict[str, str]) -> dict[str, Any]:
         FROM `tabSales Invoice`
         WHERE docstatus = 1
           AND is_return = 0
+          AND {not_fully_returned_sql('')}
           AND custom_order_purpose = %(purpose)s
           AND posting_date BETWEEN %(fd)s AND %(td)s
         """,
@@ -218,8 +225,9 @@ def _sales_totals(params: dict[str, str]) -> dict[str, Any]:
 	# missing BOM table / column never breaks the revenue headline.
 	cost = 0.0
 	try:
+		# nosemgrep: frappe-sql-format-injection -- only constant SQL fragments interpolated; values are bound parameters
 		cost_row = frappe.db.sql(
-			"""
+			f"""
             SELECT COALESCE(SUM(sii.qty * COALESCE(b.total_cost, 0)), 0) AS total_cost
             FROM `tabSales Invoice Item` sii
             JOIN `tabSales Invoice` si ON si.name = sii.parent
@@ -229,6 +237,7 @@ def _sales_totals(params: dict[str, str]) -> dict[str, Any]:
                   AND b.is_default = 1
             WHERE si.docstatus = 1
               AND si.is_return = 0
+              AND {not_fully_returned_sql('si')}
               AND si.custom_order_purpose = %(purpose)s
               AND si.posting_date BETWEEN %(fd)s AND %(td)s
             """,
@@ -249,8 +258,9 @@ def _sales_totals(params: dict[str, str]) -> dict[str, Any]:
 
 
 def _revenue_trend(params: dict[str, str]) -> list[dict[str, Any]]:
+	# nosemgrep: frappe-sql-format-injection -- only constant SQL fragments interpolated; values are bound parameters
 	rows = frappe.db.sql(
-		"""
+		f"""
         SELECT
             posting_date,
             COALESCE(SUM(grand_total), 0) AS revenue,
@@ -258,6 +268,7 @@ def _revenue_trend(params: dict[str, str]) -> list[dict[str, Any]]:
         FROM `tabSales Invoice`
         WHERE docstatus = 1
           AND is_return = 0
+          AND {not_fully_returned_sql('')}
           AND custom_order_purpose = %(purpose)s
           AND posting_date BETWEEN %(fd)s AND %(td)s
         GROUP BY posting_date
@@ -277,8 +288,9 @@ def _revenue_trend(params: dict[str, str]) -> list[dict[str, Any]]:
 
 
 def _top_clients(params: dict[str, str]) -> list[dict[str, Any]]:
+	# nosemgrep: frappe-sql-format-injection -- only constant SQL fragments interpolated; values are bound parameters
 	rows = frappe.db.sql(
-		"""
+		f"""
         SELECT
             si.customer,
             c.customer_name,
@@ -290,6 +302,7 @@ def _top_clients(params: dict[str, str]) -> list[dict[str, Any]]:
         LEFT JOIN `tabCustomer` c ON c.name = si.customer
         WHERE si.docstatus = 1
           AND si.is_return = 0
+          AND {not_fully_returned_sql('si')}
           AND si.custom_order_purpose = %(purpose)s
           AND si.posting_date BETWEEN %(fd)s AND %(td)s
         GROUP BY si.customer, c.customer_name, c.customer_segment
@@ -314,8 +327,9 @@ def _top_clients(params: dict[str, str]) -> list[dict[str, Any]]:
 
 def _revenue_by_policy(params: dict[str, str]) -> list[dict[str, Any]]:
 	"""Revenue grouped by the commercial policy applied to each B2B invoice."""
+	# nosemgrep: frappe-sql-format-injection -- only constant SQL fragments interpolated; values are bound parameters
 	rows = frappe.db.sql(
-		"""
+		f"""
         SELECT
             COALESCE(NULLIF(custom_commercial_policy, ''), '(No Policy)') AS policy,
             COUNT(*)                          AS order_count,
@@ -323,6 +337,7 @@ def _revenue_by_policy(params: dict[str, str]) -> list[dict[str, Any]]:
         FROM `tabSales Invoice`
         WHERE docstatus = 1
           AND is_return = 0
+          AND {not_fully_returned_sql('')}
           AND custom_order_purpose = %(purpose)s
           AND posting_date BETWEEN %(fd)s AND %(td)s
         GROUP BY policy
@@ -342,8 +357,9 @@ def _revenue_by_policy(params: dict[str, str]) -> list[dict[str, Any]]:
 
 
 def _revenue_by_territory(params: dict[str, str]) -> list[dict[str, Any]]:
+	# nosemgrep: frappe-sql-format-injection -- only constant SQL fragments interpolated; values are bound parameters
 	rows = frappe.db.sql(
-		"""
+		f"""
         SELECT
             COALESCE(NULLIF(territory, ''), 'Unassigned') AS territory,
             COUNT(*)                          AS orders,
@@ -351,6 +367,7 @@ def _revenue_by_territory(params: dict[str, str]) -> list[dict[str, Any]]:
         FROM `tabSales Invoice`
         WHERE docstatus = 1
           AND is_return = 0
+          AND {not_fully_returned_sql('')}
           AND custom_order_purpose = %(purpose)s
           AND posting_date BETWEEN %(fd)s AND %(td)s
         GROUP BY territory
@@ -377,7 +394,7 @@ def _revenue_by_territory(params: dict[str, str]) -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 def _clients(params: dict[str, str]) -> dict[str, Any]:
 	"""Client counts + per-group revenue over every B2B client (see
-	``_B2B_CLIENT_COND``), so the per-group revenue adds up to B2B revenue."""
+	``_b2b_client_cond``), so the per-group revenue adds up to B2B revenue."""
 	binds = {**params, "purpose": _B2B_PURPOSE, "groups": _B2B_GROUPS}
 	# nosemgrep: frappe-sql-format-injection -- only module constants interpolated; every value is a bound parameter
 	total_b2b_clients = frappe.db.sql(
@@ -385,7 +402,7 @@ def _clients(params: dict[str, str]) -> dict[str, Any]:
         SELECT COUNT(*) AS n
         FROM `tabCustomer` c
         WHERE c.disabled = 0
-          AND {_B2B_CLIENT_COND}
+          AND {_b2b_client_cond()}
         """,
 		binds,
 		as_dict=True,
@@ -393,8 +410,9 @@ def _clients(params: dict[str, str]) -> dict[str, Any]:
 
 	# New = first B2B Supply order falls in the range; a group member who has
 	# never ordered counts when it was created in the range.
+	# nosemgrep: frappe-sql-format-injection -- only constant SQL fragments interpolated; values are bound parameters
 	new_clients = frappe.db.sql(
-		"""
+		f"""
         SELECT COUNT(*) AS n FROM (
             SELECT c.name, c.customer_group, c.creation,
                    MIN(si.posting_date) AS first_b2b
@@ -403,6 +421,7 @@ def _clients(params: dict[str, str]) -> dict[str, Any]:
                    ON si.customer = c.name
                   AND si.docstatus = 1
                   AND si.is_return = 0
+                  AND {not_fully_returned_sql('si')}
                   AND si.custom_order_purpose = %(purpose)s
             GROUP BY c.name, c.customer_group, c.creation
         ) t
@@ -423,21 +442,23 @@ def _clients(params: dict[str, str]) -> dict[str, Any]:
                COUNT(*) AS client_count
         FROM `tabCustomer` c
         WHERE c.disabled = 0
-          AND {_B2B_CLIENT_COND}
+          AND {_b2b_client_cond()}
         GROUP BY COALESCE(NULLIF(c.customer_group, ''), 'Unassigned')
         """,
 		binds,
 		as_dict=True,
 	)
 	# Revenue per group in range (every B2B Supply invoice, whatever the group).
+	# nosemgrep: frappe-sql-format-injection -- only constant SQL fragments interpolated; values are bound parameters
 	rev_rows = frappe.db.sql(
-		"""
+		f"""
         SELECT COALESCE(NULLIF(c.customer_group, ''), 'Unassigned') AS customer_group,
                COALESCE(SUM(si.grand_total), 0) AS revenue
         FROM `tabSales Invoice` si
         JOIN `tabCustomer` c ON c.name = si.customer
         WHERE si.docstatus = 1
           AND si.is_return = 0
+          AND {not_fully_returned_sql('si')}
           AND si.custom_order_purpose = %(purpose)s
           AND si.posting_date BETWEEN %(fd)s AND %(td)s
         GROUP BY COALESCE(NULLIF(c.customer_group, ''), 'Unassigned')
@@ -481,12 +502,13 @@ def _at_risk_clients(params: dict[str, str]) -> dict[str, Any]:
             FROM `tabSales Invoice`
             WHERE docstatus = 1
               AND is_return = 0
+              AND {not_fully_returned_sql('')}
               AND custom_order_purpose = %(purpose)s
               AND posting_date BETWEEN %(fd)s AND %(td)s
             GROUP BY customer
         ) rev ON rev.customer = c.name
         WHERE c.disabled = 0
-          AND {_B2B_CLIENT_COND}
+          AND {_b2b_client_cond()}
           AND c.customer_segment IN %(segs)s
         ORDER BY c.rfm_avg_order_value DESC
         LIMIT 50

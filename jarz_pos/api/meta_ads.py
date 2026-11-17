@@ -24,6 +24,7 @@ import requests
 from frappe import _
 
 from jarz_pos.constants import ROLES
+from jarz_pos.utils.return_state import not_fully_returned_sql
 
 ALLOWED_ROLES = frozenset({ROLES.JARZ_MANAGER, ROLES.SYSTEM_MANAGER, ROLES.ADMINISTRATOR, "Meta CAPI Manager"})
 LEVELS = ("campaign", "adset", "ad")
@@ -485,11 +486,14 @@ def fetch_erp_by_name(names: list, start: date, end: date) -> dict | None:
 	wanted = {name_key(n) for n in names if n}
 	if not wanted:
 		return {}
+	# A fully returned order counts as cancelled, so it is not ERP-confirmed ad revenue.
+	# nosemgrep: frappe-sql-format-injection -- only a constant SQL fragment interpolated; values are bound parameters
 	rows = frappe.db.sql(
-		"""
+		f"""
 		SELECT woo_utm_content, COUNT(*) AS orders, COALESCE(SUM(grand_total), 0) AS revenue
 		FROM `tabSales Invoice`
 		WHERE docstatus = 1 AND is_return = 0
+			AND {not_fully_returned_sql('')}
 			AND posting_date BETWEEN %(start)s AND %(end)s
 			AND IFNULL(woo_utm_content, '') != ''
 		GROUP BY woo_utm_content
@@ -590,11 +594,13 @@ def blended_sql(channel_expr: str, with_followup: bool, window_days: int) -> str
 		)"""
 	else:
 		followup = "0"
+	# A fully returned order counts as cancelled, so it is not blended revenue.
 	return f"""
 		SELECT {channel_expr} AS channel, ({followup}) AS followup,
 			COUNT(*) AS orders, COALESCE(SUM(si.grand_total), 0) AS revenue
 		FROM `tabSales Invoice` si
 		WHERE si.docstatus = 1 AND si.is_return = 0
+			AND {not_fully_returned_sql('si')}
 			AND si.posting_date BETWEEN %(start)s AND %(end)s
 		GROUP BY 1, 2
 	"""
