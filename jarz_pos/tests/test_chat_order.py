@@ -145,9 +145,34 @@ class ValidateOrderTest(unittest.TestCase):
 	def test_catalog_text_has_codes_not_prices(self):
 		text = o.render_catalog(CATALOG)
 		self.assertIn("Jarz Signature Trio | Jarz Signature Trio", text)
-		self.assertIn("choose 3 from: Chocolate Hazelnut Large, Mango Large", text)
+		self.assertIn("choose 3 (Large Jars) from: Chocolate Hazelnut Large, Mango Large", text)
 		self.assertIn("## Paused", text)
 		self.assertNotIn("EGP", text)
+
+	def test_catalog_names_a_choice_whose_code_differs(self):
+		"""Codes like MED-BLU mean nothing to the model next to «٣ blueberry»: show the name."""
+		bundle = {
+			**TRIO,
+			"item_groups": [
+				{
+					"group_key": "g1",
+					"group_name": "",
+					"quantity": 4,
+					"items": [{"id": "MED-BLU", "name": "Blueberry Medium"}],
+				}
+			],
+		}
+		text = o.render_catalog(o.build_catalog(PRODUCTS, [bundle], []))
+		self.assertIn("  - choose 4 from: MED-BLU (Blueberry Medium)", text)
+
+	def test_prompt_maps_offers_and_split_messages_to_bundles(self):
+		"""Most wrong proposals in Nov 2026 billed a box the AI had read as loose jars (CHAT-07790/91/95)."""
+		prompt = o.SYSTEM_PROMPT
+		self.assertIn("Use the bundle whenever the order is one", prompt)
+		self.assertIn("«الاوفر بتاع ال ٤ وسط»", prompt)
+		self.assertIn("are that box's selections, never loose items", prompt)
+		self.assertIn("never turn loose jars into a box yourself", prompt)
+		self.assertIn("Read the whole order across messages", prompt)
 
 
 class UnsureLinesTest(unittest.TestCase):

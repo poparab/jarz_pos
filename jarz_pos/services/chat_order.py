@@ -45,8 +45,20 @@ replaced; apply their latest changes (another flavour, another size, one more, o
 - Codes come only from the catalog below. A jar flavour without a size the customer stated or \
 clearly agreed to is unclear: leave it out and say so in "unclear". Never guess a size or flavour.
 - A bundle (box/offer) goes in "bundles", one entry per box, with the flavours chosen for it in \
-"selections" (item codes from that bundle's groups, with how many of each). When they did not \
-choose flavours, leave selections empty. Jars ordered outside a box go in "items".
+"selections" (item codes from that bundle's groups, with how many of each). Jars ordered outside \
+a box go in "items".
+- Use the bundle whenever the order is one. Customers rarely say its name: «الاوفر بتاع ال ٤ وسط», \
+«عرض الـ6»، «البوكس»، «الاوفر»، "the 4 medium offer", or an offer we sent them earlier in the chat. \
+Match it by what the bundle holds (its groups: how many jars of which size) and by what our \
+messages offered. The flavours they list right after it, in the same or the next messages \
+(«٣ blueberry وواحد بيستاشيو»), are that box's selections, never loose items. Several boxes: \
+split the flavours box by box in the order they gave them. Loose jars stay loose unless they \
+said box / offer or agreed when we offered the box; never turn loose jars into a box yourself. \
+A box whose flavours they have not chosen yet: the bundle with empty selections, and say so in \
+"unclear".
+- Read the whole order across messages: customers send it in pieces (size in one line, \
+flavours in the next, «وواحد كمان» later). A later message changes the order only when it \
+says so.
 - «زي المرة اللي فاتت» / «ع النفس» / "same as last time" means the last order in the profile: \
 use its codes.
 - address_message: the [number] of the customer's own message that gives a written delivery \
@@ -186,7 +198,12 @@ def render_catalog(catalog: dict[str, Any]) -> str:
 	for code, bundle in catalog["bundles"].items():
 		lines.append(f"{code} | {bundle['name']}")
 		for group in bundle["groups"]:
-			lines.append(f"  - choose {group['quantity']} from: " + ", ".join(group["items"]))
+			label = f" ({group['label']})" if group.get("label") else ""
+			choices = ", ".join(
+				code if not name or name == code else f"{code} ({name})"
+				for code, name in group["items"].items()
+			)
+			lines.append(f"  - choose {group['quantity']}{label} from: {choices}")
 	return "\n".join(lines)
 
 

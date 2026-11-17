@@ -63,6 +63,54 @@ class TypedPhonesTest(unittest.TestCase):
 		self.assertEqual(ing.link_by_typed_phone("عايز اطلب"), {})
 
 
+class RelinkByTypedPhoneTest(unittest.TestCase):
+	"""CHAT-07815: a WhatsApp username chat linked by name to the wrong «Asmaa»."""
+
+	OWNERS = {"01000000850": ["Sama - 4"], "01000000782": ["Asmaa gamal"], "01000000111": ["Gift Sender"]}
+
+	def run_relink(self, conv, body):
+		def by_phone(phones):
+			out = []
+			for p in phones:
+				out += [c for c in self.OWNERS.get(p, []) if c not in out]
+			return out
+
+		from jarz_pos.services import chat_customer_match as m
+
+		with (
+			mock.patch.object(m, "customers_by_phone", side_effect=by_phone),
+			mock.patch.object(ing, "_last_order", lambda c: f"INV-{c}"),
+		):
+			return ing.relink_by_typed_phone(conv, body)
+
+	def test_username_chat_linked_by_name_moves_to_the_typed_number(self):
+		conv = {"customer": "Asmaa gamal", "phone": None}
+		self.assertEqual(
+			self.run_relink(conv, "01000000850"),
+			{"customer": "Sama - 4", "last_order": "INV-Sama - 4", "phone": "01000000850"},
+		)
+
+	def test_unlinked_chat_is_linked(self):
+		self.assertEqual(
+			self.run_relink({"customer": None, "phone": None}, "01000000850")["customer"], "Sama - 4"
+		)
+
+	def test_chat_number_owned_by_the_linked_customer_never_moves(self):
+		"""A gift: the sender's own WhatsApp number is on their record, the typed one is the recipient's."""
+		conv = {"customer": "Gift Sender", "phone": "01000000111"}
+		self.assertEqual(self.run_relink(conv, "ابعتوه على 01000000850"), {})
+
+	def test_whatsapp_number_not_on_the_linked_record_moves(self):
+		conv = {"customer": "Asmaa gamal", "phone": "01000000999"}
+		self.assertEqual(self.run_relink(conv, "01000000850")["customer"], "Sama - 4")
+		self.assertNotIn("phone", self.run_relink(conv, "01000000850"))
+
+	def test_same_customer_or_unknown_number_changes_nothing(self):
+		self.assertEqual(self.run_relink({"customer": "Sama - 4", "phone": None}, "01000000850"), {})
+		self.assertEqual(self.run_relink({"customer": "Asmaa gamal", "phone": None}, "01000000333"), {})
+		self.assertEqual(self.run_relink({"customer": "Asmaa gamal", "phone": None}, "01000000782"), {})
+
+
 class SummaryInputTest(unittest.TestCase):
 	def test_order_line(self):
 		line = s.order_line("2026-07-22", [("Jarz Signature Trio", 1.0), ("Lotus Large", 2.0), ("", 1.0)])

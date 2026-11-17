@@ -150,6 +150,30 @@ class PromptStyleTest(unittest.TestCase):
 		self.assertNotIn("البوكسات أوفر", joined)
 		self.assertNotIn("🚚", joined)
 
+	def test_we_are_the_team_no_team_will_check(self):
+		"""Owner, 2026-11-17: «the team will check» reads as dishonest; the customer is talking to us."""
+		p = d.SYSTEM_PROMPT
+		self.assertIn("22. You ARE the Jarz team", p)
+		self.assertIn("«هتأكد من الفرع وأرجعلك حالاً»", p)
+		for gone in (
+			"say the team will check the",
+			"say the team confirms the total",
+			"say the team will confirm it",
+			"say a team member will check it",
+			"promise that the team will look into it",
+			"هنوصل رسالتك للفريق",
+		):
+			self.assertNotIn(gone, p)
+		joined = "\n".join(r["answer"] for r in d.DEFAULT_READY_ANSWERS)
+		self.assertNotIn("فريق", joined)
+
+	def test_receipt_is_thanked_never_sent_to_review(self):
+		p = d.SYSTEM_PROMPT
+		self.assertIn("never say anyone will check or review it", p)
+		self.assertIn("«تمام يافندم 🥰 شكراً، الأوردر بيتجهز»", p)
+		self.assertIn('"verify payment receipt"', p)
+		self.assertIn("Never say a payment", p)  # still never claims the money arrived
+
 
 class TypedNumberTest(unittest.TestCase):
 	def test_order_numbers_are_not_amounts(self):

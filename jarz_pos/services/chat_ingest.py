@@ -1066,29 +1066,25 @@ def typed_phones(text: Any) -> list[str]:
 
 
 def link_by_typed_phone(body: Any, current_phone: str | None = None) -> dict[str, Any]:
-	"""Conversation updates linking a Messenger / Instagram chat to the customer whose
-	mobile the customer typed. ``{}`` unless the numbers point at exactly one customer.
+	"""Conversation updates linking a chat to the customer whose mobile the customer typed.
 
-	A number can belong to someone else (a gift's recipient); staff relink by
-	hand, and a chat already linked is never touched (callers check).
+	``{}`` when no typed number belongs to a customer. Every spelling of the number is
+	looked up in ``Customer.mobile_no`` / ``phone`` and in Contacts; when several records
+	hold it, the one with the newest invoice wins (as for a WhatsApp number). A number can
+	belong to someone else (a gift's recipient): :func:`relink_by_typed_phone` decides
+	whether a chat that is already linked may move.
 	"""
 	phones = typed_phones(body)
 	if not phones:
 		return {}
 	try:
-		from jarz_pos.utils.phone import normalize_phone, phone_variants
+		from jarz_pos.services.chat_customer_match import customers_by_phone, local_phones
+		from jarz_pos.utils.phone import normalize_phone
 
-		variants = sorted({v for p in phones for v in phone_variants(p)})
-		customers = frappe.get_all(
-			"Customer",
-			filters={"mobile_no": ["in", variants], "disabled": 0},
-			pluck="name",
-			limit_page_length=3,
-			ignore_permissions=True,
-		)
+		customers = customers_by_phone(local_phones(phones))
 	except Exception:
 		return {}
-	if len(set(customers)) != 1:
+	if not customers:
 		return {}
 	updates = {"customer": customers[0], "last_order": _last_order(customers[0])}
 	if not current_phone:
@@ -1096,14 +1092,63 @@ def link_by_typed_phone(body: Any, current_phone: str | None = None) -> dict[str
 	return updates
 
 
-def link_chats_by_typed_phone(dry_run: bool = True) -> dict[str, int]:
-	"""Link every unlinked chat whose customer typed a mobile that belongs to
-	exactly one customer. Re-runnable."""
-	result = {"checked": 0, "linked": 0}
+def link_backed_by_chat_phone(conv: Any) -> bool:
+	"""The chat's own number belongs to its linked customer: a typed number never moves it.
+
+	``False`` for a WhatsApp username chat (no number), a Messenger / Instagram chat, or a
+	link made by hand or by name to someone whose number is not the chat's. Never raises.
+	"""
+	if not conv.get("customer") or not conv.get("phone"):
+		return False
+	try:
+		from jarz_pos.services.chat_customer_match import customers_by_phone, local_phones
+
+		return conv.get("customer") in customers_by_phone(local_phones(conv.get("phone")))
+	except Exception:
+		return True  # unsure: leave the link alone
+
+
+def relink_by_typed_phone(conv: Any, body: Any) -> dict[str, Any]:
+	"""Updates moving a chat to the customer whose number was just typed, or ``{}``.
+
+	An unlinked chat is linked. A linked chat moves only when its link is not backed by
+	the chat's own number (CHAT-07815: a WhatsApp username chat linked by name to another
+	«Asmaa», then the customer typed her real number). A chat whose number is the linked
+	customer's keeps its customer: the typed number may be a gift's recipient.
+	"""
+	updates = link_by_typed_phone(body, conv.get("phone"))
+	if not updates:
+		return {}
+	current = conv.get("customer")
+	if not current:
+		return updates
+	if updates["customer"] == current or link_backed_by_chat_phone(conv):
+		return {}
+	try:
+		from jarz_pos.services.chat_customer_match import customers_by_phone, local_phones
+
+		if current in customers_by_phone(local_phones(typed_phones(body))):
+			return {}  # the linked customer holds this number too
+	except Exception:
+		return {}
+	return updates
+
+
+def link_chats_by_typed_phone(dry_run: bool = True, since_days: int | None = None) -> dict[str, Any]:
+	"""Link (or correct) every chat by the mobiles its customer typed. Re-runnable.
+
+	An unlinked chat is linked; a chat linked to someone its own number does not belong
+	to moves to the typed number's customer (see :func:`relink_by_typed_phone`).
+	``since_days`` limits it to chats with a customer message in that many days.
+	"""
+	result: dict[str, Any] = {"checked": 0, "linked": 0, "relinked": 0, "changes": []}
+	filters: dict[str, Any] = {}
+	if since_days:
+		filters["last_inbound_at"] = [">", frappe.utils.add_days(frappe.utils.now(), -int(since_days))]
 	convs = frappe.get_all(
 		cc.CONVERSATION,
-		filters={"customer": ["is", "not set"]},
-		fields=["name", "phone"],
+		filters=filters,
+		fields=["name", "phone", "customer"],
 		limit_page_length=0,
 	)
 	for conv in convs:
@@ -1115,10 +1160,12 @@ def link_chats_by_typed_phone(dry_run: bool = True) -> dict[str, int]:
 			order_by="timestamp asc",
 			limit_page_length=500,
 		)
-		updates = link_by_typed_phone("\n".join(b or "" for b in bodies), conv.phone)
+		updates = relink_by_typed_phone(conv, "\n".join(b or "" for b in bodies))
 		if not updates:
 			continue
-		result["linked"] += 1
+		result["relinked" if conv.customer else "linked"] += 1
+		if len(result["changes"]) < 50:
+			result["changes"].append((conv.name, conv.customer, updates["customer"]))
 		if not dry_run:
 			frappe.db.set_value(cc.CONVERSATION, conv.name, updates, update_modified=False)
 	if not dry_run:
@@ -1824,6 +1871,9 @@ def _persist_message(
 					link = {"customer": customer, "last_order": _last_order(customer)}
 			# Otherwise the mobile they typed (Messenger, or a WhatsApp number we do not know).
 			updates.update(link or link_by_typed_phone(body, conv.get("phone")))
+		elif typed_phones(body):
+			# Linked by name or by hand, not by the chat's own number: the number they type wins.
+			updates.update(relink_by_typed_phone(conv, body))
 	else:
 		updates.update(
 			{
