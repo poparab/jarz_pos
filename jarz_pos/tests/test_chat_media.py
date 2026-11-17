@@ -225,7 +225,7 @@ class OrderNumbersTest(unittest.TestCase):
 		for prompt in (d.SYSTEM_PROMPT, order.SYSTEM_PROMPT):
 			self.assertIn("Describe nothing you cannot", prompt)
 			self.assertIn("payment", prompt)
-		self.assertIn("Never confirm a payment from a screenshot", d.SYSTEM_PROMPT)
+		self.assertIn("Never say a payment is verified from a screenshot", d.SYSTEM_PROMPT)
 		self.assertIn('"sure": false unless the', order.SYSTEM_PROMPT)
 
 

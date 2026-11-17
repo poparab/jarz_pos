@@ -355,7 +355,10 @@ class MergeReadyAnswersTest(unittest.TestCase):
 		# No approved answer for servings: the sizes answer implies none.
 		self.assertNotIn("يكفي", by_topic["Sizes"])
 		self.assertNotRegex(by_topic["Sizes"], r"فرد|أفراد|اشخاص|أشخاص")
-		self.assertIn("الفريق", by_topic["Servings per jar"])
+		# No number either; asks the headcount itself, never «the team will confirm» (2026-11-17).
+		self.assertNotRegex(by_topic["Servings per jar"], r"\d")
+		self.assertNotIn("الفريق", by_topic["Servings per jar"])
+		self.assertIn("عدد الضيوف", by_topic["Servings per jar"])
 
 
 class FactsPromptTest(unittest.TestCase):
