@@ -55,6 +55,8 @@ from typing import Any
 import frappe
 from frappe import _
 
+from jarz_pos.utils.return_state import not_fully_returned_sql
+
 SETTINGS_DOCTYPE = "Meta CAPI Settings"
 EVENT_DOCTYPE = "Meta CAPI Event"
 MANAGER_ROLE = "Meta CAPI Manager"
@@ -600,6 +602,7 @@ def _candidate_orders(settings: dict[str, Any], since: datetime) -> list[Any]:
         INNER JOIN `tabCustomer` c ON c.name = si.customer
         WHERE si.docstatus = 1
           AND IFNULL(si.is_return, 0) = 0
+          AND {not_fully_returned_sql('si')}
           AND {chat}
           AND si.custom_sales_invoice_state = 'Delivered'
           AND si.creation >= %(since)s
@@ -663,6 +666,7 @@ def _website_candidate_orders(settings: dict[str, Any], since: datetime) -> list
         INNER JOIN `tabSales Invoice` fi ON fi.name = {_first_invoice_sql("si")}
         WHERE si.docstatus = 1
           AND IFNULL(si.is_return, 0) = 0
+          AND {not_fully_returned_sql('si')}
           AND si.woo_order_id >= %(first_order)s
           AND {origin}
           AND si.custom_sales_invoice_state = 'Delivered'

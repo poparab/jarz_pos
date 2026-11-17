@@ -32,6 +32,8 @@ from typing import Any
 
 import frappe
 
+from jarz_pos.utils.return_state import not_fully_returned_sql
+
 SETTINGS_DOCTYPE = "Jarz Follow-up Settings"
 TOUCH_DOCTYPE = "Jarz Follow-up Touch"
 CUSTOMER_OPT_OUT_FIELD = "custom_followup_opt_out"
@@ -450,10 +452,11 @@ def customer_order_time(customer: str) -> _dt.time | None:
 			"""
             SELECT posting_time FROM `tabSales Invoice`
             WHERE customer = %(customer)s AND docstatus = 1 AND IFNULL(is_return, 0) = 0
+              AND {not_fully_returned}
               AND DATE(creation) = posting_date
             ORDER BY posting_date DESC, creation DESC
             LIMIT %(limit)s
-            """,
+            """.replace("{not_fully_returned}", not_fully_returned_sql("")),
 			{"customer": customer, "limit": USUAL_TIME_ORDERS},
 		)
 	except Exception:
@@ -1013,7 +1016,7 @@ def _lifetime_spend(customer: str | None) -> float:
 	try:
 		row = frappe.db.sql(
 			"SELECT SUM(grand_total) FROM `tabSales Invoice` "
-			"WHERE customer = %s AND docstatus = 1 AND IFNULL(is_return, 0) = 0",
+			"WHERE customer = %s AND docstatus = 1 AND IFNULL(is_return, 0) = 0 AND " + not_fully_returned_sql(""),
 			(customer,),
 		)
 		return float(row[0][0] or 0) if row else 0.0
@@ -1758,7 +1761,7 @@ def _first_order_date(customer: str | None) -> str | None:
 	try:
 		row = frappe.db.sql(
 			"SELECT MIN(posting_date) FROM `tabSales Invoice` "
-			"WHERE customer = %s AND docstatus = 1 AND IFNULL(is_return, 0) = 0",
+			"WHERE customer = %s AND docstatus = 1 AND IFNULL(is_return, 0) = 0 AND " + not_fully_returned_sql(""),
 			(customer,),
 		)
 		return str(row[0][0]) if row and row[0][0] else None

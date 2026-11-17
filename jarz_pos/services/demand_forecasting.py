@@ -3,6 +3,8 @@ from datetime import date
 import frappe
 from frappe.utils import add_days, getdate, now_datetime, today
 
+from jarz_pos.utils.return_state import not_fully_returned_sql
+
 
 def get_settings():
 	return frappe.get_single("Jarz Forecast Settings")
@@ -39,9 +41,10 @@ def calculate_velocity(item_code, warehouse=None):
         JOIN `tabSales Invoice` si ON si.name = sii.parent
         WHERE si.docstatus = 1
           AND si.is_return = 0
+          AND {not_fully_returned}
           AND sii.item_code = %(item_code)s
           AND si.posting_date >= %(day60)s
-    """,
+    """.replace("{not_fully_returned}", not_fully_returned_sql("si")),
 		{
 			"item_code": item_code,
 			"day30": day30,
@@ -217,7 +220,7 @@ def build_alert_data(settings):
             SELECT sii.item_code, MAX(si.posting_date) AS last_sale
             FROM `tabSales Invoice Item` sii
             JOIN `tabSales Invoice` si ON si.name = sii.parent
-            WHERE si.docstatus = 1 AND si.is_return = 0
+            WHERE si.docstatus = 1 AND si.is_return = 0 AND {not_fully_returned}
             GROUP BY sii.item_code
         ) sales ON sales.item_code = i.name
         WHERE i.is_stock_item = 1
@@ -225,7 +228,7 @@ def build_alert_data(settings):
           AND COALESCE(b.stock, 0) > 0
           AND (sales.last_sale IS NULL OR sales.last_sale < %(cutoff)s)
         ORDER BY COALESCE(b.stock, 0) * i.standard_rate DESC
-    """,
+    """.replace("{not_fully_returned}", not_fully_returned_sql("si")),
 		{"cutoff": slow_mover_cutoff},
 		as_dict=True,
 	)

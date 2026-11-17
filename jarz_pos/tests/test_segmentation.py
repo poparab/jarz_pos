@@ -57,5 +57,15 @@ class TestSetSegmentOverride(unittest.TestCase):
 		fake.db.set_value.assert_not_called()
 
 
+class TestRetailScopeDropsFullyReturned(unittest.TestCase):
+	def test_conditions_exclude_fully_returned(self):
+		from jarz_pos.services import rfm_segmentation as rfm
+
+		conds = rfm.retail_invoice_conditions(False, "si", has_column=lambda *_: True)
+		with patch("jarz_pos.utils.return_state.has_return_status_col", return_value=True):
+			conds = rfm.retail_invoice_conditions(False, "si", has_column=lambda *_: True)
+		self.assertTrue(any("Fully Returned" in c for c in conds))
+
+
 if __name__ == "__main__":
 	unittest.main()

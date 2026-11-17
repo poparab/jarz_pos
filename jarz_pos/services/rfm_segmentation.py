@@ -1,6 +1,8 @@
 import frappe
 from frappe.utils import add_days, getdate, today
 
+from jarz_pos.utils.return_state import not_fully_returned_sql
+
 # ---------------------------------------------------------------------------
 # Retail scope
 # ---------------------------------------------------------------------------
@@ -43,6 +45,8 @@ def retail_invoice_conditions(website_only=True, alias="si", has_column=None):
 	conds = [
 		"%s.docstatus = 1" % alias,
 		"%s.is_return = 0" % alias,
+		# a fully returned order counts as cancelled, not as a purchase
+		not_fully_returned_sql(alias),
 		"%s.customer IS NOT NULL" % alias,
 	]
 	if has_column("Sales Invoice", "custom_order_purpose"):

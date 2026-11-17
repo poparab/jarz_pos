@@ -23,6 +23,8 @@ from typing import Any
 
 import frappe
 
+from jarz_pos.utils.return_state import not_fully_returned_sql
+
 ACTIVE_STAGE = "Active"
 #: Sales Invoice.custom_order_purpose of a B2B sale (same as b2b_analytics).
 B2B_PURPOSE = "B2B Supply"
@@ -224,6 +226,8 @@ def invoice_stats(
 	customers = sorted({c for c in customers if c})
 	if not customers:
 		return {}
+	# a fully returned order counts as cancelled, not as an order
+	live = not_fully_returned_sql("")
 	purpose_clause = ""
 	if frappe.get_meta("Sales Invoice").has_field("custom_order_purpose"):
 		purpose_clause = "AND custom_order_purpose = %(purpose)s"
@@ -231,16 +235,16 @@ def invoice_stats(
 		f"""
 		SELECT
 			customer,
-			SUM(CASE WHEN is_return = 0 THEN 1 ELSE 0 END) AS orders,
+			SUM(CASE WHEN is_return = 0 AND {live} THEN 1 ELSE 0 END) AS orders,
 			SUM(grand_total) AS billed,
-			SUM(CASE WHEN posting_date >= %(period_start)s AND is_return = 0 THEN 1 ELSE 0 END)
+			SUM(CASE WHEN posting_date >= %(period_start)s AND is_return = 0 AND {live} THEN 1 ELSE 0 END)
 				AS period_orders,
 			SUM(CASE WHEN posting_date >= %(period_start)s THEN grand_total ELSE 0 END)
 				AS period_billed,
 			SUM(CASE WHEN posting_date >= %(prev_start)s AND posting_date < %(period_start)s
 				THEN grand_total ELSE 0 END) AS prev_period_billed,
-			MIN(CASE WHEN is_return = 0 THEN posting_date END) AS first_order_date,
-			MAX(CASE WHEN is_return = 0 THEN posting_date END) AS last_order_date,
+			MIN(CASE WHEN is_return = 0 AND {live} THEN posting_date END) AS first_order_date,
+			MAX(CASE WHEN is_return = 0 AND {live} THEN posting_date END) AS last_order_date,
 			SUM(outstanding_amount) AS outstanding,
 			MIN(CASE WHEN outstanding_amount > 0 THEN posting_date END) AS oldest_unpaid_date
 		FROM `tabSales Invoice`
