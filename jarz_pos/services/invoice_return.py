@@ -1303,7 +1303,10 @@ def _stamp_returned_cancellation_label(inv: Any, reason_text: str) -> None:
 			for field, value in values.items():
 				inv.set(field, value)
 	except Exception:
-		frappe.log_error(frappe.get_traceback(), f"Return: cancellation label not written on {name}")
+		try:  # log_error can itself raise; a label must never cost the return
+			frappe.log_error(frappe.get_traceback(), f"Return: cancellation label not written on {name}")
+		except Exception:
+			pass
 
 
 def run_invoice_return(

@@ -51,3 +51,48 @@ def not_fully_returned_filters() -> list:
 	if not has_return_status_col():
 		return []
 	return [["custom_return_status", "!=", FULLY_RETURNED]]
+
+
+def has_return_courier_paid_col() -> bool:
+	try:
+		return bool(frappe.db.has_column("Sales Invoice", "custom_return_courier_paid"))
+	except Exception:
+		return False
+
+
+def counted_order_sql(alias: str = "si") -> str:
+	"""SQL condition: ``alias`` counts as an order (not a fully returned original).
+
+	Use it inside ``CASE WHEN`` for counts, pickup/delivery splits, per-order
+	averages and billed shipping income of reports that must still see the row
+	for its shipping expense.
+	"""
+	return not_fully_returned_sql(alias)
+
+
+def returned_trip_unpaid_sql(alias: str = "si") -> str:
+	"""SQL condition: ``alias`` is a fully returned original whose courier trip was NOT paid.
+
+	The trip is unpaid only when a submitted credit note against the original
+	carries ``custom_return_courier_paid = 0``; a missing value means paid (the
+	return dialog default). ``alias`` must be a real, non-empty table alias so
+	the subquery can reference the outer ``<alias>.name``.
+	"""
+	if not alias:
+		raise ValueError("returned_trip_unpaid_sql needs a non-empty alias")
+	if not has_return_status_col() or not has_return_courier_paid_col():
+		return "(1 = 0)"
+	return (
+		f"({fully_returned_sql(alias)} AND EXISTS ("
+		"SELECT 1 FROM `tabSales Invoice` rcn "
+		f"WHERE rcn.return_against = {alias}.name AND rcn.docstatus = 1 AND rcn.is_return = 1 "
+		"AND IFNULL(rcn.custom_return_courier_paid, 1) = 0))"
+	)
+
+
+def shipping_expense_sql(alias: str = "si") -> str:
+	"""SQL expression: the shipping expense of ``alias`` (0 for a fully returned, unpaid trip)."""
+	return (
+		f"(CASE WHEN {returned_trip_unpaid_sql(alias)} THEN 0 "
+		f"ELSE {alias}.custom_shipping_expense END)"
+	)
