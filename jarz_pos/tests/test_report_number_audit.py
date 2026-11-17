@@ -44,19 +44,22 @@ class TestB2bClientsAreWhoOrdersB2b(unittest.TestCase):
 		self.src = _src("b2b_analytics")
 
 	def test_client_condition_covers_group_or_b2b_orders(self):
-		self.assertIn("_B2B_CLIENT_COND", self.src)
-		cond = self.src[self.src.index("_B2B_CLIENT_COND =") :]
+		# A function since 2026-11-17 (it now also drops fully returned orders,
+		# whose SQL is schema-probed at call time).
+		self.assertIn("def _b2b_client_cond", self.src)
+		cond = self.src[self.src.index("def _b2b_client_cond") :]
 		cond = cond[: cond.index(')"""') + 4]
 		self.assertIn("customer_group IN %(groups)s", cond)
 		self.assertIn("custom_order_purpose = %(purpose)s", cond)
+		self.assertIn("not_fully_returned_sql('b2b_si')", cond)
 
 	def test_clients_and_at_risk_use_it(self):
 		for fn in ("_clients", "_at_risk_clients"):
 			body = _function(self.src, fn)
-			self.assertIn("{_B2B_CLIENT_COND}", body, fn)
+			self.assertIn("{_b2b_client_cond()}", body, fn)
 			# Only an f-string interpolates it; a plain string would send the
 			# literal braces to MariaDB.
-			self.assertRegex(body, r'sql\(\s*f"""[^"]*\{_B2B_CLIENT_COND\}', fn)
+			self.assertRegex(body, r'sql\(\s*f"""[^"]*\{_b2b_client_cond\(\)\}', fn)
 
 	def test_revenue_by_group_is_not_limited_to_b2b_groups(self):
 		body = _function(self.src, "_clients")
