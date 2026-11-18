@@ -824,11 +824,36 @@ def search_customers(name=None, phone=None, customer_type=None):
 		if frappe.db.has_column("Customer", "phone"):
 			phone_fields.append("phone")
 		phone_conditions = []
+		contact_conditions = []
 		for term_index, term in enumerate(phone_search_terms(phone) or [phone]):
 			param_key = f"phone_term_{term_index}"
 			params[param_key] = f"%{term}%"
 			for fieldname in phone_fields:
 				phone_conditions.append(f"`{fieldname}` LIKE %({param_key})s")
+			contact_conditions.extend(
+				(
+					f"co.`mobile_no` LIKE %({param_key})s",
+					f"co.`phone` LIKE %({param_key})s",
+					f"cp.`phone` LIKE %({param_key})s",
+				)
+			)
+		# Also match a number held only on the customer's linked Contact (its
+		# mobile/phone or any Contact Phone row). create_customer blocks on
+		# Contact.mobile_no, so a search that reads only Customer.mobile_no hid the
+		# very record the create-guard rejects on. Production, 2026-11-18: Woo
+		# order 21955 created "Sama - 4" with Customer.mobile_no 01550999123 and
+		# Contact 01117220850; searching 01117220850 found nothing, and creating
+		# the customer was refused 5 times. 1,628 contacts had a number that no
+		# Customer.mobile_no carried.
+		phone_conditions.append(
+			"`name` IN ("
+			"SELECT dl.`link_name` FROM `tabDynamic Link` dl"
+			" JOIN `tabContact` co ON co.`name` = dl.`parent`"
+			" LEFT JOIN `tabContact Phone` cp ON cp.`parent` = co.`name`"
+			" AND cp.`parenttype` = 'Contact'"
+			" WHERE dl.`parenttype` = 'Contact' AND dl.`link_doctype` = 'Customer'"
+			f" AND ({' OR '.join(contact_conditions)}))"
+		)
 		phone_condition = f"({' OR '.join(phone_conditions)})"
 		frappe.logger().info(f"Searching customers by phone: {phone}")
 

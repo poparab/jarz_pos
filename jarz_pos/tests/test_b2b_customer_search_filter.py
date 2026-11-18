@@ -142,6 +142,45 @@ class TestCustomerTypeValidation(unittest.TestCase):
 		self.assertNotIn("query", cap)
 
 
+class TestContactPhoneMatch(unittest.TestCase):
+	"""A phone search also matches the number on the customer's linked Contact.
+
+	create_customer blocks on Contact.mobile_no, so search must reach the same
+	place. Production 2026-11-18: 01117220850 lived only on the Contact of
+	"Sama - 4" (Customer.mobile_no was 01550999123) — search empty, create refused.
+	"""
+
+	def test_phone_search_includes_contact_subquery(self):
+		cap = {}
+		with _patched_db(cap):
+			cust_api.search_customers(phone="01117220850")
+		q = cap["query"]
+		self.assertIn("`tabDynamic Link`", q)
+		self.assertIn("`tabContact`", q)
+		self.assertIn("`tabContact Phone`", q)
+		self.assertIn("dl.`link_doctype` = 'Customer'", q)
+		# Every search term reaches the contact leg, parameterized, never inlined.
+		self.assertNotIn("1117220850", q)
+		for key in cap["params"]:
+			if key.startswith("phone_term_"):
+				self.assertIn(f"co.`mobile_no` LIKE %({key})s", q)
+				self.assertIn(f"cp.`phone` LIKE %({key})s", q)
+		self.assertEqual(cap["params"]["phone_term_0"], "%1117220850%")
+
+	def test_contact_leg_is_not_type_filtered(self):
+		cap = {}
+		with _patched_db(cap):
+			cust_api.search_customers(phone="01117220850", customer_type="Individual")
+		self.assertIn("`tabContact`", cap["query"])
+		self.assertNotIn("%(customer_type)s", cap["query"])
+
+	def test_name_search_has_no_contact_subquery(self):
+		cap = {}
+		with _patched_db(cap):
+			cust_api.search_customers(name="sama")
+		self.assertNotIn("`tabContact`", cap["query"])
+
+
 class TestSearchNoCriteria(unittest.TestCase):
 	"""No name and no phone -> empty list, no query (unchanged contract)."""
 
