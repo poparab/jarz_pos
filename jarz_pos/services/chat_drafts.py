@@ -144,9 +144,14 @@ never use it when a promo code applies: say you will send the total with the cod
 Never write a total «مع التوصيل» / "with delivery" while the delivery area is unknown (not on \
 file, not named in the chat): ask «حضرتك في أنهي منطقة؟» first and give only the jars' price,
    {{customer_first_name}} to greet the customer by name,
-   {{menu}} for the full priced menu, only when they ask for the menu or the flavours,
-   {{offers}} for every live bundle with what is inside and its price, plus free delivery: only \
-when they ask about offers or boxes, or want 3 jars or more,
+   {{menu}} for the full priced menu, only when they ask for the menu, the flavours or the \
+price list. The menu NEVER goes out alone: every reply with {{menu}} carries {{offers}} right \
+after it, introduced by a short line («ودي العروض والبوكسات، وتختار النكهات اللي تحبها جوه \
+البوكس:»), and ends by asking jars or a box («تحب برطمانات ولا بوكس؟»), so the customer sees \
+the boxes before choosing,
+   {{offers}} for every live bundle with what is inside and its price, plus free delivery: \
+always with {{menu}} and with the price list, and when they ask about offers or boxes, or want \
+3 jars or more,
    {{delivery_areas}} for the list of areas we deliver to,
    {{customer_offer:CODE}} for the wording of a personal offer listed in the customer profile.
    {{menu}}, {{offers}} and {{delivery_areas}} expand to several lines: put each on its own line, \
@@ -600,12 +605,14 @@ DEFAULT_READY_ANSWERS: list[dict[str, str]] = [
 		"topic": "Menu",
 		"when_to_use": "«المنيو»، «إيه الأنواع اللي عندكم؟»، «تفاصيل»",
 		"answer": "اكيد يافندم 🥰 ده المنيو، وكل النكهات بنفس السعر حسب الحجم:\n{{menu}}\n\n"
-		"تحب وسط ولا كبير؟",
+		"ودي العروض والبوكسات، وتختار النكهات اللي تحبها جوه البوكس:\n{{offers}}\n\n"
+		"تحب برطمانات ولا بوكس؟",
 	},
 	{
 		"topic": "Prices",
 		"when_to_use": "«بكام»، «الأسعار»، «سعر البرطمان الكبير»",
-		"answer": "كل النكهات بنفس السعر يافندم: {{size_prices}} 🥰 تحب وسط ولا كبير؟",
+		"answer": "كل النكهات بنفس السعر يافندم: {{size_prices}} 🥰\n"
+		"ودي العروض والبوكسات:\n{{offers}}\n\nتحب برطمانات ولا بوكس؟",
 	},
 	{
 		"topic": "Sizes",
@@ -1824,7 +1831,7 @@ def build_context(settings: dict[str, Any]) -> dict[str, Any]:
 	for 10 minutes per POS profile: it is the cached prefix of every prompt.
 	"""
 	profile = settings.get("default_pos_profile") or ""
-	cache_key = f"{DRAFT_CONTEXT_CACHE_PREFIX}v11:{profile}"
+	cache_key = f"{DRAFT_CONTEXT_CACHE_PREFIX}v12:{profile}"
 	try:
 		cached = frappe.cache().get_value(cache_key)
 		if cached:

@@ -496,6 +496,17 @@ class ReadyAnswersAndPromptTest(unittest.TestCase):
 					self.assertTrue(answer.replace(tag, "").strip(), topic)
 					self.assertEqual(answer.count(tag), 1, topic)
 
+	def test_menu_and_price_list_always_carry_the_offers(self):
+		# Owner, 2026-11-18: whenever the menu goes out, the boxes go with it.
+		by_topic = {r["topic"]: r["answer"] for r in d.DEFAULT_READY_ANSWERS}
+		for topic in ("Menu", "Prices"):
+			self.assertIn("{{offers}}", by_topic[topic], topic)
+			self.assertIn("تحب برطمانات ولا بوكس؟", by_topic[topic], topic)
+		menu = by_topic["Menu"]
+		self.assertLess(menu.index("{{menu}}"), menu.index("{{offers}}"))
+		self.assertIn("The menu NEVER goes out alone", d.SYSTEM_PROMPT)
+		self.assertIn("always with {{menu}}", d.SYSTEM_PROMPT)
+
 	def test_defaults_follow_the_facts_registry(self):
 		joined = "\n".join(r["answer"] for r in d.DEFAULT_READY_ANSWERS)
 		for banned in ("نوتيلا", "Nutella", "كنافة", "Kunafa", "Carrot", "جرة", "100%"):
