@@ -998,22 +998,19 @@ def get_territories(search=None):
 		return []
 
 
-def _contacts_block_lead_conversion(mobile_no, source_lead):
-	"""Return True if existing Contacts with ``mobile_no`` should block creating a
-	Customer while converting ``source_lead`` (Lead -> Customer).
+def _contacts_block_customer_create(mobile_no):
+	"""True when a Contact holding ``mobile_no`` belongs to an existing Customer.
 
-	When Frappe auto-creates a Contact for a Lead, that Contact carries the lead's
-	mobile. Converting that Lead to a Customer must NOT be blocked by its own
-	auto-created Contact. We only block when a *conflicting* third-party/customer
-	Contact shares the mobile.
+	Only a *Customer's* contact makes a new customer with this number a
+	duplicate. A Contact that belongs to a Lead, a Supplier, or to nobody is not
+	a customer, so it must not block one. Until 2026-11-18 any Contact blocked:
+	1,565 Lead contacts and 30 Supplier contacts on production held numbers that
+	could never become a customer, and phone search could not show the operator
+	anything because no customer existed. (A supplier who also orders from us,
+	and a lead who orders before being converted, are the real-world cases.)
 
-	A conflicting Contact is "OK to ignore" only if it is linked to ``source_lead``
-	AND is not linked to any existing Customer. If every conflicting Contact is
-	OK-to-ignore -> not blocked (return False). If any is a real third-party /
-	Customer contact -> blocked (return True).
-
-	On ANY error we fall back to the conservative behavior: a Contact with that
-	mobile exists -> treat as blocked, so we never accidentally create duplicates.
+	On ANY error we fall back to the conservative behavior (blocked), so a
+	failing lookup never lets a duplicate customer through.
 	"""
 	try:
 		contacts = frappe.get_all(
@@ -1021,24 +1018,7 @@ def _contacts_block_lead_conversion(mobile_no, source_lead):
 			filters={"mobile_no": ["in", phone_variants(mobile_no) or [mobile_no]]},
 			pluck="name",
 		)
-		if not contacts:
-			return False
-
-		for contact_name in contacts:
-			linked_to_lead = frappe.get_all(
-				"Dynamic Link",
-				filters={
-					"parenttype": "Contact",
-					"parent": contact_name,
-					"link_doctype": "Lead",
-					"link_name": source_lead,
-				},
-				limit=1,
-			)
-			if not linked_to_lead:
-				# Contact belongs to some other party -> real conflict.
-				return True
-
+		for contact_name in contacts or []:
 			linked_to_customer = frappe.get_all(
 				"Dynamic Link",
 				filters={
@@ -1049,14 +1029,22 @@ def _contacts_block_lead_conversion(mobile_no, source_lead):
 				limit=1,
 			)
 			if linked_to_customer:
-				# Already tied to a Customer -> real conflict.
 				return True
-
-		# Every conflicting contact belongs only to source_lead -> safe to ignore.
 		return False
 	except Exception:
-		# Conservative fallback: a Contact with this mobile exists -> block.
 		return True
+
+
+def _contacts_block_lead_conversion(mobile_no, source_lead):
+	"""Return True if existing Contacts with ``mobile_no`` should block creating a
+	Customer while converting ``source_lead`` (Lead -> Customer).
+
+	Same rule as every other create: only a Contact linked to an existing
+	Customer blocks. The Lead's own auto-created Contact, another Lead's contact
+	and a Supplier's contact do not. ``source_lead`` is kept for callers; a lead
+	already converted to a customer is refused earlier by ``_resolve_lead_customer``.
+	"""
+	return _contacts_block_customer_create(mobile_no)
 
 
 def _customer_conflict_label(customer_row) -> str:
@@ -1279,15 +1267,14 @@ def create_customer(
 		)
 		if existing_customer:
 			frappe.throw(_customer_conflict_text(mobile_no, existing_customer[0]))
-		# Also guard against existing contacts with the same mobile.
-		# Lead-aware: when converting a Lead -> Customer, ignore the Lead's own
-		# auto-created Contact; otherwise keep the strict B2C behavior.
-		# These two sites are blocked by a *Contact*, so the message resolves that
-		# contact's linked Customer (when any) instead of asserting a Customer exists.
+		# Also guard against a Customer's Contact holding the same mobile (the
+		# Customer's own mobile_no may differ: Woo customers carry a second number
+		# on their Contact). Lead, Supplier and unlinked contacts do not block —
+		# see _contacts_block_customer_create. The message names the Customer.
 		if valid_source_lead:
 			if _contacts_block_lead_conversion(mobile_no, source_lead):
 				frappe.throw(_contact_conflict_text(mobile_no, phone_forms, source_lead))
-		elif frappe.db.exists("Contact", {"mobile_no": ["in", phone_forms]}):
+		elif _contacts_block_customer_create(mobile_no):
 			frappe.throw(_contact_conflict_text(mobile_no, phone_forms))
 
 		# Validate territory exists
