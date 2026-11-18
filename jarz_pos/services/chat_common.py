@@ -425,6 +425,12 @@ def serialize_draft(row: Any) -> dict[str, Any]:
 	"""Draft shape. ``is_planted`` / ``planted_error`` are NEVER exposed: a planted
 	draft must look exactly like a real one or the check measures nothing."""
 	get = row.get
+	conflicts = split_warnings(get("fact_conflicts"))
+	approved: list[int] = []
+	if conflicts and get("name"):
+		from jarz_pos.services.chat_fact_approval import approved_indexes
+
+		approved = approved_indexes([get("name")]).get(get("name"), [])
 	return {
 		"name": get("name"),
 		"status": get("status"),
@@ -436,7 +442,9 @@ def serialize_draft(row: Any) -> dict[str, Any]:
 		"is_complaint": bool(get("is_complaint")),
 		"needs_human_reason": get("needs_human_reason") or None,
 		"warnings": split_warnings(get("warnings")),
-		"fact_conflicts": split_warnings(get("fact_conflicts")),
+		"fact_conflicts": conflicts,
+		# Indexes into fact_conflicts a manager already approved as Brand Facts.
+		"approved_conflicts": approved,
 		"created_at": dt_str(get("creation")),
 		"for_message": get("for_message") or None,
 	}

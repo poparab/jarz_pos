@@ -659,6 +659,7 @@ class ApiTest(unittest.TestCase):
 				"requested_by_name": "Mona",
 				"moderator_hint": "tell her delivery is 1 hour and 150",
 				"conflicts": ["1 hour delivery → we say 2-3 hours", "150 → Trio is 165"],
+				"approved_conflicts": [],
 				"status": "Sent",
 				"final_text": None,
 				"draft_text": "Delivery in 1 hour",

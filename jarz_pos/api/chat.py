@@ -278,6 +278,9 @@ def get_conversation(name: str, limit: int | str | None = 50, before: str | None
 	if summary is not None:
 		summary["can_send_media"] = ms.can_send_media(conv.channel)
 		summary["reaction_choices"] = ms.reaction_choices(conv.channel)
+		from jarz_pos.services.chat_fact_approval import can_approve
+
+		summary["can_approve_facts"] = can_approve()
 	return {
 		"conversation": summary,
 		"messages": [cc.serialize_message(r, conv.channel) for r in rows],
@@ -568,6 +571,30 @@ def regenerate_draft(conversation: str, hint: str | None = None) -> dict[str, An
 	return {"draft": cc.load_draft(name)}
 
 
+@frappe.whitelist(methods=["POST"])
+def approve_fact_conflict(
+	draft: str,
+	index: int | str,
+	topic: str,
+	fact_en: str | None = None,
+	fact_ar: str | None = None,
+	category: str | None = None,
+) -> dict[str, Any]:
+	"""Turn one ``fact_conflicts`` line of a draft into an Approved Brand Fact (managers only).
+
+	Returns ``{fact, draft, approved_conflicts}``. Approving the same line twice
+	returns the fact made the first time.
+	"""
+	_gate()
+	from jarz_pos.services import chat_fact_approval as fa
+
+	result = fa.approve(str(draft or "").strip(), index, topic, fact_en, fact_ar, category)
+	conv = frappe.db.get_value(cc.DRAFT, result["draft"], "conversation")
+	if conv:
+		cc.publish_chat_update(conv, "draft")
+	return result
+
+
 @frappe.whitelist(methods=["GET", "POST"])
 def get_fact_overrides(
 	from_date: str | None = None,
@@ -629,7 +656,11 @@ def get_fact_overrides(
 				ignore_permissions=True,
 			)
 		}
+	from jarz_pos.services import chat_fact_approval as fa
+
+	approved = fa.approved_indexes(r.name for r in rows)
 	return {
+		"can_approve_facts": fa.can_approve(),
 		"rows": [
 			{
 				"draft": r.name,
@@ -641,6 +672,7 @@ def get_fact_overrides(
 				"requested_by_name": cc.full_name(r.owner),
 				"moderator_hint": r.moderator_hint or None,
 				"conflicts": cc.split_warnings(r.fact_conflicts),
+				"approved_conflicts": approved.get(r.name, []),
 				"status": r.status,
 				"final_text": r.final_text or None,
 				"draft_text": r.draft_text or None,
