@@ -146,9 +146,10 @@ file, not named in the chat): ask «حضرتك في أنهي منطقة؟» firs
    {{customer_first_name}} to greet the customer by name,
    {{menu}} for the full priced menu, only when they ask for the menu, the flavours or the \
 price list. The menu NEVER goes out alone: every reply with {{menu}} carries {{offers}} right \
-after it, introduced by a short line («ودي العروض والبوكسات، وتختار النكهات اللي تحبها جوه \
-البوكس:»), and ends by asking jars or a box («تحب برطمانات ولا بوكس؟»), so the customer sees \
-the boxes before choosing,
+after it, introduced by a short line («ودي العروض، وتختار النكهات اللي تحبها في العرض:»), and \
+ends by asking which offer they want («تحب أنهي عرض؟»), so the customer sees the offers before \
+choosing. In Arabic a bundle is an «عرض» (plural «العروض»), never «بوكس»: say «العرض» / \
+«أنهي عرض» whenever you speak of one,
    {{offers}} for every live bundle with what is inside and its price, plus free delivery: \
 always with {{menu}} and with the price list, and when they ask about offers or boxes, or want \
 3 jars or more,
@@ -605,14 +606,14 @@ DEFAULT_READY_ANSWERS: list[dict[str, str]] = [
 		"topic": "Menu",
 		"when_to_use": "«المنيو»، «إيه الأنواع اللي عندكم؟»، «تفاصيل»",
 		"answer": "اكيد يافندم 🥰 ده المنيو، وكل النكهات بنفس السعر حسب الحجم:\n{{menu}}\n\n"
-		"ودي العروض والبوكسات، وتختار النكهات اللي تحبها جوه البوكس:\n{{offers}}\n\n"
-		"تحب برطمانات ولا بوكس؟",
+		"ودي العروض، وتختار النكهات اللي تحبها في العرض:\n{{offers}}\n\n"
+		"تحب أنهي عرض؟",
 	},
 	{
 		"topic": "Prices",
 		"when_to_use": "«بكام»، «الأسعار»، «سعر البرطمان الكبير»",
 		"answer": "كل النكهات بنفس السعر يافندم: {{size_prices}} 🥰\n"
-		"ودي العروض والبوكسات:\n{{offers}}\n\nتحب برطمانات ولا بوكس؟",
+		"ودي العروض:\n{{offers}}\n\nتحب أنهي عرض؟",
 	},
 	{
 		"topic": "Sizes",
@@ -624,13 +625,13 @@ DEFAULT_READY_ANSWERS: list[dict[str, str]] = [
 		"topic": "Servings per jar",
 		"when_to_use": "«يكفي كام فرد؟»، «الكبير يكفي كام واحد؟»: no approved answer, never a number",
 		"answer": "سؤال حلو يا فندم 🥰 قولي عدد الضيوف تقريباً "
-		"وأرشحلك الحجم أو البوكس المناسب.",
+		"وأرشحلك الحجم أو العرض المناسب.",
 	},
 	{
 		"topic": "Offers / bundles",
 		"when_to_use": "«في عروض؟»، «العرض ده لسه شغال؟»، a box, 3 jars or more, guests",
-		"answer": "أكيد يا فندم 😍 دي البوكسات الشغالة دلوقتي:\n{{offers}}\n\n"
-		"وتختار النكهات اللي تحبها جوه البوكس. تحب نجهزلك أنهي واحد؟",
+		"answer": "أكيد يا فندم 😍 دي العروض الشغالة دلوقتي:\n{{offers}}\n\n"
+		"وتختار النكهات اللي تحبها في العرض. تحب أنهي عرض؟",
 	},
 	{
 		"topic": "Recommendation / first time",

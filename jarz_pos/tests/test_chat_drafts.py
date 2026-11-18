@@ -501,7 +501,11 @@ class ReadyAnswersAndPromptTest(unittest.TestCase):
 		by_topic = {r["topic"]: r["answer"] for r in d.DEFAULT_READY_ANSWERS}
 		for topic in ("Menu", "Prices"):
 			self.assertIn("{{offers}}", by_topic[topic], topic)
-			self.assertIn("تحب برطمانات ولا بوكس؟", by_topic[topic], topic)
+			self.assertIn("تحب أنهي عرض؟", by_topic[topic], topic)
+		# Owner, 2026-11-18: in Arabic a bundle is an «عرض», never a «بوكس».
+		for answer in by_topic.values():
+			self.assertNotIn("بوكس", answer)
+		self.assertIn("never «بوكس»", d.SYSTEM_PROMPT)
 		menu = by_topic["Menu"]
 		self.assertLess(menu.index("{{menu}}"), menu.index("{{offers}}"))
 		self.assertIn("The menu NEVER goes out alone", d.SYSTEM_PROMPT)
