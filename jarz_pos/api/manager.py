@@ -2480,18 +2480,33 @@ def _carry_over_payment_receipts(
 	re-pointed exactly as :func:`_carry_over_invoice_notes` re-points notes,
 	keeping uploader, confirmer and timestamps.
 
-	* **Pending / Rejected** receipts always move: the order still needs that
-	  proof. Their ``amount`` is re-synced to the replacement's total, the same
-	  figure ``ensure_pending_payment_receipt`` files.
-	* A **Confirmed** receipt moves when the replacement is settled, or when the
-	  part of its transfer NOT already spent by the carried payment
-	  (``amount - carried_amount``) covers what the replacement still owes.
-	  ``_require_confirmed_transfer_proof`` accepts ANY confirmed receipt on the
-	  invoice, so carrying spent proof onto a dearer edit would let the extra be
-	  booked to the bank with no proof of it. ``ACC-SINV-2026-18668`` is that
-	  shape: a 1,010 receipt, all 1,010 carried, 70 still owed -- comparing 1,010
-	  to 70 would have passed. Left behind, the receipt stays on the source as the
-	  record of the old transfer and the order asks for a new screenshot.
+	Anything left behind stays on the cancelled source as the record of the old
+	transfer, and the order asks for a new screenshot -- the behaviour before
+	this function existed, so "left" is always the safe answer.
+
+	* **No receipt moves onto a different method.** If the edit switched the
+	  order to Cash (or from InstaPay to Wallet), a live transfer receipt on the
+	  replacement would make dispatch re-route it as an online order and flip the
+	  method back, silently undoing the edit.
+	* **An imageless placeholder** (pending, no screenshot) moves only while the
+	  replacement still owes money, with ``amount`` re-synced to its total -- the
+	  same target ``ensure_pending_payment_receipt`` files and re-syncs.
+	* **A receipt with a screenshot never has its amount rewritten.** That amount
+	  is the claim about the screenshot and the only automated check that the
+	  proof matches the order (``ensure_uploaded_payment_receipt``); rewriting it
+	  would let ``confirm_online_payment`` book a 1,300 order on a 1,000 transfer.
+	  It moves when the replacement is settled (the proof is then history).
+	  Otherwise:
+
+	  - **Confirmed**: when the part of its transfer NOT already spent by the
+	    carried payment (``amount - carried_amount``) covers what is still owed.
+	    ``_require_confirmed_transfer_proof`` accepts ANY confirmed receipt, so
+	    spent proof on a dearer edit would let the extra be booked unproven.
+	    ``ACC-SINV-2026-18668``: 1,010 receipt, 1,010 carried, 70 owed.
+	  - **Unconfirmed / Rejected**: only when nothing was carried and its amount
+	    still equals the replacement's total, i.e. the claim still describes this
+	    order. Anything else could be confirmed later as a plain stamp (an order
+	    with a real payment classifies ``already_paid``) and then serve as proof.
 	* ``Changed`` receipts are history of a superseded collection method; left.
 	* The confirmation fields carry only when the source was ``Payment
 	  Confirmed`` AND the carried payment settles the replacement in full. A
@@ -2504,11 +2519,19 @@ def _carry_over_payment_receipts(
 	"""
 	result: dict[str, Any] = {"receipts": [], "left_on_source": [], "confirmation_carried": False}
 	try:
+		from jarz_pos.api.payment_receipts import receipt_method_label
+
 		new_values = (
 			frappe.db.get_value(
 				"Sales Invoice",
 				new_invoice_name,
-				["custom_kanban_profile", "pos_profile", "grand_total", "outstanding_amount"],
+				[
+					"custom_kanban_profile",
+					"pos_profile",
+					"grand_total",
+					"outstanding_amount",
+					"custom_payment_method",
+				],
 				as_dict=True,
 			)
 			or {}
@@ -2516,27 +2539,43 @@ def _carry_over_payment_receipts(
 		new_pos_profile = new_values.get("custom_kanban_profile") or new_values.get("pos_profile") or None
 		outstanding = flt(new_values.get("outstanding_amount"))
 		grand_total = flt(new_values.get("grand_total"))
+		new_method_label = receipt_method_label(new_values.get("custom_payment_method"))
+		settled = outstanding <= _PAYMENT_TOLERANCE
+		carried = flt(carried_amount)
 
 		receipts = (
 			frappe.get_all(
 				"POS Payment Receipt",
 				filters={"sales_invoice": source_invoice_name},
-				fields=["name", "status", "amount"],
+				fields=["name", "status", "amount", "payment_method", "receipt_image", "receipt_image_url"],
 			)
 			or []
 		)
 		for receipt in receipts:
 			status = str(receipt.get("status") or "").strip()
+			if status not in _PENDING_RECEIPT_STATUSES and status != "Confirmed":
+				continue
+			amount = flt(receipt.get("amount"))
+			has_image = bool(
+				str(receipt.get("receipt_image_url") or receipt.get("receipt_image") or "").strip()
+			)
 			updates: dict[str, Any] = {"sales_invoice": new_invoice_name}
-			if status in _PENDING_RECEIPT_STATUSES:
-				if grand_total > 0:
+
+			if str(receipt.get("payment_method") or "").strip() != (new_method_label or ""):
+				move = False
+			elif not has_image:
+				move = status in _PENDING_RECEIPT_STATUSES and not settled
+				if move and grand_total > 0:
 					updates["amount"] = grand_total
+			elif settled:
+				move = True
 			elif status == "Confirmed":
-				unspent = flt(receipt.get("amount")) - flt(carried_amount)
-				if outstanding > _PAYMENT_TOLERANCE and unspent + _PAYMENT_TOLERANCE < outstanding:
-					result["left_on_source"].append(receipt.get("name"))
-					continue
+				move = amount - carried + _PAYMENT_TOLERANCE >= outstanding
 			else:
+				move = carried <= _PAYMENT_TOLERANCE and abs(amount - grand_total) <= _PAYMENT_TOLERANCE
+
+			if not move:
+				result["left_on_source"].append(receipt.get("name"))
 				continue
 			if new_pos_profile:
 				updates["pos_profile"] = new_pos_profile
@@ -2569,7 +2608,8 @@ def _carry_over_payment_receipts(
 			if result["left_on_source"]:
 				parts.append(
 					f"Confirmed receipt(s) {', '.join(map(str, result['left_on_source']))} left on "
-					f"{source_invoice_name}: they do not cover the {outstanding:.2f} now owed, so new proof is needed."
+					f"{source_invoice_name} (not valid proof for this edit, {outstanding:.2f} owed): "
+					"attach a new screenshot if a transfer is still expected."
 				)
 			if result["confirmation_carried"]:
 				parts.append("Payment confirmation carried over.")
