@@ -57,9 +57,11 @@ CONFIRMED = {
 
 
 class TestCarryOverPaymentReceipts(unittest.TestCase):
-	def _run(self, mf, rebooked=("ACC-PAY-NEW",)):
+	def _run(self, mf, rebooked=("ACC-PAY-NEW",), carried=None):
 		from jarz_pos.api.manager import _carry_over_payment_receipts
 
+		if carried is None:
+			carried = 1080.0 if rebooked else 0.0
 		with (
 			patch("jarz_pos.api.manager.frappe", mf),
 			patch("jarz_pos.api.manager._add_invoice_audit_comment") as comment,
@@ -68,6 +70,7 @@ class TestCarryOverPaymentReceipts(unittest.TestCase):
 				source_invoice_name=SOURCE,
 				new_invoice_name=NEW,
 				rebooked_payment_entries=list(rebooked),
+				carried_amount=carried,
 			)
 		return result, comment
 
@@ -108,8 +111,7 @@ class TestCarryOverPaymentReceipts(unittest.TestCase):
 		self.assertEqual(result["receipts"], ["POS-RCPT-2"])
 
 	def test_confirmed_proof_smaller_than_the_new_balance_stays_on_the_source(self):
-		# Edited dearer: 1080 carried, 300 still owed... but the scenario that
-		# matters is an unpaid order whose 500 proof would cover an 800 bill.
+		# An unpaid order whose 500 proof would otherwise cover an 800 bill.
 		mf = _frappe(
 			[{"name": "POS-RCPT-3", "status": "Confirmed", "amount": 500.0}],
 			new_outstanding=800.0,
@@ -139,7 +141,32 @@ class TestCarryOverPaymentReceipts(unittest.TestCase):
 		result, _ = self._run(mf)
 		self.assertFalse(result["confirmation_carried"])
 		self.assertEqual(_invoice_updates(mf), [])
-		self.assertEqual(result["receipts"], ["POS-RCPT-5"], "1080 proof still covers the 200 balance")
+		self.assertEqual(
+			result["left_on_source"], ["POS-RCPT-5"], "the 1080 transfer was spent by the carried 1080"
+		)
+
+	def test_spent_proof_cannot_cover_a_dearer_edit_acc_sinv_2026_18668(self):
+		# 1,010 receipt, all 1,010 carried, 70 still owed. Comparing 1,010 to 70
+		# would pass and let the 70 be booked to the bank on the old screenshot.
+		mf = _frappe(
+			[{"name": "POS-RCPT-201", "status": "Confirmed", "amount": 1010.0}],
+			new_outstanding=70.0,
+			new_total=1080.0,
+			source_confirmation=CONFIRMED,
+		)
+		result, _ = self._run(mf, carried=1010.0)
+		self.assertEqual(_receipt_updates(mf), {})
+		self.assertEqual(result["left_on_source"], ["POS-RCPT-201"])
+
+	def test_partly_spent_proof_moves_when_the_rest_covers_the_balance(self):
+		# A 1,500 transfer for a 1,080 order: 1,080 carried, 420 unspent >= 300 owed.
+		mf = _frappe(
+			[{"name": "POS-RCPT-7", "status": "Confirmed", "amount": 1500.0}],
+			new_outstanding=300.0,
+			new_total=1380.0,
+		)
+		result, _ = self._run(mf, carried=1080.0)
+		self.assertEqual(result["receipts"], ["POS-RCPT-7"])
 
 	def test_awaiting_payment_is_never_carried(self):
 		mf = _frappe(

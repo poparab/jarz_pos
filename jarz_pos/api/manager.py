@@ -2462,6 +2462,7 @@ def _carry_over_payment_receipts(
 	source_invoice_name: str,
 	new_invoice_name: str,
 	rebooked_payment_entries: list[str] | None = None,
+	carried_amount: float = 0.0,
 	logger: Any = None,
 ) -> dict[str, Any]:
 	"""Move the transfer proof and its confirmation onto an amendment's replacement.
@@ -2482,13 +2483,15 @@ def _carry_over_payment_receipts(
 	* **Pending / Rejected** receipts always move: the order still needs that
 	  proof. Their ``amount`` is re-synced to the replacement's total, the same
 	  figure ``ensure_pending_payment_receipt`` files.
-	* A **Confirmed** receipt moves only when what it proves covers what the
-	  replacement still owes. ``_require_confirmed_transfer_proof`` accepts ANY
-	  confirmed receipt on the invoice, so carrying a 500 proof onto an edit that
-	  now owes 800 would let the extra 300 be booked to the bank with no proof of
-	  it. Left behind, it stays on the source as the record of the old transfer
-	  and the order asks for a new screenshot, which is what happened before this
-	  fix.
+	* A **Confirmed** receipt moves when the replacement is settled, or when the
+	  part of its transfer NOT already spent by the carried payment
+	  (``amount - carried_amount``) covers what the replacement still owes.
+	  ``_require_confirmed_transfer_proof`` accepts ANY confirmed receipt on the
+	  invoice, so carrying spent proof onto a dearer edit would let the extra be
+	  booked to the bank with no proof of it. ``ACC-SINV-2026-18668`` is that
+	  shape: a 1,010 receipt, all 1,010 carried, 70 still owed -- comparing 1,010
+	  to 70 would have passed. Left behind, the receipt stays on the source as the
+	  record of the old transfer and the order asks for a new screenshot.
 	* ``Changed`` receipts are history of a superseded collection method; left.
 	* The confirmation fields carry only when the source was ``Payment
 	  Confirmed`` AND the carried payment settles the replacement in full. A
@@ -2529,10 +2532,8 @@ def _carry_over_payment_receipts(
 				if grand_total > 0:
 					updates["amount"] = grand_total
 			elif status == "Confirmed":
-				if (
-					outstanding > _PAYMENT_TOLERANCE
-					and flt(receipt.get("amount")) + _PAYMENT_TOLERANCE < outstanding
-				):
+				unspent = flt(receipt.get("amount")) - flt(carried_amount)
+				if outstanding > _PAYMENT_TOLERANCE and unspent + _PAYMENT_TOLERANCE < outstanding:
 					result["left_on_source"].append(receipt.get("name"))
 					continue
 			else:
@@ -3370,6 +3371,7 @@ def _run_invoice_amendment_job(
 			source_invoice_name=invoice_id,
 			new_invoice_name=replacement_invoice_name,
 			rebooked_payment_entries=list(rebooked_payment.get("payment_entries") or []),
+			carried_amount=flt(rebooked_payment.get("allocated")) + flt(rebooked_payment.get("unallocated")),
 			logger=logger,
 		)
 
