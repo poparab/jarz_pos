@@ -10,6 +10,10 @@ class TestReportsAPI(unittest.TestCase):
 		patcher = patch("jarz_pos.api.reports._jar_sales_by_warehouse", return_value={})
 		patcher.start()
 		self.addCleanup(patcher.stop)
+		# Same for the reservation read (SQL): no open orders here.
+		reserved = patch("jarz_pos.api.reports._open_order_reservations", return_value=({}, [], False))
+		reserved.start()
+		self.addCleanup(reserved.stop)
 
 	def test_get_final_products_report_includes_medium_group(self):
 		from jarz_pos.api import reports
@@ -448,8 +452,8 @@ class TestReportsAPI(unittest.TestCase):
 
 		medium = result["groups"][0]
 		self.assertEqual(250.0, medium["items"][0]["stock_value"])
-		self.assertEqual({"qty": 5.0, "stock_value": 250.0}, medium["totals"])
-		self.assertEqual({"qty": 7.0, "stock_value": 430.0}, result["totals"])
+		self.assertEqual({"qty": 5.0, "stock_value": 250.0, "reserved_qty": 0.0}, medium["totals"])
+		self.assertEqual({"qty": 7.0, "stock_value": 430.0, "reserved_qty": 0.0}, result["totals"])
 		self.assertEqual({"branch": None, "warehouse": None}, result["filters"])
 
 	def test_final_products_branch_shows_only_that_warehouse(self):
@@ -490,7 +494,7 @@ class TestReportsAPI(unittest.TestCase):
 
 		self.assertEqual("Stores - Dokki", captured["filters"]["warehouse"])
 		self.assertEqual(["Stores - Dokki"], result["groups"][0]["warehouses"])
-		self.assertEqual({"qty": 3.0, "stock_value": 90.0}, result["totals"])
+		self.assertEqual({"qty": 3.0, "stock_value": 90.0, "reserved_qty": 0.0}, result["totals"])
 		self.assertEqual("Dokki", result["filters"]["branch"])
 
 	def test_materials_report_carries_bucket_and_grand_totals(self):
@@ -542,7 +546,7 @@ ZAMALEK = "Zamalek - J"
 class TestFinalProductsDaysOfCover(unittest.TestCase):
 	"""Days-of-cover on the Final Products report (14-day net sales rate)."""
 
-	def _run(self, items, bins, sales, fg=(FG,), branch=None, db=None):
+	def _run(self, items, bins, sales, fg=(FG,), branch=None, db=None, reservations=None):
 		from jarz_pos.api import reports
 
 		def fake_get_all(doctype, **kwargs):
@@ -558,6 +562,10 @@ class TestFinalProductsDaysOfCover(unittest.TestCase):
 			patch("jarz_pos.api.reports._finished_goods_warehouses", return_value=list(fg)),
 			patch("jarz_pos.api.reports.frappe.get_all", side_effect=fake_get_all),
 			patch("jarz_pos.api.reports._jar_sales_by_warehouse", sales_mock),
+			patch(
+				"jarz_pos.api.reports._open_order_reservations",
+				return_value=reservations or ({}, [], False),
+			),
 		]
 		if db is not None:
 			patches.append(patch("jarz_pos.api.reports.frappe.db", db))
@@ -688,6 +696,7 @@ class TestFinalProductsDaysOfCover(unittest.TestCase):
 			patch("jarz_pos.api.reports.frappe.get_all", side_effect=fake_get_all),
 			patch("jarz_pos.api.reports.frappe.db", SimpleNamespace(sql=broken_sql)),
 			patch("jarz_pos.api.reports.nowdate", return_value="2026-10-20"),
+			patch("jarz_pos.api.reports._open_order_reservations", return_value=({}, [], False)),
 			patch(
 				"jarz_pos.api.reports._log_degraded_read",
 				side_effect=lambda title, message: logged.append(title),
@@ -750,3 +759,269 @@ class TestFinalProductsDaysOfCover(unittest.TestCase):
 		# No items: no query at all.
 		self.assertEqual({}, reports._jar_sales_by_warehouse([], None, 14))
 		self.assertEqual(2, len(captured))
+
+
+def _order_row(invoice, warehouse, code, qty, delivery=None, posting="2026-11-19", **extra):
+	row = {
+		"invoice": invoice,
+		"woo_order_id": None,
+		"customer": "CUST-1",
+		"customer_name": "Lucaffe",
+		"state": "Recieved",
+		"posting_date": posting,
+		"delivery_date": delivery,
+		"delivery_slot_label": None,
+		"warehouse": warehouse,
+		"item_code": code,
+		"item_name": "Lotus Medium",
+		"qty": qty,
+	}
+	row.update(extra)
+	return row
+
+
+class TestFinalProductsReservations(unittest.TestCase):
+	"""Jars held by open orders (reserved / available) on the Final Products report."""
+
+	TODAY = "2026-11-19"
+
+	_run = TestFinalProductsDaysOfCover._run
+	_item = staticmethod(TestFinalProductsDaysOfCover._item)
+	_bin = staticmethod(TestFinalProductsDaysOfCover._bin)
+
+	def _reserved(self, rows, warehouse=None, codes=("ITEM-M",)):
+		"""Run the real helper against fake SQL rows; return its result and the queries."""
+		from jarz_pos.api import reports
+
+		captured = []
+
+		def fake_sql(query, params, as_dict=False):
+			captured.append((query, params))
+			return rows
+
+		with (
+			patch("jarz_pos.api.reports.frappe.db", SimpleNamespace(sql=fake_sql)),
+			patch("jarz_pos.api.reports.nowdate", return_value=self.TODAY),
+		):
+			return reports._open_order_reservations(list(codes), warehouse), captured
+
+	def test_reserved_and_available_per_warehouse_and_totals(self):
+		reservations = ({(DOKKI, "ITEM-M"): 12.0, (FG, "ITEM-M"): 8.0}, [], False)
+		result, _ = self._run(
+			[self._item()],
+			[self._bin(FG, 100), self._bin(DOKKI, 20)],
+			{(DOKKI, "ITEM-M"): 28.0},
+			reservations=reservations,
+		)
+		group = result["groups"][0]
+		row = group["items"][0]
+		self.assertEqual({DOKKI: 12.0, FG: 8.0}, row["reserved_qty"])
+		self.assertEqual({DOKKI: 8.0, FG: 92.0}, row["available_qty"])
+		self.assertEqual(20.0, row["total_reserved_qty"])
+		self.assertEqual(100.0, row["total_available_qty"])
+		# 8 left at 2/day = 4 days; FG falls back to the company rate (2/day).
+		self.assertEqual(4.0, row["available_days_cover"][DOKKI])
+		self.assertEqual(46.0, row["available_days_cover"][FG])
+		self.assertEqual(50.0, row["total_available_days_cover"])
+		self.assertEqual(20.0, group["totals"]["reserved_qty"])
+		self.assertEqual(20.0, result["totals"]["reserved_qty"])
+		# Stock figures are unchanged.
+		self.assertEqual(120.0, row["total_qty"])
+
+	def test_reservation_without_a_bin_grows_a_column(self):
+		result, _ = self._run(
+			[self._item()],
+			[self._bin(FG, 10)],
+			{},
+			reservations=({(NASR, "ITEM-M"): 5.0}, [], False),
+		)
+		group = result["groups"][0]
+		self.assertEqual([FG, NASR], group["warehouses"])
+		row = group["items"][0]
+		self.assertEqual({FG: 0.0, NASR: 5.0}, row["reserved_qty"])
+		self.assertEqual({FG: 10.0, NASR: -5.0}, row["available_qty"])
+		self.assertIsNone(row["available_days_cover"][NASR])
+
+	def test_every_column_has_an_entry_even_when_nothing_is_held(self):
+		result, _ = self._run([self._item()], [self._bin(FG, 10), self._bin(DOKKI, 3)], {})
+		row = result["groups"][0]["items"][0]
+		self.assertEqual({DOKKI: 0.0, FG: 0.0}, row["reserved_qty"])
+		self.assertEqual({DOKKI: 3.0, FG: 10.0}, row["available_qty"])
+		self.assertEqual(0.0, row["total_reserved_qty"])
+		self.assertEqual(13.0, row["total_available_qty"])
+		self.assertEqual(
+			{
+				"qty": 0.0,
+				"order_count": 0,
+				"overdue_count": 0,
+				"failed": False,
+				"states": ["Recieved", "In Progress"],
+				"orders": [],
+			},
+			result["reserved"],
+		)
+
+	def test_available_cover_uses_the_finished_goods_fallback(self):
+		# Dokki sells 2/day; FG has no rate of its own so it is measured on 2/day too.
+		result, _ = self._run(
+			[self._item()],
+			[self._bin(FG, 60), self._bin(DOKKI, 10)],
+			{(DOKKI, "ITEM-M"): 28.0},
+			reservations=({(FG, "ITEM-M"): 20.0}, [], False),
+		)
+		row = result["groups"][0]["items"][0]
+		self.assertEqual(20.0, row["available_days_cover"][FG])  # (60 - 20) / 2
+		self.assertEqual(5.0, row["available_days_cover"][DOKKI])  # nothing held there
+		# A non-FG column with no rate of its own stays None.
+		result, _ = self._run(
+			[self._item()],
+			[self._bin(ZAMALEK, 10)],
+			{(DOKKI, "ITEM-M"): 28.0},
+			reservations=({(ZAMALEK, "ITEM-M"): 4.0}, [], False),
+		)
+		self.assertIsNone(result["groups"][0]["items"][0]["available_days_cover"][ZAMALEK])
+
+	def test_branch_view_only_sees_its_warehouse(self):
+		result, _ = self._run(
+			[self._item()],
+			[self._bin("Stores - Dokki", 21)],
+			{},
+			fg=(),
+			branch="Dokki",
+			db=SimpleNamespace(get_value=lambda *a, **k: "Stores - Dokki"),
+			reservations=({("Stores - Dokki", "ITEM-M"): 6.0}, [], False),
+		)
+		group = result["groups"][0]
+		self.assertEqual(["Stores - Dokki"], group["warehouses"])
+		self.assertEqual({"Stores - Dokki": 15.0}, group["items"][0]["available_qty"])
+		# The helper itself narrows the query to that warehouse.
+		_, captured = self._reserved([], warehouse="Stores - Dokki")
+		query, params = captured[0]
+		self.assertIn("sii.warehouse = %(warehouse)s", query)
+		self.assertEqual("Stores - Dokki", params["warehouse"])
+		_, captured = self._reserved([])
+		self.assertNotIn("%(warehouse)s", captured[0][0])
+
+	def test_helper_query_rules(self):
+		_, captured = self._reserved([])
+		query, params = captured[0]
+		self.assertIn("si.docstatus = 1", query)
+		self.assertIn("IFNULL(si.is_return, 0) = 0", query)
+		self.assertIn("NOT EXISTS", query)
+		self.assertIn("tabDelivery Note Item", query)
+		self.assertIn("dn.docstatus = 1", query)
+		self.assertIn("SUM(sii.stock_qty)", query)
+		self.assertEqual(["ITEM-M"], params["codes"])
+		self.assertEqual({"Recieved", "Received", "In Progress"}, set(params["states"]))
+		# No items: no query at all.
+		outcome, captured = self._reserved([], codes=())
+		self.assertEqual(({}, [], False), outcome)
+		self.assertEqual([], captured)
+
+	def test_overdue_flag_and_ordering(self):
+		rows = [
+			# Past delivery date: overdue.
+			_order_row("SINV-3", NASR, "ITEM-M", 4.0, delivery="2026-11-18", posting="2026-11-10"),
+			# No delivery date, past posting date: overdue.
+			_order_row("SINV-1", NASR, "ITEM-M", 2.0, delivery=None, posting="2026-07-03"),
+			# Delivery today: not overdue, even though posted earlier.
+			_order_row("SINV-4", NASR, "ITEM-M", 3.0, delivery="2026-11-19", posting="2026-11-01"),
+			# No delivery date, posted today: not overdue.
+			_order_row("SINV-5", NASR, "ITEM-M", 1.0, delivery=None, posting="2026-11-19"),
+			# Delivery in the future, posted in the past: not overdue.
+			_order_row("SINV-6", NASR, "ITEM-M", 5.0, delivery="2026-11-25", posting="2026-11-01"),
+		]
+		(qty_map, orders, failed), _ = self._reserved(rows)
+		self.assertFalse(failed)
+		by_invoice = {o["invoice"]: o for o in orders}
+		self.assertTrue(by_invoice["SINV-3"]["overdue"])
+		self.assertTrue(by_invoice["SINV-1"]["overdue"])
+		self.assertFalse(by_invoice["SINV-4"]["overdue"])
+		self.assertFalse(by_invoice["SINV-5"]["overdue"])
+		self.assertFalse(by_invoice["SINV-6"]["overdue"])
+		# Most urgent first by COALESCE(delivery_date, posting_date), then invoice.
+		self.assertEqual(
+			["SINV-1", "SINV-3", "SINV-4", "SINV-5", "SINV-6"], [o["invoice"] for o in orders]
+		)
+		self.assertIsNone(by_invoice["SINV-1"]["delivery_date"])
+		self.assertEqual("2026-07-03", by_invoice["SINV-1"]["posting_date"])
+		self.assertEqual(15.0, qty_map[(NASR, "ITEM-M")])
+
+		result, _ = self._run(
+			[self._item()], [self._bin(NASR, 40)], {}, reservations=(qty_map, orders, False)
+		)
+		block = result["reserved"]
+		self.assertEqual(15.0, block["qty"])
+		self.assertEqual(5, block["order_count"])
+		self.assertEqual(2, block["overdue_count"])
+
+	def test_one_entry_per_invoice_and_warehouse_with_items(self):
+		import datetime
+
+		day = datetime.date(2026, 11, 19)
+		rows = [
+			_order_row("SINV-1", NASR, "ITEM-M", 3.0, delivery=day, posting=day, woo_order_id="12345"),
+			_order_row(
+				"SINV-1", NASR, "ITEM-L", 2.0, delivery=day, posting=day,
+				woo_order_id="12345", item_name="Lotus Large",
+			),
+			_order_row("SINV-1", FG, "ITEM-M", 1.0, delivery=day, posting=day, woo_order_id="12345"),
+		]
+		(qty_map, orders, _), _ = self._reserved(rows, codes=("ITEM-M", "ITEM-L"))
+		self.assertEqual(2, len(orders))
+		nasr = next(o for o in orders if o["warehouse"] == NASR)
+		self.assertEqual(5.0, nasr["qty"])
+		self.assertEqual("12345", nasr["woo_order_id"])
+		self.assertEqual("2026-11-19", nasr["delivery_date"])
+		self.assertEqual(
+			[("ITEM-M", 3.0), ("ITEM-L", 2.0)], [(i["item_code"], i["qty"]) for i in nasr["items"]]
+		)
+		self.assertEqual({(NASR, "ITEM-M"): 3.0, (NASR, "ITEM-L"): 2.0, (FG, "ITEM-M"): 1.0}, qty_map)
+
+	def test_failed_reservation_read_keeps_the_stock(self):
+		from jarz_pos.api import reports
+
+		def broken_sql(*a, **k):
+			raise Exception("Lost connection to MySQL server")
+
+		def fake_get_all(doctype, **kwargs):
+			return [self._item()] if doctype == "Item" else [self._bin(FG, 60)]
+
+		logged = []
+		with (
+			patch("jarz_pos.api.reports._ensure_jarz_manager"),
+			patch("jarz_pos.api.reports._finished_goods_warehouses", return_value=[FG]),
+			patch("jarz_pos.api.reports.frappe.get_all", side_effect=fake_get_all),
+			patch("jarz_pos.api.reports._jar_sales_by_warehouse", return_value={}),
+			patch("jarz_pos.api.reports.frappe.db", SimpleNamespace(sql=broken_sql)),
+			patch("jarz_pos.api.reports.nowdate", return_value=self.TODAY),
+			patch(
+				"jarz_pos.api.reports._log_degraded_read",
+				side_effect=lambda title, message: logged.append(title),
+			),
+		):
+			result = reports.get_final_products_report()
+
+		row = result["groups"][0]["items"][0]
+		self.assertEqual(60.0, row["total_qty"])
+		self.assertEqual({FG: 0.0}, row["reserved_qty"])
+		self.assertEqual({FG: 60.0}, row["available_qty"])
+		self.assertEqual(0.0, result["totals"]["reserved_qty"])
+		self.assertTrue(result["reserved"]["failed"])
+		self.assertEqual([], result["reserved"]["orders"])
+		self.assertEqual(0.0, result["reserved"]["qty"])
+		self.assertEqual(1, len(logged))
+
+	def test_reservation_helper_survives_a_failing_logger(self):
+		from jarz_pos.api import reports
+
+		def broken(*a, **k):
+			raise Exception("boom")
+
+		with (
+			patch("jarz_pos.api.reports.frappe.db", SimpleNamespace(sql=broken)),
+			patch("jarz_pos.api.reports.frappe.log_error", side_effect=broken),
+			patch("jarz_pos.api.reports.frappe.logger", side_effect=broken),
+			patch("jarz_pos.api.reports.frappe.get_traceback", side_effect=broken),
+		):
+			self.assertEqual(({}, [], True), reports._open_order_reservations(["ITEM-M"], None))

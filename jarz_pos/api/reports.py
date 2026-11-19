@@ -268,6 +268,185 @@ def _totals(rows: list[dict[str, Any]]) -> dict[str, float]:
 	}
 
 
+def _final_products_totals(rows: list[dict[str, Any]]) -> dict[str, float]:
+	"""``_totals`` plus the jars held by open orders (Final Products only).
+
+	Kept apart from ``_totals`` because the materials report shares that helper
+	and has no notion of a reservation.
+	"""
+	totals = _totals(rows)
+	totals["reserved_qty"] = round(sum(float(r.get("total_reserved_qty") or 0) for r in rows), 3)
+	return totals
+
+
+# Order states whose jars are still on the shelf. Production spells the first one
+# "Recieved" (sic); "Received" is matched too so a spelling fix cannot silently
+# empty the report. The payload echoes the production spelling.
+_RESERVING_STATES = ("Recieved", "Received", "In Progress")
+_RESERVING_STATES_ECHO = ["Recieved", "In Progress"]
+
+
+def _iso(value: Any) -> str | None:
+	"""ISO date string, or None for a missing date."""
+	if not value:
+		return None
+	return str(getdate(value))
+
+
+def _open_order_reservations(
+	item_codes: list[str],
+	warehouse: str | None,
+) -> tuple[dict[tuple[str, str], float], list[dict[str, Any]], bool]:
+	"""Jars held by open orders: ``(qty_map, orders, failed)``.
+
+	POS Sales Invoices are submitted with ``update_stock = 0``; a jar leaves its
+	warehouse only when the Delivery Note is made at "Out for Delivery". Between
+	submit and that note the jar is still counted in the bin but already promised.
+	``Sales Invoice Item.delivered_qty`` cannot tell us (legacy Delivery Notes
+	never stamped ``si_detail``, so ~48k jars on delivered invoices read as
+	undelivered); the order state plus "no submitted Delivery Note" is the test.
+
+	``qty_map`` is ``{(warehouse, item_code): qty}``; ``orders`` has one entry per
+	``(invoice, warehouse)`` sorted most urgent first (``COALESCE(delivery_date,
+	posting_date)``, then invoice), each flagged ``overdue`` when its delivery date
+	(or, lacking one, its posting date) is before today.
+
+	With ``warehouse`` only that warehouse's lines count. One query; grouping is
+	done here, not per order.
+
+	Fail-soft: any failure is logged and ``({}, [], True)`` is returned, so the
+	stock figures still render and the app can say the held count is unknown.
+	"""
+	codes = sorted({str(c) for c in item_codes or [] if c})
+	if not codes:
+		return {}, [], False
+
+	try:
+		params: dict[str, Any] = {"codes": codes, "states": list(_RESERVING_STATES)}
+		warehouse_clause = "AND IFNULL(sii.warehouse, '') != ''"
+		if warehouse:
+			warehouse_clause = "AND sii.warehouse = %(warehouse)s"
+			params["warehouse"] = warehouse
+		rows = frappe.db.sql(
+			f"""
+			SELECT si.name AS invoice,
+			       si.woo_order_id AS woo_order_id,
+			       si.customer AS customer,
+			       si.customer_name AS customer_name,
+			       si.custom_sales_invoice_state AS state,
+			       si.posting_date AS posting_date,
+			       si.custom_delivery_date AS delivery_date,
+			       si.custom_delivery_slot_label AS delivery_slot_label,
+			       sii.warehouse AS warehouse,
+			       sii.item_code AS item_code,
+			       sii.item_name AS item_name,
+			       SUM(sii.stock_qty) AS qty
+			FROM `tabSales Invoice Item` sii
+			INNER JOIN `tabSales Invoice` si ON si.name = sii.parent
+			WHERE si.docstatus = 1
+			  AND IFNULL(si.is_return, 0) = 0
+			  AND si.custom_sales_invoice_state IN %(states)s
+			  AND NOT EXISTS (
+			        SELECT 1
+			        FROM `tabDelivery Note Item` dni
+			        INNER JOIN `tabDelivery Note` dn ON dn.name = dni.parent
+			        WHERE dni.against_sales_invoice = si.name
+			          AND dn.docstatus = 1
+			  )
+			  AND sii.item_code IN %(codes)s
+			  {warehouse_clause}
+			GROUP BY si.name, si.woo_order_id, si.customer, si.customer_name,
+			         si.custom_sales_invoice_state, si.posting_date,
+			         si.custom_delivery_date, si.custom_delivery_slot_label,
+			         sii.warehouse, sii.item_code, sii.item_name
+			""",
+			params,
+			as_dict=True,
+		)
+
+		today = getdate(nowdate())
+		qty_map: dict[tuple[str, str], float] = {}
+		by_order: dict[tuple[str, str], dict[str, Any]] = {}
+		for row in rows or []:
+			qty = float(row.get("qty") or 0)
+			wh = str(row["warehouse"])
+			code = str(row["item_code"])
+			qty_map[(wh, code)] = qty_map.get((wh, code), 0.0) + qty
+
+			order = by_order.get((str(row["invoice"]), wh))
+			if order is None:
+				delivery = row.get("delivery_date")
+				posting = row.get("posting_date")
+				due = getdate(delivery) if delivery else (getdate(posting) if posting else None)
+				order = {
+					"invoice": row["invoice"],
+					"woo_order_id": row.get("woo_order_id") or None,
+					"customer": row.get("customer"),
+					"customer_name": row.get("customer_name"),
+					"state": row.get("state"),
+					"posting_date": _iso(posting),
+					"delivery_date": _iso(delivery),
+					"delivery_slot_label": row.get("delivery_slot_label") or None,
+					"warehouse": wh,
+					"qty": 0.0,
+					"overdue": bool(due and due < today),
+					"items": [],
+					"_sort": str(due or ""),
+				}
+				by_order[(str(row["invoice"]), wh)] = order
+			order["qty"] += qty
+			order["items"].append({"item_code": code, "item_name": row.get("item_name"), "qty": qty})
+
+		orders = sorted(by_order.values(), key=lambda o: (o["_sort"], str(o["invoice"])))
+		for order in orders:
+			order.pop("_sort", None)
+			order["qty"] = round(order["qty"], 3)
+		return qty_map, orders, False
+	except Exception:
+		try:
+			tb = frappe.get_traceback()
+		except Exception:
+			tb = ""
+		_log_degraded_read(
+			"JARZ Reports - final products reservation read failed",
+			f"warehouse={warehouse}\n{tb}",
+		)
+		return {}, [], True
+
+
+def _reserved_payload(orders: list[dict[str, Any]], failed: bool) -> dict[str, Any]:
+	"""The top-level ``reserved`` block."""
+	return {
+		"qty": round(sum(o["qty"] for o in orders), 3),
+		"order_count": len({o["invoice"] for o in orders}),
+		"overdue_count": len({o["invoice"] for o in orders if o["overdue"]}),
+		"failed": failed,
+		"states": list(_RESERVING_STATES_ECHO),
+		"orders": orders,
+	}
+
+
+def _cover_for_warehouse(
+	wh: str,
+	on_hand: float,
+	own_rates: dict[str, float],
+	company_rate: float,
+	fg_warehouses: set,
+) -> float | None:
+	"""Days of cover for one warehouse cell, shared by stock and available qty.
+
+	Own rate > 0 → against that rate. A finished-goods store feeds every branch,
+	so with no rate of its own it is measured against company-wide demand.
+	Anything else has nothing to measure against: ``None``.
+	"""
+	own_rate = own_rates.get(wh, 0.0)
+	if own_rate > 0:
+		return days_of_cover(on_hand=on_hand, rate=own_rate)
+	if wh in fg_warehouses:
+		return days_of_cover(on_hand=on_hand, rate=company_rate)
+	return None
+
+
 @frappe.whitelist()
 def get_final_products_report(branch: str | None = None) -> dict[str, Any]:
 	"""
@@ -305,6 +484,27 @@ def get_final_products_report(branch: str | None = None) -> dict[str, Any]:
 	thresholds travel in the top-level ``cover`` block. If the sales read fails
 	every cover is ``None`` and every rate ``0.0``; the stock figures are untouched.
 
+	Reserved jars. POS invoices do not move stock until the Delivery Note at "Out
+	for Delivery", so a jar on an open order is still in the bin but promised —
+	see ``_open_order_reservations`` for the exact rule. Per item row, one entry
+	for EVERY warehouse column (``0.0`` when none):
+
+	* ``reserved_qty``: ``{wh: float}`` held by open orders.
+	* ``available_qty``: ``{wh: float}`` = stock - reserved (may go negative).
+	* ``available_days_cover``: ``{wh: float | None}``, the ``days_cover`` rules
+	  applied to the available qty.
+	* ``total_reserved_qty``, ``total_available_qty``,
+	  ``total_available_days_cover`` (same rule as ``total_days_cover``).
+
+	A warehouse holding a reservation joins the columns even with no bin. Group
+	and top-level ``totals`` gain ``reserved_qty``. The top-level ``reserved``
+	block is ``{"qty", "order_count", "overdue_count", "failed", "states",
+	"orders": [{"invoice", "woo_order_id", "customer", "customer_name", "state",
+	"posting_date", "delivery_date", "delivery_slot_label", "warehouse", "qty",
+	"overdue", "items": [{"item_code", "item_name", "qty"}]}]}``; dates are ISO
+	strings or null. If the reservation read fails, ``failed`` is true, nothing
+	is reserved, and the stock figures are untouched.
+
 	Response shape:
 	{
 	    "groups": [
@@ -324,17 +524,25 @@ def get_final_products_report(branch: str | None = None) -> dict[str, Any]:
 	                    "sells_per_day": {"WH-A": 2.0, "WH-B": 0.0},
 	                    "days_cover": {"WH-A": 5.0, "WH-B": None},
 	                    "total_sells_per_day": 2.0,
-	                    "total_days_cover": 7.5
+	                    "total_days_cover": 7.5,
+	                    "reserved_qty": {"WH-A": 3.0, "WH-B": 0.0},
+	                    "available_qty": {"WH-A": 7.0, "WH-B": 5.0},
+	                    "available_days_cover": {"WH-A": 3.5, "WH-B": None},
+	                    "total_reserved_qty": 3.0,
+	                    "total_available_qty": 12.0,
+	                    "total_available_days_cover": 6.0
 	                },
 	                ...
 	            ],
-	            "totals": {"qty": 15.0, "stock_value": 450.0}
+	            "totals": {"qty": 15.0, "stock_value": 450.0, "reserved_qty": 3.0}
 	        },
 	        ...
 	    ],
-	    "totals": {"qty": ..., "stock_value": ...},
+	    "totals": {"qty": ..., "stock_value": ..., "reserved_qty": ...},
 	    "filters": {"branch": None, "warehouse": None},
-	    "cover": {"sales_days": 14, "red_below": 3, "green_above": 7}
+	    "cover": {"sales_days": 14, "red_below": 3, "green_above": 7},
+	    "reserved": {"qty": 3.0, "order_count": 1, "overdue_count": 0, "failed": False,
+	                 "states": ["Recieved", "In Progress"], "orders": [...]}
 	}
 	"""
 	_ensure_jarz_manager()
@@ -360,9 +568,10 @@ def get_final_products_report(branch: str | None = None) -> dict[str, Any]:
 	if not items:
 		return {
 			"groups": [],
-			"totals": {"qty": 0.0, "stock_value": 0.0},
+			"totals": {"qty": 0.0, "stock_value": 0.0, "reserved_qty": 0.0},
 			"filters": filters_echo,
 			"cover": _cover_meta(),
+			"reserved": _reserved_payload([], False),
 		}
 
 	item_codes = [it["item_code"] for it in items]
@@ -380,6 +589,9 @@ def get_final_products_report(branch: str | None = None) -> dict[str, Any]:
 		_jar_sales_by_warehouse(item_codes, warehouse, _COVER_SALES_DAYS),
 		_COVER_SALES_DAYS,
 	)
+
+	# Jars held by open orders. Fail-soft: failed=True and nothing reserved.
+	reserved_map, reserved_orders, reserved_failed = _open_order_reservations(item_codes, warehouse)
 
 	# One column set for the whole report. What this guarantees is that the
 	# Company's FG warehouse is ALWAYS a column, and that Small, Medium and
@@ -402,6 +614,9 @@ def get_final_products_report(branch: str | None = None) -> dict[str, Any]:
 		warehouse_set: set = set(fg_warehouses)
 		for wh_qty in item_wh_map.values():
 			warehouse_set.update(wh_qty.keys())
+		# A warehouse holding a reservation is a column even with no bin, so a
+		# held jar is never invisible.
+		warehouse_set.update(wh for wh, _code in reserved_map)
 		warehouses = sorted(warehouse_set)
 
 	# Build separate tables per group: Medium, Large, then Small at the bottom
@@ -424,16 +639,21 @@ def get_final_products_report(branch: str | None = None) -> dict[str, Any]:
 			item_company_rate = company_rate.get(it["item_code"], 0.0)
 			wh_rates: dict[str, float] = {}
 			wh_cover: dict[str, float | None] = {}
+			wh_reserved: dict[str, float] = {}
+			wh_available: dict[str, float] = {}
+			wh_available_cover: dict[str, float | None] = {}
 			for wh in warehouses:
-				own_rate = own_rates.get(wh, 0.0)
-				wh_rates[wh] = own_rate
-				if own_rate > 0:
-					wh_cover[wh] = days_of_cover(on_hand=wh_qty.get(wh, 0.0), rate=own_rate)
-				elif wh in fg_warehouses:
-					# The store feeds every branch: measure it against all demand.
-					wh_cover[wh] = days_of_cover(on_hand=wh_qty.get(wh, 0.0), rate=item_company_rate)
-				else:
-					wh_cover[wh] = None
+				wh_rates[wh] = own_rates.get(wh, 0.0)
+				on_hand = wh_qty.get(wh, 0.0)
+				held = round(reserved_map.get((wh, it["item_code"]), 0.0), 3)
+				wh_reserved[wh] = held
+				wh_available[wh] = round(on_hand - held, 3)
+				wh_cover[wh] = _cover_for_warehouse(wh, on_hand, own_rates, item_company_rate, fg_warehouses)
+				wh_available_cover[wh] = _cover_for_warehouse(
+					wh, wh_available[wh], own_rates, item_company_rate, fg_warehouses
+				)
+			total_reserved = round(sum(wh_reserved.values()), 3)
+			total_available = round(total - total_reserved, 3)
 
 			group_result_items.append(
 				{
@@ -449,6 +669,14 @@ def get_final_products_report(branch: str | None = None) -> dict[str, Any]:
 					"days_cover": wh_cover,
 					"total_sells_per_day": item_company_rate,
 					"total_days_cover": days_of_cover(on_hand=total, rate=item_company_rate),
+					"reserved_qty": wh_reserved,
+					"available_qty": wh_available,
+					"available_days_cover": wh_available_cover,
+					"total_reserved_qty": total_reserved,
+					"total_available_qty": total_available,
+					"total_available_days_cover": days_of_cover(
+						on_hand=total_available, rate=item_company_rate
+					),
 				}
 			)
 
@@ -457,16 +685,17 @@ def get_final_products_report(branch: str | None = None) -> dict[str, Any]:
 				"group_name": group_name,
 				"warehouses": warehouses,
 				"items": group_result_items,
-				"totals": _totals(group_result_items),
+				"totals": _final_products_totals(group_result_items),
 			}
 		)
 
 	all_rows = [row for group in result_groups for row in group["items"]]
 	return {
 		"groups": result_groups,
-		"totals": _totals(all_rows),
+		"totals": _final_products_totals(all_rows),
 		"filters": filters_echo,
 		"cover": _cover_meta(),
+		"reserved": _reserved_payload(reserved_orders, reserved_failed),
 	}
 
 
