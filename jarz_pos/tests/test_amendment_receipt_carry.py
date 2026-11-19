@@ -68,6 +68,11 @@ def _invoice_updates(mf):
 	return [c.args[2] for c in mf.db.set_value.call_args_list if c.args[0] == "Sales Invoice"]
 
 
+def _comment(comment_mock):
+	comment_mock.assert_called_once()
+	return comment_mock.call_args.args[1]
+
+
 CONFIRMED = {
 	"custom_payment_confirmation_status": "Payment Confirmed",
 	"custom_payment_confirmation_reference": None,
@@ -155,9 +160,10 @@ class TestCarryOverPaymentReceipts(unittest.TestCase):
 			new_outstanding=1300.0,
 			new_total=1300.0,
 		)
-		result, _ = self._run(mf, rebooked=())
+		result, comment = self._run(mf, rebooked=())
 		self.assertEqual(_receipt_updates(mf), {})
 		self.assertEqual(result["left_on_source"], ["POS-RCPT-8"])
+		self.assertIn("no longer matches the order total of 1300.00", _comment(comment))
 
 	def test_stale_rejected_screenshot_cannot_cover_a_dearer_paid_edit(self):
 		# R1 rejected, R2 confirmed and spent by the carried 1,010, 70 owed. R1
@@ -170,9 +176,14 @@ class TestCarryOverPaymentReceipts(unittest.TestCase):
 			new_outstanding=70.0,
 			new_total=1080.0,
 		)
-		result, _ = self._run(mf, carried=1010.0)
+		result, comment = self._run(mf, carried=1010.0)
 		self.assertEqual(_receipt_updates(mf), {})
 		self.assertEqual(sorted(result["left_on_source"]), ["POS-RCPT-R1", "POS-RCPT-R2"])
+		text = _comment(comment)
+		self.assertIn("POS-RCPT-R1 left on", text)
+		self.assertIn("count that money twice", text)
+		self.assertIn("POS-RCPT-R2 left on", text)
+		self.assertIn("already used for the earlier payment", text)
 
 	def test_spent_proof_cannot_cover_a_dearer_edit_acc_sinv_2026_18668(self):
 		mf = _frappe(
@@ -185,12 +196,18 @@ class TestCarryOverPaymentReceipts(unittest.TestCase):
 		self.assertEqual(_receipt_updates(mf), {})
 		self.assertEqual(result["left_on_source"], ["POS-RCPT-201"])
 		self.assertFalse(result["confirmation_carried"], "70 is owed that nobody confirmed")
-		self.assertIn("new screenshot", comment.call_args.args[1])
+		text = _comment(comment)
+		self.assertIn("already used for the earlier payment", text)
+		self.assertIn("70.00 still owed", text)
+		self.assertNotIn("Confirmed receipt", text, "the old wording named every receipt Confirmed")
 
 	def test_unpaid_confirmed_proof_smaller_than_the_bill_stays(self):
 		mf = _frappe([_receipt("POS-RCPT-9", "Confirmed", 500.0)], new_outstanding=800.0, new_total=800.0)
-		result, _ = self._run(mf, rebooked=())
+		result, comment = self._run(mf, rebooked=())
 		self.assertEqual(result["left_on_source"], ["POS-RCPT-9"])
+		text = _comment(comment)
+		self.assertIn("smaller than the 800.00 owed", text)
+		self.assertNotIn("earlier payment", text, "nothing was paid before this edit")
 
 	def test_edit_to_cash_leaves_the_transfer_receipt_behind(self):
 		# Moving it would make dispatch re-route the order as online and flip
@@ -200,9 +217,12 @@ class TestCarryOverPaymentReceipts(unittest.TestCase):
 			new_outstanding=1080.0,
 			new_method="Cash",
 		)
-		result, _ = self._run(mf, rebooked=())
+		result, comment = self._run(mf, rebooked=())
 		self.assertEqual(_receipt_updates(mf), {})
 		self.assertEqual(result["left_on_source"], ["POS-RCPT-10"])
+		text = _comment(comment)
+		self.assertIn("now paid by Cash", text)
+		self.assertNotIn("screenshot", text, "a cash order needs no screenshot")
 
 	def test_edit_from_instapay_to_wallet_leaves_the_instapay_receipt(self):
 		mf = _frappe(
@@ -215,8 +235,9 @@ class TestCarryOverPaymentReceipts(unittest.TestCase):
 
 	def test_placeholder_is_not_moved_onto_a_settled_order(self):
 		mf = _frappe([_receipt("POS-RCPT-12", "Unconfirmed", 1080.0, image=None)])
-		result, _ = self._run(mf)
+		result, comment = self._run(mf)
 		self.assertEqual(_receipt_updates(mf), {})
+		self.assertIn("already paid; nothing to do", _comment(comment))
 
 	def test_changed_receipts_are_history_and_stay(self):
 		mf = _frappe([_receipt("POS-RCPT-6", "Changed", 1080.0)])

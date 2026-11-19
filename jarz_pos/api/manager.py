@@ -2543,6 +2543,7 @@ def _carry_over_payment_receipts(
 		settled = outstanding <= _PAYMENT_TOLERANCE
 		carried = flt(carried_amount)
 
+		left_by_reason: dict[str, list[str]] = {}
 		receipts = (
 			frappe.get_all(
 				"POS Payment Receipt",
@@ -2560,22 +2561,28 @@ def _carry_over_payment_receipts(
 				str(receipt.get("receipt_image_url") or receipt.get("receipt_image") or "").strip()
 			)
 			updates: dict[str, Any] = {"sales_invoice": new_invoice_name}
+			reason = None
 
 			if str(receipt.get("payment_method") or "").strip() != (new_method_label or ""):
 				move = False
+				reason = "method"
 			elif not has_image:
 				move = status in _PENDING_RECEIPT_STATUSES and not settled
 				if move and grand_total > 0:
 					updates["amount"] = grand_total
+				reason = "no_image_paid" if settled else "no_image"
 			elif settled:
 				move = True
 			elif status == "Confirmed":
 				move = amount - carried + _PAYMENT_TOLERANCE >= outstanding
+				reason = "spent" if carried > _PAYMENT_TOLERANCE else "short"
 			else:
 				move = carried <= _PAYMENT_TOLERANCE and abs(amount - grand_total) <= _PAYMENT_TOLERANCE
+				reason = "amount" if abs(amount - grand_total) > _PAYMENT_TOLERANCE else "after_payment"
 
 			if not move:
 				result["left_on_source"].append(receipt.get("name"))
+				left_by_reason.setdefault(reason or "other", []).append(str(receipt.get("name")))
 				continue
 			if new_pos_profile:
 				updates["pos_profile"] = new_pos_profile
@@ -2605,11 +2612,32 @@ def _carry_over_payment_receipts(
 				parts.append(
 					f"Payment receipt(s) carried over from {source_invoice_name}: {', '.join(map(str, result['receipts']))}."
 				)
-			if result["left_on_source"]:
+			new_method = str(new_values.get("custom_payment_method") or "").strip() or "an untracked method"
+			left_wording = {
+				"method": f"the order is now paid by {new_method}, so the transfer receipt does not apply.",
+				"no_image_paid": "no screenshot was ever attached and the order is already paid; nothing to do.",
+				"no_image": "no screenshot was attached to it; upload the screenshot on this order.",
+				"spent": (
+					"that transfer was already used for the earlier payment and does not cover the "
+					f"{outstanding:.2f} still owed; attach a new screenshot for the rest."
+				),
+				"short": (
+					"the confirmed transfer is smaller than the "
+					f"{outstanding:.2f} owed; attach a screenshot that covers it."
+				),
+				"amount": (
+					f"its amount no longer matches the order total of {grand_total:.2f}; "
+					"attach a new screenshot for this order."
+				),
+				"after_payment": (
+					"part of this order was already paid, so it would count that money twice; "
+					f"attach a new screenshot for the {outstanding:.2f} still owed."
+				),
+				"other": "it is not valid proof for this edit.",
+			}
+			for reason, names in left_by_reason.items():
 				parts.append(
-					f"Confirmed receipt(s) {', '.join(map(str, result['left_on_source']))} left on "
-					f"{source_invoice_name} (not valid proof for this edit, {outstanding:.2f} owed): "
-					"attach a new screenshot if a transfer is still expected."
+					f"Receipt(s) {', '.join(names)} left on {source_invoice_name}: {left_wording[reason]}"
 				)
 			if result["confirmation_carried"]:
 				parts.append("Payment confirmation carried over.")
