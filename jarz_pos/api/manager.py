@@ -2442,6 +2442,158 @@ def _carry_over_invoice_notes(
 			)
 
 
+#: Invoice fields that record a manager's confirmation of a transfer. They are
+#: carried to an amendment's replacement only together, and only when the
+#: carried payment settles it (see :func:`_carry_over_payment_receipts`).
+_PAYMENT_CONFIRMATION_FIELDS = (
+	"custom_payment_confirmation_status",
+	"custom_payment_confirmation_reference",
+	"custom_payment_confirmed_by",
+	"custom_payment_confirmed_date",
+)
+
+#: Receipt states that still wait on a person: a screenshot to upload, or a
+#: rejected one to replace. They follow the order unconditionally.
+_PENDING_RECEIPT_STATUSES = ("Unconfirmed", "Rejected")
+
+
+def _carry_over_payment_receipts(
+	*,
+	source_invoice_name: str,
+	new_invoice_name: str,
+	rebooked_payment_entries: list[str] | None = None,
+	logger: Any = None,
+) -> dict[str, Any]:
+	"""Move the transfer proof and its confirmation onto an amendment's replacement.
+
+	Order 22069 (2026-11-19): the InstaPay screenshot was uploaded and confirmed on
+	``ACC-SINV-2026-19757``, which posted the payment. Thirteen minutes later the
+	order was edited. The amendment carried the PAYMENT to ``-1`` but left the
+	``POS Payment Receipt`` linked to the cancelled source and blanked
+	``custom_payment_confirmation_status``. The live order then read as a paid
+	InstaPay order with no proof and no confirmation, and its card -- paid, so no
+	pay button -- offered no way to attach one. Staff took it for an unpaid order
+	that had been marked paid by the edit.
+
+	Receipts are linked by invoice name, which an amendment changes, so they are
+	re-pointed exactly as :func:`_carry_over_invoice_notes` re-points notes,
+	keeping uploader, confirmer and timestamps.
+
+	* **Pending / Rejected** receipts always move: the order still needs that
+	  proof. Their ``amount`` is re-synced to the replacement's total, the same
+	  figure ``ensure_pending_payment_receipt`` files.
+	* A **Confirmed** receipt moves only when what it proves covers what the
+	  replacement still owes. ``_require_confirmed_transfer_proof`` accepts ANY
+	  confirmed receipt on the invoice, so carrying a 500 proof onto an edit that
+	  now owes 800 would let the extra 300 be booked to the bank with no proof of
+	  it. Left behind, it stays on the source as the record of the old transfer
+	  and the order asks for a new screenshot, which is what happened before this
+	  fix.
+	* ``Changed`` receipts are history of a superseded collection method; left.
+	* The confirmation fields carry only when the source was ``Payment
+	  Confirmed`` AND the carried payment settles the replacement in full. A
+	  dearer edit owes money nobody has confirmed. ``Awaiting Payment`` is never
+	  carried: the replacement restarts at Received, and re-dispatching it
+	  stamps the flag afresh.
+
+	Never raises: this is bookkeeping around money that has already moved, and an
+	exception here would roll back a correct amendment through its savepoint.
+	"""
+	result: dict[str, Any] = {"receipts": [], "left_on_source": [], "confirmation_carried": False}
+	try:
+		new_values = (
+			frappe.db.get_value(
+				"Sales Invoice",
+				new_invoice_name,
+				["custom_kanban_profile", "pos_profile", "grand_total", "outstanding_amount"],
+				as_dict=True,
+			)
+			or {}
+		)
+		new_pos_profile = new_values.get("custom_kanban_profile") or new_values.get("pos_profile") or None
+		outstanding = flt(new_values.get("outstanding_amount"))
+		grand_total = flt(new_values.get("grand_total"))
+
+		receipts = (
+			frappe.get_all(
+				"POS Payment Receipt",
+				filters={"sales_invoice": source_invoice_name},
+				fields=["name", "status", "amount"],
+			)
+			or []
+		)
+		for receipt in receipts:
+			status = str(receipt.get("status") or "").strip()
+			updates: dict[str, Any] = {"sales_invoice": new_invoice_name}
+			if status in _PENDING_RECEIPT_STATUSES:
+				if grand_total > 0:
+					updates["amount"] = grand_total
+			elif status == "Confirmed":
+				if (
+					outstanding > _PAYMENT_TOLERANCE
+					and flt(receipt.get("amount")) + _PAYMENT_TOLERANCE < outstanding
+				):
+					result["left_on_source"].append(receipt.get("name"))
+					continue
+			else:
+				continue
+			if new_pos_profile:
+				updates["pos_profile"] = new_pos_profile
+			frappe.db.set_value("POS Payment Receipt", receipt.get("name"), updates, update_modified=False)
+			result["receipts"].append(receipt.get("name"))
+
+		source_values = (
+			frappe.db.get_value(
+				"Sales Invoice", source_invoice_name, list(_PAYMENT_CONFIRMATION_FIELDS), as_dict=True
+			)
+			or {}
+		)
+		if (
+			str(source_values.get("custom_payment_confirmation_status") or "").strip() == "Payment Confirmed"
+			and rebooked_payment_entries
+			and outstanding <= _PAYMENT_TOLERANCE
+		):
+			confirmation = {field: source_values.get(field) for field in _PAYMENT_CONFIRMATION_FIELDS}
+			if not str(confirmation.get("custom_payment_confirmation_reference") or "").strip():
+				confirmation["custom_payment_confirmation_reference"] = str(rebooked_payment_entries[0])
+			frappe.db.set_value("Sales Invoice", new_invoice_name, confirmation, update_modified=False)
+			result["confirmation_carried"] = True
+
+		if result["receipts"] or result["left_on_source"] or result["confirmation_carried"]:
+			parts = []
+			if result["receipts"]:
+				parts.append(
+					f"Payment receipt(s) carried over from {source_invoice_name}: {', '.join(map(str, result['receipts']))}."
+				)
+			if result["left_on_source"]:
+				parts.append(
+					f"Confirmed receipt(s) {', '.join(map(str, result['left_on_source']))} left on "
+					f"{source_invoice_name}: they do not cover the {outstanding:.2f} now owed, so new proof is needed."
+				)
+			if result["confirmation_carried"]:
+				parts.append("Payment confirmation carried over.")
+			try:
+				_add_invoice_audit_comment(new_invoice_name, " ".join(parts))
+			except Exception:
+				pass
+	except Exception as exc:
+		if logger:
+			logger.warning(
+				{
+					"event": "payment_receipt_carry_over_failed",
+					"source_invoice": source_invoice_name,
+					"new_invoice": new_invoice_name,
+					"error": str(exc),
+				}
+			)
+		else:
+			frappe.log_error(
+				frappe.get_traceback(),
+				f"Payment receipt carry-over failed {source_invoice_name} -> {new_invoice_name}",
+			)
+	return result
+
+
 def _build_invoice_amendment_response(
 	*,
 	request_id: str,
@@ -3209,6 +3361,15 @@ def _run_invoice_amendment_job(
 		_carry_over_invoice_notes(
 			source_invoice_name=invoice_id,
 			new_invoice_name=replacement_invoice_name,
+			logger=logger,
+		)
+
+		# Same reason for the transfer proof (order 22069): a receipt left on the
+		# cancelled source makes a paid InstaPay order look unproven and unpaid.
+		_carry_over_payment_receipts(
+			source_invoice_name=invoice_id,
+			new_invoice_name=replacement_invoice_name,
+			rebooked_payment_entries=list(rebooked_payment.get("payment_entries") or []),
 			logger=logger,
 		)
 
