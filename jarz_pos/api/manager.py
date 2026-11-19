@@ -2772,7 +2772,7 @@ def _run_invoice_amendment_job(
 	effective_payment_method = (
 		payment_method if payment_method is not None else source_invoice.get("custom_payment_method") or None
 	)
-	effective_pickup = _is_truthy_flag(pickup) or _is_truthy_flag(source_invoice.get("custom_is_pickup"))
+	effective_pickup = _resolve_amendment_pickup(source_invoice, pickup)
 	zero_shipping_override_enabled = _is_truthy_flag(zero_shipping_override)
 	effective_suppress_shipping_income = (
 		True
@@ -3745,6 +3745,20 @@ def _is_truthy_flag(value: bool | int | str | None) -> bool:
 	if isinstance(value, bool):
 		return value
 	return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _resolve_amendment_pickup(source_invoice: Any, pickup: bool | int | str | None) -> bool:
+	"""Pickup mode for the replacement invoice.
+
+	An explicit ``pickup`` (1 or 0) is the operator's choice on the edit screen and
+	wins. Only a missing value (an app too old to send 0) inherits the source's flag.
+	Until 2026-11-19 the source flag was OR-ed in unconditionally, so a pickup order
+	could never be edited back to delivery: order 22088 was re-submitted twice as
+	delivery and stayed pickup both times, with its 50 EGP fee suppressed.
+	"""
+	if pickup is None or (isinstance(pickup, str) and not pickup.strip()):
+		return _is_truthy_flag(source_invoice.get("custom_is_pickup"))
+	return _is_truthy_flag(pickup)
 
 
 def _publish_invoice_reassignment_refresh(
