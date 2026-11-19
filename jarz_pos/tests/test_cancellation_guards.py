@@ -87,12 +87,11 @@ class TestClosedShiftDetection(unittest.TestCase):
 		self.assertIsNone(access_control.find_closed_shift_covering("2026-07-01 10:00:00"))
 		self.assertTrue(mock_frappe.log_error.called)
 
-	@patch("jarz_pos.utils.access_control.find_closed_shift_covering")
+	@patch("jarz_pos.utils.access_control.find_closed_shift_for_voucher")
 	@patch("jarz_pos.utils.access_control.frappe")
 	def test_throws_when_a_voucher_sits_in_a_closed_shift(self, mock_frappe, mock_find):
 		from jarz_pos.utils import access_control
 
-		mock_frappe.db.get_value.return_value = "2026-07-01 10:00:00"
 		mock_frappe.throw.side_effect = RuntimeError("blocked")
 		mock_find.return_value = {"name": "POS-CLOSE-0001"}
 
@@ -101,12 +100,11 @@ class TestClosedShiftDetection(unittest.TestCase):
 				[("Payment Entry", "PE-0001")], action_label="cancelling this order"
 			)
 
-	@patch("jarz_pos.utils.access_control.find_closed_shift_covering")
+	@patch("jarz_pos.utils.access_control.find_closed_shift_for_voucher")
 	@patch("jarz_pos.utils.access_control.frappe")
 	def test_allows_when_no_closed_shift_covers_the_voucher(self, mock_frappe, mock_find):
 		from jarz_pos.utils import access_control
 
-		mock_frappe.db.get_value.return_value = "2026-07-01 10:00:00"
 		mock_find.return_value = None
 
 		access_control.assert_vouchers_not_in_closed_shift(
@@ -120,6 +118,85 @@ class TestClosedShiftDetection(unittest.TestCase):
 
 		access_control.assert_vouchers_not_in_closed_shift([], action_label="x")
 		self.assertFalse(mock_frappe.throw.called)
+
+
+class TestClosedShiftIsScopedToTheTill(unittest.TestCase):
+	"""A closed shift blocks a cancel only if the voucher posts to THAT shift's till.
+
+	Production case 2026-11-19: Woo #19201 (Nasr City, paid by Kashier card into
+	``kashier - J``) could not be cancelled because a Dokki shift had closed over
+	the same minutes. Neither the branch nor the account had anything to do with it.
+	"""
+
+	CREATED = "2026-10-23 14:41:31"
+	TILLS = {"Dokki": "Dokki - J", "Nasr city": "Nasr city - J"}
+
+	def _run(self, closing_rows, ledger_accounts):
+		from jarz_pos.utils import access_control
+
+		def get_all(doctype, **kwargs):
+			if doctype == "GL Entry":
+				return [{"account": acc} for acc in ledger_accounts]
+			if doctype == "POS Closing Entry":
+				return closing_rows
+			raise AssertionError(doctype)
+
+		with (
+			patch("jarz_pos.utils.access_control.frappe") as mock_frappe,
+			patch(
+				"jarz_pos.api.shift._resolve_pos_profile_account",
+				side_effect=lambda company, profile, *_: self.TILLS.get(profile),
+			),
+		):
+			mock_frappe.db.get_value.return_value = self.CREATED
+			mock_frappe.get_all.side_effect = get_all
+			return access_control.find_closed_shift_for_voucher("Payment Entry", "PE-0001")
+
+	@staticmethod
+	def _closing(name, profile):
+		return {"name": name, "pos_profile": profile, "company": "Jarz"}
+
+	def test_gateway_payment_is_never_blocked(self):
+		"""Kashier money sits in no shift's reconciliation."""
+		found = self._run([self._closing("POS-CLO-232", "Dokki")], ["Debtors - J", "kashier - J"])
+		self.assertIsNone(found)
+
+	def test_other_branch_shift_does_not_block(self):
+		found = self._run([self._closing("POS-CLO-232", "Dokki")], ["Debtors - J", "Nasr city - J"])
+		self.assertIsNone(found)
+
+	def test_own_till_in_a_closed_shift_blocks(self):
+		found = self._run([self._closing("POS-CLO-230", "Nasr city")], ["Debtors - J", "Nasr city - J"])
+		self.assertEqual(found["name"], "POS-CLO-230")
+
+	def test_every_covering_shift_is_checked_not_just_the_first(self):
+		rows = [self._closing("POS-CLO-232", "Dokki"), self._closing("POS-CLO-230", "Nasr city")]
+		found = self._run(rows, ["Debtors - J", "Nasr city - J"])
+		self.assertEqual(found["name"], "POS-CLO-230")
+
+	def test_cancelled_voucher_with_no_live_gl_is_not_blocked(self):
+		self.assertIsNone(self._run([self._closing("POS-CLO-230", "Nasr city")], []))
+
+	@patch("jarz_pos.utils.access_control.find_closed_shift_covering")
+	@patch("jarz_pos.utils.access_control._voucher_ledger_accounts", side_effect=Exception("db gone"))
+	@patch("jarz_pos.utils.access_control.frappe")
+	def test_unreadable_ledger_falls_back_to_the_stricter_window_rule(self, mock_frappe, _ledger, mock_window):
+		"""Not knowing the accounts must never widen what may be cancelled."""
+		from jarz_pos.utils import access_control
+
+		mock_frappe.db.get_value.return_value = self.CREATED
+		mock_window.return_value = {"name": "POS-CLO-232"}
+		found = access_control.find_closed_shift_for_voucher("Payment Entry", "PE-0001")
+		self.assertEqual(found["name"], "POS-CLO-232")
+		mock_window.assert_called_once_with(self.CREATED)
+
+	@patch("jarz_pos.utils.access_control.frappe")
+	def test_closing_lookup_failure_fails_open(self, mock_frappe):
+		from jarz_pos.utils import access_control
+
+		mock_frappe.get_all.side_effect = Exception("db gone")
+		self.assertIsNone(access_control.find_closed_shift_reconciling(self.CREATED, ["Nasr city - J"]))
+		self.assertTrue(mock_frappe.log_error.called)
 
 
 class TestCancellationEligibility(unittest.TestCase):

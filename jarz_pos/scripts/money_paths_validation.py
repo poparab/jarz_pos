@@ -2518,7 +2518,7 @@ def _case_cancel_guards(ctx: RunContext, env: dict[str, Any]) -> None:
 	from jarz_pos.api.kanban import cancel_invoice
 	from jarz_pos.utils.access_control import (
 		assert_vouchers_not_in_closed_shift,
-		find_closed_shift_covering,
+		find_closed_shift_for_voucher,
 	)
 
 	inside = _new_invoice(ctx, env, f"{case}-INSIDE")
@@ -2589,10 +2589,12 @@ def _case_cancel_guards(ctx: RunContext, env: dict[str, Any]) -> None:
 	_absorb(ctx, outside)
 
 	# ---- closed shift ----
+	# The guard only refuses a payment that sits in a closed shift's OWN till, so
+	# the window must belong to the branch the cash fixture pays into.
 	closing = (
 		frappe.get_all(
 			"POS Closing Entry",
-			filters={"docstatus": 1},
+			filters={"docstatus": 1, "pos_profile": env["pos_profile"]},
 			fields=["name", "period_start_date", "period_end_date", "pos_profile"],
 			order_by="period_end_date desc",
 			limit=1,
@@ -2643,14 +2645,14 @@ def _case_cancel_guards(ctx: RunContext, env: dict[str, Any]) -> None:
 		)
 		return
 
-	covering = find_closed_shift_covering(inside_window)
+	covering = find_closed_shift_for_voucher("Payment Entry", pes[0])
 	if not covering:
 		_skip(
 			ctx,
 			f"{case}.closed_shift_refusal",
-			f"find_closed_shift_covering({inside_window}) matched nothing even though "
-			f"{window['name']} spans {window['period_start_date']} to "
-			f"{window['period_end_date']}",
+			f"find_closed_shift_for_voucher({pes[0]}) matched nothing even though "
+			f"{window['name']} ({window['pos_profile']}) spans {window['period_start_date']} "
+			f"to {window['period_end_date']}",
 		)
 		return
 

@@ -1586,14 +1586,17 @@ def get_invoice_cancellation_eligibility(inv: Any) -> dict[str, Any]:
 	if outstanding <= tolerance and grand_total > tolerance:
 		try:
 			from jarz_pos.utils.access_control import (
-				find_closed_shift_covering,
+				find_closed_shift_for_voucher,
 				get_invoice_branch,
 				get_open_shift_for_profile,
 				user_requires_pos_shift,
 			)
 
+			# Same rule as the authoritative guard in cancel_invoice: only a payment
+			# that sits in a closed shift's own till blocks (not a gateway receipt,
+			# not another branch's shift that closed over the same minutes).
 			for pe_name in _find_submitted_payment_entries(invoice_name):
-				closed = find_closed_shift_covering(frappe.db.get_value("Payment Entry", pe_name, "creation"))
+				closed = find_closed_shift_for_voucher("Payment Entry", pe_name)
 				if closed:
 					return _blocked(
 						"closed_shift",

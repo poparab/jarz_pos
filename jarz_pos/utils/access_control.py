@@ -22,7 +22,7 @@ further: not just "is this your branch?" but "is your branch open right now?".
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from typing import Any, Optional
 
 import frappe
@@ -389,6 +389,10 @@ class ClosedShiftError(frappe.ValidationError):
 def find_closed_shift_covering(voucher_creation: Any) -> dict[str, Any] | None:
 	"""Return the submitted POS Closing Entry whose window contains *voucher_creation*.
 
+	Window only, for ANY branch. To decide whether a voucher may be cancelled use
+	:func:`find_closed_shift_for_voucher`, which also requires the voucher to post
+	to that shift's till; this one is its fallback when the ledger is unreadable.
+
 	``jarz_pos.api.shift._get_shift_account_movements`` buckets a shift's cash
 	movements by GL Entry ``creation`` between the shift's start and end, and
 	filters ``is_cancelled = 0``.  Cancelling a voucher created inside a window
@@ -431,25 +435,111 @@ def find_closed_shift_covering(voucher_creation: Any) -> dict[str, Any] | None:
 	return rows[0] if rows else None
 
 
+def _voucher_ledger_accounts(doctype: str, name: str) -> set[str]:
+	"""Every account *doctype* *name* currently posts to (live GL rows only)."""
+	rows = (
+		frappe.get_all(
+			"GL Entry",
+			filters={"voucher_type": doctype, "voucher_no": name, "is_cancelled": 0},
+			fields=["account"],
+			limit_page_length=0,
+		)
+		or []
+	)
+	return {str(row.get("account")).strip() for row in rows if row.get("account")}
+
+
+def find_closed_shift_reconciling(voucher_creation: Any, accounts: Iterable[str]) -> dict[str, Any] | None:
+	"""Return a closed shift that covers *voucher_creation* AND reconciles one of *accounts*.
+
+	A shift reconciles exactly one account: its till, the account named after the
+	POS Profile (``jarz_pos.api.shift._resolve_pos_profile_account``, the same
+	resolver ``_get_shift_account_movements`` is fed from). Cancelling a voucher
+	can only rewrite a closed shift's totals if it posts to that till, so this is
+	the precise form of :func:`find_closed_shift_covering`:
+
+	* it ignores other branches' shifts that merely close over the same minutes
+	  (Woo #19201 was refused on a Dokki shift although it was a Nasr City order);
+	* it ignores money that never touched a till — a Kashier / InstaPay / bank
+	  receipt appears in no shift's reconciliation.
+
+	Every covering entry is enumerated, not one arbitrary row: several branches
+	close over the same window, and the first row is usually not the right one.
+	Fails open on a lookup error, like :func:`find_closed_shift_covering`.
+	"""
+	wanted = {str(acc).strip() for acc in (accounts or []) if acc}
+	if not voucher_creation or not wanted:
+		return None
+	try:
+		from jarz_pos.api.shift import _resolve_pos_profile_account
+
+		rows = (
+			frappe.get_all(
+				"POS Closing Entry",
+				filters={
+					"docstatus": 1,
+					"period_start_date": ["<=", voucher_creation],
+					"period_end_date": [">=", voucher_creation],
+				},
+				fields=["name", "pos_profile", "company", "period_start_date", "period_end_date"],
+				limit_page_length=0,
+			)
+			or []
+		)
+	except Exception:
+		frappe.log_error(frappe.get_traceback(), "find_closed_shift_reconciling failed")
+		return None
+
+	for row in rows:
+		try:
+			till = _resolve_pos_profile_account(row.get("company"), row.get("pos_profile"), None, None)
+		except Exception:
+			continue
+		if till and str(till).strip() in wanted:
+			return row
+	return None
+
+
+def find_closed_shift_for_voucher(doctype: str, name: str) -> dict[str, Any] | None:
+	"""The closed shift whose reconciled totals cancelling *doctype* *name* would rewrite.
+
+	``None`` when there is none: the voucher was booked in a shift that is still
+	open, or its money never touched a closed shift's till. If the voucher's
+	ledger accounts cannot be read, falls back to the stricter window-only
+	:func:`find_closed_shift_covering`, so an unreadable ledger never widens what
+	may be cancelled.
+	"""
+	if not doctype or not name:
+		return None
+	try:
+		created = frappe.db.get_value(doctype, name, "creation")
+	except Exception:
+		return None
+	if not created:
+		return None
+	try:
+		accounts = _voucher_ledger_accounts(doctype, name)
+	except Exception:
+		frappe.log_error(frappe.get_traceback(), "closed-shift guard: ledger lookup failed")
+		return find_closed_shift_covering(created)
+	return find_closed_shift_reconciling(created, accounts)
+
+
 def assert_vouchers_not_in_closed_shift(
 	vouchers: Sequence[Any],
 	*,
 	action_label: str,
 ) -> None:
-	"""Refuse *action_label* when any of *vouchers* sits inside a closed shift.
+	"""Refuse *action_label* when cancelling any of *vouchers* would rewrite a closed shift.
 
-	*vouchers* is a sequence of ``(doctype, name)`` pairs.  Each one's
-	``creation`` timestamp is tested against every closed shift window; the
-	first hit aborts.
+	*vouchers* is a sequence of ``(doctype, name)`` pairs. A voucher is refused
+	only when it was booked inside a closed shift's window AND posts to that
+	shift's till (see :func:`find_closed_shift_for_voucher`); the first hit aborts.
 	"""
 	for doctype, name in vouchers or []:
 		if not doctype or not name:
 			continue
-		try:
-			created = frappe.db.get_value(doctype, name, "creation")
-		except Exception:
-			continue
-		closed = find_closed_shift_covering(created)
+		closed = find_closed_shift_for_voucher(doctype, name)
 		if not closed:
 			continue
 		frappe.throw(
