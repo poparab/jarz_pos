@@ -187,7 +187,12 @@ def _ensure_small_item(medium, company, log):
 		"is_sales_item": 1,
 		"is_purchase_item": 0,
 		"include_item_in_manufacturing": 1,
-		"valuation_method": medium.valuation_method or "FIFO",
+		# Always Moving Average, whatever the Medium carries. ERPNext 16 reposts a
+		# Manufacture's finished row with the RAW material's method, so a FIFO jar
+		# made from Moving Average inputs keeps a stale queue and later transfers
+		# leave at an old rate (Blueberry Medium at 699/jar, 2026-11). Every stock
+		# item is Moving Average since the repair of 2026-11-21.
+		"valuation_method": "Moving Average",
 		"allow_negative_stock": medium.allow_negative_stock,
 		"shelf_life_in_days": medium.shelf_life_in_days,
 		"grant_commission": medium.grant_commission,
