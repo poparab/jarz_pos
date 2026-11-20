@@ -541,6 +541,23 @@ class TestVisibleWindow(unittest.TestCase):
 		kept = _rows_in_visible_window(rows, ("delivered", "cancelled"), CUTOFF)
 		self.assertEqual([r.name for r in kept], ["b", "d", "e", "f"])
 
+	def test_old_cancelled_invoice_with_live_state_is_trimmed(self):
+		# Woo 20693: cancelled original left "Out for Delivery" must not survive the trim.
+		rows = [frappe._dict(name="x", docstatus=2, custom_sales_invoice_state="Out for Delivery", posting_date=_d(18))]
+		self.assertEqual(_rows_in_visible_window(rows, ("delivered", "cancelled"), CUTOFF), [])
+
+
+class TestCancelledInvoiceColumn(unittest.TestCase):
+	def test_cancelled_docstatus_wins_over_state_field(self):
+		for state in ("Out for Delivery", "Delivered", "In Progress", None):
+			row = frappe._dict(docstatus=2, custom_sales_invoice_state=state)
+			self.assertEqual(kanban._invoice_state(row), ("Cancelled", "cancelled"), state)
+
+	def test_submitted_invoice_keeps_its_state(self):
+		row = frappe._dict(docstatus=1, custom_sales_invoice_state="Out for Delivery")
+		self.assertEqual(kanban._invoice_state(row), ("Out for Delivery", "out_for_delivery"))
+		self.assertEqual(kanban._invoice_state(frappe._dict(custom_sales_invoice_state="Ready")), ("Ready", "in_progress"))
+
 
 if __name__ == "__main__":
 	unittest.main()

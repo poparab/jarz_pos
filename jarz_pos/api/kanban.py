@@ -1644,6 +1644,15 @@ def _kanban_trim_cutoff() -> str:
 
 def _invoice_state(inv: Any) -> tuple[str, str]:
 	"""The board state label of an invoice row and the column key it lands in."""
+	# A cancelled invoice (docstatus 2) is in the Cancelled column whatever its
+	# state field says. The board loads docstatus 2 rows to fill that column, and
+	# a hand re-issue left Woo 20693's cancelled original saying "Out for
+	# Delivery", so it sat in that live column for 18 days (2026-11-20).
+	try:
+		if int(inv.get("docstatus") or 0) == 2:
+			return "Cancelled", "cancelled"
+	except (TypeError, ValueError):
+		pass
 	state = inv.get("custom_sales_invoice_state") or inv.get("sales_invoice_state") or "Received"
 	state_key = state.lower().replace(" ", "_")
 	# A legacy "Ready" row (not yet converted by the migration) shows in
