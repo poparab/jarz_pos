@@ -75,11 +75,24 @@ class FlavourNamesTest(unittest.TestCase):
 
 	def test_arabic_menu_uses_arabic_names_english_menu_keeps_english(self):
 		ar = d.render_menu(PRODUCTS, True)
-		self.assertIn("• وسط 120 جنيه: بلوبيري، ريد فيلفت، شوكلاته بندق", ar)
-		self.assertIn("مانجو", ar)
+		self.assertEqual(
+			ar,
+			"• وسط 120 جنيه\n• كبير 160 جنيه\n"
+			"• النكهات: بلوبيري (وسط بس)، ريد فيلفت (وسط بس)، شوكلاته بندق (وسط بس)، مانجو (كبير بس)",
+		)
 		self.assertNotIn("Redvelvet", ar)
 		en = d.render_menu(PRODUCTS, False)
-		self.assertIn("Blueberry, Red Velvet, Chocolate Hazelnut", en)
+		self.assertIn("Blueberry (Medium only), Red Velvet (Medium only), Chocolate Hazelnut", en)
+
+	def test_flavours_sold_in_every_size_are_named_once(self):
+		both = [
+			{**p, "id": f"{p['id']}-{g}", "name": p["name"].replace("Medium", g), "item_group": g, "price": price}
+			for g, price in (("Large", 160), ("Medium", 120))
+			for p in PRODUCTS[:3]
+		]
+		ar = d.render_menu(both, True)
+		self.assertEqual(ar, "• وسط 120 جنيه\n• كبير 160 جنيه\n• النكهات: بلوبيري، ريد فيلفت، شوكلاته بندق")
+		self.assertEqual(ar.count("بلوبيري"), 1)
 
 	def test_context_menu_lines_carry_both_names_and_red_velvet_spacing(self):
 		self.assertEqual(d.display_name("Redvelvet Medium", "Medium"), "Red Velvet Medium")

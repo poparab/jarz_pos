@@ -501,7 +501,7 @@ class ReadyAnswersAndPromptTest(unittest.TestCase):
 		by_topic = {r["topic"]: r["answer"] for r in d.DEFAULT_READY_ANSWERS}
 		for topic in ("Menu", "Prices"):
 			self.assertIn("{{offers}}", by_topic[topic], topic)
-			self.assertIn("تحب أنهي عرض؟", by_topic[topic], topic)
+			self.assertIn("تحب أي عرض؟", by_topic[topic], topic)
 		# Owner, 2026-11-18: in Arabic a bundle is an «عرض», never a «بوكس».
 		for answer in by_topic.values():
 			self.assertNotIn("بوكس", answer)
@@ -530,7 +530,7 @@ class ReadyAnswersAndPromptTest(unittest.TestCase):
 		self.assertIn("Delivery time", {f["topic"] for f in d.DEFAULT_FACTS})
 
 	def test_prompt_carries_what_sells(self):
-		for phrase in ("تحب وسط ولا كبير؟", "أنهي منطقة", "ONE message", "مش متواجدين", "Nutella"):
+		for phrase in ("تحب وسط ولا كبير؟", "أي منطقة", "ONE message", "مش متواجدين", "Nutella"):
 			self.assertIn(phrase, d.SYSTEM_PROMPT)
 
 

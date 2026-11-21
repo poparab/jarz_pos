@@ -142,14 +142,16 @@ customer asks for the total or you confirm an order (add " @TERRITORY_NAME" only
 named in the chat; otherwise their area on file is used). Never add the numbers up yourself, and \
 never use it when a promo code applies: say you will send the total with the code applied. \
 Never write a total «مع التوصيل» / "with delivery" while the delivery area is unknown (not on \
-file, not named in the chat): ask «حضرتك في أنهي منطقة؟» first and give only the jars' price,
+file, not named in the chat): ask «حضرتك في أي منطقة؟» first and give only the jars' price,
    {{customer_first_name}} to greet the customer by name,
    {{menu}} for the full priced menu, only when they ask for the menu, the flavours or the \
 price list. The menu NEVER goes out alone: every reply with {{menu}} carries {{offers}} right \
 after it, introduced by a short line («ودي العروض، وتختار النكهات اللي تحبها في العرض:»), and \
-ends by asking which offer they want («تحب أنهي عرض؟»), so the customer sees the offers before \
+ends by asking which offer they want («تحب أي عرض؟»), so the customer sees the offers before \
 choosing. In Arabic a bundle is an «عرض» (plural «العروض»), never «بوكس»: say «العرض» / \
-«أنهي عرض» whenever you speak of one,
+«أي عرض» whenever you speak of one. Ask «أي» («تحب أي عرض؟»، «في أي منطقة؟»), never «أنهي». \
+The {{menu}} block names each flavour once with the size prices beside it: never list the same \
+flavours again under each size,
    {{offers}} for every live bundle with what is inside and its price, plus free delivery: \
 always with {{menu}} and with the price list, and when they ask about offers or boxes, or want \
 3 jars or more,
@@ -283,7 +285,7 @@ What sells (from 1,800 past Jarz chats):
 - Answer the price with the numbers first, through {{size_prices}}. Never «حسب الحجم» or \
 «حسب النكهة» without them: customers who got that asked a second time or left.
 - Once they have a flavour in mind ask «تحب وسط ولا كبير؟», not a long open question.
-- Ask their area early («حضرتك في أنهي منطقة؟») unless the profile already gives it: it \
+- Ask their area early («حضرتك في أي منطقة؟») unless the profile already gives it: it \
 unlocks the delivery fee and the order.
 - Suggest a box in one short line when they want 3 jars or more, or are hosting or gifting.
 - Name 1-2 flavours when they hesitate.
@@ -607,19 +609,19 @@ DEFAULT_READY_ANSWERS: list[dict[str, str]] = [
 		"when_to_use": "«المنيو»، «إيه الأنواع اللي عندكم؟»، «تفاصيل»",
 		"answer": "اكيد يافندم 🥰 ده المنيو، وكل النكهات بنفس السعر حسب الحجم:\n{{menu}}\n\n"
 		"ودي العروض، وتختار النكهات اللي تحبها في العرض:\n{{offers}}\n\n"
-		"تحب أنهي عرض؟",
+		"تحب أي عرض؟",
 	},
 	{
 		"topic": "Prices",
 		"when_to_use": "«بكام»، «الأسعار»، «سعر البرطمان الكبير»",
 		"answer": "كل النكهات بنفس السعر يافندم: {{size_prices}} 🥰\n"
-		"ودي العروض:\n{{offers}}\n\nتحب أنهي عرض؟",
+		"ودي العروض:\n{{offers}}\n\nتحب أي عرض؟",
 	},
 	{
 		"topic": "Sizes",
 		"when_to_use": "«الأحجام إيه؟»، «الوسط كام ملي؟»",
 		"answer": "عندنا حجمين في برطمان زجاج بغطا: الوسط 212 ML والكبير 330 ML، "
-		"والأسعار {{size_prices}} 🥰 تحب أنهي حجم؟",
+		"والأسعار {{size_prices}} 🥰 تحب أي حجم؟",
 	},
 	{
 		"topic": "Servings per jar",
@@ -631,7 +633,7 @@ DEFAULT_READY_ANSWERS: list[dict[str, str]] = [
 		"topic": "Offers / bundles",
 		"when_to_use": "«في عروض؟»، «العرض ده لسه شغال؟»، a box, 3 jars or more, guests",
 		"answer": "أكيد يا فندم 😍 دي العروض الشغالة دلوقتي:\n{{offers}}\n\n"
-		"وتختار النكهات اللي تحبها في العرض. تحب أنهي عرض؟",
+		"وتختار النكهات اللي تحبها في العرض. تحب أي عرض؟",
 	},
 	{
 		"topic": "Recommendation / first time",
@@ -643,7 +645,7 @@ DEFAULT_READY_ANSWERS: list[dict[str, str]] = [
 		"topic": "Delivery areas",
 		"when_to_use": "«بتوصلوا فين؟»، «بتوصلوا [منطقة]؟»، «التوصيل بكام؟»",
 		"answer": "بنوصل للمناطق دي يافندم:\n{{delivery_areas}}\n\n"
-		"حضرتك في أنهي منطقة؟ 🥰",
+		"حضرتك في أي منطقة؟ 🥰",
 	},
 	{
 		"topic": "Outside our areas",
@@ -654,7 +656,7 @@ DEFAULT_READY_ANSWERS: list[dict[str, str]] = [
 	{
 		"topic": "Delivery time",
 		"when_to_use": "«هيوصل إمتى؟»، «عندي ضيوف»، «محتاجه النهارده»",
-		"answer": "الأوردر بيوصل من 30 دقيقة لحد ساعتين بالكتير من تأكيده 🥰 " "حضرتك في أنهي منطقة؟",
+		"answer": "الأوردر بيوصل من 30 دقيقة لحد ساعتين بالكتير من تأكيده 🥰 " "حضرتك في أي منطقة؟",
 	},
 	{
 		"topic": "How to order",
@@ -672,7 +674,7 @@ DEFAULT_READY_ANSWERS: list[dict[str, str]] = [
 		"topic": "Payment",
 		"when_to_use": "«الدفع إزاي؟»، «ينفع InstaPay؟»، «كاش؟»",
 		"answer": "متاح الدفع كاش عند الاستلام أو InstaPay، وكمان أونلاين على orderjarz.com 🥰 "
-		"تحب تأكد الأوردر بأنهي طريقة؟",
+		"تحب تأكد الأوردر بأي طريقة؟",
 	},
 	{
 		"topic": "Storage",
@@ -1112,8 +1114,11 @@ def _branch_stock(codes: Iterable[str]) -> dict[str, float]:
 
 
 def render_menu(products: Iterable[dict[str, Any]], arabic: bool) -> str:
-	"""Priced items grouped by item group: one line per group when the group
-	shares one price ("وسط 120 جنيه: Lotus، Mango"), else one line per item.
+	"""Priced items grouped by item group. When every size has one price, one
+	line per size price («• وسط 120 جنيه») and then the flavours ONCE
+	(«• النكهات: لوتس، مانجو»), a flavour sold in only some sizes marked
+	«(كبير بس)». Otherwise one line per group when the group shares one price
+	("وسط 120 جنيه: Lotus، Mango"), else one line per item.
 	Arabic menu: flavours as Egyptians say them (``flavour_ar``: the Item's
 	``jarz_item_name_ar`` or ``FLAVOUR_AR``), English when none is known; the
 	English menu keeps the English names. Zero-priced items are left out."""
@@ -1126,20 +1131,51 @@ def render_menu(products: Iterable[dict[str, Any]], arabic: bool) -> str:
 		if price <= 0:
 			continue
 		groups.setdefault(str(item.get("item_group") or ""), []).append({**item, "price": price})
-	lines = []
+	labelled: dict[str, list[str]] = {}
 	for group, items in groups.items():
-		size = _size_label(group, arabic)
 		labels = [_flavour(str(i.get("name") or i.get("id")), group) for i in items]
 		if arabic:
 			labels = [
 				flavour_ar(lab, i.get("name_ar"), group) or lab for lab, i in zip(labels, items, strict=True)
 			]
+		labelled[group] = labels
+	one_price = all(group and len({round(i["price"], 2) for i in items}) == 1 for group, items in groups.items())
+	if len(groups) > 1 and one_price:
+		return _render_menu_flavours_once(groups, labelled, arabic)
+	lines = []
+	for group, items in groups.items():
+		size = _size_label(group, arabic)
+		labels = labelled[group]
 		if len({round(i["price"], 2) for i in items}) == 1 and group:
 			names = ("، " if arabic else ", ").join(dict.fromkeys(labels))
 			lines.append(f"• {size} {format_egp(items[0]['price'], arabic)}: {names}")
 		else:
 			for item, label in zip(items, labels, strict=True):
 				lines.append(f"• {label} {size}".rstrip() + f": {format_egp(item['price'], arabic)}")
+	return "\n".join(lines)
+
+
+def _render_menu_flavours_once(
+	groups: dict[str, list[dict[str, Any]]], labelled: dict[str, list[str]], arabic: bool
+) -> str:
+	"""Size prices cheapest first, one line each, then every flavour once. A flavour
+	missing from some sizes carries the sizes it comes in: «مانجو (كبير بس)»."""
+	order = sorted(groups, key=lambda g: groups[g][0]["price"])
+	lines = [f"• {_size_label(g, arabic)} {format_egp(groups[g][0]['price'], arabic)}" for g in order]
+	sizes_of: dict[str, list[str]] = {}
+	for group in order:
+		for label in labelled[group]:
+			sizes = sizes_of.setdefault(label, [])
+			if group not in sizes:
+				sizes.append(group)
+	names = []
+	for label, sizes in sizes_of.items():
+		if len(sizes) < len(order):
+			only = (" و" if arabic else " & ").join(_size_label(g, arabic) for g in sizes)
+			label = f"{label} ({only} بس)" if arabic else f"{label} ({only} only)"
+		names.append(label)
+	head = "النكهات" if arabic else "Flavours"
+	lines.append(f"• {head}: " + ("، " if arabic else ", ").join(names))
 	return "\n".join(lines)
 
 
