@@ -1,8 +1,9 @@
 """Flavour availability for the AI chat menu, and the moderators' override of it.
 
-The AI menu pauses a flavour when every branch together holds fewer than
-``chat_drafts.MENU_MIN_STOCK`` jars. The system's stock often lags reality (jars
-on the route, or already in a branch but not moved in the system), so a
+The AI menu pauses a flavour when every branch together, plus the jars in
+transit to them, holds fewer than ``chat_drafts.MENU_MIN_STOCK`` jars (a
+branch's negative bin counts as zero). The system's stock still lags reality
+(jars already in a branch but not moved in the system), so a
 moderator may force a flavour **Available** (offered whatever the stock) or
 **Paused** (never offered). Clearing the override (``auto``) goes back to the
 stock. Overrides live in the ``flavour_overrides`` table of Jarz Chat Settings

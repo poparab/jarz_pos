@@ -922,6 +922,26 @@ class PausedFlavoursTest(unittest.TestCase):
 		self.assertNotIn("Carrot", menu)
 		self.assertIn("Lotus", menu)
 
+	def test_negative_branch_does_not_cancel_jars_elsewhere(self):
+		# Production 2026-11-21: Blueberry Medium was -1/-2/-2 at the branches
+		# with 53 in Goods In Transit; Tiramisu Large 3/1/-5 with 32 in transit.
+		bins = [
+			("Blueberry Medium", "6th of october - J", -1.0),
+			("Blueberry Medium", "Dokki - J", -2.0),
+			("Blueberry Medium", "Nasr city - J", -2.0),
+			("Blueberry Medium", "Goods In Transit - J", 53.0),
+			("Tiramisu Large", "6th of october - J", 3.0),
+			("Tiramisu Large", "Dokki - J", 1.0),
+			("Tiramisu Large", "Nasr city - J", -5.0),
+			("Mango Large", "Nasr city - J", -4.0),
+			("Stray Item", "Dokki - J", 9.0),
+		]
+		stock = d.sum_menu_stock(["Blueberry Medium", "Tiramisu Large", "Mango Large", "Lotus Large"], bins)
+		self.assertEqual(
+			stock,
+			{"Blueberry Medium": 53.0, "Tiramisu Large": 4.0, "Mango Large": 0.0, "Lotus Large": 0.0},
+		)
+
 	def test_moderator_override_beats_stock(self):
 		available, paused = d.split_by_stock(self.PRODUCTS, self.STOCK)
 		# Mango Large is on the route: forced Available. Lotus Large forced Paused.

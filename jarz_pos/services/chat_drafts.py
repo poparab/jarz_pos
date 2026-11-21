@@ -1137,28 +1137,51 @@ def paused_names(paused: Iterable[dict[str, Any]]) -> list[str]:
 	return list(dict.fromkeys(names))
 
 
+def sum_menu_stock(stock_items: Iterable[str], bins: Iterable[tuple[str, str, float]]) -> dict[str, float]:
+	"""``{item_code: jars}`` from ``(item_code, warehouse, qty)`` bin rows. Pure.
+
+	Each warehouse counts at no less than zero. A branch sells jars the system
+	has not received yet (they are still in Goods In Transit), so its bin goes
+	negative; summed as-is that negative cancelled another branch's real jars and
+	paused Tiramisu and Blueberry Medium on 2026-11-21 while 32-53 of each were
+	on the route."""
+	out = dict.fromkeys(stock_items, 0.0)
+	for code, _warehouse, qty in bins:
+		if code in out:
+			out[code] += max(float(qty or 0), 0.0)
+	return out
+
+
 def _branch_stock(codes: Iterable[str]) -> dict[str, float]:
-	"""Stock of each stock item summed over every enabled POS profile's warehouse."""
+	"""Jars of each stock item a customer can be sold: every enabled POS profile's
+	warehouse plus the Transit warehouses (jars on the route to a branch), each
+	warehouse floored at zero (``sum_menu_stock``)."""
 	codes = sorted({c for c in codes if c})
 	if not codes:
 		return {}
 	try:
-		warehouses = sorted(
-			{w for w in frappe.get_all("POS Profile", filters={"disabled": 0}, pluck="warehouse") if w}
+		warehouses = {w for w in frappe.get_all("POS Profile", filters={"disabled": 0}, pluck="warehouse") if w}
+		if not warehouses:
+			return {}
+		warehouses |= set(
+			frappe.get_all(
+				"Warehouse",
+				filters={"warehouse_type": "Transit", "is_group": 0, "disabled": 0},
+				pluck="name",
+				ignore_permissions=True,
+			)
 		)
 		stock_items = frappe.get_all(
 			"Item", filters={"name": ["in", codes], "is_stock_item": 1}, pluck="name", ignore_permissions=True
 		)
-		if not warehouses or not stock_items:
+		if not stock_items:
 			return {}
-		out = dict.fromkeys(stock_items, 0.0)
-		for code, qty in frappe.db.sql(
-			"""select item_code, sum(actual_qty) from `tabBin`
-			where warehouse in %(wh)s and item_code in %(codes)s group by item_code""",
-			{"wh": tuple(warehouses), "codes": tuple(stock_items)},
-		):
-			out[code] = float(qty or 0)
-		return out
+		bins = frappe.db.sql(
+			"""select item_code, warehouse, actual_qty from `tabBin`
+			where warehouse in %(wh)s and item_code in %(codes)s""",
+			{"wh": tuple(sorted(warehouses)), "codes": tuple(stock_items)},
+		)
+		return sum_menu_stock(stock_items, bins)
 	except Exception:
 		return {}
 
