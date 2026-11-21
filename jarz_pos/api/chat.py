@@ -596,6 +596,31 @@ def approve_fact_conflict(
 
 
 @frappe.whitelist(methods=["GET", "POST"])
+def get_flavour_availability() -> dict[str, Any]:
+	"""Every priced flavour on the AI menu with its stock and availability.
+
+	Returns ``{items: [{item_code, name, name_ar, size, size_ar, stock, auto,
+	override, effective}], min_stock}``. ``auto`` is the stock verdict,
+	``override`` is ``auto|available|paused``, ``effective`` what the AI uses.
+	"""
+	_gate()
+	from jarz_pos.services import chat_availability as ca
+
+	return ca.list_availability()
+
+
+@frappe.whitelist(methods=["POST"])
+def set_flavour_availability(item_code: str, availability: str) -> dict[str, Any]:
+	"""A moderator forces one flavour ``available`` (stock lags: on the route, or in a
+	branch but not moved yet) or ``paused``, or sets ``auto`` to follow the stock again.
+	Returns the flavour's fresh row (see ``get_flavour_availability``)."""
+	_gate()
+	from jarz_pos.services import chat_availability as ca
+
+	return {"item": ca.set_availability(item_code, availability)}
+
+
+@frappe.whitelist(methods=["GET", "POST"])
 def get_fact_overrides(
 	from_date: str | None = None,
 	to_date: str | None = None,

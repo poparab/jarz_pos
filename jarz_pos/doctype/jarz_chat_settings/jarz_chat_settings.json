@@ -19,6 +19,7 @@
   "planted_draft_percent",
   "upsell_items",
   "ready_answers",
+  "flavour_overrides",
   "sec_voice",
   "transcribe_voice_notes",
   "transcription_provider",
@@ -135,6 +136,13 @@
    "description": "Jarz's saved replies (menu, prices, offers, delivery areas...). The AI adapts the matching one instead of improvising. The built-in defaults stay unless you override them: a row with the same Topic replaces that default, an inactive row with that Topic removes it, and a new Topic is added. Placeholders such as {{menu}}, {{offers}}, {{delivery_areas}} and {{price:ITEM_CODE}} are filled live."
   },
   {
+   "fieldname": "flavour_overrides",
+   "fieldtype": "Table",
+   "label": "Flavour Availability",
+   "options": "Jarz Chat Flavour Override",
+   "description": "Moderators' overrides of the stock check for the AI menu, set from the app's inbox. Available: offered even when stock shows none. Paused: never offered. No row: follow the branches' stock."
+  },
+  {
    "fieldname": "sec_voice",
    "fieldtype": "Section Break",
    "label": "Voice notes"
@@ -231,7 +239,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-10-30 12:00:00.000000",
+ "modified": "2026-11-21 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "jarz pos",
  "name": "Jarz Chat Settings",

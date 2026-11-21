@@ -626,8 +626,7 @@ DEFAULT_READY_ANSWERS: list[dict[str, str]] = [
 	{
 		"topic": "Servings per jar",
 		"when_to_use": "«يكفي كام فرد؟»، «الكبير يكفي كام واحد؟»: no approved answer, never a number",
-		"answer": "سؤال حلو يا فندم 🥰 قولي عدد الضيوف تقريباً "
-		"وأرشحلك الحجم أو العرض المناسب.",
+		"answer": "سؤال حلو يا فندم 🥰 قولي عدد الضيوف تقريباً " "وأرشحلك الحجم أو العرض المناسب.",
 	},
 	{
 		"topic": "Offers / bundles",
@@ -644,8 +643,7 @@ DEFAULT_READY_ANSWERS: list[dict[str, str]] = [
 	{
 		"topic": "Delivery areas",
 		"when_to_use": "«بتوصلوا فين؟»، «بتوصلوا [منطقة]؟»، «التوصيل بكام؟»",
-		"answer": "بنوصل للمناطق دي يافندم:\n{{delivery_areas}}\n\n"
-		"حضرتك في أي منطقة؟ 🥰",
+		"answer": "بنوصل للمناطق دي يافندم:\n{{delivery_areas}}\n\n" "حضرتك في أي منطقة؟ 🥰",
 	},
 	{
 		"topic": "Outside our areas",
@@ -714,8 +712,7 @@ DEFAULT_READY_ANSWERS: list[dict[str, str]] = [
 	{
 		"topic": "Large or event order",
 		"when_to_use": "An event, a very large quantity, a custom request",
-		"answer": "يا أهلاً بيك 🥰 الطلبات الكبيرة بنظبطها معاك خطوة بخطوة "
-		"ممكن العدد تقريباً والمعاد؟",
+		"answer": "يا أهلاً بيك 🥰 الطلبات الكبيرة بنظبطها معاك خطوة بخطوة " "ممكن العدد تقريباً والمعاد؟",
 	},
 	{
 		"topic": "Café / company (B2B)",
@@ -1072,6 +1069,59 @@ def split_by_stock(
 	return available, paused
 
 
+#: Child table of Jarz Chat Settings holding moderators' availability overrides.
+FLAVOUR_OVERRIDE_DOCTYPE = "Jarz Chat Flavour Override"
+AVAILABLE, PAUSED = "Available", "Paused"
+
+
+def apply_availability_overrides(
+	available: Iterable[dict[str, Any]], paused: Iterable[dict[str, Any]], overrides: dict[str, str]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+	"""``(available, paused)`` after a moderator's overrides. Pure.
+
+	*overrides* maps an item code to ``Available`` (offered whatever the stock:
+	jars on the route, or in a branch but not yet moved in the system) or
+	``Paused`` (never offered). Items without an override keep their stock
+	verdict."""
+	available, paused = list(available), list(paused)
+	if not overrides:
+		return available, paused
+	by_stock = {id(item) for item in available}
+	out_available, out_paused = [], []
+	for item in [*available, *paused]:
+		verdict = overrides.get(str(item.get("id") or "")) or (AVAILABLE if id(item) in by_stock else PAUSED)
+		(out_available if verdict == AVAILABLE else out_paused).append(item)
+	return out_available, out_paused
+
+
+def _flavour_overrides() -> dict[str, str]:
+	"""``{item_code: "Available"|"Paused"}`` from Jarz Chat Settings; {} on any error."""
+	try:
+		rows = frappe.db.get_all(
+			FLAVOUR_OVERRIDE_DOCTYPE,
+			filters={"parent": "Jarz Chat Settings", "parentfield": "flavour_overrides"},
+			fields=["item_code", "availability"],
+		)
+	except Exception:
+		return {}
+	return {
+		str(r.item_code): str(r.availability)
+		for r in rows
+		if r.item_code and r.availability in (AVAILABLE, PAUSED)
+	}
+
+
+def split_menu_by_availability(
+	products: Iterable[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+	"""``(available, paused)``: the branches' stock, then the moderators' overrides."""
+	products = list(products)
+	available, paused = split_by_stock(products, _branch_stock(str(p.get("id") or "") for p in products))
+	available, paused = apply_availability_overrides(available, paused, _flavour_overrides())
+	order = {id(item): n for n, item in enumerate(products)}
+	return sorted(available, key=lambda i: order[id(i)]), sorted(paused, key=lambda i: order[id(i)])
+
+
 def paused_names(paused: Iterable[dict[str, Any]]) -> list[str]:
 	"""``Mango (Large)`` for each priced paused item, catalog order. Pure."""
 	names = []
@@ -1139,7 +1189,9 @@ def render_menu(products: Iterable[dict[str, Any]], arabic: bool) -> str:
 				flavour_ar(lab, i.get("name_ar"), group) or lab for lab, i in zip(labels, items, strict=True)
 			]
 		labelled[group] = labels
-	one_price = all(group and len({round(i["price"], 2) for i in items}) == 1 for group, items in groups.items())
+	one_price = all(
+		group and len({round(i["price"], 2) for i in items}) == 1 for group, items in groups.items()
+	)
 	if len(groups) > 1 and one_price:
 		return _render_menu_flavours_once(groups, labelled, arabic)
 	lines = []
@@ -1852,7 +1904,9 @@ def render_delivery_slots(slots: Iterable[dict[str, Any]] | None) -> str:
 	if running:
 		lines.append(f"- A slot is running now: {running['label']}. An order confirmed now goes out in it.")
 	elif upcoming:
-		lines.append(f"- No slot is running now. An order confirmed now goes out in the next slot: {upcoming[0]}.")
+		lines.append(
+			f"- No slot is running now. An order confirmed now goes out in the next slot: {upcoming[0]}."
+		)
 	else:
 		lines.append("- No slot is running now.")
 	if upcoming:
@@ -1892,9 +1946,10 @@ def build_context(settings: dict[str, Any]) -> dict[str, Any]:
 				products = pos_api.get_profile_products(profile) or []
 		except Exception:
 			products = []
-		# Paused flavours (no stock at any branch) leave the menu, the size
-		# prices and the code list, so the model cannot offer them.
-		products, paused = split_by_stock(products, _branch_stock(str(p.get("id") or "") for p in products))
+		# Paused flavours (no stock at any branch, unless a moderator forced them
+		# Available; or forced Paused) leave the menu, the size prices and the
+		# code list, so the model cannot offer them.
+		products, paused = split_menu_by_availability(products)
 		arabic_names = _item_arabic_names(str(p.get("id") or "") for p in products)
 		for item in products:
 			code = str(item.get("id") or "")
@@ -2815,7 +2870,9 @@ def generate_draft(
 	if cc.has_category_columns():
 		updates.update(
 			category_updates(
-				conv.get("contact_category_source"), clean["contact_category"], clean["contact_category_reason"]
+				conv.get("contact_category_source"),
+				clean["contact_category"],
+				clean["contact_category_reason"],
 			)
 		)
 	frappe.db.set_value(cc.CONVERSATION, conversation, updates, update_modified=False)

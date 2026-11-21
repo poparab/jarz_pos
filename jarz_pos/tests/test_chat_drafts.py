@@ -922,6 +922,39 @@ class PausedFlavoursTest(unittest.TestCase):
 		self.assertNotIn("Carrot", menu)
 		self.assertIn("Lotus", menu)
 
+	def test_moderator_override_beats_stock(self):
+		available, paused = d.split_by_stock(self.PRODUCTS, self.STOCK)
+		# Mango Large is on the route: forced Available. Lotus Large forced Paused.
+		overrides = {"Mango Large": d.AVAILABLE, "Lotus Large": d.PAUSED}
+		available, paused = d.apply_availability_overrides(available, paused, overrides)
+		self.assertEqual([p["id"] for p in available], ["Gift Card", "Mango Large"])
+		self.assertIn("Lotus Large", [p["id"] for p in paused])
+		self.assertNotIn("Mango Large", [p["id"] for p in paused])
+		self.assertIn("Mango", d.render_menu(available, arabic=False))
+
+	def test_no_override_keeps_the_stock_verdict(self):
+		before = d.split_by_stock(self.PRODUCTS, self.STOCK)
+		self.assertEqual(d.apply_availability_overrides(*before, {}), (before[0], before[1]))
+		self.assertEqual(d.apply_availability_overrides(*before, {"Unknown": d.AVAILABLE}), before)
+
+	def test_availability_rows_for_the_moderator(self):
+		from jarz_pos.services import chat_availability as ca
+
+		rows = ca.describe(self.PRODUCTS, self.STOCK, {"Mango Large": d.AVAILABLE})
+		by_code = {r["item_code"]: r for r in rows}
+		self.assertNotIn("Mango Small", by_code)  # zero price
+		mango = by_code["Mango Large"]
+		self.assertEqual(
+			(mango["auto"], mango["override"], mango["effective"], mango["stock"]),
+			("paused", "available", "available", 0.0),
+		)
+		self.assertEqual((mango["size"], mango["size_ar"], mango["name"]), ("Large", "كبير", "Mango"))
+		lotus = by_code["Lotus Large"]
+		self.assertEqual(
+			(lotus["auto"], lotus["override"], lotus["effective"]), ("available", "auto", "available")
+		)
+		self.assertIsNone(by_code["Gift Card"]["stock"])
+
 	def test_no_stock_data_pauses_nothing(self):
 		for stock in ({}, {"Lotus Large": 0.0, "Mango Large": 0.0}):
 			available, paused = d.split_by_stock(self.PRODUCTS, stock)

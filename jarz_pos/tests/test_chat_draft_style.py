@@ -86,7 +86,13 @@ class FlavourNamesTest(unittest.TestCase):
 
 	def test_flavours_sold_in_every_size_are_named_once(self):
 		both = [
-			{**p, "id": f"{p['id']}-{g}", "name": p["name"].replace("Medium", g), "item_group": g, "price": price}
+			{
+				**p,
+				"id": f"{p['id']}-{g}",
+				"name": p["name"].replace("Medium", g),
+				"item_group": g,
+				"price": price,
+			}
 			for g, price in (("Large", 160), ("Medium", 120))
 			for p in PRODUCTS[:3]
 		]
@@ -246,7 +252,6 @@ class SettleTest(unittest.TestCase):
 			gen.assert_not_called()
 
 
-
 class LiveJobNeverSleepsTest(unittest.TestCase):
 	"""The draft job shares the single short/default worker with webhook ingest: it must not wait."""
 
@@ -311,7 +316,13 @@ class SlotsFamiliesAreasTest(unittest.TestCase):
 	def test_unreadable_message_wants_no_draft_and_hides_the_note(self):
 		self.assertTrue(d.needs_no_draft("unsupported", "note to staff"))
 		lines = d.transcript_lines(
-			[{"direction": "Inbound", "message_type": "unsupported", "body": "WhatsApp did not pass this on"}],
+			[
+				{
+					"direction": "Inbound",
+					"message_type": "unsupported",
+					"body": "WhatsApp did not pass this on",
+				}
+			],
 			False,
 			[],
 		)

@@ -1,0 +1,60 @@
+{
+ "actions": [],
+ "creation": "2026-11-21 12:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "item_code",
+  "availability",
+  "set_by",
+  "set_on"
+ ],
+ "fields": [
+  {
+   "fieldname": "item_code",
+   "fieldtype": "Link",
+   "label": "Item",
+   "options": "Item",
+   "in_list_view": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "availability",
+   "fieldtype": "Select",
+   "label": "Availability",
+   "options": "Available\nPaused",
+   "default": "Available",
+   "in_list_view": 1,
+   "reqd": 1,
+   "description": "Available: offered even when the branches show no stock (on the route, or not yet moved in the system). Paused: never offered, whatever the stock."
+  },
+  {
+   "fieldname": "set_by",
+   "fieldtype": "Link",
+   "label": "Set By",
+   "options": "User",
+   "read_only": 1,
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "set_on",
+   "fieldtype": "Datetime",
+   "label": "Set On",
+   "read_only": 1
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-11-21 12:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "jarz pos",
+ "name": "Jarz Chat Flavour Override",
+ "owner": "Administrator",
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "istable": 1,
+ "editable_grid": 1,
+ "track_changes": 0,
+ "permissions": []
+}

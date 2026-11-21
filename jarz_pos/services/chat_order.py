@@ -464,9 +464,7 @@ def _catalog(profile: str) -> dict[str, Any]:
 	with drafts._quiet():
 		products = pos_api.get_profile_products(profile) or []
 		bundles = pos_api.get_profile_bundles(profile) or []
-	products, paused = drafts.split_by_stock(
-		products, drafts._branch_stock(str(p.get("id") or "") for p in products)
-	)
+	products, paused = drafts.split_menu_by_availability(products)
 	return build_catalog(products, bundles, paused)
 
 
