@@ -378,6 +378,8 @@ class TestBuildPlan(unittest.TestCase):
 				"item_name",
 				"stock_uom",
 				"on_hand",
+				"shelf_qty",
+				"reserved_qty",
 				"stock_is_negative",
 				"sells_per_day",
 				"days_of_cover",
@@ -496,6 +498,58 @@ class TestBuildPlan(unittest.TestCase):
 		self.assertEqual([], payload["branches"])
 		self.assertEqual(0, payload["summary"]["branches"])
 		self.assertEqual(0.0, payload["summary"]["total_suggested"])
+
+
+class TestReservedJars(unittest.TestCase):
+	"""Jars sold but not yet dispatched are in the Bin and are not the shelf's."""
+
+	ITEMS = [{"item_code": "CHOC-L", "item_name": "Chocolate Hazelnut Large", "stock_uom": "Nos"}]
+	BRANCHES = [{"warehouse": "Nasr city - J", "branch": "Nasr city"}]
+
+	def _row(self, *, on_hand, reserved, sold=300, source=1000):
+		payload = plan.build_plan(
+			generated_on="",
+			company="Jarz",
+			source_warehouse="Finished Goods - J",
+			cover_days=14,
+			sales_days=30,
+			items=self.ITEMS,
+			branches=self.BRANCHES,
+			source_available={"CHOC-L": source},
+			on_hand={("Nasr city - J", "CHOC-L"): on_hand},
+			sold={("Nasr city - J", "CHOC-L"): sold},  # 10/day -> target 140
+			reserved={("Nasr city - J", "CHOC-L"): reserved} if reserved is not None else None,
+		)
+		return payload["branches"][0]["items"][0]
+
+	def test_has_is_the_bin_minus_jars_sold_and_not_dispatched(self):
+		row = self._row(on_hand=50, reserved=12)
+		self.assertEqual(38.0, row["on_hand"])
+		self.assertEqual(50.0, row["shelf_qty"])
+		self.assertEqual(12.0, row["reserved_qty"])
+		self.assertEqual(102, row["suggested_qty"])
+
+	def test_no_reservation_is_the_old_figure(self):
+		row = self._row(on_hand=50, reserved=None)
+		self.assertEqual(50.0, row["on_hand"])
+		self.assertEqual(90, row["suggested_qty"])
+
+	def test_sold_more_than_the_shelf_is_owed_on_top(self):
+		row = self._row(on_hand=3, reserved=5)
+		self.assertEqual(-2.0, row["on_hand"])
+		self.assertFalse(row["stock_is_negative"])
+		self.assertEqual(142, row["suggested_qty"])
+
+	def test_a_negative_bin_is_still_floored_before_the_reservation(self):
+		row = self._row(on_hand=-55, reserved=4)
+		self.assertTrue(row["stock_is_negative"])
+		self.assertEqual(-59.0, row["on_hand"])
+		self.assertEqual(144, row["suggested_qty"])
+
+	def test_spare_is_counted_from_free_stock(self):
+		# Sells 1/day, keeps 14; 40 on the shelf with 20 sold -> 6 spare, not 26.
+		row = self._row(on_hand=40, reserved=20, sold=30)
+		self.assertEqual(6, plan.spare_qty(row))
 
 
 class TestJarSize(unittest.TestCase):
@@ -781,6 +835,8 @@ class TestEndpoint(unittest.TestCase):
 				("Nasr city - J", "CHOC-L"): 300.0,
 				("Dokki - J", "CHOC-L"): 150.0,
 			},
+			"_resolve_pending_moves": lambda warehouses, codes: {},
+			"_resolve_reserved": lambda warehouses, codes: {},
 			"_generated_on": lambda: "2026-09-10 09:00:00",
 		}
 		patches.update(overrides)

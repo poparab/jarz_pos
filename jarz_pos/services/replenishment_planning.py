@@ -377,15 +377,31 @@ def build_branch_item_row(
 	qty_sold: Any,
 	sales_days: int,
 	cover_days: int,
+	reserved: Any = 0,
 ) -> dict[str, Any]:
 	"""One jar, at one branch: what is there, what sells, what to send.
 
 	``send_now`` / ``short_by`` / ``available_at_source`` are filled in later by
 	:func:`apply_allocation`, because what this branch can actually receive is
 	not knowable until every branch's demand for the same jar is known.
+
+	``on_hand`` is the Bin.  ``reserved`` is the jars already sold on an invoice
+	whose Delivery Note has not posted yet: a POS invoice here never moves stock
+	(``update_stock=0``), the Delivery Note at dispatch does, so until then a sold
+	jar is still in the Bin.  Those jars belong to a customer, not to the shelf,
+	so the row's ``on_hand`` - the "Has" the screen shows and every figure
+	below - is the Bin minus them.  ``shelf_qty`` keeps the raw Bin.
 	"""
-	on_hand_value = to_float(on_hand, 0.0)
+	shelf_value = to_float(on_hand, 0.0)
+	reserved_value = max(0.0, to_float(reserved, 0.0))
+	on_hand_value = shelf_value - reserved_value
 	rate = sells_per_day(qty_sold=qty_sold, sales_days=sales_days)
+	# Same rule as :func:`suggested_qty`, against the free stock: jars already
+	# sold are owed on top of the cover target.  The negative floor applies to
+	# the Bin (a counting error), not to the reservation: a branch holding 3
+	# with 5 sold really is 2 jars short.
+	deficit = to_float(rate, 0.0) * to_float(cover_days, 0.0) - (countable(shelf_value) - reserved_value)
+	suggested = 0 if deficit <= QTY_EPSILON else int(math.ceil(deficit - QTY_EPSILON))
 	return {
 		"item_code": str(item.get("item_code") or ""),
 		"item_name": str(item.get("item_name") or item.get("item_code") or ""),
@@ -393,13 +409,15 @@ def build_branch_item_row(
 		"item_group": str(item.get("item_group") or ""),
 		"jar_size": jar_size(item.get("item_group")),
 		"on_hand": on_hand_value,
+		"shelf_qty": shelf_value,
+		"reserved_qty": reserved_value,
 		# Reported, never subtracted.  This is the flag that says "go count
 		# this shelf", and it is the only place the raw negative does any work.
-		"stock_is_negative": on_hand_value < 0,
+		"stock_is_negative": shelf_value < 0,
 		"sells_per_day": rate,
 		"days_of_cover": days_of_cover(on_hand=on_hand_value, rate=rate),
 		"target_days": int(cover_days),
-		"suggested_qty": suggested_qty(rate=rate, cover_days=cover_days, on_hand=on_hand_value),
+		"suggested_qty": suggested,
 		"available_at_source": 0.0,
 		"send_now": 0,
 		"short_by": 0,
@@ -569,6 +587,7 @@ def build_plan(
 	sold: Mapping[tuple[str, str], Any],
 	notice: str | None = None,
 	pending_moves: Mapping[tuple[str, str, str], Any] | None = None,
+	reserved: Mapping[tuple[str, str], Any] | None = None,
 ) -> dict[str, Any]:
 	"""The whole endpoint payload, from plain data.  No database, no frappe.
 
@@ -594,6 +613,7 @@ def build_plan(
 				qty_sold=sold.get((warehouse, str(item["item_code"]))),
 				sales_days=sales_days,
 				cover_days=cover_days,
+				reserved=(reserved or {}).get((warehouse, str(item["item_code"]))),
 			)
 			for item in catalogue
 		}

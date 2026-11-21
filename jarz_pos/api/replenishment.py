@@ -456,6 +456,7 @@ def get_branch_replenishment(
 
 	source_available = {code: stock.get((source, code), 0.0) for code in item_codes}
 	pending_moves = _resolve_pending_moves(branch_warehouses, item_codes)
+	reserved = _resolve_reserved(branch_warehouses, item_codes)
 
 	return plan.build_plan(
 		generated_on=_generated_on(),
@@ -469,7 +470,83 @@ def get_branch_replenishment(
 		on_hand=stock,
 		sold=sold,
 		pending_moves=pending_moves,
+		reserved=reserved,
 	)
+
+
+#: How far back an invoice still waiting for its Delivery Note is counted as
+#: holding jars.  Older ones are stuck paperwork, not a jar on the shelf.
+RESERVED_LOOKBACK_DAYS = 30
+
+
+def _resolve_reserved(
+	warehouses: Sequence[str],
+	item_codes: Sequence[str],
+) -> dict[tuple[str, str], float]:
+	"""ONE query: jars sold but still in the Bin, per (warehouse, item).
+
+	POS invoices here are ``update_stock=0``; the jar leaves the Bin only when
+	the Delivery Note posts at dispatch.  Until then the Bin counts a jar that
+	already belongs to a customer, so the plan read the branch as holding more
+	than it can sell (2026-11-21: 39 jars at Nasr city, 38 at 6th of october).
+
+	A line counts while its invoice is submitted, not a return, not cancelled
+	on the Kanban, inside :data:`RESERVED_LOOKBACK_DAYS`, and no submitted
+	Delivery Note line points at it (``si_detail``).  Fails soft to "nothing
+	reserved", which is the old behaviour.
+	"""
+	warehouses = sorted({str(w) for w in warehouses if w})
+	item_codes = sorted({str(c) for c in item_codes if c})
+	if not warehouses or not item_codes:
+		return {}
+
+	try:
+		state_clause = ""
+		if frappe.db.has_column("Sales Invoice", "custom_sales_invoice_state"):
+			state_clause = (
+				"AND IFNULL(si.custom_sales_invoice_state, '') NOT IN ('Cancelled', 'Returned')"
+			)
+		rows = frappe.db.sql(
+			f"""
+            SELECT sii.warehouse AS warehouse,
+                   sii.item_code AS item_code,
+                   SUM(sii.stock_qty) AS qty
+            FROM `tabSales Invoice Item` sii
+            INNER JOIN `tabSales Invoice` si ON si.name = sii.parent
+            WHERE si.docstatus = 1
+              AND si.is_return = 0
+              AND IFNULL(si.update_stock, 0) = 0
+              AND si.posting_date >= %(from_date)s
+              AND sii.warehouse IN %(warehouses)s
+              AND sii.item_code IN %(codes)s
+              {state_clause}
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM `tabDelivery Note Item` dni
+                  INNER JOIN `tabDelivery Note` dn ON dn.name = dni.parent
+                  WHERE dn.docstatus = 1 AND dni.si_detail = sii.name
+              )
+            GROUP BY sii.warehouse, sii.item_code
+            """,
+			{
+				"from_date": add_days(getdate(nowdate()), -RESERVED_LOOKBACK_DAYS),
+				"warehouses": warehouses,
+				"codes": item_codes,
+			},
+			as_dict=True,
+		)
+	except Exception:
+		_log_failure(
+			"JARZ Replenishment - reserved read failed",
+			f"warehouses={warehouses}\n{_traceback()}",
+		)
+		return {}
+
+	return {
+		(str(row["warehouse"]), str(row["item_code"])): plan.to_float(row.get("qty"), 0.0)
+		for row in rows or []
+		if plan.to_float(row.get("qty"), 0.0) > 0
+	}
 
 
 def _resolve_pending_moves(
