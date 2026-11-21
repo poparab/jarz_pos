@@ -57,6 +57,9 @@ RATE_LIMIT_WINDOW_SEC = 60
 #: openings and the rep chases a prospect who looked once.
 VIEW_THROTTLE_SEC = 30 * 60
 
+#: Fixed fake token for the send preview: the real URL shape, never a real share.
+PREVIEW_TOKEN = "xxxxxxxxxxxxxxxx"
+
 _VIEW_KEY_PREFIX = "jarz_pos:mshare:seen:"
 
 #: Fields read for the rep's picker. An allow-list here too, because this
@@ -74,6 +77,10 @@ _MATERIAL_FIELDS = (
 	"render_status",
 	"source_type",
 )
+
+
+#: Fields :func:`_public_item` reads from a material.
+_PUBLIC_MATERIAL_FIELDS = ("name", "title", "title_ar", "material_type", "attachment", "enabled")
 
 
 def _logger():
@@ -264,6 +271,29 @@ def get_sales_materials(include_disabled: Any = 0) -> dict[str, Any]:
 	}
 
 
+def _build_snapshots(
+	names: list[str], found: dict[str, Any], reference_doctype: str, reference_name: str
+) -> dict[str, str]:
+	"""Build the price-sheet snapshot of every generated material in ``names``.
+
+	Shared by the real share and the preview so both print the same pages for
+	the same recipient. Raises (``frappe.throw``) on a build failure: the caller
+	must not mint a link, or show a preview, of a sheet that does not exist.
+	"""
+	snapshots: dict[str, str] = {}
+	for name in names:
+		if not _is_generated(found[name]):
+			continue
+		try:
+			snapshots[name] = price_sheet_service.ensure_snapshot(name, reference_doctype, reference_name)[
+				"digest"
+			]
+		except Exception as exc:
+			_logger().error(f"price sheet build failed for {name}", exc_info=True)
+			frappe.throw(f"Could not build the price sheet: {exc}")
+	return snapshots
+
+
 @frappe.whitelist()
 def create_material_share(
 	reference_name: str,
@@ -311,17 +341,7 @@ def create_material_share(
 	# row exists. Order matters twice: a build failure must not leave behind a
 	# share whose link opens an empty page, and the snapshot digest has to be
 	# on the item the moment the row is inserted (see get_public_share).
-	snapshots: dict[str, str] = {}
-	for name in names:
-		if not _is_generated(found[name]):
-			continue
-		try:
-			snapshots[name] = price_sheet_service.ensure_snapshot(name, reference_doctype, reference_name)[
-				"digest"
-			]
-		except Exception as exc:
-			_logger().error(f"price sheet build failed for {name}", exc_info=True)
-			frappe.throw(f"Could not build the price sheet: {exc}")
+	snapshots = _build_snapshots(names, found, reference_doctype, reference_name)
 
 	doc = frappe.get_doc(
 		{
@@ -378,6 +398,59 @@ def create_material_share(
 		"message": rendered,
 		"msisdn": msisdn,
 		"pending_render": pending,
+	}
+
+
+@frappe.whitelist()
+def preview_material_share(
+	reference_name: str,
+	materials: Any = None,
+	reference_doctype: str = "Lead",
+	contact_name: str | None = None,
+	message: str | None = None,
+) -> dict[str, Any]:
+	"""What the client would receive, without sending anything.
+
+	Writes NO share row, NO view row, NO journey note and mints NO token, so the
+	rep can look as often as they like without inflating the engagement counts
+	or leaving a link behind. Items come from :func:`_public_item`, the same
+	function the public page uses. The message carries a fixed fake token in the
+	real URL shape (``link_placeholder_url``) so the app can style it as "link
+	is created when you send".
+	"""
+	_ensure_b2b_access()
+	_ensure_reference(reference_doctype, reference_name)
+
+	names = _as_list(materials)
+	if not names:
+		frappe.throw("Pick at least one material to preview.")
+
+	rows = frappe.get_all(
+		MATERIAL_DOCTYPE,
+		filters={"name": ["in", names], "enabled": 1},
+		fields=[*_PUBLIC_MATERIAL_FIELDS, "source_type"],
+		limit_page_length=0,
+	)
+	found = {row.name: row for row in rows}
+	missing = [name for name in names if name not in found]
+	if missing:
+		frappe.throw("These materials are unavailable: " + ", ".join(missing))
+
+	snapshots = _build_snapshots(names, found, reference_doctype, reference_name)
+	items = []
+	for name in names:
+		item = _public_item(found[name], snapshots.get(name))
+		if item:
+			items.append(item)
+
+	placeholder_url = materials_service.share_url(PREVIEW_TOKEN)
+	greeting = (contact_name or "").strip() or None
+	return {
+		"message": materials_service.render_message(message, placeholder_url, greeting),
+		"link_placeholder_url": placeholder_url,
+		"greeting_name": greeting,
+		"items": items,
+		"material_names": names,
 	}
 
 
@@ -565,6 +638,58 @@ def get_public_share(
 		return not_found()
 
 
+def _public_item(material: Any, snapshot_digest: str | None = None) -> dict[str, Any] | None:
+	"""One material -> the item dict the customer's page renders, or ``None``.
+
+	The single place that decides what a customer sees for a material. Both the
+	public page (:func:`_resolve_public_share`) and the rep's send preview
+	(:func:`preview_material_share`) call it, so the preview cannot drift from
+	the real page. ``None`` means "drop this item" (pulled from the library, a
+	snapshot gone from disk, nothing to show), never an error.
+	"""
+	if not material or not material.enabled:
+		# A material pulled from the library disappears from links already
+		# sent, rather than 404-ing the whole page.
+		return None
+	snapshot_digest = (snapshot_digest or "").strip()
+	if snapshot_digest:
+		# A generated price list: serve the exact pages minted with this
+		# link, never today's prices. A snapshot gone from disk drops the
+		# item (like a pulled material) rather than silently re-pricing it.
+		stored = price_sheet_service.load_snapshot(snapshot_digest)
+		if not stored:
+			return None
+		return {
+			"title": _display_title(material),
+			"type": material.material_type,
+			"download_url": stored["pdf_url"],
+			"pages": stored["pages"],
+		}
+	manifest = materials_service.manifest_for(material.name)
+	pages = [
+		{
+			"thumb": page["tiers"]["thumb"]["u"],
+			"screen": page["tiers"]["screen"]["u"],
+			"full": page["tiers"]["full"]["u"],
+			"w": page["tiers"]["full"]["w"],
+			"h": page["tiers"]["full"]["h"],
+		}
+		for page in manifest.get("pages", [])
+		if page.get("tiers", {}).get("full")
+	]
+	if not pages and not material.attachment:
+		return None
+	# A material with no pages but a file -- a .docx price list, or a PDF on
+	# a site with no renderer -- still ships as a download-only card. The
+	# rep's send is otherwise silently short by one item.
+	return {
+		"title": _display_title(material),
+		"type": material.material_type,
+		"download_url": material.attachment,
+		"pages": pages,
+	}
+
+
 def _resolve_public_share(token: str | None, client: dict[str, Any] | None = None) -> dict[str, Any]:
 	"""Token -> payload. Every refusal collapses to :func:`not_found`."""
 	cleaned = (token or "").strip()
@@ -589,54 +714,12 @@ def _resolve_public_share(token: str | None, client: dict[str, Any] | None = Non
 		material = frappe.db.get_value(
 			MATERIAL_DOCTYPE,
 			row.material,
-			["name", "title", "title_ar", "material_type", "attachment", "enabled"],
+			list(_PUBLIC_MATERIAL_FIELDS),
 			as_dict=True,
 		)
-		if not material or not material.enabled:
-			# A material pulled from the library disappears from links already
-			# sent, rather than 404-ing the whole page.
-			continue
-		snapshot_digest = (getattr(row, "snapshot", None) or "").strip()
-		if snapshot_digest:
-			# A generated price list: serve the exact pages minted with this
-			# link, never today's prices. A snapshot gone from disk drops the
-			# item (like a pulled material) rather than silently re-pricing it.
-			stored = price_sheet_service.load_snapshot(snapshot_digest)
-			if stored:
-				items.append(
-					{
-						"title": _display_title(material),
-						"type": material.material_type,
-						"download_url": stored["pdf_url"],
-						"pages": stored["pages"],
-					}
-				)
-			continue
-		manifest = materials_service.manifest_for(material.name)
-		pages = [
-			{
-				"thumb": page["tiers"]["thumb"]["u"],
-				"screen": page["tiers"]["screen"]["u"],
-				"full": page["tiers"]["full"]["u"],
-				"w": page["tiers"]["full"]["w"],
-				"h": page["tiers"]["full"]["h"],
-			}
-			for page in manifest.get("pages", [])
-			if page.get("tiers", {}).get("full")
-		]
-		if not pages and not material.attachment:
-			continue
-		# A material with no pages but a file -- a .docx price list, or a PDF on
-		# a site with no renderer -- still ships as a download-only card. The
-		# rep's send is otherwise silently short by one item.
-		items.append(
-			{
-				"title": _display_title(material),
-				"type": material.material_type,
-				"download_url": material.attachment,
-				"pages": pages,
-			}
-		)
+		item = _public_item(material, getattr(row, "snapshot", None))
+		if item:
+			items.append(item)
 
 	if not items:
 		return not_found()

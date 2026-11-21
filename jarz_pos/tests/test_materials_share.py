@@ -318,5 +318,133 @@ class TestClientValueSanitising(unittest.TestCase):
 		self.assertEqual(self.clean("   "), "")
 
 
+class TestPreviewMaterialShare(unittest.TestCase):
+	"""The send preview: same items as the public page, and it writes nothing."""
+
+	def _rows(self):
+		import frappe
+
+		uploaded = frappe._dict(
+			name="M-UP",
+			title="Catalogue",
+			title_ar="",
+			material_type="Catalog",
+			attachment="/files/cat.pdf",
+			enabled=1,
+			source_type="Uploaded",
+		)
+		generated = frappe._dict(
+			name="M-GEN",
+			title="Price list",
+			title_ar="",
+			material_type="Price List",
+			attachment=None,
+			enabled=1,
+			source_type="Generated Price List",
+		)
+		return uploaded, generated
+
+	def _run(self, names, message="Hi {name} {link}", contact_name="Sara", rows=None):
+		from unittest import mock
+
+		import frappe
+
+		from jarz_pos.api import materials as api
+
+		uploaded, generated = self._rows()
+		rows = [uploaded, generated] if rows is None else rows
+		stored = {"digest": "ab" * 8, "pdf_url": "/files/s.pdf", "pages": [{"thumb": "t"}]}
+		patches = [
+			mock.patch.object(api, "_ensure_b2b_access"),
+			mock.patch.object(api, "_ensure_reference"),
+			mock.patch.object(frappe, "get_all", return_value=rows),
+			mock.patch.object(api.price_sheet_service, "ensure_snapshot", return_value={"digest": "ab" * 8}),
+			mock.patch.object(api.price_sheet_service, "load_snapshot", return_value=stored),
+			mock.patch.object(api.materials_service, "manifest_for", return_value={"pages": []}),
+			mock.patch.object(api.materials_service, "share_url", side_effect=lambda t: f"https://x/m/{t}"),
+			mock.patch.object(frappe, "get_doc"),
+		]
+		with (
+			patches[0] as gate,
+			patches[1],
+			patches[2],
+			patches[3] as ensure,
+			patches[4],
+			patches[5],
+			patches[6],
+			patches[7] as get_doc,
+		):
+			out = api.preview_material_share("LEAD-1", names, "Lead", contact_name, message)
+		return out, gate, ensure, get_doc
+
+	def test_shape_message_and_no_writes(self):
+		out, gate, ensure, get_doc = self._run('["M-UP", "M-GEN"]')
+		gate.assert_called_once()
+		get_doc.assert_not_called()  # no share / view / note doc is ever built
+		self.assertEqual(out["link_placeholder_url"], "https://x/m/xxxxxxxxxxxxxxxx")
+		self.assertEqual(out["message"], "Hi Sara https://x/m/xxxxxxxxxxxxxxxx")
+		self.assertEqual(out["greeting_name"], "Sara")
+		self.assertEqual(out["material_names"], ["M-UP", "M-GEN"])
+		self.assertEqual([i["title"] for i in out["items"]], ["Catalogue", "Price list"])
+
+	def test_generated_uses_snapshot_and_uploaded_falls_back_to_download(self):
+		out, _gate, ensure, _doc = self._run(["M-UP", "M-GEN"])
+		ensure.assert_called_once_with("M-GEN", "Lead", "LEAD-1")
+		upload, sheet = out["items"]
+		self.assertEqual(upload["download_url"], "/files/cat.pdf")
+		self.assertEqual(upload["pages"], [])
+		self.assertEqual(sheet["download_url"], "/files/s.pdf")
+		self.assertEqual(sheet["pages"], [{"thumb": "t"}])
+
+	def test_items_equal_the_public_page_helper(self):
+		from unittest import mock
+
+		from jarz_pos.api import materials as api
+
+		uploaded, generated = self._rows()
+		out, *_ = self._run(["M-UP", "M-GEN"])
+		with (
+			mock.patch.object(api.materials_service, "manifest_for", return_value={"pages": []}),
+			mock.patch.object(
+				api.price_sheet_service,
+				"load_snapshot",
+				return_value={"digest": "d", "pdf_url": "/files/s.pdf", "pages": [{"thumb": "t"}]},
+			),
+		):
+			expected = [api._public_item(uploaded), api._public_item(generated, "ab" * 8)]
+		self.assertEqual(out["items"], expected)
+
+	def test_blank_name_uses_fallback_and_greeting_is_null(self):
+		out, *_ = self._run(["M-UP"], contact_name="  ", rows=[self._rows()[0]])
+		self.assertIsNone(out["greeting_name"])
+
+	def test_unavailable_material_throws(self):
+		import frappe
+
+		with self.assertRaises(frappe.ValidationError):
+			self._run(["M-UP", "M-GEN"], rows=[self._rows()[0]])
+
+	def test_no_materials_throws(self):
+		import frappe
+
+		with self.assertRaises(frappe.ValidationError):
+			self._run([])
+
+	def test_gate_refusal_stops_everything(self):
+		from unittest import mock
+
+		import frappe
+
+		from jarz_pos.api import materials as api
+
+		with (
+			mock.patch.object(api, "_ensure_b2b_access", side_effect=frappe.PermissionError),
+			mock.patch.object(frappe, "get_all") as get_all,
+		):
+			with self.assertRaises(frappe.PermissionError):
+				api.preview_material_share("LEAD-1", ["M-UP"])
+		get_all.assert_not_called()
+
+
 if __name__ == "__main__":
 	unittest.main()
