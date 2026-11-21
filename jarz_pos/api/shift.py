@@ -1692,3 +1692,460 @@ def list_shifts(
 		"total": total,
 		"amounts_hidden": 0 if is_manager else 1,
 	}
+
+
+# ---------------------------------------------------------------------------
+# Shift sales sheet (replaces the paper sheet branches fill per shift)
+# ---------------------------------------------------------------------------
+
+_SHEET_SIZE_BY_GROUP = {"small": "small", "medium": "medium", "meduim": "medium", "large": "large"}
+_SHEET_SIZE_WORDS = re.compile(r"\b(large|medium|meduim|small)\b", re.IGNORECASE)
+
+
+def _sheet_log(title: str) -> None:
+	try:
+		frappe.log_error(frappe.get_traceback(), f"jarz_pos.shift_sheet.{title}")
+	except Exception:
+		pass
+
+
+def _sheet_iso(value: Any) -> str | None:
+	if not value:
+		return None
+	try:
+		return get_datetime(value).isoformat()
+	except Exception:
+		return None
+
+
+def _sheet_has_column(doctype: str, column: str) -> bool:
+	try:
+		return bool(frappe.db.has_column(doctype, column))
+	except Exception:
+		return False
+
+
+def _sheet_caller_access() -> tuple[bool, list[str]]:
+	"""(has shift-monitor access, branches the caller may monitor)."""
+	from jarz_pos.api.manager import _current_user_allowed_profiles, _has_shift_monitor_access
+
+	has_access = bool(_has_shift_monitor_access())
+	return has_access, (list(_current_user_allowed_profiles() or []) if has_access else [])
+
+
+def _resolve_sheet_opening(opening_entry: str) -> dict[str, Any] | None:
+	return frappe.db.get_value(
+		"POS Opening Entry",
+		opening_entry,
+		["name", "user", "pos_profile", "period_start_date", "company"],
+		as_dict=True,
+	)
+
+
+def _resolve_sheet_closing(opening_entry: str) -> dict[str, Any] | None:
+	"""The submitted POS Closing Entry for this shift, or None while it is open."""
+	try:
+		return frappe.db.get_value(
+			"POS Closing Entry",
+			{"pos_opening_entry": opening_entry, "docstatus": 1},
+			["name", "period_end_date"],
+			as_dict=True,
+		)
+	except Exception:
+		_sheet_log("closing")
+		return None
+
+
+def _resolve_sheet_invoices(branch: str, start: Any, end: Any) -> list[dict[str, Any]]:
+	"""Submitted, non-return Sales Invoices of the branch created inside the shift."""
+	try:
+		optional = [
+			c
+			for c in (
+				"woo_order_number",
+				"custom_order_channel",
+				"custom_sub_territory",
+				"custom_is_pickup",
+				"custom_kanban_profile",
+			)
+			if _sheet_has_column("Sales Invoice", c)
+		]
+		cols = [
+			"name",
+			"creation",
+			"grand_total",
+			"outstanding_amount",
+			"territory",
+			"customer",
+			"sales_partner",
+			"woo_order_id",
+			"custom_courier_party_type",
+			"custom_courier_party",
+			"custom_sales_invoice_state",
+			"custom_payment_method",
+			"pos_profile",
+			"status",
+		]
+		cols = [c for c in cols if _sheet_has_column("Sales Invoice", c)] + optional
+		if "custom_kanban_profile" in optional:
+			branch_cond = "IFNULL(NULLIF(custom_kanban_profile, ''), pos_profile) = %(branch)s"
+		else:
+			branch_cond = "pos_profile = %(branch)s"
+		select = ", ".join(f"`{c}`" for c in cols)
+		return (
+			frappe.db.sql(
+				f"""
+				SELECT {select}
+				FROM `tabSales Invoice`
+				WHERE docstatus = 1 AND is_return = 0 AND {branch_cond}
+				  AND creation BETWEEN %(start)s AND %(end)s
+				ORDER BY creation ASC, name ASC
+				""",
+				{"branch": branch, "start": start, "end": end},
+				as_dict=True,
+			)
+			or []
+		)
+	except Exception:
+		_sheet_log("invoices")
+		return []
+
+
+def _resolve_sheet_jar_rows(invoice_names: list[str]) -> list[dict[str, Any]]:
+	if not invoice_names:
+		return []
+	try:
+		return (
+			frappe.get_all(
+				"Sales Invoice Item",
+				filters={"parent": ["in", invoice_names], "parenttype": "Sales Invoice"},
+				fields=["parent", "item_code", "item_name", "item_group", "qty"],
+				limit=0,
+			)
+			or []
+		)
+	except Exception:
+		_sheet_log("jar_rows")
+		return []
+
+
+def _resolve_sheet_bundle_codes() -> set[str]:
+	try:
+		from jarz_pos.api.product_analytics import _get_bundle_item_codes
+
+		return set(_get_bundle_item_codes())
+	except Exception:
+		_sheet_log("bundle_codes")
+		return set()
+
+
+def _resolve_sheet_shipping(invoice_names: list[str]) -> dict[str, float]:
+	"""Shipping Income tax row per invoice (the only honest delivery fee)."""
+	out: dict[str, float] = {}
+	if not invoice_names:
+		return out
+	try:
+		rows = frappe.get_all(
+			"Sales Taxes and Charges",
+			filters={
+				"parent": ["in", invoice_names],
+				"parenttype": "Sales Invoice",
+				"description": ["like", "Shipping Income%"],
+			},
+			fields=["parent", "tax_amount"],
+			limit=0,
+		)
+		for row in rows or []:
+			out[row["parent"]] = out.get(row["parent"], 0.0) + flt(row.get("tax_amount"))
+	except Exception:
+		_sheet_log("shipping")
+	return out
+
+
+def _resolve_sheet_courier_labels(invoices: list[dict[str, Any]]) -> dict[tuple[str, str], str]:
+	"""(party_type, party) -> label, one query per party type."""
+	from jarz_pos.services.courier_carry import party_label
+
+	wanted: dict[str, set[str]] = {}
+	for inv in invoices:
+		party = inv.get("custom_courier_party")
+		if party:
+			wanted.setdefault(str(inv.get("custom_courier_party_type") or ""), set()).add(party)
+	labels: dict[tuple[str, str], str] = {}
+	spec = {"Employee": "employee_name", "Supplier": "supplier_name"}
+	for ptype, parties in wanted.items():
+		found: dict[str, str] = {}
+		if ptype in spec:
+			try:
+				rows = frappe.get_all(
+					ptype, filters={"name": ["in", list(parties)]}, fields=["name", spec[ptype]], limit=0
+				)
+				found = {r["name"]: r.get(spec[ptype]) for r in rows or []}
+			except Exception:
+				_sheet_log("courier_labels")
+		for party in parties:
+			labels[(ptype, party)] = found.get(party) or party_label(None, party)
+	return labels
+
+
+def _resolve_sheet_payment_methods(invoices: list[dict[str, Any]]) -> dict[str, str]:
+	try:
+		from jarz_pos.api.kanban import _get_actual_payment_method_map
+
+		return _get_actual_payment_method_map(
+			[
+				{
+					"name": inv.get("name"),
+					"outstanding_amount": inv.get("outstanding_amount"),
+					"status": inv.get("status"),
+					"custom_payment_method": inv.get("custom_payment_method"),
+					"sales_partner": inv.get("sales_partner"),
+				}
+				for inv in invoices
+			]
+		)
+	except Exception:
+		_sheet_log("payment_methods")
+		return {}
+
+
+def _resolve_sheet_area_labels(territories: set[str]) -> dict[str, str]:
+	out: dict[str, str] = {}
+	try:
+		from jarz_pos.utils.invoice_utils import get_area_label
+
+		for territory in territories:
+			out[territory] = get_area_label(territory)
+	except Exception:
+		_sheet_log("areas")
+	return out
+
+
+def _resolve_sheet_payouts(branch: str, start: Any, end: Any) -> list[dict[str, Any]]:
+	"""Expense requests and employee advances the branch paid out in the window."""
+	payouts: list[dict[str, Any]] = []
+	try:
+		rows = frappe.get_all(
+			"Jarz Expense Request",
+			filters={
+				"pos_profile": branch,
+				"docstatus": ["!=", 2],
+				"status": ["not in", ["Cancelled", "Rejected"]],
+				"creation": ["between", [start, end]],
+			},
+			fields=["name", "reason_label", "amount", "status", "creation"],
+			order_by="creation asc",
+			limit=0,
+		)
+		for r in rows or []:
+			payouts.append(
+				{
+					"kind": "expense",
+					"name": r["name"],
+					"label": r.get("reason_label") or r["name"],
+					"amount": flt(r.get("amount")),
+					"status": r.get("status") or "",
+					"at": _sheet_iso(r.get("creation")),
+				}
+			)
+	except Exception:
+		_sheet_log("payouts_expense")
+	try:
+		if _sheet_has_column("Employee Advance", "custom_jarz_pos_profile"):
+			rows = frappe.get_all(
+				"Employee Advance",
+				filters={
+					"custom_jarz_pos_profile": branch,
+					"docstatus": ["!=", 2],
+					"creation": ["between", [start, end]],
+				},
+				fields=["name", "employee_name", "purpose", "advance_amount", "status", "creation"],
+				order_by="creation asc",
+				limit=0,
+			)
+			for r in rows or []:
+				label = " - ".join(p for p in (r.get("employee_name"), r.get("purpose")) if p)
+				payouts.append(
+					{
+						"kind": "advance",
+						"name": r["name"],
+						"label": label or r["name"],
+						"amount": flt(r.get("advance_amount")),
+						"status": r.get("status") or "",
+						"at": _sheet_iso(r.get("creation")),
+					}
+				)
+	except Exception:
+		_sheet_log("payouts_advance")
+	payouts.sort(key=lambda p: p.get("at") or "")
+	return payouts
+
+
+def _resolve_sheet_drawer(opening_entry: str, closing_entry: str | None) -> dict[str, float | None]:
+	"""Drawer figures for the manager totals; every missing part stays None."""
+	out: dict[str, float | None] = {
+		"opening_amount": None,
+		"expected_closing": None,
+		"actual_closing": None,
+		"difference": None,
+	}
+	try:
+		rows = frappe.get_all(
+			"POS Opening Entry Detail",
+			filters={"parent": opening_entry, "parenttype": "POS Opening Entry"},
+			fields=["opening_amount"],
+			limit=0,
+		)
+		if rows:
+			out["opening_amount"] = flt(sum(flt(r.get("opening_amount")) for r in rows), 2)
+	except Exception:
+		_sheet_log("drawer_opening")
+	if closing_entry:
+		try:
+			rows = frappe.get_all(
+				"POS Closing Entry Detail",
+				filters={"parent": closing_entry, "parenttype": "POS Closing Entry"},
+				fields=["expected_amount", "closing_amount"],
+				limit=0,
+			)
+			if rows:
+				expected = flt(sum(flt(r.get("expected_amount")) for r in rows), 2)
+				actual = flt(sum(flt(r.get("closing_amount")) for r in rows), 2)
+				# Same definition the shift monitor row uses: counted minus expected.
+				diff = flt(actual - expected, 2)
+				out.update(expected_closing=expected, actual_closing=actual, difference=diff)
+		except Exception:
+			_sheet_log("drawer_closing")
+	return out
+
+
+def _sheet_flavour_label(item_name: str | None, item_code: str | None) -> str:
+	"""Item name without its size word, original casing kept for display."""
+	name = " ".join(_SHEET_SIZE_WORDS.sub(" ", str(item_name or item_code or "")).split())
+	return name or str(item_code or "")
+
+
+def _aggregate_sheet_jars(
+	rows: list[dict[str, Any]], bundle_codes: set[str]
+) -> tuple[dict[str, int], list[dict[str, Any]]]:
+	"""Jar totals per invoice and the flavour x size matrix.
+
+	A jar is an item row in a Small / Medium (or the legacy "Meduim") / Large item
+	group. A bundle header row is the bundle's own item, not a jar, so it is
+	skipped; the jars inside the bundle are their own rows and do count.
+	"""
+	per_invoice: dict[str, int] = {}
+	matrix: dict[str, dict[str, Any]] = {}
+	for row in rows or []:
+		size = _SHEET_SIZE_BY_GROUP.get(str(row.get("item_group") or "").strip().lower())
+		if not size or row.get("item_code") in bundle_codes:
+			continue
+		qty = int(flt(row.get("qty")))
+		if qty <= 0:
+			continue
+		per_invoice[row["parent"]] = per_invoice.get(row["parent"], 0) + qty
+		label = _sheet_flavour_label(row.get("item_name"), row.get("item_code"))
+		entry = matrix.setdefault(label.casefold(), {"flavour": label, "small": 0, "medium": 0, "large": 0})
+		entry[size] += qty
+	return per_invoice, sorted(matrix.values(), key=lambda e: (e["flavour"].casefold(), e["flavour"]))
+
+
+@frappe.whitelist()
+def get_shift_sheet(opening_entry: str) -> dict[str, Any]:
+	"""Read-only sales sheet of one shift (the digital replacement of the paper sheet).
+
+	The opener and shift-monitor managers of the branch may read it. The staff view
+	carries per-order amounts but no totals and no drawer figures (blind count).
+	"""
+	opening = _resolve_sheet_opening(opening_entry)
+	if not opening:
+		frappe.throw(_("POS Opening Entry {0} not found").format(opening_entry), frappe.DoesNotExistError)
+
+	user = frappe.session.user
+	branch = opening.get("pos_profile")
+	is_opener = bool(user) and opening.get("user") == user
+	is_manager_view, allowed_profiles = _sheet_caller_access()
+	if not is_opener and not (is_manager_view and branch in allowed_profiles):
+		frappe.throw(_("Not permitted to view this shift sheet"), frappe.PermissionError)
+
+	closing = _resolve_sheet_closing(opening_entry)
+	start = opening.get("period_start_date")
+	end = (closing or {}).get("period_end_date") or now_datetime()
+
+	invoices = _resolve_sheet_invoices(branch, start, end)
+	names = [inv["name"] for inv in invoices]
+
+	jar_rows = _resolve_sheet_jar_rows(names)
+	jars_by_invoice, jars_by_flavour = _aggregate_sheet_jars(jar_rows, _resolve_sheet_bundle_codes())
+	shipping = _resolve_sheet_shipping(names)
+	courier_labels = _resolve_sheet_courier_labels(invoices)
+	methods = _resolve_sheet_payment_methods(invoices)
+	areas = _resolve_sheet_area_labels({inv["territory"] for inv in invoices if inv.get("territory")})
+
+	orders = []
+	for inv in invoices:
+		is_pickup = bool(cint(inv.get("custom_is_pickup")))
+		party = inv.get("custom_courier_party")
+		area = areas.get(inv.get("territory")) if inv.get("territory") else None
+		sub = inv.get("custom_sub_territory")
+		if area and sub:
+			area = f"{area} - {sub}"
+		woo_number = str(inv.get("woo_order_number") or "").strip()
+		woo_id = cint(inv.get("woo_order_id"))
+		orders.append(
+			{
+				"name": inv["name"],
+				"order_number": woo_number or (str(woo_id) if woo_id else inv["name"]),
+				"created_at": _sheet_iso(inv.get("creation")),
+				"jars": jars_by_invoice.get(inv["name"], 0),
+				"grand_total": flt(inv.get("grand_total")),
+				"outstanding_amount": flt(inv.get("outstanding_amount")),
+				"delivery_fee": flt(shipping.get(inv["name"], 0.0)),
+				"courier": None
+				if is_pickup or not party
+				else courier_labels.get((str(inv.get("custom_courier_party_type") or ""), party), party),
+				"is_pickup": is_pickup,
+				"area": area or None,
+				"payment_method": methods.get(inv["name"]) or inv.get("custom_payment_method") or None,
+				"state": inv.get("custom_sales_invoice_state") or None,
+				"channel": inv.get("custom_order_channel") or None,
+			}
+		)
+
+	payouts = _resolve_sheet_payouts(branch, start, end)
+
+	totals = None
+	if is_manager_view:
+		drawer = _resolve_sheet_drawer(opening_entry, (closing or {}).get("name"))
+		totals = {
+			"orders": len(orders),
+			"jars": sum(o["jars"] for o in orders),
+			"grand_total": flt(sum(o["grand_total"] for o in orders), 2),
+			"delivery_fees": flt(sum(o["delivery_fee"] for o in orders), 2),
+			"payouts": flt(sum(p["amount"] for p in payouts), 2),
+			**drawer,
+		}
+
+	user_full_name = None
+	try:
+		user_full_name = frappe.db.get_value("User", opening.get("user"), "full_name")
+	except Exception:
+		_sheet_log("user")
+
+	return {
+		"opening_entry": opening_entry,
+		"closing_entry": (closing or {}).get("name"),
+		"pos_profile": branch,
+		"branch_label": branch,
+		"user": opening.get("user"),
+		"user_full_name": user_full_name or opening.get("user"),
+		"opened_at": _sheet_iso(start),
+		"closed_at": _sheet_iso((closing or {}).get("period_end_date")),
+		"is_open": not closing,
+		"is_manager_view": is_manager_view,
+		"amounts_hidden": 0 if is_manager_view else 1,
+		"orders": orders,
+		"jars_by_flavour": jars_by_flavour,
+		"payouts": payouts,
+		"totals": totals,
+	}
