@@ -230,6 +230,26 @@ def _doctype_ready() -> bool:
 		return False
 
 
+def _has_carton_plan_column() -> bool:
+	"""False between deploy and ``bench migrate`` (the column is not there yet)."""
+	try:
+		return bool(frappe.db.has_column(DOCTYPE, "carton_plan"))
+	except Exception:
+		return False
+
+
+def _parse_carton_plan(raw: Any) -> dict[str, Any] | None:
+	if not raw:
+		return None
+	if isinstance(raw, dict):
+		return raw
+	try:
+		parsed = json.loads(raw)
+	except Exception:
+		return None
+	return parsed if isinstance(parsed, dict) else None
+
+
 def _parse_lines(lines: Any) -> list[Any]:
 	if lines is None or lines == "":
 		return []
@@ -771,6 +791,7 @@ def _serialize(
 		"stock_entry": _g(row, "stock_entry") or None,
 		"reject_reason": _g(row, "reject_reason") or None,
 		"match_note": _g(row, "match_note") or None,
+		"carton_plan": _parse_carton_plan(_g(row, "carton_plan")),
 		"items": [
 			{
 				"item_code": _g(i, "item_code"),
@@ -1134,12 +1155,15 @@ def _insert_handover(
 	kind: str = DOC_KIND_HANDOVER,
 	client_request_id: str | None = None,
 	transit_warehouse: str | None = None,
+	carton_plan: str | None = None,
 ) -> Any:
 	now = _now()
 	dispatch = kind == DOC_KIND_DISPATCH
 	payload: dict[str, Any] = {}
 	if transit_warehouse:
 		payload["transit_warehouse"] = transit_warehouse
+	if carton_plan and _has_carton_plan_column():
+		payload["carton_plan"] = carton_plan
 	doc = frappe.get_doc(
 		{
 			**payload,
@@ -1183,7 +1207,10 @@ def touches_branch(source_warehouse: str, target_warehouse: str) -> bool:
 
 
 def create_manager_handover(
-	source_warehouse: str, target_warehouse: str, lines: Sequence[dict[str, Any]]
+	source_warehouse: str,
+	target_warehouse: str,
+	lines: Sequence[dict[str, Any]],
+	carton_plan: str | None = None,
 ) -> str:
 	"""The pending handover behind a manager's branch-touching ``submit_transfer``.
 
@@ -1198,6 +1225,7 @@ def create_manager_handover(
 		source=SOURCE_MANAGER,
 		lines=merged,
 		user=frappe.session.user,
+		carton_plan=carton_plan,
 	)
 	_enqueue_push(doc.name, EVENT_DECLARED, frappe.session.user)
 	return doc.name
@@ -1741,7 +1769,7 @@ def _notify_transit_managers(handover_name: str, actor_user: str | None) -> bool
 
 
 def _list_fields() -> list[str]:
-	return [
+	fields = [
 		"name",
 		"status",
 		"kind",
@@ -1762,6 +1790,9 @@ def _list_fields() -> list[str]:
 		"transit_warehouse",
 		"modified",
 	]
+	if _has_carton_plan_column():
+		fields.append("carton_plan")
+	return fields
 
 
 def list_handovers(

@@ -34,6 +34,7 @@
   "cancelled_by",
   "cancelled_at",
   "match_note",
+  "carton_plan",
   "client_request_id",
   "transit_warehouse",
   "transit_entry"
@@ -252,6 +253,14 @@
    "read_only": 1
   },
   {
+   "description": "Carton packing plan the factory sent with the jars (JSON); the branch counts cartons first.",
+   "fieldname": "carton_plan",
+   "fieldtype": "Long Text",
+   "hidden": 1,
+   "label": "Carton Plan",
+   "read_only": 1
+  },
+  {
    "description": "Client-generated id; a repeated declare with the same id and user returns the existing row.",
    "fieldname": "client_request_id",
    "fieldtype": "Data",
@@ -280,7 +289,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-10-22 12:00:00.000000",
+ "modified": "2026-11-21 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "jarz pos",
  "name": "Jarz Stock Handover",

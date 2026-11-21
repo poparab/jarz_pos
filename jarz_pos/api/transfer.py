@@ -353,6 +353,24 @@ def _record_transfer_claim(key: str | None, result: str | None) -> None:
 		pass
 
 
+_CARTON_PLAN_MAX_CHARS = 20000
+
+
+def _clean_carton_plan(plan: Any) -> str | None:
+	"""Compact JSON of a valid carton plan dict, else None (never fails the transfer)."""
+	import json
+
+	try:
+		if isinstance(plan, str):
+			plan = json.loads(plan) if plan.strip() else None
+		if not isinstance(plan, dict) or not plan:
+			return None
+		out = json.dumps(plan, separators=(",", ":"), ensure_ascii=False)
+	except Exception:
+		return None
+	return out if len(out) <= _CARTON_PLAN_MAX_CHARS else None
+
+
 @frappe.whitelist(methods=["POST"])
 def submit_transfer(
 	source_warehouse: str,
@@ -360,6 +378,7 @@ def submit_transfer(
 	lines: Any,
 	posting_date: str | None = None,
 	direct: Any = 0,
+	carton_plan: Any = None,
 ) -> dict[str, Any]:
 	"""Create a Stock Entry (Material Transfer) between warehouses for given items.
 
@@ -379,6 +398,10 @@ def submit_transfer(
 	for it is refused rather than silently sent down the handover path.
 
 	Transfers touching no branch keep posting immediately, unchanged.
+
+	``carton_plan`` (JSON string or dict, optional) is the factory's carton packing
+	plan; it is stored on the pending handover only and silently dropped when it
+	is malformed or over ``_CARTON_PLAN_MAX_CHARS``.
 	"""
 	_ensure_transfer_access()
 	direct = bool(cint(direct))
@@ -415,7 +438,13 @@ def submit_transfer(
 	claim = _claim_transfer(source_warehouse, target_warehouse, cleaned)
 	try:
 		if branch and not direct:
-			handover = handover_service.create_manager_handover(source_warehouse, target_warehouse, cleaned)
+			plan_json = _clean_carton_plan(carton_plan)
+			if plan_json:
+				handover = handover_service.create_manager_handover(
+					source_warehouse, target_warehouse, cleaned, carton_plan=plan_json
+				)
+			else:
+				handover = handover_service.create_manager_handover(source_warehouse, target_warehouse, cleaned)
 			_record_transfer_claim(claim, handover)
 			return {"ok": True, "stock_entry": None, "handover": handover, "pending": True}
 		if branch:
