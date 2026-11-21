@@ -1198,6 +1198,50 @@ class TestPendingReceiptFiling(unittest.TestCase):
 		self.assertIn("does not match", str(exc.exception))
 		mock_frappe.get_doc.return_value.save.assert_not_called()
 
+	def test_grand_and_rounded_total_are_the_same_order_amount(self):
+		"""Order 22160: a 972.50 receipt against its own 972.00 courier row."""
+		from jarz_pos.api.payment_receipts import ensure_uploaded_payment_receipt
+
+		mock_frappe = MagicMock()
+		mock_frappe.throw.side_effect = _raise_frappe
+		mock_frappe.db.exists.return_value = True
+		mock_frappe.db.get_value.return_value = {"grand_total": 972.5, "rounded_total": 972.0}
+		mock_frappe.get_doc.return_value = _FakeReceiptDoc(
+			status="Unconfirmed", amount=972.5, receipt_image_url="/files/x.jpg"
+		)
+
+		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe):
+			result = ensure_uploaded_payment_receipt(
+				"PPR-0001",
+				sales_invoice="ACC-SINV-0001",
+				payment_method="InstaPay",
+				amount=972.0,
+			)
+
+		self.assertEqual(result["amount"], 972.5)
+
+	def test_rounding_does_not_excuse_a_real_mismatch(self):
+		from jarz_pos.api.payment_receipts import ensure_uploaded_payment_receipt
+
+		mock_frappe = MagicMock()
+		mock_frappe.throw.side_effect = _raise_frappe
+		mock_frappe.db.exists.return_value = True
+		mock_frappe.db.get_value.return_value = {"grand_total": 972.5, "rounded_total": 972.0}
+		mock_frappe.get_doc.return_value = _FakeReceiptDoc(
+			status="Unconfirmed", amount=500.0, receipt_image_url="/files/x.jpg"
+		)
+
+		with patch("jarz_pos.api.payment_receipts.frappe", mock_frappe):
+			with self.assertRaises(Exception) as exc:
+				ensure_uploaded_payment_receipt(
+					"PPR-0001",
+					sales_invoice="ACC-SINV-0001",
+					payment_method="InstaPay",
+					amount=972.0,
+				)
+
+		self.assertIn("does not match", str(exc.exception))
+
 
 class TestConfirmReceiptCollectsTheMoney(unittest.TestCase):
 	"""Confirming in the receipts list must post the payment, not just stamp.

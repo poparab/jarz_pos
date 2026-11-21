@@ -321,6 +321,38 @@ def retire_pending_payment_receipts(sales_invoice: str) -> list[str]:
 	return retired
 
 
+def _same_invoice_total(sales_invoice: str | None, *amounts: float) -> bool:
+	"""True when every one of *amounts* is this invoice's grand OR rounded total.
+
+	An invoice whose grand total has piastres carries two figures for one
+	order: ``grand_total`` (972.50) and the payable ``rounded_total`` (972.00).
+	The paths that file and check a receipt do not agree on which they use --
+	dispatch filing, the Kanban transfer-proof upload and
+	``confirm_online_payment`` take the grand total, while a cash dispatch
+	books the rounded figure on the Courier Transaction, which is what the
+	courier-cash confirmation compares against. So order 22160
+	(ACC-SINV-2026-19835-1, 2026-11-20) had a 972.50 receipt refused against
+	its own 972.00 courier row, and the manager saw "unexpected error".
+
+	The two totals are the same money, so they may stand in for each other;
+	anything else -- a 500 screenshot against a 1,000 order -- still does not.
+	"""
+	invoice_name = str(sales_invoice or "").strip()
+	if not invoice_name:
+		return False
+	try:
+		row = frappe.db.get_value(
+			"Sales Invoice", invoice_name, ["grand_total", "rounded_total"], as_dict=True
+		)
+		totals = [float(row.get(field) or 0) for field in ("grand_total", "rounded_total")]
+	except Exception:
+		return False
+	totals = [total for total in totals if total > 0.0001]
+	if not totals:
+		return False
+	return all(any(abs(value - total) <= 0.01 for total in totals) for value in amounts)
+
+
 def ensure_uploaded_payment_receipt(
 	receipt_name: str,
 	*,
@@ -344,7 +376,9 @@ def ensure_uploaded_payment_receipt(
 	):
 		frappe.throw("Payment receipt method does not match the selected collection method")
 	receipt_amount = float(getattr(receipt, "amount", 0) or 0)
-	if abs(receipt_amount - float(amount or 0)) > 0.01:
+	if abs(receipt_amount - float(amount or 0)) > 0.01 and not _same_invoice_total(
+		sales_invoice, receipt_amount, float(amount or 0)
+	):
 		# Deliberately still a refusal. The posted Payment Entry takes its
 		# amount from the invoice's outstanding, never from this field, so this
 		# comparison is the only automated check that the screenshot somebody
