@@ -731,6 +731,7 @@ def _reconcile_counts(
 	lines: list[dict[str, Any]],
 	debug: bool = False,
 	qty_as_of_posting: bool = False,
+	remarks: str | None = None,
 ) -> dict[str, Any]:
 	"""Post the Stock Reconciliation for counted lines. No permission check, no commit.
 
@@ -771,6 +772,8 @@ def _reconcile_counts(
 		sr.posting_date = today()
 	sr.set_posting_time = 1
 	sr.purpose = "Stock Reconciliation"
+	if remarks:
+		sr.remarks = remarks
 	# Ensure accounting defaults to avoid validation failures on some sites
 	if sr.company:
 		comp = frappe.get_all(

@@ -11,6 +11,7 @@ above ``services/production_planning.py``, which holds the maths.
 from __future__ import annotations
 
 import json
+import math
 from typing import Any, Optional
 
 import frappe
@@ -308,3 +309,172 @@ def set_item_target_days(item_code: str, target_days: Any = None) -> dict[str, A
 		"target_days": value or None,
 		"uses_default": not value,
 	}
+
+
+# ── Shortage → miscount correction ─────────────────────────────────────────
+# The Plan tab's "Insufficient inventory" card, answered in one tap.  Production
+# is recorded AFTER the jars are already made, so a shortage on this board is a
+# count that was wrong, never stock that is genuinely absent: the jars exist.
+# The fix the owner asked for is a Stock Reconciliation that adds exactly the
+# missing quantity a few minutes BEFORE the production moment, so the batch then
+# posts against it.  It is NOT the fix for a base that was never produced or a
+# purchase invoice that was never entered — the confirmation says so, and the
+# remarks on the document record that the user confirmed it.
+
+SHORTAGE_COUNT_LEAD_MINUTES = 5
+
+
+def _ensure_shortage_count_access() -> None:
+	"""Same tier that may backdate production: a count moves stock value and
+	can land in the past, so floor operators are excluded."""
+	roles = set(frappe.get_roles())
+	if not roles.intersection(ROLES.PRODUCTION_BACKDATE):
+		frappe.throw(_("Not permitted: production managers only"), frappe.PermissionError)
+
+
+def _shortage_count_plan(lines: Any, scheduled_at: Any = None, company: str | None = None) -> dict[str, Any]:
+	"""What the correction would post: one row per short (item, warehouse).
+
+	Always recomputed from the basket on the server — the client's figures are
+	never trusted, so the confirmation and the posted document cannot differ.
+
+	``counted_qty`` = the balance at the count moment + the basket's missing
+	quantity.  Adding the shortfall as a DELTA (rather than setting the balance
+	to the required quantity) is what keeps every later movement intact: the
+	rollup's shortage for a backdated basket is already capped by the lowest
+	later balance, so this is exactly the quantity the batch is missing.
+	"""
+	from datetime import timedelta
+
+	from frappe.utils import get_datetime
+
+	from jarz_pos.api import inventory_count
+	from jarz_pos.api.manufacturing import _resolve_now_datetime, _resolve_scheduled_datetime
+
+	parsed = _coerce_lines(lines)
+	if not parsed:
+		frappe.throw(_("Nothing is queued for production"))
+	if scheduled_at:
+		get_datetime(scheduled_at)  # validate early with a clear error
+		parsed = [dict(line, scheduled_at=scheduled_at) for line in parsed]
+
+	company = (company or "").strip() or planning._resolve_default_company()
+	if not company:
+		frappe.throw(_("Company is not configured and no Default Company is set"))
+
+	production_at = min(_resolve_scheduled_datetime(line.get("scheduled_at")) for line in parsed)
+	count_at = production_at - timedelta(minutes=SHORTAGE_COUNT_LEAD_MINUTES)
+	# A batch timed later today still gets its count now: ERPNext refuses a
+	# stock posting in the future, and "now" is already before the batch.
+	now = get_datetime(_resolve_now_datetime())
+	if count_at > now:
+		count_at = now
+	count_at = count_at.replace(microsecond=0)
+
+	rollup = planning.build_basket_rollup(parsed, company)
+	rows: list[dict[str, Any]] = []
+	skipped: list[dict[str, Any]] = []
+	by_warehouse: dict[str, list[dict[str, Any]]] = {}
+	for short in rollup.get("shortages") or []:
+		warehouse = short.get("source_warehouse")
+		missing = float(short.get("missing_qty") or 0)
+		if not warehouse or short.get("reason") == "missing_source_warehouse":
+			skipped.append({"item_code": short.get("item_code"), "reason": "missing_source_warehouse"})
+			continue
+		if missing <= 1e-9:
+			continue
+		# Round UP to the gram/unit the count sheet works in: rounding down
+		# would leave the batch short by a float hair and refuse it again.
+		missing = math.ceil(missing * 1000 - 1e-6) / 1000
+		row = {
+			"item_code": short.get("item_code"),
+			"item_name": short.get("item_name") or short.get("item_code"),
+			"uom": short.get("uom") or "",
+			"warehouse": warehouse,
+			"required_qty": float(short.get("required_qty") or 0),
+			"available_qty": float(short.get("available_qty") or 0),
+			"missing_qty": missing,
+		}
+		rows.append(row)
+		by_warehouse.setdefault(warehouse, []).append(row)
+
+	date_text = count_at.strftime("%Y-%m-%d")
+	time_text = count_at.strftime("%H:%M:%S")
+	for warehouse, wh_rows in by_warehouse.items():
+		balances = inventory_count._get_qty_as_of_map(
+			warehouse, [r["item_code"] for r in wh_rows], date_text, time_text
+		)
+		for r in wh_rows:
+			current = float(balances.get(r["item_code"], 0.0))
+			r["current_qty"] = current
+			r["counted_qty"] = max(0.0, round(current + r["missing_qty"], 6))
+
+	return {
+		"company": company,
+		"production_at": production_at.strftime("%Y-%m-%d %H:%M:%S"),
+		"count_at": count_at.strftime("%Y-%m-%d %H:%M:%S"),
+		"lead_minutes": SHORTAGE_COUNT_LEAD_MINUTES,
+		"items": [r for r in rows if r["counted_qty"] > r["current_qty"] + 1e-9],
+		"skipped": skipped,
+	}
+
+
+@frappe.whitelist()
+def preview_shortage_count_fix(
+	lines: Any, scheduled_at: str | None = None, company: str | None = None
+) -> dict[str, Any]:
+	"""The confirmation's content: items, counts and the count moment.  Posts nothing."""
+	_ensure_shortage_count_access()
+	return _shortage_count_plan(lines, scheduled_at, company)
+
+
+@frappe.whitelist(methods=["POST"])
+def fix_shortage_by_count(
+	lines: Any,
+	scheduled_at: str | None = None,
+	company: str | None = None,
+	confirm_miscount: Any = 0,
+) -> dict[str, Any]:
+	"""Post the correction: one Stock Reconciliation per warehouse, all or none.
+
+	``confirm_miscount`` must be set — the user's statement that the stock was
+	counted wrong, not a base left unproduced or a purchase left unentered.
+	"""
+	from jarz_pos.api import inventory_count
+
+	_ensure_shortage_count_access()
+	if not _coerce_int(confirm_miscount, 0):
+		frappe.throw(_("Confirm that the stock was counted wrong before adding it"))
+
+	plan = _shortage_count_plan(lines, scheduled_at, company)
+	if not plan["items"]:
+		return {**plan, "ok": True, "stock_reconciliations": []}
+
+	user = frappe.session.user
+	full_name = frappe.db.get_value("User", user, "full_name") or user
+	remarks = (
+		"Production shortage correction from the Production Board: counted wrong, "
+		f"not a missing base or purchase invoice (confirmed by {full_name}). "
+		f"Production at {plan['production_at']}."
+	)
+
+	by_warehouse: dict[str, list[dict[str, Any]]] = {}
+	for row in plan["items"]:
+		by_warehouse.setdefault(row["warehouse"], []).append(row)
+
+	names: list[str] = []
+	for warehouse, rows in by_warehouse.items():
+		result = inventory_count._reconcile_counts(
+			warehouse,
+			plan["count_at"],
+			[{"item_code": r["item_code"], "counted_qty": r["counted_qty"]} for r in rows],
+			qty_as_of_posting=True,
+			remarks=remarks,
+		)
+		if result.get("stock_reconciliation"):
+			names.append(result["stock_reconciliation"])
+
+	# One commit for every warehouse: a failure in the second raises and the
+	# request rolls back the first, so the board never gets half a correction.
+	frappe.db.commit()
+	return {**plan, "ok": True, "stock_reconciliations": names}
