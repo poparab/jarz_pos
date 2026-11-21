@@ -245,9 +245,31 @@ def _price_cell(item_code, price_list, customer, include_deals, on_date) -> dict
 		include_deals=include_deals,
 	)
 	if provenance == "client" or rate is None:
-		return {"rate": None, "normal_rate": None, "is_deal": False, "_deal_until": None}
+		return {"rate": None, "normal_rate": None, "is_deal": False, "_deal_until": None, "_deal_from": None}
 	if provenance != "deal":
-		return {"rate": flt(rate, 2), "normal_rate": None, "is_deal": False, "_deal_until": None}
+		# No deal today, but one agreed for later (a December price set in
+		# November) still belongs on the sheet, dated, with today's price struck.
+		upcoming = (
+			customer_deals.find_upcoming_deal(customer, item_code, on_date=on_date)
+			if include_deals and customer
+			else None
+		)
+		if upcoming:
+			deal_rate, _deal, starts, ends = upcoming
+			return {
+				"rate": flt(deal_rate, 2),
+				"normal_rate": flt(rate, 2),
+				"is_deal": True,
+				"_deal_until": str(getdate(ends)) if ends else None,
+				"_deal_from": str(getdate(starts)) if starts else None,
+			}
+		return {
+			"rate": flt(rate, 2),
+			"normal_rate": None,
+			"is_deal": False,
+			"_deal_until": None,
+			"_deal_from": None,
+		}
 
 	normal, normal_provenance = _resolve_item_rate_with_provenance(
 		item_code,
@@ -266,6 +288,7 @@ def _price_cell(item_code, price_list, customer, include_deals, on_date) -> dict
 		"normal_rate": None if normal_provenance == "client" else flt(normal, 2),
 		"is_deal": True,
 		"_deal_until": str(getdate(until)) if until else None,
+		"_deal_from": None,
 	}
 
 
@@ -304,6 +327,7 @@ def build_sheet_data(
 
 	rows: list[dict[str, Any]] = []
 	deal_dates: list[str] = []
+	deal_starts: list[str] = []
 	for row in wanted:
 		cells = []
 		for size in sizes:
@@ -313,20 +337,30 @@ def build_sheet_data(
 			else:
 				cell = {"rate": None, "normal_rate": None, "is_deal": False, "_deal_until": None}
 			until = cell.pop("_deal_until")
+			starts = cell.pop("_deal_from", None)
 			if until:
 				deal_dates.append(until)
+			if starts:
+				deal_starts.append(starts)
 			cells.append({"size": size, **cell})
 		rows.append({"flavour": row.flavour, "label": row.label or row.flavour, "cells": cells})
-	return _finish(doc, rows, sizes, customer_name, price_list, currency, as_of, deal_dates)
+	return _finish(doc, rows, sizes, customer_name, price_list, currency, as_of, deal_dates, deal_starts)
 
 
-def _finish(doc, rows, sizes, customer_name, price_list, currency, as_of, deal_dates=()) -> dict[str, Any]:
+def _finish(
+	doc, rows, sizes, customer_name, price_list, currency, as_of, deal_dates=(), deal_starts=()
+) -> dict[str, Any]:
 	"""Drop dead rows and assemble the dict. Split out so the maths is testable.
 
 	``deal_until`` is the EARLIEST end date among the deal cells: the one line
 	under the table must be true of every deal price above it, and a sheet that
 	said "until 30 Nov" while one flavour's deal ended on the 15th would be the
 	customer's receipt for a price the till refuses.
+
+	``deal_from`` is set only when a deal price on the sheet has not started yet
+	(the LATEST start among them, for the same reason): the note then reads
+	"from <start> to <end>" so a price agreed for next month is not read as
+	today's.
 	"""
 	rows = [r for r in rows if any(c["rate"] is not None for c in r["cells"])]
 	return {
@@ -338,6 +372,7 @@ def _finish(doc, rows, sizes, customer_name, price_list, currency, as_of, deal_d
 		"sizes": sizes,
 		"rows": rows,
 		"deal_until": min(deal_dates) if deal_dates else None,
+		"deal_from": (max(deal_starts) if deal_starts and max(deal_starts) > str(as_of) else None),
 		"terms": parse_terms(doc.get("sheet_terms")),
 		"footer": (doc.get("sheet_footer") or "").strip(),
 	}
@@ -439,6 +474,7 @@ def render_html(data: dict[str, Any], logo_uri: str) -> str:
 			"sizes": data["sizes"],
 			"rows": _display_rows(data),
 			"deal_until_text": format_date(data["deal_until"]) if data.get("deal_until") else None,
+			"deal_from_text": format_date(data["deal_from"]) if data.get("deal_from") else None,
 			"terms": data.get("terms") or [],
 			"footer": data.get("footer") or "",
 			"fonts": _font_uris(),

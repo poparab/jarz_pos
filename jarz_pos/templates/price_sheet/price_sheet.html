@@ -99,7 +99,11 @@
 		</tbody>
 	</table>
 	{%- if deal_until_text %}
+	{%- if deal_from_text %}
+	<div class="deal-note">Special prices from {{ deal_from_text|e }} to {{ deal_until_text|e }}</div>
+	{%- else %}
 	<div class="deal-note">Special prices valid until {{ deal_until_text|e }}</div>
+	{%- endif %}
 	{%- endif %}
 
 	{%- if terms %}

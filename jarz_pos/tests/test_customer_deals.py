@@ -101,6 +101,57 @@ class TestFindDealRate(unittest.TestCase):
 		self.assertIn("IFNULL(d.disabled, 0) = 0", query)
 
 
+class TestFindUpcomingDeal(unittest.TestCase):
+	"""Only the price sheet asks: a deal agreed now for next month is printed, dated."""
+
+	def _up(self, rows, item_group="Large", code="Molten Large"):
+		rows = [
+			frappe._dict(
+				deal=d,
+				rate=rate,
+				item_code=ic_,
+				item_group=ig,
+				valid_from=vf,
+				valid_upto=vu,
+			)
+			for d, rate, ic_, ig, vf, vu in rows
+		]
+		with (
+			patch.object(deals.frappe.db, "sql", return_value=rows) as sql,
+			patch.object(deals.frappe.db, "get_value", return_value=item_group),
+		):
+			found = deals.find_upcoming_deal("Cafe A", code, on_date=TODAY)
+		return found, sql
+
+	def test_category_row_of_a_future_deal_matches(self):
+		found, sql = self._up([("DEAL-16", 85, None, "Large", D(2026, 12, 1), D(2026, 12, 31))])
+		self.assertEqual(found, (85.0, "DEAL-16", D(2026, 12, 1), D(2026, 12, 31)))
+		query = sql.call_args.args[0]
+		self.assertIn("d.valid_from > %(on_date)s", query)
+		self.assertIn("IFNULL(d.disabled, 0) = 0", query)
+		self.assertIn("ORDER BY d.valid_from ASC", query)
+
+	def test_soonest_deal_wins_and_item_row_beats_category_within_it(self):
+		found, _ = self._up(
+			[
+				("DEAL-A", 85, None, "Large", D(2026, 11, 1), D(2026, 11, 30)),
+				("DEAL-A", 80, "Molten Large", None, D(2026, 11, 1), D(2026, 11, 30)),
+				("DEAL-B", 70, "Molten Large", None, D(2026, 12, 1), D(2026, 12, 31)),
+			]
+		)
+		self.assertEqual(found[:2], (80.0, "DEAL-A"))
+
+	def test_other_category_or_nothing_is_none(self):
+		self.assertIsNone(self._up([("DEAL-1", 85, None, "Medium", D(2026, 12, 1), D(2026, 12, 31))])[0])
+		self.assertIsNone(self._up([])[0])
+
+	def test_missing_customer_or_item_skips_lookup(self):
+		with patch.object(deals.frappe.db, "sql") as sql:
+			self.assertIsNone(deals.find_upcoming_deal("", "X"))
+			self.assertIsNone(deals.find_upcoming_deal("Cafe A", ""))
+		sql.assert_not_called()
+
+
 class TestDealStatus(unittest.TestCase):
 	def test_statuses(self):
 		base = {"valid_from": D(2026, 10, 1), "valid_upto": D(2026, 10, 5), "disabled": 0}

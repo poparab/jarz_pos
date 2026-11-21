@@ -151,6 +151,33 @@ class TestCustomerResolution(unittest.TestCase):
 
 class TestPriceCell(unittest.TestCase):
 	RESOLVER = "jarz_pos.services.invoice_creation._resolve_item_rate_with_provenance"
+	UPCOMING = "jarz_pos.services.customer_deals.find_upcoming_deal"
+
+	def setUp(self):
+		# No upcoming deal unless a test says otherwise (never touch a real DB).
+		patcher = mock.patch(self.UPCOMING, return_value=None)
+		self.upcoming = patcher.start()
+		self.addCleanup(patcher.stop)
+
+	def test_an_upcoming_deal_is_shown_dated_with_todays_price_struck(self):
+		"""Kavun, 21 Nov: Large at 85 agreed for 1-31 Dec. Today's price is 92."""
+		self.upcoming.return_value = (85.0, "DEAL-16", "2026-12-01", "2026-12-31")
+		with mock.patch(self.RESOLVER, return_value=(92.0, "item_price")):
+			cell = sheet._price_cell("Strawberry Large", "B2B Selling", "C1", True, "2026-11-21")
+		self.assertEqual(cell["rate"], 85.0)
+		self.assertEqual(cell["normal_rate"], 92.0)
+		self.assertTrue(cell["is_deal"])
+		self.assertEqual(cell["_deal_from"], "2026-12-01")
+		self.assertEqual(cell["_deal_until"], "2026-12-31")
+		self.upcoming.assert_called_once_with("C1", "Strawberry Large", on_date="2026-11-21")
+
+	def test_upcoming_deals_follow_the_show_deals_switch(self):
+		self.upcoming.return_value = (85.0, "DEAL-16", "2026-12-01", "2026-12-31")
+		with mock.patch(self.RESOLVER, return_value=(92.0, "item_price")):
+			cell = sheet._price_cell("Strawberry Large", "B2B Selling", "C1", False, "2026-11-21")
+		self.assertEqual(cell["rate"], 92.0)
+		self.assertFalse(cell["is_deal"])
+		self.upcoming.assert_not_called()
 
 	def test_a_list_rate_is_a_plain_cell(self):
 		with mock.patch(self.RESOLVER, return_value=(77.0, "item_price")):
@@ -246,6 +273,7 @@ class TestBuildSheetData(unittest.TestCase):
 				"sizes",
 				"rows",
 				"deal_until",
+				"deal_from",
 				"terms",
 				"footer",
 			},
@@ -309,8 +337,29 @@ class TestBuildSheetData(unittest.TestCase):
 		}
 		data, _ = self._build(cells)
 		self.assertEqual(data["deal_until"], "2026-11-15")
+		self.assertIsNone(data["deal_from"])  # running deals: "valid until" only
 		self.assertTrue(data["rows"][0]["cells"][0]["is_deal"])
 		self.assertNotIn("_deal_until", data["rows"][0]["cells"][0])
+
+	def test_an_upcoming_deal_sets_the_start_date(self):
+		upcoming = {
+			"rate": 85.0,
+			"normal_rate": 92.0,
+			"is_deal": True,
+			"_deal_until": "2026-12-31",
+			"_deal_from": "2026-12-01",
+		}
+		cells = {
+			"Strawberry Medium": _cell(77.0),
+			"Strawberry Large": upcoming,
+			"Molten Medium": _cell(77.0),
+			"Molten Large": dict(upcoming),
+		}
+		data, _ = self._build(cells)
+		self.assertEqual(data["deal_from"], "2026-12-01")
+		self.assertEqual(data["deal_until"], "2026-12-31")
+		self.assertEqual(data["rows"][0]["cells"][1]["rate"], 85.0)
+		self.assertNotIn("_deal_from", data["rows"][0]["cells"][1])
 
 	def test_deals_are_only_requested_with_a_customer_and_the_switch_on(self):
 		cells = {
@@ -929,6 +978,11 @@ class TestHtmlRendering(unittest.TestCase):
 		self.assertIn("Price &lt;List&gt;", html)
 		self.assertIn("Strawberry &lt;b&gt;jar&lt;/b&gt;", html)
 		self.assertNotIn("<b>jar</b>", html)
+
+	def test_an_upcoming_deal_note_gives_both_dates(self):
+		html = self._render(deal_from="2026-12-01", deal_until="2026-12-31")
+		self.assertIn("Special prices from 1 Dec 2026 to 31 Dec 2026", html)
+		self.assertNotIn("valid until", html)
 
 	def test_no_deal_means_no_note_and_no_customer_means_no_prepared_for(self):
 		html = self._render(deal_until=None, customer_name=None)

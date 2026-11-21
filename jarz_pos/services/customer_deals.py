@@ -103,6 +103,65 @@ def find_deal_rate(customer, item_code, on_date=None, item_group=None):
 	return None
 
 
+def find_upcoming_deal(customer, item_code, on_date=None, item_group=None):
+	"""The NEXT deal for this item that has not started yet, else ``None``.
+
+	Returns ``(rate, deal_name, valid_from, valid_upto)`` for the deal with the
+	earliest start after ``on_date``. Only the price sheet asks for this: a
+	customer told "85 from 1 Dec" before December needs to see it on the sheet,
+	while every order path keeps pricing by today's live deal alone.
+	"""
+	customer = str(customer or "").strip()
+	item_code = str(item_code or "").strip()
+	if not customer or not item_code:
+		return None
+	try:
+		rows = frappe.db.sql(
+			"""
+            SELECT d.name AS deal, d.valid_from, d.valid_upto, i.item_code, i.item_group, i.rate
+            FROM `tabJarz Customer Deal` d
+            JOIN `tabJarz Customer Deal Item` i
+              ON i.parent = d.name AND i.parenttype = 'Jarz Customer Deal'
+            WHERE d.customer = %(customer)s
+              AND IFNULL(d.disabled, 0) = 0
+              AND d.valid_from > %(on_date)s
+            ORDER BY d.valid_from ASC, d.creation DESC, i.idx ASC
+            """,
+			{"customer": customer, "on_date": _as_date(on_date)},
+			as_dict=True,
+		)
+	except Exception as exc:
+		if frappe.db.is_table_missing(exc):
+			return None
+		raise
+	if not isinstance(rows, (list, tuple)) or not rows:
+		return None
+	if item_group is None:
+		item_group = frappe.db.get_value("Item", item_code, "item_group")
+	# Rows arrive soonest deal first. Within one deal a row naming the item
+	# beats a category row, exactly as in ``find_deal_rate``.
+	order: list[str] = []
+	by_deal: dict[str, list] = {}
+	for row in rows:
+		if row.get("rate") is None:
+			continue
+		if row["deal"] not in by_deal:
+			order.append(row["deal"])
+			by_deal[row["deal"]] = []
+		by_deal[row["deal"]].append(row)
+	for deal in order:
+		deal_rows = by_deal[deal]
+		match = next((r for r in deal_rows if r.get("item_code") == item_code), None)
+		if match is None and item_group:
+			match = next(
+				(r for r in deal_rows if not r.get("item_code") and r.get("item_group") == item_group),
+				None,
+			)
+		if match is not None:
+			return float(match["rate"]), deal, match.get("valid_from"), match.get("valid_upto")
+	return None
+
+
 def deal_has_orders(deal_name: str) -> bool:
 	"""True once a submitted invoice was priced from this deal.
 
