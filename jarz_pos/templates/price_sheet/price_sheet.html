@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+{#-
+	The generated B2B price sheet, styled after the owner's Canva original.
+
+	Rendered by jarz_pos.services.price_sheet.render_html and printed by
+	wkhtmltopdf 0.12.6 (Qt 4.8 WebKit). That engine is old on purpose-built
+	terms: no flexbox, no grid, no `gap`. Layout is tables and inline-blocks
+	only; do not "modernise" it without printing a real PDF.
+
+	Fonts and the logo arrive as data: URIs (`fonts`, `logo` in the context).
+	frappe.utils.pdf.get_pdf always passes --disable-local-file-access, so a
+	file:// reference would silently print in DejaVu with no logo.
+
+	Everything the customer reads is passed through |e: a flavour label or a
+	term is typed by a manager, and an unescaped "<" would eat the rest of the
+	sheet.
+-#}
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{{ heading|e }}</title>
+<style>
+	@font-face { font-family: 'Inter'; font-weight: 400; src: url({{ fonts.inter_regular }}); }
+	@font-face { font-family: 'Inter'; font-weight: 700; src: url({{ fonts.inter_bold }}); }
+	@font-face { font-family: 'Tajawal'; font-weight: 400; src: url({{ fonts.tajawal_regular }}); }
+	@font-face { font-family: 'Tajawal'; font-weight: 700; src: url({{ fonts.tajawal_bold }}); }
+	@font-face { font-family: 'DM Serif Display'; font-weight: 400; src: url({{ fonts.display }}); }
+
+	html, body { margin: 0; padding: 0; background: #ffffff; }
+	body { font-family: 'Inter', 'Tajawal', 'DejaVu Sans', sans-serif; color: #3F3D56; font-size: 11pt; }
+	.page { width: 182mm; padding: 9mm 14mm 6mm 14mm; }
+
+	.logotype { text-align: center; line-height: 1; white-space: nowrap; }
+	.logotype .bar { display: inline-block; width: 16mm; height: 1.1mm; vertical-align: middle; }
+	.logotype .coral { background: #EF6F7E; margin-right: 1mm; }
+	.logotype .slate { background: #3F3D56; margin-left: 1mm; position: relative; top: 3mm; }
+	.logotype .brand { font-family: 'DM Serif Display', 'DejaVu Serif', serif; font-style: italic; font-size: 46pt; color: #EF6F7E; }
+	.title { text-align: center; margin-top: -2mm; white-space: nowrap; }
+	.title span { display: inline-block; font-family: 'DM Serif Display', 'DejaVu Serif', serif; font-style: italic; font-size: 38pt; color: #3F3D56; line-height: 1.15; border-bottom: 1.2mm solid #EF6F7E; padding: 0 2mm 0.5mm 2mm; }
+
+	.band { margin-top: 6mm; background: #FCEBEE; text-align: center; padding: 2.4mm 4mm; font-style: italic; font-size: 12pt; color: #3F3D56; }
+	.band .sep { color: #EF6F7E; padding: 0 2mm; }
+
+	table.grid { width: 100%; border-collapse: collapse; margin-top: 0; border: 0.35mm solid #8E8CA3; }
+	table.grid th, table.grid td { border: 0.35mm solid #8E8CA3; vertical-align: middle; }
+	table.grid th { font-weight: 400; font-style: italic; color: #EF6F7E; text-align: left; padding: 1.8mm 3mm; }
+	table.grid th.prod { font-size: 17pt; width: 60%; }
+	table.grid th.size { font-size: 11pt; text-align: center; }
+	table.grid td { padding: 1.4mm 3mm; font-size: 13.5pt; }
+	table.grid td.price { text-align: center; font-size: 12.5pt; white-space: nowrap; }
+	table.grid tr { page-break-inside: avoid; }
+	.cur { font-size: 10.5pt; color: #3F3D56; }
+	.dash { color: #B3B2C2; }
+	.deal { color: #EF6F7E; font-weight: 700; }
+	.was { display: block; font-size: 9pt; color: #8E8CA3; text-decoration: line-through; font-weight: 400; }
+
+	.deal-note { margin-top: 2.5mm; font-size: 10pt; color: #EF6F7E; font-weight: 700; text-align: center; }
+
+	.terms { margin-top: 4.5mm; direction: rtl; text-align: right; font-family: 'Tajawal', 'Inter', 'DejaVu Sans', sans-serif; font-size: 10pt; line-height: 1.6; }
+	.terms .term { margin: 0 0 0.6mm 0; }
+	.terms .lbl { color: #EF6F7E; font-weight: 700; }
+
+	table.foot { margin-top: 5mm; border-collapse: collapse; page-break-inside: avoid; }
+	table.foot td { vertical-align: middle; padding: 0; }
+	table.foot img { display: block; width: 17mm; }
+	table.foot .tag { padding-left: 3mm; color: #EF6F7E; font-size: 10pt; }
+</style>
+</head>
+<body>
+<div class="page">
+	<div class="logotype"><span class="bar coral"></span><span class="brand">Jarz</span><span class="bar slate"></span></div>
+	<div class="title"><span>{{ heading|e }}</span></div>
+
+	<div class="band">
+		{%- if customer_name -%}Prepared for {{ customer_name|e }}<span class="sep">&bull;</span>{%- endif -%}
+		Prices as of {{ as_of_text|e }}
+	</div>
+
+	<table class="grid">
+		<thead>
+			<tr>
+				<th class="prod">Product</th>
+				{%- for size in sizes %}<th class="size">{{ size|e }}</th>{% endfor %}
+			</tr>
+		</thead>
+		<tbody>
+			{%- for row in rows %}
+			<tr>
+				<td>{{ row.label|e }}</td>
+				{%- for cell in row.cells %}
+				<td class="price">
+					{%- if cell.empty -%}<span class="dash">&mdash;</span>
+					{%- elif cell.is_deal -%}<span class="deal">{{ cell.text|e }}</span>{%- if cell.was %}<span class="was">{{ cell.was|e }}</span>{% endif -%}
+					{%- else -%}{{ cell.amount|e }} <span class="cur">{{ cell.currency|e }}</span>{%- endif -%}
+				</td>
+				{%- endfor %}
+			</tr>
+			{%- endfor %}
+		</tbody>
+	</table>
+	{%- if deal_until_text %}
+	<div class="deal-note">Special prices valid until {{ deal_until_text|e }}</div>
+	{%- endif %}
+
+	{%- if terms %}
+	<div class="terms" dir="rtl">
+		{%- for term in terms %}
+		<p class="term">{% if term.label %}<span class="lbl">{{ term.label|e }}:</span> {% endif %}{{ term.text|e }}</p>
+		{%- endfor %}
+	</div>
+	{%- endif %}
+
+	<table class="foot">
+		<tr>
+			<td><img src="{{ logo }}" alt=""></td>
+			<td class="tag">{{ footer|e }}</td>
+		</tr>
+	</table>
+</div>
+</body>
+</html>

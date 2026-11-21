@@ -7,7 +7,8 @@
  "field_order": [
   "material",
   "title",
-  "material_type"
+  "material_type",
+  "snapshot"
  ],
  "fields": [
   {
@@ -33,12 +34,19 @@
    "fieldtype": "Data",
    "in_list_view": 1,
    "label": "Type"
+  },
+  {
+   "description": "Digest of the generated price sheet this share serves. Blank for an uploaded file.",
+   "fieldname": "snapshot",
+   "fieldtype": "Data",
+   "label": "Snapshot",
+   "read_only": 1
   }
  ],
  "index_web_pages_for_search": 0,
  "istable": 1,
  "links": [],
- "modified": "2026-08-26 00:00:00.000000",
+ "modified": "2026-11-21 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "jarz pos",
  "name": "Jarz Material Share Item",

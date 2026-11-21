@@ -13,9 +13,21 @@
   "enabled",
   "is_default",
   "sort_order",
+  "source_type",
   "section_break_file",
   "attachment",
   "description",
+  "section_break_sheet",
+  "sheet_heading",
+  "sheet_price_list",
+  "sheet_sizes",
+  "column_break_sheet",
+  "sheet_show_deals",
+  "sheet_footer",
+  "sheet_logo",
+  "section_break_sheet_content",
+  "sheet_terms",
+  "sheet_rows",
   "section_break_render",
   "render_status",
   "page_count",
@@ -74,16 +86,28 @@
    "label": "Sort Order"
   },
   {
-   "fieldname": "section_break_file",
-   "fieldtype": "Section Break",
-   "label": "File"
+   "default": "Uploaded File",
+   "description": "Generated Price List: built fresh from live prices every time it is sent, for the customer it is sent to. Uploaded File: a PDF or image you attach.",
+   "fieldname": "source_type",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Source",
+   "options": "Uploaded File\nGenerated Price List"
   },
   {
-   "description": "PDF or image. The file is published (made non-private) on save, because a customer opening the link is an anonymous visitor.",
+   "fieldname": "section_break_file",
+   "fieldtype": "Section Break",
+   "label": "File",
+   "depends_on": "eval:doc.source_type!='Generated Price List'"
+  },
+  {
+   "description": "PDF or image. The file is published (made non-private) on save, because a customer opening the link is an anonymous visitor. Not used by a generated price list.",
    "fieldname": "attachment",
    "fieldtype": "Attach",
    "label": "File",
-   "reqd": 1
+   "mandatory_depends_on": "eval:doc.source_type=='Uploaded File'",
+   "depends_on": "eval:doc.source_type!='Generated Price List'"
   },
   {
    "fieldname": "description",
@@ -91,10 +115,80 @@
    "label": "Internal Note"
   },
   {
+   "depends_on": "eval:doc.source_type=='Generated Price List'",
+   "fieldname": "section_break_sheet",
+   "fieldtype": "Section Break",
+   "label": "Price sheet"
+  },
+  {
+   "default": "Price List",
+   "description": "Printed under the Jarz logotype at the top of the sheet.",
+   "fieldname": "sheet_heading",
+   "fieldtype": "Data",
+   "label": "Heading"
+  },
+  {
+   "description": "Leave blank to price each customer from their own B2B price list (a lead or an unknown customer gets 'B2B Selling').",
+   "fieldname": "sheet_price_list",
+   "fieldtype": "Link",
+   "label": "Price List",
+   "options": "Price List"
+  },
+  {
+   "default": "Medium,Large",
+   "description": "Comma separated Item Group names, in column order. A row is priced from the item named \"<flavour> <size>\".",
+   "fieldname": "sheet_sizes",
+   "fieldtype": "Data",
+   "label": "Sizes (Item Groups)"
+  },
+  {
+   "fieldname": "column_break_sheet",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "1",
+   "description": "When the customer has a running deal, print the deal price and its end date.",
+   "fieldname": "sheet_show_deals",
+   "fieldtype": "Check",
+   "label": "Show Customer Deals"
+  },
+  {
+   "default": "More Than Just a Jar",
+   "fieldname": "sheet_footer",
+   "fieldtype": "Data",
+   "label": "Footer Text"
+  },
+  {
+   "description": "Blank uses the bundled Jarz logo.",
+   "fieldname": "sheet_logo",
+   "fieldtype": "Attach Image",
+   "label": "Logo"
+  },
+  {
+   "depends_on": "eval:doc.source_type=='Generated Price List'",
+   "fieldname": "section_break_sheet_content",
+   "fieldtype": "Section Break",
+   "label": "Rows and terms"
+  },
+  {
+   "description": "One term per line. \"Label: text\" prints the label highlighted. Rendered right to left (Arabic).",
+   "fieldname": "sheet_terms",
+   "fieldtype": "Long Text",
+   "label": "Terms"
+  },
+  {
+   "description": "Row order is print order. The flavour is the item-name stem: \"Strawberry\" prices \"Strawberry Medium\".",
+   "fieldname": "sheet_rows",
+   "fieldtype": "Table",
+   "label": "Flavours",
+   "options": "Jarz Sales Material Row"
+  },
+  {
    "collapsible": 1,
    "fieldname": "section_break_render",
    "fieldtype": "Section Break",
-   "label": "Rendering"
+   "label": "Rendering",
+   "depends_on": "eval:doc.source_type!='Generated Price List'"
   },
   {
    "default": "Pending",
@@ -138,7 +232,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-08-26 00:00:00.000000",
+ "modified": "2026-11-21 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "jarz pos",
  "name": "Jarz Sales Material",

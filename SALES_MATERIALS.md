@@ -46,6 +46,90 @@ Edit the same record and attach the new file. The content hash changes, the
 old renders are swept, and every link minted afterwards serves the new pixels.
 Do **not** create a second record unless you want both sendable at once.
 
+## Generated price list
+
+The owner's Canva price list, rebuilt from live prices every time it is sent.
+A material whose **Source** is *Generated Price List* has no file: when a rep
+sends it, the backend prices the sheet for **that recipient**, prints it to a
+PDF, rasterises it into the same three JPEG tiers as any other material, and
+stores the result as a **snapshot** on the share. The customer's page is
+unchanged (same payload, same viewer); the Download button gets the PDF.
+
+Feature: `b2b-price-sheet`. Code: `services/price_sheet.py`,
+`api/price_sheet.py`, `templates/price_sheet/price_sheet.html`,
+`setup/price_sheet_setup.py`.
+
+### What a manager edits
+
+Open the material in Desk (or the app's template editor):
+
+| Field | Meaning |
+|---|---|
+| Heading | The title under the Jarz logotype ("Price List"). |
+| Price List | Blank prices each customer from their own B2B list; a lead or an unknown customer gets `B2B Selling`. |
+| Sizes | Comma list of **Item Group** names, in column order (`Medium,Large`). |
+| Show Customer Deals | Print a running deal's price (see below). |
+| Flavours (rows) | `flavour` is the item-name stem: `Strawberry` prices the items `Strawberry Medium` and `Strawberry Large`. `label` is what the customer reads; blank prints the flavour. Row order is print order; untick *Enabled* to hide a row. |
+| Terms | One per line, Arabic, printed right to left. `Label: text` (first colon) prints the label highlighted in coral. |
+| Footer, Logo | Text beside the logo; a custom logo replaces the bundled one. |
+
+A new migrate seeds **Jarz B2B Price List** (8 flavours, Medium/Large, the seven
+terms) once. The seeder does nothing if *any* generated material exists, so a
+rename or a delete is never undone.
+
+### How a cell is priced
+
+Every cell calls `invoice_creation._resolve_item_rate_with_provenance`, the
+same resolver an invoice uses, so the sheet cannot promise a number the order
+will not book. There is no second resolver.
+
+- Item missing or disabled, or the resolver found nothing (provenance
+  `client`): the cell is a dash. A row whose cells are all dashes is dropped.
+- Provenance `deal` (the customer has a running **Jarz Customer Deal**): the
+  cell shows the deal price in coral with the normal price struck through, and
+  one line under the table says "Special prices valid until <date>". With
+  several deals the date is the **earliest** end date, so the line is true of
+  every deal price above it.
+- A Lead or Opportunity that has converted prices as its Customer; one that has
+  not has no deal and gets the base list.
+
+### Snapshots: the link keeps the prices it was minted with
+
+`create_material_share` builds the sheet synchronously (before the share row
+exists) and stores its digest on the share item (`Jarz Material Share Item.
+snapshot`). `get_public_share` serves those pages, never today's prices, so a
+link forwarded to a partner next week still shows what the rep sent. If the
+build fails, `create_material_share` throws "Could not build the price sheet"
+and no link is minted.
+
+The digest is `sha256` over everything the page prints plus a render version
+and the logo's content hash; identical sheets share one directory. Files live
+in `public/files/jarz_price_sheets/<digest>/` (`price-list.pdf`, `p0-*.jpg`,
+`manifest.json`), a **separate root** from `jarz_materials` because
+`_sweep_stale_digests` there deletes everything but a material's newest digest,
+which would break links already sent. Nothing sweeps this root; a sheet is
+~300 KB. The digest includes the template file's content hash, so editing the
+HTML re-renders; bump `RENDER_VERSION` for Python-side changes (print options,
+fonts, rasteriser).
+
+### PDF engine gotchas
+
+- `frappe.utils.pdf.get_pdf` always passes `--disable-local-file-access`, so
+  fonts and the logo are embedded as **base64 data URIs** in the HTML. A
+  `file://` reference silently prints in DejaVu with no logo. Fonts live in
+  `public/fonts` (Inter, Tajawal, DM Serif Display); the servers have only
+  DejaVu installed.
+- wkhtmltopdf 0.12.6 is Qt 4.8 WebKit: no flexbox, no grid, no `gap`. The
+  template is tables and inline-blocks. Print a real PDF after touching it.
+
+### API (staff)
+
+`api.materials.get_sales_materials` marks generated items (`generated`,
+`source_type`, `ready: true`, `download_url: null`) and returns
+`can_edit_sheets`. `api.price_sheet.preview_price_sheet` (B2B access),
+`get_price_sheet_template` (pricing read), `save_price_sheet_template`
+(**full manager only**, POST; `rows` is a full replacement).
+
 ## Why the page serves images, not the PDF
 
 Mobile browsers treat an inline PDF as somebody else's problem: Android Chrome

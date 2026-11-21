@@ -33,6 +33,7 @@ from frappe.utils import cint, now_datetime
 
 from jarz_pos.api.crm import _ensure_b2b_access
 from jarz_pos.services import materials as materials_service
+from jarz_pos.services import price_sheet as price_sheet_service
 from jarz_pos.utils.phone import whatsapp_msisdn
 
 try:  # pragma: no cover - import shape depends on the Frappe build
@@ -71,6 +72,7 @@ _MATERIAL_FIELDS = (
 	"sort_order",
 	"page_count",
 	"render_status",
+	"source_type",
 )
 
 
@@ -156,6 +158,22 @@ def _ensure_reference(reference_doctype: str, reference_name: str) -> None:
 		frappe.throw(f"{reference_doctype} '{reference_name}' not found.")
 
 
+def _is_generated(row: Any) -> bool:
+	return (row.get("source_type") or "") == price_sheet_service.SOURCE_GENERATED
+
+
+def _can_edit_sheets() -> bool:
+	"""Full manager pricing access -- may open the price-sheet template editor.
+
+	Imported lazily: ``api.pos`` is far too heavy to drag in at import time for
+	every guest hit on the share page.
+	"""
+	from jarz_pos.api.crm import _can_access_b2b
+	from jarz_pos.api.pos import _has_manager_pricing_access
+
+	return bool(_has_manager_pricing_access() and _can_access_b2b())
+
+
 def _display_title(row: Any) -> str:
 	"""English title, falling back to the Arabic one.
 
@@ -185,7 +203,9 @@ def get_sales_materials(include_disabled: Any = 0) -> dict[str, Any]:
 	round trip, not two.
 
 	Returns ``{"materials": [...], "message_template": str,
-	"name_placeholder": str, "link_placeholder": str, "name_fallback": str}``.
+	"name_placeholder": str, "link_placeholder": str, "name_fallback": str,
+	"can_edit_sheets": bool}``. A generated price list is always ``ready`` (its
+	pages are built per send), has no ``download_url`` and counts as one page.
 	The placeholders are returned rather than hard-coded in the app so the
 	substitution contract has exactly one definition.
 	"""
@@ -210,21 +230,29 @@ def get_sales_materials(include_disabled: Any = 0) -> dict[str, Any]:
 		_logger().error("get_sales_materials failed", exc_info=True)
 		rows = []
 
-	materials = [
-		{
-			"name": row.name,
-			"title": row.title,
-			"title_ar": row.title_ar,
-			"display_title": _display_title(row),
-			"material_type": row.material_type,
-			"download_url": row.attachment,
-			"is_default": bool(row.is_default),
-			"page_count": cint(row.page_count),
-			"ready": row.render_status
-			in (materials_service.RENDER_READY, materials_service.RENDER_DOWNLOAD_ONLY),
-		}
-		for row in rows
-	]
+	materials = []
+	for row in rows:
+		generated = _is_generated(row)
+		materials.append(
+			{
+				"name": row.name,
+				"title": row.title,
+				"title_ar": row.title_ar,
+				"display_title": _display_title(row),
+				"material_type": row.material_type,
+				"download_url": None if generated else row.attachment,
+				"is_default": bool(row.is_default),
+				"page_count": 1 if generated else cint(row.page_count),
+				"ready": True
+				if generated
+				else row.render_status
+				in (materials_service.RENDER_READY, materials_service.RENDER_DOWNLOAD_ONLY),
+				"source_type": price_sheet_service.SOURCE_GENERATED
+				if generated
+				else price_sheet_service.SOURCE_UPLOADED,
+				"generated": generated,
+			}
+		)
 
 	return {
 		"materials": materials,
@@ -232,6 +260,7 @@ def get_sales_materials(include_disabled: Any = 0) -> dict[str, Any]:
 		"name_placeholder": materials_service.NAME_PLACEHOLDER,
 		"link_placeholder": materials_service.LINK_PLACEHOLDER,
 		"name_fallback": materials_service.NAME_FALLBACK,
+		"can_edit_sheets": _can_edit_sheets(),
 	}
 
 
@@ -270,13 +299,29 @@ def create_material_share(
 	rows = frappe.get_all(
 		MATERIAL_DOCTYPE,
 		filters={"name": ["in", names], "enabled": 1},
-		fields=["name", "title", "title_ar", "material_type", "render_status"],
+		fields=["name", "title", "title_ar", "material_type", "render_status", "source_type"],
 		limit_page_length=0,
 	)
 	found = {row.name: row for row in rows}
 	missing = [name for name in names if name not in found]
 	if missing:
 		frappe.throw("These materials are unavailable: " + ", ".join(missing))
+
+	# Generated price lists are built NOW, for this recipient, BEFORE the share
+	# row exists. Order matters twice: a build failure must not leave behind a
+	# share whose link opens an empty page, and the snapshot digest has to be
+	# on the item the moment the row is inserted (see get_public_share).
+	snapshots: dict[str, str] = {}
+	for name in names:
+		if not _is_generated(found[name]):
+			continue
+		try:
+			snapshots[name] = price_sheet_service.ensure_snapshot(name, reference_doctype, reference_name)[
+				"digest"
+			]
+		except Exception as exc:
+			_logger().error(f"price sheet build failed for {name}", exc_info=True)
+			frappe.throw(f"Could not build the price sheet: {exc}")
 
 	doc = frappe.get_doc(
 		{
@@ -293,6 +338,7 @@ def create_material_share(
 					"material": name,
 					"title": found[name].title,
 					"material_type": found[name].material_type,
+					"snapshot": snapshots.get(name),
 				}
 				for name in names
 			],
@@ -313,7 +359,8 @@ def create_material_share(
 	pending = [
 		name
 		for name in names
-		if found[name].render_status
+		if not _is_generated(found[name])
+		and found[name].render_status
 		not in (materials_service.RENDER_READY, materials_service.RENDER_DOWNLOAD_ONLY)
 	]
 	for name in pending:
@@ -456,6 +503,12 @@ def rebuild_material(name: str) -> dict[str, Any]:
 	frappe.has_permission(MATERIAL_DOCTYPE, ptype="write", throw=True)
 	if not frappe.db.exists(MATERIAL_DOCTYPE, name):
 		frappe.throw(f"Material '{name}' not found.")
+	if (
+		frappe.db.get_value(MATERIAL_DOCTYPE, name, "source_type") or ""
+	) == price_sheet_service.SOURCE_GENERATED:
+		# Nothing to rebuild: a generated sheet is rendered per send, from live
+		# prices, and a stored snapshot is by design never rewritten.
+		return {"ok": True, "pages": 1, "status": materials_service.RENDER_READY}
 	manifest = materials_service.build_derivatives(name, force=True)
 	return {
 		"ok": True,
@@ -542,6 +595,22 @@ def _resolve_public_share(token: str | None, client: dict[str, Any] | None = Non
 		if not material or not material.enabled:
 			# A material pulled from the library disappears from links already
 			# sent, rather than 404-ing the whole page.
+			continue
+		snapshot_digest = (getattr(row, "snapshot", None) or "").strip()
+		if snapshot_digest:
+			# A generated price list: serve the exact pages minted with this
+			# link, never today's prices. A snapshot gone from disk drops the
+			# item (like a pulled material) rather than silently re-pricing it.
+			stored = price_sheet_service.load_snapshot(snapshot_digest)
+			if stored:
+				items.append(
+					{
+						"title": _display_title(material),
+						"type": material.material_type,
+						"download_url": stored["pdf_url"],
+						"pages": stored["pages"],
+					}
+				)
 			continue
 		manifest = materials_service.manifest_for(material.name)
 		pages = [

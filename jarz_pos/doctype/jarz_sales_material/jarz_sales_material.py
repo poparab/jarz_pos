@@ -28,21 +28,38 @@ import frappe
 from frappe.model.document import Document
 
 from jarz_pos.services import materials as materials_service
+from jarz_pos.services import price_sheet as price_sheet_service
 
 
 class JarzSalesMaterial(Document):
 	"""A price list / photo set / catalogue available to send to a lead."""
+
+	@property
+	def is_generated(self) -> bool:
+		return (self.get("source_type") or "") == price_sheet_service.SOURCE_GENERATED
 
 	def validate(self):
 		self.title = (self.title or "").strip()
 		if not self.title:
 			frappe.throw("Title is required.")
 		self.title_ar = (self.title_ar or "").strip() or None
+		if self.is_generated:
+			# A generated price list has no file: its pages are built per send.
+			# There is nothing for the rasteriser to do, so the record is born
+			# "Ready" instead of sitting at "Pending" forever.
+			price_sheet_service.validate_sheet_config(self)
+			self.render_status = materials_service.RENDER_READY
+			self.page_count = 1
+			return
 		if not (self.attachment or "").strip():
 			frappe.throw("Attach the price list or photo file.")
 		self._publish_attachment()
 
 	def on_update(self):
+		if self.is_generated:
+			# No attachment, so no rasteriser job: ``build_derivatives`` would
+			# throw "This material has no attached file" on every save.
+			return
 		previous = self.get_doc_before_save()
 		changed = previous is None or (previous.attachment or "") != (self.attachment or "")
 		if changed:

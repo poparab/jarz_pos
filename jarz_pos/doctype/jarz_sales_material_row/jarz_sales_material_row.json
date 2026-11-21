@@ -1,0 +1,51 @@
+{
+ "actions": [],
+ "creation": "2026-11-21 00:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "flavour",
+  "label",
+  "enabled"
+ ],
+ "fields": [
+  {
+   "columns": 3,
+   "description": "The item-name stem. \"Strawberry\" prices the items \"Strawberry Medium\", \"Strawberry Large\"...",
+   "fieldname": "flavour",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Flavour",
+   "reqd": 1
+  },
+  {
+   "columns": 5,
+   "description": "What the customer reads on that row. Blank prints the flavour.",
+   "fieldname": "label",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Printed Name"
+  },
+  {
+   "columns": 1,
+   "default": "1",
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Enabled"
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "istable": 1,
+ "links": [],
+ "modified": "2026-11-21 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "jarz pos",
+ "name": "Jarz Sales Material Row",
+ "owner": "Administrator",
+ "permissions": [],
+ "sort_field": "idx",
+ "sort_order": "ASC",
+ "states": []
+}

@@ -228,6 +228,11 @@ after_migrate = [
 	# Task Board: seed the full-access list with the owner account, only while
 	# the list is empty and only if that User exists. Create-only, never raises.
 	"jarz_pos.setup.task_board_setup.ensure_task_board_settings",
+	# The generated B2B price list (Sales Material of source type "Generated
+	# Price List"): eight flavours x Medium/Large and the Arabic terms, as in the
+	# owner's Canva PDF. Create-only — does nothing once ANY generated material
+	# exists, so a rename or a delete by a manager is never undone. Never raises.
+	"jarz_pos.setup.price_sheet_setup.ensure_price_sheet_material",
 ]
 
 # Apps

@@ -472,6 +472,11 @@ jobs:
             # reason this must be in CI: a wrong country code does not error,
             # it opens a chat with a different real person.
             test_materials_share
+            # Generated B2B price sheet: a cell is a real price or nothing (never
+            # the resolver's 0.0 "client" fallback), a deal prints as a deal with the
+            # EARLIEST end date, the digest is stable, a share keeps the prices it was
+            # minted with, and a build failure never yields a link.
+            test_price_sheet
             # Payment receipt screenshots. The re-upload/remove cases are the
             # reason this must be in CI: the only thing separating "swap the
             # wrong screenshot" from "erase a confirmed one" is the status
