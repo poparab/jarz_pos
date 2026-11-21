@@ -772,8 +772,6 @@ def _reconcile_counts(
 		sr.posting_date = today()
 	sr.set_posting_time = 1
 	sr.purpose = "Stock Reconciliation"
-	if remarks:
-		sr.remarks = remarks
 	# Ensure accounting defaults to avoid validation failures on some sites
 	if sr.company:
 		comp = frappe.get_all(
@@ -916,6 +914,10 @@ def _reconcile_counts(
 		sr.insert()
 		sr.flags.ignore_permissions = True
 		sr.submit()
+		if remarks:
+			# Stock Reconciliation has no remarks field: the note goes on the
+			# document's timeline, where Desk shows it beside the count.
+			sr.add_comment("Comment", remarks)
 	except Exception as e:
 		tb = _safe_log("jarz_pos.submit_reconciliation")
 		if debug:
