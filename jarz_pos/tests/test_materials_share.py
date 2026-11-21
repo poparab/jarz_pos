@@ -78,6 +78,11 @@ class TestMessageRendering(unittest.TestCase):
 		self.assertIn(self.materials.NAME_PLACEHOLDER, template)
 		self.assertIn(self.materials.LINK_PLACEHOLDER, template)
 
+	def test_default_template_spells_the_brand_in_arabic(self):
+		template = self.materials.default_message_template()
+		self.assertIn("جارز", template)
+		self.assertNotIn("چارز", template)
+
 	def test_placeholders_are_filled(self):
 		text = self.materials.render_message(self.materials.default_message_template(), self.URL, "Ahmed")
 		self.assertIn(self.URL, text)

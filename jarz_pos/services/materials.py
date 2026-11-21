@@ -548,9 +548,11 @@ NAME_FALLBACK = "بحضرتك"
 def default_message_template() -> str:
 	"""The Arabic message the rep sends, before the placeholders are filled.
 
-	Arabic-first because the reader is an Egyptian cafe owner, and phrased to do
-	one job the bare link cannot: say that it opens in the browser, so it is not
-	mistaken for a download they have no space for.
+	Arabic-first because the reader is an Egyptian cafe or company owner. Written
+	as a short, warm business note (rewritten 2026-11-21 at the owner's request):
+	thank them, say what the one link holds, and end on an invitation to reply,
+	because the reply is what turns a sent price list into an order. The brand is
+	spelled «جارز», never «چارز».
 
 	Returned as a *template* rather than finished text because the app shows it
 	in an editable box before sending, and the URL does not exist until the
@@ -561,11 +563,11 @@ def default_message_template() -> str:
 	return "\n".join(
 		[
 			f"أهلاً {NAME_PLACEHOLDER} 👋",
-			"معاك فريق چارز.",
-			"ده لينك قائمة الأسعار وصور المنتجات:",
+			"شكراً لاهتمامك بجارز 🤍",
+			"جهّزنالك كل اللي محتاجه في لينك واحد، قائمة الأسعار وصور النكهات:",
 			LINK_PLACEHOLDER,
 			"",
-			"بيفتح على الموبايل على طول من غير تحميل، وتقدر تكبّر بصباعك تشوف التفاصيل.",
+			"لو حابب تطلب أو عندك أي سؤال، ابعتلي هنا وهرد عليك على طول 🙏",
 		]
 	)
 
