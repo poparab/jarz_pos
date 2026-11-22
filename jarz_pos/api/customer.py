@@ -6,6 +6,7 @@ from frappe import _
 from frappe.model.document import Document
 from frappe.utils import flt
 
+from jarz_pos.utils import customer_identity
 from jarz_pos.utils.customer_address_utils import (
 	ADDRESS_PHONE_FIELDS,
 	_address_phone,
@@ -22,7 +23,7 @@ from jarz_pos.utils.customer_address_utils import (
 	get_customer_shipping_addresses as _get_customer_shipping_addresses,
 )
 from jarz_pos.utils.invoice_utils import resolve_address_territory
-from jarz_pos.utils.phone import phone_search_terms, phone_variants
+from jarz_pos.utils.phone import normalize_phone, phone_search_terms, phone_variants
 
 # ---------------------------------------------------------------------------
 # Door pin (COURIER_CONTRACTS §3, §4, §10a)
@@ -756,29 +757,11 @@ def get_recent_customers(limit=10):
 		return []
 
 
-@frappe.whitelist()
-def search_customers(name=None, phone=None, customer_type=None):
-	"""Enhanced search for customers by name or phone using direct SQL.
-
-	Optional ``customer_type`` ("Individual" | "Company") restricts results to that
-	customer type — used to keep Company customers in the B2B flow and out of B2C.
-	Default None leaves results unchanged (all types).
-
-	The type filter applies to the **name** match only. A phone number identifies
-	one subscriber, and ``create_customer`` blocks a duplicate mobile across every
-	customer_type; filtering a phone search by type therefore hid the very record
-	the create-guard rejects on (a staff "Employee"/Company account holding that
-	number), leaving the operator with an unexplainable error and no way to find
-	the record. Name browsing keeps the filter so Company/B2B accounts stay out of
-	the B2C name lists.
-
-	When both ``name`` and ``phone`` are supplied the two match groups are ORed —
-	previously ``phone`` was silently ignored whenever a name was also passed.
-	"""
-
-	if not name and not phone:
-		return []
-
+def _customer_search_fields() -> tuple[list[str], bool]:
+	"""The ``tabCustomer`` columns a customer search row carries, and whether the
+	credit column is among them. Shared by ``search_customers`` and
+	``check_customer_duplicates`` so a duplicate match can be selected in the POS
+	exactly like a search result."""
 	# Base fields available on the Customer doctype
 	fields_to_select = [
 		"`name`",
@@ -803,6 +786,98 @@ def search_customers(name=None, phone=None, customer_type=None):
 	has_credit_column = frappe.db.has_column("Customer", "custom_credit_allowed")
 	if has_credit_column:
 		fields_to_select.append("`custom_credit_allowed`")
+	return fields_to_select, has_credit_column
+
+
+def _customer_phone_condition(
+	terms: list[str],
+	params: dict,
+	*,
+	key_prefix: str = "phone_term",
+	include_addresses: bool = False,
+) -> str:
+	"""SQL condition over ``tabCustomer`` (unaliased) matching any of *terms*
+	(``LIKE %term%``) on the Customer's own mobile/phone and on its linked
+	Contacts. Binds the terms into *params* as ``<key_prefix>_<i>``.
+
+	``include_addresses`` also matches the phone columns of Addresses linked to
+	the Customer (duplicate check only; ``search_customers`` keeps its old SQL).
+	"""
+	phone_fields = ["mobile_no"]
+	if frappe.db.has_column("Customer", "phone"):
+		phone_fields.append("phone")
+	address_fields = (
+		[f for f in ADDRESS_PHONE_FIELDS if frappe.db.has_column("Address", f)] if include_addresses else []
+	)
+	phone_conditions = []
+	contact_conditions = []
+	address_conditions = []
+	for term_index, term in enumerate(terms):
+		param_key = f"{key_prefix}_{term_index}"
+		params[param_key] = f"%{term}%"
+		for fieldname in phone_fields:
+			phone_conditions.append(f"`{fieldname}` LIKE %({param_key})s")
+		contact_conditions.extend(
+			(
+				f"co.`mobile_no` LIKE %({param_key})s",
+				f"co.`phone` LIKE %({param_key})s",
+				f"cp.`phone` LIKE %({param_key})s",
+			)
+		)
+		for fieldname in address_fields:
+			address_conditions.append(f"ad.`{fieldname}` LIKE %({param_key})s")
+	# Also match a number held only on the customer's linked Contact (its
+	# mobile/phone or any Contact Phone row). create_customer blocks on
+	# Contact.mobile_no, so a search that reads only Customer.mobile_no hid the
+	# very record the create-guard rejects on. Production, 2026-11-18: Woo
+	# order 21955 created "Sama - 4" with Customer.mobile_no 01550999123 and
+	# Contact 01117220850; searching 01117220850 found nothing, and creating
+	# the customer was refused 5 times. 1,628 contacts had a number that no
+	# Customer.mobile_no carried.
+	phone_conditions.append(
+		"`name` IN ("
+		"SELECT dl.`link_name` FROM `tabDynamic Link` dl"
+		" JOIN `tabContact` co ON co.`name` = dl.`parent`"
+		" LEFT JOIN `tabContact Phone` cp ON cp.`parent` = co.`name`"
+		" AND cp.`parenttype` = 'Contact'"
+		" WHERE dl.`parenttype` = 'Contact' AND dl.`link_doctype` = 'Customer'"
+		f" AND ({' OR '.join(contact_conditions)}))"
+	)
+	if address_conditions:
+		phone_conditions.append(
+			"`name` IN ("
+			"SELECT adl.`link_name` FROM `tabDynamic Link` adl"
+			" JOIN `tabAddress` ad ON ad.`name` = adl.`parent`"
+			" WHERE adl.`parenttype` = 'Address' AND adl.`link_doctype` = 'Customer'"
+			f" AND ({' OR '.join(address_conditions)}))"
+		)
+	return f"({' OR '.join(phone_conditions)})"
+
+
+@frappe.whitelist()
+def search_customers(name=None, phone=None, customer_type=None):
+	"""Enhanced search for customers by name or phone using direct SQL.
+
+	Optional ``customer_type`` ("Individual" | "Company") restricts results to that
+	customer type — used to keep Company customers in the B2B flow and out of B2C.
+	Default None leaves results unchanged (all types).
+
+	The type filter applies to the **name** match only. A phone number identifies
+	one subscriber, and ``create_customer`` blocks a duplicate mobile across every
+	customer_type; filtering a phone search by type therefore hid the very record
+	the create-guard rejects on (a staff "Employee"/Company account holding that
+	number), leaving the operator with an unexplainable error and no way to find
+	the record. Name browsing keeps the filter so Company/B2B accounts stay out of
+	the B2C name lists.
+
+	When both ``name`` and ``phone`` are supplied the two match groups are ORed —
+	previously ``phone`` was silently ignored whenever a name was also passed.
+	"""
+
+	if not name and not phone:
+		return []
+
+	fields_to_select, has_credit_column = _customer_search_fields()
 
 	# nosemgrep: frappe-sql-format-injection -- fixed column list and generated bound-parameter conditions; user text only enters via %(name)s params
 	query = f"SELECT {', '.join(fields_to_select)} FROM `tabCustomer` WHERE "
@@ -820,41 +895,7 @@ def search_customers(name=None, phone=None, customer_type=None):
 		# Match every stored spelling of the number. A search for 01111034268 has
 		# to surface a record stored as +201111034268 — otherwise the operator
 		# cannot see the customer they already have and creates a second one.
-		phone_fields = ["mobile_no"]
-		if frappe.db.has_column("Customer", "phone"):
-			phone_fields.append("phone")
-		phone_conditions = []
-		contact_conditions = []
-		for term_index, term in enumerate(phone_search_terms(phone) or [phone]):
-			param_key = f"phone_term_{term_index}"
-			params[param_key] = f"%{term}%"
-			for fieldname in phone_fields:
-				phone_conditions.append(f"`{fieldname}` LIKE %({param_key})s")
-			contact_conditions.extend(
-				(
-					f"co.`mobile_no` LIKE %({param_key})s",
-					f"co.`phone` LIKE %({param_key})s",
-					f"cp.`phone` LIKE %({param_key})s",
-				)
-			)
-		# Also match a number held only on the customer's linked Contact (its
-		# mobile/phone or any Contact Phone row). create_customer blocks on
-		# Contact.mobile_no, so a search that reads only Customer.mobile_no hid the
-		# very record the create-guard rejects on. Production, 2026-11-18: Woo
-		# order 21955 created "Sama - 4" with Customer.mobile_no 01550999123 and
-		# Contact 01117220850; searching 01117220850 found nothing, and creating
-		# the customer was refused 5 times. 1,628 contacts had a number that no
-		# Customer.mobile_no carried.
-		phone_conditions.append(
-			"`name` IN ("
-			"SELECT dl.`link_name` FROM `tabDynamic Link` dl"
-			" JOIN `tabContact` co ON co.`name` = dl.`parent`"
-			" LEFT JOIN `tabContact Phone` cp ON cp.`parent` = co.`name`"
-			" AND cp.`parenttype` = 'Contact'"
-			" WHERE dl.`parenttype` = 'Contact' AND dl.`link_doctype` = 'Customer'"
-			f" AND ({' OR '.join(contact_conditions)}))"
-		)
-		phone_condition = f"({' OR '.join(phone_conditions)})"
+		phone_condition = _customer_phone_condition(phone_search_terms(phone) or [phone], params)
 		frappe.logger().info(f"Searching customers by phone: {phone}")
 
 	# Optional customer_type filter (parameterized). Validated for BOTH search
@@ -1192,6 +1233,16 @@ def create_customer(
 				"Missing required parameters: customer_name, mobile_no, customer_primary_address, territory_id"
 			)
 
+		# A name with no letters ("...", "-", "123", "؟؟") is not a name. Production
+		# 2026-11-22: Woo order 22309 went onto a new customer named "..." although
+		# the person already existed, and nobody could find that record by name.
+		# Every create path (POS, chat, B2B lead conversion) goes through here.
+		if customer_identity.is_invalid_customer_name(customer_name):
+			frappe.throw(
+				f"Customer name '{str(customer_name).strip()}' has no letters. "
+				"Enter the customer's real name (Arabic or English)."
+			)
+
 		valid_source_lead = False
 		existing_source_address_name = None
 		if source_lead:
@@ -1451,6 +1502,223 @@ def create_customer(
 	except Exception as e:
 		frappe.log_error(f"Error creating customer: {e!s}")
 		frappe.throw(f"Failed to create customer: {e!s}")
+
+
+# ---------------------------------------------------------------------------
+# Likely-duplicate warning before create (Woo order 22309, 2026-11-22)
+# ---------------------------------------------------------------------------
+
+DUPLICATE_MATCH_LIMIT = 5
+DUPLICATE_PHONE_MIN_DIGITS = 8
+DUPLICATE_ADDRESS_CANDIDATES = 300
+
+
+def _dup_log(message: str) -> None:
+	"""``frappe.log_error`` that cannot raise. On v16 log_error itself can throw
+	(capture_exception reads System Settings outside its own try), which would
+	turn the duplicate check's "never throws" contract into a 500."""
+	try:
+		frappe.log_error(message, frappe.get_traceback())
+	except Exception:
+		pass
+
+
+def _duplicate_phone_terms(phone) -> list[str]:
+	"""LIKE terms for one supplied number, or [] for a blank / partial number.
+
+	Only terms carrying at least ``DUPLICATE_PHONE_MIN_DIGITS`` digits are kept:
+	the warning runs while the operator is still typing, and ``%0100%`` would
+	match half the customer table.
+	"""
+	canonical = normalize_phone(phone)
+	if sum(ch.isdigit() for ch in canonical) < DUPLICATE_PHONE_MIN_DIGITS:
+		return []
+	return [
+		term
+		for term in phone_search_terms(phone)
+		if sum(ch.isdigit() for ch in term) >= DUPLICATE_PHONE_MIN_DIGITS
+	]
+
+
+def _duplicate_customers_by_phone(phone, key_prefix: str) -> list[str]:
+	"""Enabled Customers holding *phone* (any spelling) on the Customer, a linked
+	Contact (mobile/phone/Contact Phone rows) or a linked Address. Never raises."""
+	terms = _duplicate_phone_terms(phone)
+	if not terms:
+		return []
+	try:
+		params: dict = {}
+		condition = _customer_phone_condition(terms, params, key_prefix=key_prefix, include_addresses=True)
+		# nosemgrep: frappe-sql-format-injection -- condition is generated from fixed column names; values are bound params
+		rows = frappe.db.sql(
+			f"SELECT `name` FROM `tabCustomer` WHERE IFNULL(`disabled`, 0) = 0 AND {condition} LIMIT 20",
+			params,
+		)
+		return [row[0] for row in rows or [] if row and row[0]]
+	except Exception as e:
+		_dup_log(f"check_customer_duplicates phone lookup failed: {e}")
+		return []
+
+
+def _duplicate_customers_by_address(address) -> dict[str, str]:
+	"""``{customer: address_line1}`` for enabled Customer addresses that fuzzy-match
+	*address*. Candidates are preselected in SQL (LIKE on the most distinctive
+	tokens, spelling-ambiguous letters wildcarded) and scored in Python with
+	``customer_identity.address_match``. Never raises."""
+	patterns = customer_identity.address_like_patterns(address)
+	if not patterns:
+		return {}
+	try:
+		params: dict = {}
+		text_expr = "CONCAT_WS(' ', ad.`address_line1`, ad.`address_line2`)"
+		likes = []
+		for index, pattern in enumerate(patterns):
+			key = f"addr_like_{index}"
+			params[key] = pattern
+			likes.append(f"({text_expr} LIKE %({key})s)")
+		# Rows hitting more of the distinctive tokens come first, so the LIMIT never
+		# cuts the real duplicate in favour of a district-wide token hit.
+		# nosemgrep: frappe-sql-format-injection -- generated LIKE clauses over fixed columns; values are bound params
+		rows = frappe.db.sql(
+			f"""
+			SELECT ad.`name` AS address, ad.`address_line1`, ad.`address_line2`, dl.`link_name` AS customer
+			FROM `tabAddress` ad
+			JOIN `tabDynamic Link` dl
+				ON dl.`parent` = ad.`name` AND dl.`parenttype` = 'Address' AND dl.`link_doctype` = 'Customer'
+			WHERE IFNULL(ad.`disabled`, 0) = 0 AND ({" OR ".join(likes)})
+			ORDER BY ({" + ".join(likes)}) DESC, ad.`modified` DESC
+			LIMIT {int(DUPLICATE_ADDRESS_CANDIDATES)}
+			""",
+			params,
+			as_dict=True,
+		)
+	except Exception as e:
+		_dup_log(f"check_customer_duplicates address lookup failed: {e}")
+		return {}
+
+	matched: dict[str, str] = {}
+	for row in rows or []:
+		customer = row.get("customer")
+		if not customer or customer in matched:
+			continue
+		line1 = row.get("address_line1")
+		if customer_identity.address_match(
+			address, customer_identity.address_text(line1, row.get("address_line2"))
+		) or customer_identity.address_match(address, line1):
+			matched[customer] = line1
+	return matched
+
+
+def _customer_order_stats(customers: list[str]) -> dict[str, tuple[int, str | None]]:
+	"""``{customer: (submitted_invoice_count, last_posting_date)}``; returns are
+	not orders and are excluded. Never raises."""
+	if not customers:
+		return {}
+	try:
+		rows = frappe.db.sql(
+			"""
+			SELECT `customer`, COUNT(*) AS order_count, MAX(`posting_date`) AS last_order_date
+			FROM `tabSales Invoice`
+			WHERE `customer` IN %(customers)s AND `docstatus` = 1 AND IFNULL(`is_return`, 0) = 0
+			GROUP BY `customer`
+			""",
+			{"customers": tuple(customers)},
+			as_dict=True,
+		)
+	except Exception as e:
+		_dup_log(f"check_customer_duplicates order stats failed: {e}")
+		return {}
+	return {
+		row.get("customer"): (
+			int(row.get("order_count") or 0),
+			str(row.get("last_order_date"))[:10] if row.get("last_order_date") else None,
+		)
+		for row in rows or []
+	}
+
+
+@frappe.whitelist()
+def check_customer_duplicates(customer_name=None, mobile_no=None, secondary_mobile=None, address=None):
+	"""Warn-before-create: existing customers that are probably the same person.
+
+	Called by the POS before ``create_customer`` (which still hard-blocks a
+	repeated *primary* phone). Matches, strongest first:
+
+	* ``phone`` - *mobile_no* (any spelling) on a Customer, its linked Contacts
+	  (mobile/phone/Contact Phone rows) or its linked Addresses;
+	* ``secondary_phone`` - *secondary_mobile*, same places;
+	* ``address`` - fuzzy match of *address* against linked, enabled Addresses;
+	* ``name`` - normalised exact name match, only ever added to a customer
+	  already matched by phone or address (a name alone is too noisy).
+
+	Returns ``{"matches": [...at most 5...], "name_invalid": bool}``. Each match
+	carries the same keys as a ``search_customers`` row plus ``match_reasons``,
+	``matched_address``, ``order_count`` and ``last_order_date``. Never throws on
+	empty or partial input. Same access as ``search_customers`` (any logged-in
+	POS user; read-only).
+	"""
+	name_invalid = customer_identity.is_invalid_customer_name(customer_name)
+	result = {"matches": [], "name_invalid": name_invalid}
+	try:
+		reasons: dict[str, list[str]] = {}
+		matched_address: dict[str, str] = {}
+
+		primary_canonical = normalize_phone(mobile_no)
+		for customer in _duplicate_customers_by_phone(mobile_no, "dup_phone"):
+			reasons.setdefault(customer, []).append(customer_identity.REASON_PHONE)
+		if secondary_mobile and normalize_phone(secondary_mobile) != primary_canonical:
+			for customer in _duplicate_customers_by_phone(secondary_mobile, "dup_secondary"):
+				reasons.setdefault(customer, []).append(customer_identity.REASON_SECONDARY_PHONE)
+		for customer, line1 in _duplicate_customers_by_address(address).items():
+			reasons.setdefault(customer, []).append(customer_identity.REASON_ADDRESS)
+			matched_address[customer] = line1
+
+		if not reasons:
+			return result
+
+		fields_to_select, has_credit_column = _customer_search_fields()
+		# nosemgrep: frappe-sql-format-injection -- fixed column list; names are a bound tuple param
+		rows = frappe.db.sql(
+			f"SELECT {', '.join(fields_to_select)} FROM `tabCustomer`"
+			" WHERE `name` IN %(names)s AND IFNULL(`disabled`, 0) = 0",
+			{"names": tuple(reasons)},
+			as_dict=True,
+		)
+		stats = _customer_order_stats([row.get("name") for row in rows or []])
+
+		matches = []
+		for row in rows or []:
+			row_reasons = list(reasons.get(row.get("name")) or [])
+			if customer_identity.names_match(customer_name, row.get("customer_name")):
+				row_reasons.append(customer_identity.REASON_NAME)
+			if not customer_identity.is_reportable(row_reasons):
+				continue
+			order_count, last_order_date = stats.get(row.get("name"), (0, None))
+			match = dict(row)
+			match["match_reasons"] = customer_identity.order_reasons(row_reasons)
+			match["matched_address"] = matched_address.get(row.get("name"))
+			match["order_count"] = order_count
+			match["last_order_date"] = last_order_date
+			match["credit_allowed"] = (
+				bool(int(match.get("custom_credit_allowed") or 0)) if has_credit_column else False
+			)
+			matches.append(match)
+
+		matches.sort(
+			key=lambda m: (
+				customer_identity.match_score(m["match_reasons"]),
+				m["order_count"],
+				m["last_order_date"] or "",
+			),
+			reverse=True,
+		)
+		matches = matches[:DUPLICATE_MATCH_LIMIT]
+		for match in matches:
+			_augment_customer_with_territory(match)
+		result["matches"] = matches
+	except Exception as e:
+		_dup_log(f"check_customer_duplicates failed: {e}")
+	return result
 
 
 # ---------------------------------------------------------------------------

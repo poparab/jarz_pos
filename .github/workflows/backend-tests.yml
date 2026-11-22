@@ -196,6 +196,10 @@ jobs:
             test_invoice_cases_integration
             test_b2b_permission_gating
             test_b2b_customer_search_filter
+            # Warn-before-create duplicate check (phone / secondary phone /
+            # fuzzy Arabic address) and the no-letters customer-name guard
+            # (Woo order 22309). Pure + mocked.
+            test_customer_duplicate_check
             test_b2b_lead_contact_guard
             test_b2b_crm_access
             # Existing-account linking and territory-safe branch selection. This
