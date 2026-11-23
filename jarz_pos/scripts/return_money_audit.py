@@ -71,6 +71,8 @@ REPORT_MARKER_END = "RETURN_MONEY_AUDIT_JSON_END"
 
 CUSTOMER_PREFIX = "_RETMONEY_"
 _TOL = 0.01
+# What the partner charges for one fixture trip, as typed off the partner's app.
+PARTNER_FEE = 45.0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -272,6 +274,9 @@ def _dispatch_as_partner(invoice: str, profile: str, courier: dict[str, Any]) ->
 		pos_profile=profile,
 		party_type=courier.get("party_type"),
 		party=courier.get("party"),
+		# A partner order is refused without the partner's own price for the trip
+		# (``_require_partner_fee``); the operator types it off the partner's app.
+		partner_fee=PARTNER_FEE,
 	)
 
 
@@ -713,9 +718,13 @@ def _case_cod_deposit_return(
 def _case_partner_return(ctx: RunContext, env: dict[str, Any]) -> None:
 	"""Return a delivery-partner order.
 
-	Partner orders never touch Courier Outstanding — dispatch moves the receivable
-	to the partner's own settlement account. The return has to unwind *that*
-	account, and must leave Courier Outstanding strictly alone.
+	A partner rider carries the branch's money like our own courier: dispatch
+	moves the receivable to Courier Outstanding and accrues the partner's fee to
+	the partner's settlement account. The return must release Courier Outstanding
+	in full and leave the fee owed — the partner is paid for the trip regardless.
+	(This case used to assert the older model, where partner dispatch bypassed
+	Courier Outstanding; it also failed at dispatch once the partner's own
+	delivery cost became mandatory.)
 	"""
 	case = "MONEY-PARTNER-RETURN"
 	partner = frappe.db.get_value("Delivery Partner", {}, ["name", "settlement_account"], as_dict=True)
@@ -774,25 +783,44 @@ def _case_partner_return(ctx: RunContext, env: dict[str, Any]) -> None:
 	if not result.get("success"):
 		return
 
-	ship_expense = _courier_shipping_expense(invoice)
+	# The partner's fee lives on ``partner_fee`` (and ``custom_shipping_expense``);
+	# a partner Courier Transaction carries ``shipping_amount`` 0 on purpose, so
+	# ``_courier_shipping_expense`` would read 0 here.
+	partner_fee = round(
+		sum(
+			flt(r["partner_fee"])
+			for r in frappe.get_all(
+				"Courier Transaction",
+				filters={"reference_invoice": invoice, "is_partner_order": 1},
+				fields=["partner_fee"],
+			)
+		),
+		2,
+	)
+	ctx.record(
+		f"{case}.partner_fee_recorded",
+		abs(partner_fee - PARTNER_FEE) <= _TOL,
+		f"partner_fee on the courier rows={partner_fee}, entered at dispatch={PARTNER_FEE}",
+	)
 	actual = _net_by_account(_vouchers_for(invoice))
-	# Dispatch left the partner owing us (order - fee) and expensed the fee. A full
-	# return with the trip paid for cancels the order side and nothing else, so the
-	# partner ends up owed exactly the fee — a payable, hence negative — and the
-	# freight expense stands. Courier Outstanding stays untouched throughout, which
-	# is the whole point of the partner path and is asserted separately below.
+	# Dispatch moves the receivable to Courier Outstanding against the partner's
+	# rider, exactly like our own courier, and accrues the partner's fee
+	# (DR Freight / CR partner ledger). A full return releases Courier Outstanding
+	# in full and does NOT reverse the fee — the partner charges for a trip whose
+	# goods came back. So the partner ends up owed exactly the fee (a payable,
+	# hence negative), freight stands, and every other account nets to zero.
 	expected = {
 		acc.receivable: 0.0,
 		acc.courier_outstanding: 0.0,
-		partner["settlement_account"]: -ship_expense,
-		acc.freight: ship_expense,
+		partner["settlement_account"]: -partner_fee,
+		acc.freight: partner_fee,
 	}
 	_record_expectation(ctx, case, actual, expected)
 	ctx.record(
-		f"{case}.courier_outstanding_untouched",
+		f"{case}.courier_outstanding_nets_to_zero",
 		abs(flt(actual.get(acc.courier_outstanding, 0.0))) <= _TOL,
 		f"Courier Outstanding net={actual.get(acc.courier_outstanding, 0.0)} "
-		f"(a partner order must never touch this account)",
+		f"(dispatch puts the order there; the return must release all of it)",
 	)
 
 	reversal = (
