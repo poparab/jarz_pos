@@ -1756,8 +1756,15 @@ def _resolve_sheet_closing(opening_entry: str) -> dict[str, Any] | None:
 		return None
 
 
-def _resolve_sheet_invoices(branch: str, start: Any, end: Any) -> list[dict[str, Any]]:
-	"""Submitted, non-return Sales Invoices of the branch created inside the shift."""
+def _resolve_sheet_invoices(
+	branch: str, start: Any, end: Any, extra_names: list[str] | None = None
+) -> list[dict[str, Any]]:
+	"""Submitted, non-return Sales Invoices that belong on the sheet.
+
+	Those of the branch created inside the shift, plus ``extra_names`` (orders that
+	went out for delivery or were settled inside the shift; the caller already
+	matched their branch / shift link), whenever they are submitted non-returns.
+	"""
 	try:
 		optional = [
 			c
@@ -1792,22 +1799,233 @@ def _resolve_sheet_invoices(branch: str, start: Any, end: Any) -> list[dict[str,
 		else:
 			branch_cond = "pos_profile = %(branch)s"
 		select = ", ".join(f"`{c}`" for c in cols)
+		extra_cond = " OR name IN %(extra)s" if extra_names else ""
+		params: dict[str, Any] = {"branch": branch, "start": start, "end": end}
+		if extra_names:
+			params["extra"] = tuple(extra_names)
 		return (
 			frappe.db.sql(
 				f"""
 				SELECT {select}
 				FROM `tabSales Invoice`
-				WHERE docstatus = 1 AND is_return = 0 AND {branch_cond}
-				  AND creation BETWEEN %(start)s AND %(end)s
+				WHERE docstatus = 1 AND is_return = 0
+				  AND (({branch_cond} AND creation BETWEEN %(start)s AND %(end)s){extra_cond})
 				ORDER BY creation ASC, name ASC
 				""",
-				{"branch": branch, "start": start, "end": end},
+				params,
 				as_dict=True,
 			)
 			or []
 		)
 	except Exception:
 		_sheet_log("invoices")
+		return []
+
+
+def _sheet_branch_expr(alias: str = "si") -> str:
+	if _sheet_has_column("Sales Invoice", "custom_kanban_profile"):
+		return f"IFNULL(NULLIF({alias}.custom_kanban_profile, ''), {alias}.pos_profile)"
+	return f"{alias}.pos_profile"
+
+
+def _resolve_sheet_dispatches(branch: str, start: Any, end: Any) -> dict[str, Any]:
+	"""invoice -> time it went Out for Delivery inside the window (branch orders).
+
+	Mirrors ``ops_reports.get_fulfilment_sla``: the first non-migration
+	``Invoice State Log`` move to "Out for Delivery"; an order with no such log
+	row at all (it predates the log, 2026-10-13) falls back to the creation of
+	its first submitted Delivery Note. Only times inside [start, end] count.
+	"""
+	out: dict[str, Any] = {}
+	try:
+		branch_expr = _sheet_branch_expr("si")
+		params = {"branch": branch, "start": start, "end": end, "ofd": "Out for Delivery"}
+		has_log = bool(frappe.db.table_exists("Invoice State Log"))
+		if has_log:
+			for r in (
+				frappe.db.sql(
+					f"""
+					SELECT l.sales_invoice AS name, MIN(l.changed_at) AS at
+					FROM `tabInvoice State Log` l
+					JOIN `tabSales Invoice` si ON si.name = l.sales_invoice
+					WHERE si.docstatus = 1 AND si.is_return = 0 AND {branch_expr} = %(branch)s
+					  AND l.to_state = %(ofd)s AND IFNULL(l.source, '') NOT LIKE 'migration%%'
+					  AND l.changed_at BETWEEN %(start)s AND %(end)s
+					GROUP BY l.sales_invoice
+					""",
+					params,
+					as_dict=True,
+				)
+				or []
+			):
+				out[r["name"]] = r.get("at")
+		no_log = (
+			"""AND NOT EXISTS (
+				SELECT 1 FROM `tabInvoice State Log` l2
+				WHERE l2.sales_invoice = si.name AND l2.to_state = %(ofd)s
+				  AND IFNULL(l2.source, '') NOT LIKE 'migration%%')"""
+			if has_log
+			else ""
+		)
+		for r in (
+			frappe.db.sql(
+				f"""
+				SELECT dni.against_sales_invoice AS name, MIN(dn.creation) AS at
+				FROM `tabDelivery Note Item` dni
+				JOIN `tabDelivery Note` dn ON dn.name = dni.parent
+				JOIN `tabSales Invoice` si ON si.name = dni.against_sales_invoice
+				WHERE dn.docstatus = 1 AND dn.is_return = 0
+				  AND si.docstatus = 1 AND si.is_return = 0 AND {branch_expr} = %(branch)s
+				  {no_log}
+				GROUP BY dni.against_sales_invoice
+				HAVING MIN(dn.creation) BETWEEN %(start)s AND %(end)s
+				""",
+				params,
+				as_dict=True,
+			)
+			or []
+		):
+			out.setdefault(r["name"], r.get("at"))
+	except Exception:
+		_sheet_log("dispatches")
+	return out
+
+
+def _resolve_sheet_settlements(
+	opening_entry: str, branch: str, start: Any, end: Any
+) -> dict[str, dict[str, Any]]:
+	"""invoice -> {"at": first settle time, "amount": sum of Courier Transaction.amount}.
+
+	A Courier Transaction counts when ``settled_in_shift`` is this opening entry,
+	or when it has no shift link, was settled inside the window and the invoice
+	belongs to the branch.
+	"""
+	out: dict[str, dict[str, Any]] = {}
+	try:
+		if not (
+			_sheet_has_column("Courier Transaction", "settled_in_shift")
+			and _sheet_has_column("Courier Transaction", "settled_at")
+		):
+			return out
+		rows = (
+			frappe.db.sql(
+				f"""
+				SELECT ct.reference_invoice AS name, ct.amount, ct.settled_at
+				FROM `tabCourier Transaction` ct
+				JOIN `tabSales Invoice` si ON si.name = ct.reference_invoice
+				WHERE si.docstatus = 1 AND si.is_return = 0
+				  AND (
+				    ct.settled_in_shift = %(oe)s
+				    OR (IFNULL(ct.settled_in_shift, '') = ''
+				        AND ct.settled_at BETWEEN %(start)s AND %(end)s
+				        AND {_sheet_branch_expr("si")} = %(branch)s)
+				  )
+				""",
+				{"oe": opening_entry, "branch": branch, "start": start, "end": end},
+				as_dict=True,
+			)
+			or []
+		)
+		for r in rows:
+			entry = out.setdefault(r["name"], {"at": None, "amount": 0.0})
+			entry["amount"] += flt(r.get("amount"))
+			at = r.get("settled_at")
+			if at and (entry["at"] is None or get_datetime(at) < get_datetime(entry["at"])):
+				entry["at"] = at
+	except Exception:
+		_sheet_log("settlements")
+	return out
+
+
+def _sheet_order_number(row: dict[str, Any]) -> str:
+	woo_number = str(row.get("woo_order_number") or "").strip()
+	woo_id = cint(row.get("woo_order_id"))
+	return woo_number or (str(woo_id) if woo_id else str(row.get("name") or ""))
+
+
+def _resolve_sheet_returns(branch: str, company: str | None, start: Any, end: Any) -> list[dict[str, Any]]:
+	"""Credit notes of the branch's orders created in the window, plus any credit
+	note of the branch refunded (Payment Entry ``RET-<credit note>``) in the window.
+	"""
+	try:
+		number_col = (
+			"orig.woo_order_number" if _sheet_has_column("Sales Invoice", "woo_order_number") else "NULL"
+		)
+		branch_expr = _sheet_branch_expr("orig")
+		select = (
+			"cn.name AS credit_note, cn.return_against AS orig_name, cn.grand_total, cn.creation, "
+			f"{number_col} AS woo_order_number, orig.woo_order_id"
+		)
+		base = "FROM `tabSales Invoice` cn JOIN `tabSales Invoice` orig ON orig.name = cn.return_against"
+		params = {"branch": branch, "start": start, "end": end}
+		notes: dict[str, dict[str, Any]] = {}
+		for r in (
+			frappe.db.sql(
+				f"""SELECT {select} {base}
+				WHERE cn.docstatus = 1 AND cn.is_return = 1 AND {branch_expr} = %(branch)s
+				  AND cn.creation BETWEEN %(start)s AND %(end)s""",
+				params,
+				as_dict=True,
+			)
+			or []
+		):
+			notes[r["credit_note"]] = r
+		refunds: dict[str, dict[str, Any]] = {}
+		for r in (
+			frappe.db.sql(
+				f"""SELECT {select}, pe.paid_amount, pe.paid_from
+				{base}
+				JOIN `tabPayment Entry Reference` per
+				  ON per.reference_doctype = 'Sales Invoice' AND per.reference_name = cn.name
+				JOIN `tabPayment Entry` pe ON pe.name = per.parent
+				WHERE pe.docstatus = 1 AND pe.payment_type = 'Pay'
+				  AND pe.reference_no LIKE 'RET-%%'
+				  AND cn.docstatus = 1 AND cn.is_return = 1 AND {branch_expr} = %(branch)s
+				  AND pe.creation BETWEEN %(start)s AND %(end)s""",
+				params,
+				as_dict=True,
+			)
+			or []
+		):
+			notes.setdefault(r["credit_note"], r)
+			slot = refunds.setdefault(r["credit_note"], {"amount": 0.0, "account": None})
+			slot["amount"] += abs(flt(r.get("paid_amount")))
+			slot["account"] = slot["account"] or r.get("paid_from")
+		cash_account = None
+		try:
+			from jarz_pos.utils.account_utils import get_pos_cash_account
+
+			if company:
+				cash_account = get_pos_cash_account(branch, company)
+		except Exception:
+			cash_account = None
+		out = []
+		for name, r in notes.items():
+			refund = refunds.get(name)
+			account = refund["account"] if refund else None
+			kind = "credit" if not refund else ("cash" if account and account == cash_account else "bank")
+			out.append(
+				{
+					"credit_note": name,
+					"order": r["orig_name"],
+					"order_number": _sheet_order_number(
+						{
+							"name": r["orig_name"],
+							"woo_order_number": r.get("woo_order_number"),
+							"woo_order_id": r.get("woo_order_id"),
+						}
+					),
+					"amount": abs(flt(r.get("grand_total"))),
+					"refund_amount": flt(refund["amount"], 2) if refund else 0.0,
+					"refund_account": account,
+					"refund_kind": kind,
+					"at": _sheet_iso(r.get("creation")),
+				}
+			)
+		out.sort(key=lambda x: (x.get("at") or "", x["credit_note"]))
+		return out
+	except Exception:
+		_sheet_log("returns")
 		return []
 
 
@@ -2056,6 +2274,22 @@ def get_shift_sheet(opening_entry: str) -> dict[str, Any]:
 
 	The opener and shift-monitor managers of the branch may read it. The staff view
 	carries per-order amounts but no totals and no drawer figures (blind count).
+
+	``orders`` lists every order of the branch that was created, went Out for
+	Delivery, or was courier-settled inside the shift window. Each row carries
+	``reasons`` (subset of created / out_for_delivery / settled, in that order),
+	``out_for_delivery_at`` and ``settled_at`` (in-window times or null) and
+	``settled_amount`` (Courier Transaction amounts settled in this shift). Rows
+	are sorted by the earliest in-window moment. ``jars_by_flavour`` and
+	``totals.orders / jars / grand_total / delivery_fees`` count only orders with
+	"created" in ``reasons``, so nothing is counted twice across shifts.
+
+	``returns`` (always a list) holds credit notes of the branch's orders created
+	in the window plus those refunded in the window: credit_note, order,
+	order_number, amount, refund_amount, refund_account, refund_kind
+	(cash / bank / credit) and at. The manager ``totals`` add new_orders,
+	out_for_delivery_orders, settled_orders, settled_amount, returns,
+	returns_amount, cash_refunds and bank_refunds.
 	"""
 	opening = _resolve_sheet_opening(opening_entry)
 	if not opening:
@@ -2072,18 +2306,52 @@ def get_shift_sheet(opening_entry: str) -> dict[str, Any]:
 	start = opening.get("period_start_date")
 	end = (closing or {}).get("period_end_date") or now_datetime()
 
-	invoices = _resolve_sheet_invoices(branch, start, end)
+	dispatches = _resolve_sheet_dispatches(branch, start, end)
+	settlements = _resolve_sheet_settlements(opening_entry, branch, start, end)
+	invoices = _resolve_sheet_invoices(branch, start, end, sorted(set(dispatches) | set(settlements)))
 	names = [inv["name"] for inv in invoices]
 
+	start_dt, end_dt = get_datetime(start), get_datetime(end)
+
+	def _created_in_window(inv: dict[str, Any]) -> bool:
+		try:
+			return bool(inv.get("creation")) and start_dt <= get_datetime(inv["creation"]) <= end_dt
+		except Exception:
+			return False
+
+	created_names = {inv["name"] for inv in invoices if _created_in_window(inv)}
+
 	jar_rows = _resolve_sheet_jar_rows(names)
-	jars_by_invoice, jars_by_flavour = _aggregate_sheet_jars(jar_rows, _resolve_sheet_bundle_codes())
+	bundle_codes = _resolve_sheet_bundle_codes()
+	jars_by_invoice, _all_flavours = _aggregate_sheet_jars(jar_rows, bundle_codes)
+	# The flavour matrix counts only orders created in this shift, so a jar is
+	# never counted in two shifts.
+	_per_created, jars_by_flavour = _aggregate_sheet_jars(
+		[r for r in jar_rows if r.get("parent") in created_names], bundle_codes
+	)
 	shipping = _resolve_sheet_shipping(names)
 	courier_labels = _resolve_sheet_courier_labels(invoices)
 	methods = _resolve_sheet_payment_methods(invoices)
 	areas = _resolve_sheet_area_labels({inv["territory"] for inv in invoices if inv.get("territory")})
 
 	orders = []
+	sort_keys: dict[str, Any] = {}
 	for inv in invoices:
+		reasons = []
+		moments = []
+		if inv["name"] in created_names:
+			reasons.append("created")
+			moments.append(get_datetime(inv["creation"]))
+		ofd_at = dispatches.get(inv["name"])
+		if ofd_at:
+			reasons.append("out_for_delivery")
+			moments.append(get_datetime(ofd_at))
+		settled = settlements.get(inv["name"])
+		if settled:
+			reasons.append("settled")
+			if settled.get("at"):
+				moments.append(get_datetime(settled["at"]))
+		sort_keys[inv["name"]] = (min(moments) if moments else start_dt, inv["name"])
 		is_pickup = bool(cint(inv.get("custom_is_pickup")))
 		party = inv.get("custom_courier_party")
 		area = areas.get(inv.get("territory")) if inv.get("territory") else None
@@ -2109,19 +2377,35 @@ def get_shift_sheet(opening_entry: str) -> dict[str, Any]:
 				"payment_method": methods.get(inv["name"]) or inv.get("custom_payment_method") or None,
 				"state": inv.get("custom_sales_invoice_state") or None,
 				"channel": inv.get("custom_order_channel") or None,
+				"reasons": reasons,
+				"out_for_delivery_at": _sheet_iso(ofd_at),
+				"settled_at": _sheet_iso((settled or {}).get("at")),
+				"settled_amount": flt((settled or {}).get("amount"), 2) if settled else 0.0,
 			}
 		)
+	orders.sort(key=lambda o: sort_keys[o["name"]])
+
+	returns = _resolve_sheet_returns(branch, opening.get("company"), start, end)
 
 	payouts = _resolve_sheet_payouts(branch, start, end)
 
 	totals = None
 	if is_manager_view:
 		drawer = _resolve_sheet_drawer(opening_entry, (closing or {}).get("name"))
+		created_orders = [o for o in orders if "created" in o["reasons"]]
 		totals = {
-			"orders": len(orders),
-			"jars": sum(o["jars"] for o in orders),
-			"grand_total": flt(sum(o["grand_total"] for o in orders), 2),
-			"delivery_fees": flt(sum(o["delivery_fee"] for o in orders), 2),
+			"orders": len(created_orders),
+			"jars": sum(o["jars"] for o in created_orders),
+			"grand_total": flt(sum(o["grand_total"] for o in created_orders), 2),
+			"delivery_fees": flt(sum(o["delivery_fee"] for o in created_orders), 2),
+			"new_orders": len(created_orders),
+			"out_for_delivery_orders": sum(1 for o in orders if "out_for_delivery" in o["reasons"]),
+			"settled_orders": sum(1 for o in orders if "settled" in o["reasons"]),
+			"settled_amount": flt(sum(o["settled_amount"] for o in orders), 2),
+			"returns": len(returns),
+			"returns_amount": flt(sum(r["amount"] for r in returns), 2),
+			"cash_refunds": flt(sum(r["refund_amount"] for r in returns if r["refund_kind"] == "cash"), 2),
+			"bank_refunds": flt(sum(r["refund_amount"] for r in returns if r["refund_kind"] == "bank"), 2),
 			"payouts": flt(sum(p["amount"] for p in payouts), 2),
 			**drawer,
 		}
@@ -2145,6 +2429,7 @@ def get_shift_sheet(opening_entry: str) -> dict[str, Any]:
 		"is_manager_view": is_manager_view,
 		"amounts_hidden": 0 if is_manager_view else 1,
 		"orders": orders,
+		"returns": returns,
 		"jars_by_flavour": jars_by_flavour,
 		"payouts": payouts,
 		"totals": totals,

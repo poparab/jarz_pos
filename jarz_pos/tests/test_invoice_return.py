@@ -465,6 +465,82 @@ class TestEmployeeOrderReturns(unittest.TestCase):
 		mock_frappe.db.savepoint.assert_called_once()
 
 
+class TestRefundSourceAccount(unittest.TestCase):
+	"""Refund now pays out of the ledger that received the money."""
+
+	def _resolve(self, method, *, received=(), accounts=None, mop_account=None):
+		accounts = accounts or {}
+
+		def get_value(doctype, filters, fieldname=None, as_dict=False):
+			if doctype == "Mode of Payment Account":
+				return mop_account
+			row = accounts.get(filters)
+			if fieldname == "account_type":
+				return (row or {}).get("account_type")
+			return row
+
+		inv = _invoice(custom_payment_method=method)
+		with (
+			patch.object(ir, "get_pos_cash_account", return_value="Cash - 6th"),
+			patch.object(ir, "_get_courier_outstanding_account", return_value="Courier Outstanding - J"),
+			patch("jarz_pos.api.kanban._get_actual_payment_method_map", return_value={inv.name: method}),
+			patch.object(ir.frappe.db, "sql", return_value=received),
+			patch.object(ir.frappe.db, "get_value", side_effect=get_value),
+		):
+			return ir.resolve_refund_source_account(inv, "6th of october")
+
+	BANK = {"is_group": 0, "account_type": "Bank", "root_type": "Asset", "company": "JARZ"}
+	KASHIER = {"is_group": 0, "account_type": "", "root_type": "Asset", "company": "JARZ"}
+	COURIER = {"is_group": 0, "account_type": "", "root_type": "Asset", "company": "JARZ"}
+
+	def test_kashier_card_uses_the_untyped_kashier_ledger(self):
+		got = self._resolve(
+			"Kashier Card", received=(("kashier - J",),), accounts={"kashier - J": self.KASHIER}
+		)
+		self.assertEqual(got, ("kashier - J", False))
+
+	def test_courier_outstanding_receipt_is_skipped_for_mop_default(self):
+		# Production 19874-1: InstaPay order whose Payment Entry landed in Courier
+		# Outstanding; the refund must come from the InstaPay bank, not the till.
+		got = self._resolve(
+			"Instapay",
+			received=(("Courier Outstanding - J",),),
+			mop_account="Bank Account - J",
+			accounts={"Courier Outstanding - J": self.COURIER, "Bank Account - J": self.BANK},
+		)
+		self.assertEqual(got, ("Bank Account - J", False))
+
+	def test_cash_and_empty_method_use_branch_cash(self):
+		self.assertEqual(self._resolve("Cash"), ("Cash - 6th", True))
+		self.assertEqual(self._resolve("Cash on Delivery"), ("Cash - 6th", True))
+		self.assertEqual(self._resolve(""), ("Cash - 6th", True))
+
+	def test_instapay_uses_the_bank_that_received_the_money(self):
+		got = self._resolve(
+			"Instapay", received=(("Bank Account - J",),), accounts={"Bank Account - J": self.BANK}
+		)
+		self.assertEqual(got, ("Bank Account - J", False))
+
+	def test_mode_of_payment_default_when_no_payment_entry(self):
+		got = self._resolve(
+			"Instapay", mop_account="Bank Account - J", accounts={"Bank Account - J": self.BANK}
+		)
+		self.assertEqual(got, ("Bank Account - J", False))
+
+	def test_other_branch_cash_account_is_refused(self):
+		till = {"is_group": 0, "account_type": "Cash", "root_type": "Asset", "company": "JARZ"}
+		got = self._resolve("Instapay", mop_account="Cash - Maadi", accounts={"Cash - Maadi": till})
+		self.assertEqual(got, ("Cash - 6th", True))
+
+	def test_group_ledger_falls_back_to_cash(self):
+		grp = {"is_group": 1, "account_type": "Bank", "root_type": "Asset", "company": "JARZ"}
+		got = self._resolve("Instapay", mop_account="Banks - J", accounts={"Banks - J": grp})
+		self.assertEqual(got, ("Cash - 6th", True))
+
+	def test_no_mapping_falls_back_to_cash(self):
+		self.assertEqual(self._resolve("Instapay"), ("Cash - 6th", True))
+
+
 class TestReturnedCancellationLabel(unittest.TestCase):
 	"""A full return labels the original as cancelled (owner decision 2026-11-17);
 	a partial one does not, and a failed label write never fails the return."""

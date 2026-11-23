@@ -526,8 +526,15 @@ def build_return_preview(invoice_id: str) -> dict[str, Any]:
 			abs(flt(tax_row.tax_amount)) - flt(already_credited.get(key, 0.0)), 0.0
 		)
 
+	try:
+		refund_account, refund_from_cash = resolve_refund_source_account(inv, branch)
+	except Exception:
+		refund_account, refund_from_cash = "", True
+
 	return {
 		"invoice_id": invoice_id,
+		"refund_account": refund_account,
+		"refund_from_branch_cash": bool(refund_from_cash),
 		"woo_order_id": normalize_woo_order_id(inv.get("woo_order_id")),
 		"customer": inv.customer,
 		"customer_name": inv.customer_name,
@@ -1092,15 +1099,119 @@ def _compensating_sales_partner_transaction(inv: Any, *, ratio: float, credit_no
 		return None
 
 
+_CASH_LIKE_METHODS = {"", "cash", "cash on delivery", "cod", "cash_on_delivery"}
+
+
+def resolve_refund_source_account(inv: Any, branch: str) -> tuple[str, bool]:
+	"""Ledger a "Refund now" is paid out of, and whether it is the branch till.
+
+	Why: the refund used to come out of branch cash unconditionally, so an order
+	the customer paid by InstaPay (money in "Bank Account - J") was refunded from
+	the branch drawer, leaving the drawer short and the bank overstated.
+
+	Rule: cash / cash-on-delivery / unknown method -> branch cash (unchanged).
+	Any other method -> the money ledger the payment was actually received into
+	(the submitted Payment Entry against this invoice: bank, wallet, kashier),
+	else the Mode of Payment's default account for the company; each only if it
+	is a non-group Asset ledger of the company that is not a Cash-type ledger
+	(a branch till), a party ledger or Courier Outstanding. Anything that
+	fails those checks falls back to branch cash. Never raises.
+	"""
+	company = inv.company
+	branch_cash = get_pos_cash_account(branch, company)
+
+	try:
+		method = ""
+		try:
+			from jarz_pos.api.kanban import _get_actual_payment_method_map
+
+			method = str(
+				(
+					_get_actual_payment_method_map(
+						[
+							{
+								"name": inv.name,
+								"outstanding_amount": inv.get("outstanding_amount"),
+								"status": inv.get("status"),
+								"custom_payment_method": inv.get("custom_payment_method"),
+								"sales_partner": inv.get("sales_partner"),
+							}
+						]
+					)
+					or {}
+				).get(inv.name)
+				or ""
+			).strip()
+		except Exception:
+			method = ""
+		if not method:
+			method = str(inv.get("custom_payment_method") or "").strip()
+		if method.lower() in _CASH_LIKE_METHODS:
+			return branch_cash, True
+
+		try:
+			courier_outstanding = _get_courier_outstanding_account(company)
+		except Exception:
+			courier_outstanding = None
+
+		def _usable(account: str | None) -> bool:
+			# A money ledger the refund can be paid from: an Asset leaf of this
+			# company that is not a branch till (Cash), not a party ledger and not
+			# Courier Outstanding (a COD order's Payment Entry lands there, which
+			# says nothing about where the money is now). Kashier card/wallet money
+			# sits in "kashier - J", an untyped Current Asset leaf, so Bank-type
+			# alone would miss it.
+			if not account or account in (branch_cash, courier_outstanding):
+				return False
+			row = frappe.db.get_value(
+				"Account", account, ["is_group", "account_type", "root_type", "company"], as_dict=True
+			)
+			return bool(
+				row
+				and not row.get("is_group")
+				and row.get("root_type") == "Asset"
+				and row.get("account_type") not in ("Cash", "Receivable", "Payable")
+				and (not row.get("company") or row.get("company") == company)
+			)
+
+		# 1. The ledger the customer's money was actually received into.
+		received = frappe.db.sql(
+			"""
+			SELECT pe.paid_to
+			FROM `tabPayment Entry` pe
+			JOIN `tabPayment Entry Reference` per ON per.parent = pe.name
+			WHERE pe.docstatus = 1 AND pe.payment_type = 'Receive'
+			  AND per.reference_doctype = 'Sales Invoice' AND per.reference_name = %s
+			ORDER BY pe.creation DESC LIMIT 1
+			""",
+			(inv.name,),
+		)
+		if received and _usable(received[0][0]):
+			return received[0][0], False
+
+		# 2. The Mode of Payment's default ledger for this company.
+		default_account = frappe.db.get_value(
+			"Mode of Payment Account",
+			{"parent": method, "company": company, "parenttype": "Mode of Payment"},
+			"default_account",
+		)
+		if _usable(default_account):
+			return default_account, False
+	except Exception:
+		frappe.log_error(frappe.get_traceback(), f"Return: refund account lookup failed for {inv.name}")
+	return branch_cash, True
+
+
 def _create_refund_payment_entry(
 	inv: Any, *, credit_note_name: str, amount: float, branch: str
 ) -> str | None:
-	"""Pay the customer back out of branch cash against the credit note."""
+	"""Pay the customer back against the credit note, out of the account that
+	received the money (see ``resolve_refund_source_account``)."""
 	if amount <= _TOL:
 		return None
 
 	company = inv.company
-	cash_account = get_pos_cash_account(branch, company)
+	cash_account, _from_cash = resolve_refund_source_account(inv, branch)
 	validate_account_exists(cash_account)
 	receivable = get_company_receivable_account(company)
 
@@ -1620,6 +1731,9 @@ def run_invoice_return(
 				"compensating_courier_transaction": compensating_ct,
 				"compensating_sales_partner_transaction": compensating_spt,
 				"refund_payment_entry": refund_pe,
+				"refund_account": (
+					frappe.db.get_value("Payment Entry", refund_pe, "paid_from") if refund_pe else None
+				),
 				"refund_amount": refund_amount,
 				"return_status": return_status,
 				"money_state": money_state,

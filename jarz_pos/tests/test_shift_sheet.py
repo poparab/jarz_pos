@@ -58,8 +58,28 @@ JAR_ROWS = [
 
 
 class TestShiftSheet(unittest.TestCase):
-	def _run(self, user, *, manager=False, profiles=(), closing=CLOSING, opening=OPENING):
+	def _run(
+		self,
+		user,
+		*,
+		manager=False,
+		profiles=(),
+		closing=CLOSING,
+		opening=OPENING,
+		invoices=None,
+		dispatches=None,
+		settlements=None,
+		returns=None,
+	):
+		if invoices is None:
+			invoices = [
+				_inv("SI-1", 300, custom_courier_party_type="Employee", custom_courier_party="EMP-1"),
+				_inv("SI-2", 500, custom_is_pickup=1, custom_courier_party="EMP-1", woo_order_id=77),
+			]
 		patches = [
+			patch.object(shift, "_resolve_sheet_dispatches", return_value=dispatches or {}),
+			patch.object(shift, "_resolve_sheet_settlements", return_value=settlements or {}),
+			patch.object(shift, "_resolve_sheet_returns", return_value=returns or []),
 			patch.object(frappe, "session", SimpleNamespace(user=user)),
 			patch.object(shift, "_resolve_sheet_opening", return_value=dict(opening)),
 			patch.object(shift, "_resolve_sheet_closing", return_value=closing),
@@ -67,10 +87,7 @@ class TestShiftSheet(unittest.TestCase):
 			patch.object(
 				shift,
 				"_resolve_sheet_invoices",
-				return_value=[
-					_inv("SI-1", 300, custom_courier_party_type="Employee", custom_courier_party="EMP-1"),
-					_inv("SI-2", 500, custom_is_pickup=1, custom_courier_party="EMP-1", woo_order_id=77),
-				],
+				return_value=invoices,
 			),
 			patch.object(shift, "_resolve_sheet_jar_rows", return_value=JAR_ROWS),
 			patch.object(shift, "_resolve_sheet_bundle_codes", return_value={"BND-1"}),
@@ -176,6 +193,70 @@ class TestShiftSheet(unittest.TestCase):
 		per, matrix = shift._aggregate_sheet_jars(JAR_ROWS, {"BND-1"})
 		self.assertEqual(per, {"SI-1": 3, "SI-2": 6})
 		self.assertEqual([m["flavour"] for m in matrix], ["Mango", "Oreo"])
+
+	def test_default_rows_are_created_only_and_returns_is_a_list(self):
+		sheet = self._run("opener@example.com")
+		self.assertEqual([o["reasons"] for o in sheet["orders"]], [["created"], ["created"]])
+		self.assertIsNone(sheet["orders"][0]["out_for_delivery_at"])
+		self.assertIsNone(sheet["orders"][0]["settled_at"])
+		self.assertEqual(sheet["orders"][0]["settled_amount"], 0.0)
+		self.assertEqual(sheet["returns"], [])
+
+	def _multi_reason_sheet(self):
+		invoices = [
+			_inv("SI-1", 300),
+			# created in an earlier shift, dispatched and settled in this one
+			_inv("SI-OLD", 200, creation="2026-11-19 20:00:00"),
+			# created in an earlier shift, only dispatched here
+			_inv("SI-OFD", 100, creation="2026-11-19 21:00:00"),
+		]
+		returns = [
+			{"credit_note": "CN-1", "order": "SI-1", "order_number": "SI-1", "amount": 50.0,
+			 "refund_amount": 50.0, "refund_account": "Cash - A", "refund_kind": "cash", "at": "x"},
+			{"credit_note": "CN-2", "order": "SI-9", "order_number": "9", "amount": 80.0,
+			 "refund_amount": 80.0, "refund_account": "Bank Account - J", "refund_kind": "bank", "at": "y"},
+			{"credit_note": "CN-3", "order": "SI-8", "order_number": "8", "amount": 20.0,
+			 "refund_amount": 0.0, "refund_account": None, "refund_kind": "credit", "at": "z"},
+		]
+		return self._run(
+			"mgr@example.com",
+			manager=True,
+			profiles=["Branch A"],
+			invoices=invoices,
+			dispatches={"SI-OLD": "2026-11-20 12:00:00", "SI-OFD": "2026-11-20 10:30:00", "SI-1": "2026-11-20 11:30:00"},
+			settlements={"SI-OLD": {"at": "2026-11-20 13:00:00", "amount": 170.0}},
+			returns=returns,
+		)
+
+	def test_reasons_order_and_sorting(self):
+		sheet = self._multi_reason_sheet()
+		by_name = {o["name"]: o for o in sheet["orders"]}
+		self.assertEqual(by_name["SI-1"]["reasons"], ["created", "out_for_delivery"])
+		self.assertEqual(by_name["SI-OLD"]["reasons"], ["out_for_delivery", "settled"])
+		self.assertEqual(by_name["SI-OLD"]["settled_amount"], 170.0)
+		self.assertTrue(by_name["SI-OLD"]["settled_at"].startswith("2026-11-20T13:00"))
+		self.assertTrue(by_name["SI-OLD"]["out_for_delivery_at"].startswith("2026-11-20T12:00"))
+		# earliest in-window moment: SI-OFD 10:30, SI-1 11:00 (created), SI-OLD 12:00
+		self.assertEqual([o["name"] for o in sheet["orders"]], ["SI-OFD", "SI-1", "SI-OLD"])
+
+	def test_totals_count_created_orders_only(self):
+		totals = self._multi_reason_sheet()["totals"]
+		self.assertEqual(totals["orders"], 1)
+		self.assertEqual(totals["new_orders"], 1)
+		self.assertEqual(totals["grand_total"], 300.0)
+		self.assertEqual(totals["jars"], 3)  # SI-1 only; the other two have no jar rows
+		self.assertEqual(totals["out_for_delivery_orders"], 3)
+		self.assertEqual(totals["settled_orders"], 1)
+		self.assertEqual(totals["settled_amount"], 170.0)
+		self.assertEqual(totals["returns"], 3)
+		self.assertEqual(totals["returns_amount"], 150.0)
+		self.assertEqual(totals["cash_refunds"], 50.0)
+		self.assertEqual(totals["bank_refunds"], 80.0)
+
+	def test_staff_view_still_has_no_totals_but_has_returns(self):
+		sheet = self._run("opener@example.com", returns=[{"credit_note": "CN-1"}])
+		self.assertIsNone(sheet["totals"])
+		self.assertEqual(len(sheet["returns"]), 1)
 
 
 if __name__ == "__main__":
