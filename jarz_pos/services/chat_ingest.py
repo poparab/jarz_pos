@@ -1190,13 +1190,20 @@ def _last_order(customer: str | None) -> str | None:
 		return None
 
 
-def _find_conversation(channel: str, external_id: str) -> Any:
+def _find_conversation(channel: str, external_id: str, fresh: bool = False) -> Any:
+	"""The conversation row for ``channel:external_id``, or ``None``.
+
+	``fresh`` uses a locking read. Under REPEATABLE READ a plain SELECT keeps
+	reading this transaction's old snapshot, so a chat another worker created and
+	committed after our first read stays invisible; a locking read always sees the
+	latest committed row.
+	"""
 	key = f"{channel}:{external_id}"
-	name = frappe.db.get_value(cc.CONVERSATION, {"channel_key": key}, "name")
+	name = frappe.db.get_value(cc.CONVERSATION, {"channel_key": key}, "name", for_update=fresh)
 	if not name:
 		return None
 	fields = [*cc.summary_fields(), "alert_count", "source_post_id", "ad_referral", "last_outbound_at"]
-	return frappe.db.get_value(cc.CONVERSATION, name, fields, as_dict=True)
+	return frappe.db.get_value(cc.CONVERSATION, name, fields, as_dict=True, for_update=fresh)
 
 
 def _contact_key(phone: str) -> str:
@@ -1275,8 +1282,10 @@ def _create_conversation(event: dict[str, Any], when: _dt.datetime) -> Any:
 	try:
 		doc.insert(ignore_permissions=True)
 	except (frappe.DuplicateEntryError, frappe.UniqueValidationError):
-		# A parallel worker created it between our read and insert.
-		return _find_conversation(channel, external_id)
+		# A parallel worker created it between our read and insert. Our snapshot
+		# predates its commit, so only a locking read can see it (2026-11-23:
+		# CHAT-08206 and CHAT-08059 each lost their second message this way).
+		return _find_conversation(channel, external_id, fresh=True)
 	return _find_conversation(channel, external_id)
 
 
@@ -1770,7 +1779,11 @@ def _persist_message(
 			return None
 		conv = _create_conversation(event, when)
 		if conv is None:
-			return None
+			# Never drop a message silently: raising logs "chat: webhook event failed".
+			raise RuntimeError(
+				f"chat: could not create or find conversation {event['channel']}:"
+				f"{mask_id(event.get('external_id'))}"
+			)
 		if inbound and event["channel"] == cc.WHATSAPP:
 			# Often an answer to a follow-up template: put it in the chat first.
 			from jarz_pos.services import customer_followups as followups

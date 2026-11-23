@@ -780,5 +780,63 @@ class ShouldDraftTest(unittest.TestCase):
 		self.assertFalse(ing.should_draft(self.ev(message_type="reaction", body="x")))
 
 
+class NewChatRaceTests(unittest.TestCase):
+	"""Two webhooks for a brand-new chat on two workers (CHAT-08206, 2026-11-23).
+
+	The loser's insert hits the unique channel_key after the winner commits, but a
+	plain SELECT still reads its old REPEATABLE READ snapshot and finds nothing.
+	"""
+
+	def setUp(self):
+		from unittest import mock
+
+		self.mock = mock
+
+	def _event(self):
+		return {
+			"kind": "message",
+			"channel": cc.INSTAGRAM,
+			"external_id": "IGSID1",
+			"direction": "Inbound",
+			"external_message_id": "mid-2",
+			"body": "في توصيل دلوقتي",
+			"timestamp": 1763856508,
+		}
+
+	def test_duplicate_create_rereads_with_locking_read(self):
+		mock = self.mock
+		dup = type("DuplicateEntryError", (Exception,), {})
+		doc = mock.MagicMock()
+		doc.insert.side_effect = dup()
+		db = mock.MagicMock()
+		row = _Row(name="CHAT-1")
+
+		def get_value(doctype, filters, fields, as_dict=False, for_update=False):
+			# The winner's row is visible only to a locking (fresh) read.
+			if not for_update:
+				return None
+			return row if as_dict else "CHAT-1"
+
+		db.get_value.side_effect = get_value
+		with (
+			mock.patch.object(ing.frappe, "DuplicateEntryError", dup, create=True),
+			mock.patch.object(ing.frappe, "UniqueValidationError", dup, create=True),
+			mock.patch.object(ing.frappe, "get_doc", return_value=doc, create=True),
+			mock.patch.object(ing.frappe, "db", db),
+		):
+			conv = ing._create_conversation(self._event(), datetime.datetime(2026, 11, 23, 2, 8))
+		self.assertIs(conv, row)
+
+	def test_message_is_never_dropped_silently(self):
+		mock = self.mock
+		with (
+			mock.patch.object(ing, "_message_exists", return_value=False),
+			mock.patch.object(ing, "_find_conversation", return_value=None),
+			mock.patch.object(ing, "_create_conversation", return_value=None),
+		):
+			with self.assertRaises(RuntimeError):
+				ing._persist_message(self._event(), {}, "UTC")
+
+
 if __name__ == "__main__":
 	unittest.main()
