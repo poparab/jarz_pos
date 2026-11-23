@@ -110,7 +110,7 @@ class TestJournalLegPlanning(unittest.TestCase):
 		credit = sum(l["amount"] for l in plan["legs"] if not l.get("debit"))
 		return abs(debit - credit) < 0.005
 
-	def _plan(self, money_state, *, pay_courier=True, courier=None):
+	def _plan(self, money_state, *, pay_courier=True, courier=None, courier_release=None):
 		return ir.plan_return_journal_legs(
 			inv=_invoice(),
 			money_state=money_state,
@@ -118,7 +118,24 @@ class TestJournalLegPlanning(unittest.TestCase):
 			credit_note_name="ACC-SINV-2026-00099",
 			pay_courier_for_trip=pay_courier,
 			courier=courier,
+			courier_release=courier_release,
 		)
+
+	def test_deposit_is_not_released_from_courier_outstanding(self, *_):
+		"""500 order, 200 deposit at the branch: the courier carried 300 only."""
+		plans = self._plan(ir.MONEY_COURIER_OUTSTANDING, courier_release=300.0)
+		legs = plans[0]["legs"]
+		self.assertTrue(self._balanced(plans[0]))
+		release = next(l for l in legs if l["account"] == "Courier Outstanding - J")
+		self.assertEqual(release["amount"], 300.0)
+		credit_note_leg = next(l for l in legs if l.get("reference_name") == "ACC-SINV-2026-00099")
+		# The CN keeps -200 open: the customer's deposit, as credit or refund.
+		self.assertEqual(credit_note_leg["amount"], 300.0)
+
+	def test_release_never_exceeds_the_return(self, *_):
+		plans = self._plan(ir.MONEY_COURIER_OUTSTANDING, courier_release=900.0)
+		release = next(l for l in plans[0]["legs"] if l["account"] == "Courier Outstanding - J")
+		self.assertEqual(release["amount"], 500.0)
 
 	def test_unpaid_posts_a_balanced_ar_knockoff(self, *_):
 		plans = self._plan(ir.MONEY_UNPAID)
@@ -168,6 +185,36 @@ class TestJournalLegPlanning(unittest.TestCase):
 	def test_zero_shipping_reverses_nothing(self, *_):
 		courier = {"party_type": "Supplier", "party": "SUP-1", "shipping_amount": 0.0}
 		self.assertEqual(self._plan(ir.MONEY_PREPAID, pay_courier=False, courier=courier), [])
+
+
+class TestCourierCarriedAmounts(unittest.TestCase):
+	"""What the courier carries vs what the branch already took as a deposit."""
+
+	ROWS = [
+		{"amount": 300.0, "status": "Unsettled"},  # dispatch: 500 order, 200 deposit
+	]
+
+	def test_open_amount_nets_earlier_returns(self):
+		rows = self.ROWS + [{"amount": -100.0, "status": "Unsettled"}]
+		self.assertEqual(ir._courier_open_amount(rows), 200.0)
+
+	def test_settled_rows_are_not_open(self):
+		rows = [{"amount": 300.0, "status": "Settled"}]
+		self.assertEqual(ir._courier_open_amount(rows), 0.0)
+
+	def test_open_amount_never_negative(self):
+		rows = self.ROWS + [{"amount": -500.0, "status": "Unsettled"}]
+		self.assertEqual(ir._courier_open_amount(rows), 0.0)
+
+	def test_deposit_is_grand_total_minus_dispatched(self):
+		self.assertEqual(ir._deposit_collected(_invoice(grand_total=500.0), self.ROWS), 200.0)
+
+	def test_plain_cod_has_no_deposit(self):
+		rows = [{"amount": 500.0, "status": "Unsettled"}]
+		self.assertEqual(ir._deposit_collected(_invoice(grand_total=500.0), rows), 0.0)
+
+	def test_no_dispatch_no_deposit(self):
+		self.assertEqual(ir._deposit_collected(_invoice(grand_total=500.0), []), 0.0)
 
 
 class TestPostReturnJe(unittest.TestCase):
@@ -498,6 +545,17 @@ class TestRefundSourceAccount(unittest.TestCase):
 			"Kashier Card", received=(("kashier - J",),), accounts={"kashier - J": self.KASHIER}
 		)
 		self.assertEqual(got, ("kashier - J", False))
+
+	def test_cod_order_with_instapay_deposit_refunds_from_the_bank(self):
+		got = self._resolve(
+			"Cash", received=(("Bank Account - J",),), accounts={"Bank Account - J": self.BANK}
+		)
+		self.assertEqual(got, ("Bank Account - J", False))
+
+	def test_cash_order_paid_into_the_till_stays_on_branch_cash(self):
+		till = {"is_group": 0, "account_type": "Cash", "root_type": "Asset", "company": "JARZ"}
+		got = self._resolve("Cash", received=(("Cash - 6th",),), accounts={"Cash - 6th": till})
+		self.assertEqual(got, ("Cash - 6th", True))
 
 	def test_courier_outstanding_receipt_is_skipped_for_mop_default(self):
 		# Production 19874-1: InstaPay order whose Payment Entry landed in Courier

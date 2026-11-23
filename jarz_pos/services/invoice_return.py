@@ -318,6 +318,29 @@ def _unsettled_courier_transactions(invoice_name: str) -> list[dict[str, Any]]:
 		return []
 
 
+def _courier_open_amount(transactions: list[dict[str, Any]]) -> float:
+	"""Order money the courier still carries for this invoice (net, never < 0).
+
+	Dispatch records the invoice's *outstanding* balance, not its grand total,
+	so a cash-on-delivery order with a deposit taken at the branch puts only the
+	remainder on the courier. Earlier returns' negative rows are netted in.
+	"""
+	open_rows = [t for t in transactions or [] if str(t.get("status") or "").strip() != "Settled"]
+	return max(sum(flt(t.get("amount")) for t in open_rows), 0.0)
+
+
+def _deposit_collected(inv: Any, transactions: list[dict[str, Any]]) -> float:
+	"""Money taken at the branch before dispatch on a courier-carried order.
+
+	Grand total minus what was handed to couriers at dispatch (the positive rows).
+	Zero for an ordinary cash-on-delivery order.
+	"""
+	dispatched = sum(flt(t.get("amount")) for t in transactions or [] if flt(t.get("amount")) > _TOL)
+	if dispatched <= _TOL:
+		return 0.0
+	return max(flt(inv.get("grand_total")) - dispatched, 0.0)
+
+
 def _is_partner_order(inv: Any) -> bool:
 	"""True when this order was delivered by a delivery partner's rider.
 
@@ -509,7 +532,12 @@ def build_return_preview(invoice_id: str) -> dict[str, Any]:
 			break
 
 	is_pickup = bool(int(inv.get("custom_is_pickup") or 0))
-	refund_available = money_state in {MONEY_PREPAID, MONEY_COURIER_SETTLED}
+	deposit_collected = (
+		_deposit_collected(inv, transactions) if money_state == MONEY_COURIER_OUTSTANDING else 0.0
+	)
+	# A deposit taken at the branch on a courier-carried order is real collected
+	# money: the part of a return the courier never carried can be refunded now.
+	refund_available = money_state in {MONEY_PREPAID, MONEY_COURIER_SETTLED} or deposit_collected > _TOL
 
 	# What the delivery charge would add if this return closes the order out.
 	# The dialog needs it to show the operator the figure that will actually be
@@ -542,6 +570,8 @@ def build_return_preview(invoice_id: str) -> dict[str, Any]:
 		"currency": inv.currency,
 		"branch": branch,
 		"money_state": money_state,
+		"deposit_collected": round(deposit_collected, 2),
+		"courier_open_amount": round(_courier_open_amount(transactions), 2),
 		"is_pickup": is_pickup,
 		"fixed_charges_remaining": round(fixed_charges_remaining, 2),
 		"lines": lines,
@@ -676,12 +706,16 @@ def plan_return_journal_legs(
 	credit_note_name: str,
 	pay_courier_for_trip: bool,
 	courier: dict[str, Any] | None,
+	courier_release: float | None = None,
 ) -> list[dict[str, Any]]:
 	"""Describe every Journal Entry a return will post, without posting any.
 
 	Shared by the real run and by ``dry_run`` previews, so a dry run exercises
 	the same account resolution and the same balancing arithmetic that the live
 	posting will — which is what makes it a meaningful check against real data.
+
+	*courier_release* caps what a courier-outstanding return releases from
+	Courier Outstanding (``None`` = the whole return, the old behaviour).
 	"""
 	company = inv.company
 	customer = inv.customer
@@ -728,9 +762,17 @@ def plan_return_journal_legs(
 		# (It used to release a partner order against the partner's own settlement
 		# account, which matched the old model where partner dispatch bypassed
 		# Courier Outstanding. It no longer does.)
+		#
+		# Release only what the courier actually carries. Dispatch put the
+		# invoice's outstanding balance on him, so a deposit taken at the branch
+		# was never in Courier Outstanding; releasing the full return drove the
+		# account negative by the deposit and the settlement then paid that
+		# deposit out of the branch till. The unreleased part stays open on the
+		# credit note as the customer's credit (or is refunded now).
+		release = return_total if courier_release is None else min(return_total, max(courier_release, 0.0))
 		release_leg = {
 			"account": _get_courier_outstanding_account(company),
-			"amount": return_total,
+			"amount": release,
 			"debit": False,
 		}
 		human = f"Return courier reversal – {inv.name} / {credit_note_name}"
@@ -741,7 +783,7 @@ def plan_return_journal_legs(
 				"legs": [
 					{
 						"account": receivable,
-						"amount": return_total,
+						"amount": release,
 						"debit": True,
 						"party_type": "Customer",
 						"party": customer,
@@ -805,6 +847,7 @@ def dry_run_return_postings(invoice_id: str) -> dict[str, Any]:
 	money_state = _money_state(inv)
 	transactions = _unsettled_courier_transactions(inv.name)
 	courier = next((t for t in transactions if flt(t.get("amount")) > _TOL), None)
+	courier_release = _courier_open_amount(transactions) if money_state == MONEY_COURIER_OUTSTANDING else None
 
 	result: dict[str, Any] = {
 		"invoice_id": inv.name,
@@ -823,6 +866,7 @@ def dry_run_return_postings(invoice_id: str) -> dict[str, Any]:
 				credit_note_name=f"DRYRUN-{inv.name}",
 				pay_courier_for_trip=pay_courier,
 				courier=courier,
+				courier_release=courier_release,
 			)
 		except Exception as exc:
 			result["ok"] = False
@@ -1109,10 +1153,11 @@ def resolve_refund_source_account(inv: Any, branch: str) -> tuple[str, bool]:
 	the customer paid by InstaPay (money in "Bank Account - J") was refunded from
 	the branch drawer, leaving the drawer short and the bank overstated.
 
-	Rule: cash / cash-on-delivery / unknown method -> branch cash (unchanged).
-	Any other method -> the money ledger the payment was actually received into
-	(the submitted Payment Entry against this invoice: bank, wallet, kashier),
-	else the Mode of Payment's default account for the company; each only if it
+	Rule: first, the money ledger a payment was actually received into (a
+	submitted Payment Entry against this invoice: bank, wallet, kashier) — this
+	also catches an InstaPay deposit on a cash-on-delivery order. Otherwise
+	cash / cash-on-delivery / unknown method -> branch cash (unchanged), and any
+	other method -> the Mode of Payment's default account for the company; each only if it
 	is a non-group Asset ledger of the company that is not a Cash-type ledger
 	(a branch till), a party ledger or Courier Outstanding. Anything that
 	fails those checks falls back to branch cash. Never raises.
@@ -1146,8 +1191,6 @@ def resolve_refund_source_account(inv: Any, branch: str) -> tuple[str, bool]:
 			method = ""
 		if not method:
 			method = str(inv.get("custom_payment_method") or "").strip()
-		if method.lower() in _CASH_LIKE_METHODS:
-			return branch_cash, True
 
 		try:
 			courier_outstanding = _get_courier_outstanding_account(company)
@@ -1174,7 +1217,10 @@ def resolve_refund_source_account(inv: Any, branch: str) -> tuple[str, bool]:
 				and (not row.get("company") or row.get("company") == company)
 			)
 
-		# 1. The ledger the customer's money was actually received into.
+		# 1. The ledger the customer's money was actually received into. Checked
+		# before the method, because a cash-on-delivery order can carry a deposit
+		# paid by InstaPay into the bank; that deposit is what a refund pays back.
+		# The newest usable receipt wins; tills and Courier Outstanding are skipped.
 		received = frappe.db.sql(
 			"""
 			SELECT pe.paid_to
@@ -1182,12 +1228,16 @@ def resolve_refund_source_account(inv: Any, branch: str) -> tuple[str, bool]:
 			JOIN `tabPayment Entry Reference` per ON per.parent = pe.name
 			WHERE pe.docstatus = 1 AND pe.payment_type = 'Receive'
 			  AND per.reference_doctype = 'Sales Invoice' AND per.reference_name = %s
-			ORDER BY pe.creation DESC LIMIT 1
+			ORDER BY pe.creation DESC LIMIT 5
 			""",
 			(inv.name,),
 		)
-		if received and _usable(received[0][0]):
-			return received[0][0], False
+		for (paid_to,) in received or ():
+			if _usable(paid_to):
+				return paid_to, False
+
+		if method.lower() in _CASH_LIKE_METHODS:
+			return branch_cash, True
 
 		# 2. The Mode of Payment's default ledger for this company.
 		default_account = frappe.db.get_value(
@@ -1553,6 +1603,10 @@ def run_invoice_return(
 		branch = get_invoice_branch(inv)
 		transactions = _unsettled_courier_transactions(invoice_id)
 		courier = next((t for t in transactions if flt(t.get("amount")) > _TOL), None)
+		courier_open = _courier_open_amount(transactions)
+		deposit_collected = (
+			_deposit_collected(inv, transactions) if money_state == MONEY_COURIER_OUTSTANDING else 0.0
+		)
 
 		if refund_mode == REFUND_CUSTOMER_CREDIT and _employee_credit_return_blocked(inv, money_state):
 			return {
@@ -1566,7 +1620,7 @@ def run_invoice_return(
 			}
 
 		if refund_mode == REFUND_NOW:
-			if money_state not in {MONEY_PREPAID, MONEY_COURIER_SETTLED}:
+			if money_state not in {MONEY_PREPAID, MONEY_COURIER_SETTLED} and deposit_collected <= _TOL:
 				return {
 					"success": False,
 					"error": _("There is no collected payment to refund for this order."),
@@ -1626,6 +1680,15 @@ def run_invoice_return(
 			ratio = (return_total / flt(inv.grand_total)) if flt(inv.grand_total) else 1.0
 			ratio = min(max(ratio, 0.0), 1.0)
 
+			# What the courier carries for this return vs what the branch already
+			# holds (a deposit). Only the former leaves Courier Outstanding.
+			courier_release = (
+				min(return_total, courier_open) if money_state == MONEY_COURIER_OUTSTANDING else None
+			)
+			branch_held_part = (
+				max(return_total - courier_release, 0.0) if courier_release is not None else 0.0
+			)
+
 			# 3. Money that already moved.
 			journal_entries: list[str] = []
 			for plan in plan_return_journal_legs(
@@ -1635,6 +1698,7 @@ def run_invoice_return(
 				credit_note_name=cn.name,
 				pay_courier_for_trip=pay_courier_for_trip,
 				courier=courier,
+				courier_release=courier_release,
 			):
 				posted = _post_return_je(
 					company=inv.company,
@@ -1652,7 +1716,9 @@ def run_invoice_return(
 				compensating_ct = _compensating_courier_transaction(
 					inv,
 					courier,
-					return_total=return_total,
+					# Cancel only what the courier carried; a larger negative row
+					# would net his balance below zero by the deposit.
+					return_total=flt(courier_release),
 					shipping_reversed=(0.0 if pay_courier_for_trip else flt(courier.get("shipping_amount"))),
 					credit_note_name=cn.name,
 				)
@@ -1671,8 +1737,14 @@ def run_invoice_return(
 			refund_pe = None
 			refund_amount = 0.0
 			if refund_mode == REFUND_NOW:
-				collected = max(flt(inv.grand_total) - flt(inv.outstanding_amount), 0.0)
-				refund_amount = min(return_total, collected)
+				if money_state == MONEY_COURIER_OUTSTANDING:
+					# Only the deposit part is in the branch; the courier's part was
+					# released above and is not cash anyone holds.
+					collected = deposit_collected
+					refund_amount = min(branch_held_part, deposit_collected)
+				else:
+					collected = max(flt(inv.grand_total) - flt(inv.outstanding_amount), 0.0)
+					refund_amount = min(return_total, collected)
 				if refund_amount < return_total - _TOL:
 					logger.warning(
 						f"return refund capped on {inv.name}: requested {return_total}, "

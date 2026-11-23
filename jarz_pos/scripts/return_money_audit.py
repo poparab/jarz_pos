@@ -552,6 +552,164 @@ def _case_settle_after_return(ctx: RunContext, env: dict[str, Any], courier: dic
 	_record_expectation(ctx, case, _net_by_account(_vouchers_for(invoice)), expected)
 
 
+def _pay_deposit_cash(ctx: RunContext, invoice: str, pos_profile: str, amount: float) -> str:
+	"""Take part of the order in cash at the branch before dispatch."""
+	inv = frappe.get_doc("Sales Invoice", invoice)
+	receivable = inv.debit_to or get_company_receivable_account(inv.company)
+	pe = frappe.new_doc("Payment Entry")
+	pe.payment_type = "Receive"
+	pe.company = inv.company
+	pe.posting_date = frappe.utils.nowdate()
+	pe.mode_of_payment = "Cash"
+	pe.party_type = "Customer"
+	pe.party = inv.customer
+	pe.paid_from = receivable
+	pe.paid_to = get_pos_cash_account(pos_profile, inv.company)
+	pe.paid_amount = amount
+	pe.received_amount = amount
+	pe.append(
+		"references",
+		{"reference_doctype": "Sales Invoice", "reference_name": invoice, "allocated_amount": amount},
+	)
+	pe.flags.ignore_permissions = True
+	pe.insert(ignore_permissions=True)
+	pe.submit()
+	ctx.payment_entries.append(pe.name)
+	return pe.name
+
+
+def _case_cod_deposit_return(
+	ctx: RunContext, env: dict[str, Any], *, case: str, refund_mode: str, courier: dict[str, Any] | None
+) -> None:
+	"""Cash-on-delivery order with a deposit taken at the branch, returned in full.
+
+	Dispatch puts only the remainder (grand total - deposit) on the courier. The
+	return used to release the WHOLE credit note from Courier Outstanding and add
+	a negative courier row for the whole total, so the courier's rows netted to
+	minus the deposit, the settlement then paid that deposit out of the till, and
+	the customer was left with no credit at all.
+
+	``customer_credit`` -> the deposit stays in the till and the customer holds a
+	credit of exactly the deposit; settling the courier afterwards moves only the
+	trip fee.  ``refund_now`` -> the deposit goes back out of the till; every
+	account but the trip fee returns to zero.
+	"""
+	if not courier:
+		ctx.skip(f"{case}.skipped", "no courier bound to this branch — the deposit return did NOT run")
+		return
+
+	acc: Accounts = env["accounts"]
+	profile = env["pos_profile"]
+	customer = _ensure_customer(ctx, case, env["territory"], env["customer_group"])
+	invoice = _create_invoice(
+		ctx,
+		customer=customer,
+		pos_profile=profile,
+		items=env["items"],
+		order_purpose=None,
+		commercial_policy=None,
+		policy_reason=None,
+		pickup=False,
+	)
+	grand_total = flt(frappe.db.get_value("Sales Invoice", invoice, "grand_total"))
+	deposit = round(min(100.0, grand_total / 2), 2)
+	_pay_deposit_cash(ctx, invoice, profile, deposit)
+	_dispatch_invoice(invoice, profile, courier)
+	frappe.db.commit()
+	ship_expense = _courier_shipping_expense(invoice)
+
+	carried = round(
+		sum(
+			flt(r["amount"])
+			for r in frappe.get_all(
+				"Courier Transaction", filters={"reference_invoice": invoice}, fields=["amount"]
+			)
+		),
+		2,
+	)
+	ctx.record(
+		f"{case}.courier_carries_remainder_only",
+		abs(carried - (grand_total - deposit)) <= _TOL,
+		f"grand total={grand_total}, deposit={deposit}, courier carries={carried}",
+	)
+
+	result = ir.run_invoice_return(
+		invoice_id=invoice,
+		lines=_full_lines(invoice),
+		reason=f"{case} money audit",
+		refund_mode=refund_mode,
+		pay_courier_for_trip=True,
+	)
+	ctx.record(f"{case}.succeeded", bool(result.get("success")), json.dumps(result, default=str)[:300])
+	if not result.get("success"):
+		return
+
+	net_ct = round(
+		sum(
+			flt(r["amount"])
+			for r in frappe.get_all(
+				"Courier Transaction", filters={"reference_invoice": invoice}, fields=["amount"]
+			)
+		),
+		2,
+	)
+	ctx.record(
+		f"{case}.courier_rows_net_to_zero",
+		abs(net_ct) <= _TOL,
+		f"courier transaction net after return={net_ct} (negative = the courier would be "
+		f"paid the deposit out of the till at settlement)",
+	)
+
+	if refund_mode == ir.REFUND_NOW:
+		ctx.record(
+			f"{case}.refund_is_the_deposit",
+			abs(flt(result.get("refund_amount")) - deposit) <= _TOL,
+			f"refund_amount={result.get('refund_amount')}, deposit={deposit}",
+		)
+		expected = {
+			acc.receivable: 0.0,
+			acc.cash: 0.0,
+			acc.courier_outstanding: 0.0,
+			acc.freight: ship_expense,
+			acc.creditors: -ship_expense,
+		}
+		_record_expectation(ctx, case, _net_by_account(_vouchers_for(invoice)), expected)
+		return
+
+	from jarz_pos.services.delivery_handling import settle_single_invoice_paid
+
+	extra: list[tuple] = []
+	try:
+		settled = (
+			settle_single_invoice_paid(invoice, profile, courier.get("party_type"), courier.get("party"))
+			or {}
+		)
+		ctx.record(f"{case}.settlement_ran", True, json.dumps(settled, default=str)[:300])
+		for key in ("journal_entry", "settlement_journal_entry", "payment_entry"):
+			name = settled.get(key) if isinstance(settled, dict) else None
+			if name and frappe.db.exists("Journal Entry", name):
+				extra.append(("Journal Entry", name))
+		settlement_ran = True
+	except frappe.ValidationError as exc:
+		ctx.record(f"{case}.settlement_refused", True, f"{type(exc).__name__}: {exc}")
+		settlement_ran = False
+
+	# The deposit stays in the till as the customer's credit. Settling only pays
+	# the courier his trip fee out of the till; it must not touch the deposit.
+	expected = {
+		acc.receivable: -deposit,
+		acc.courier_outstanding: 0.0,
+		acc.freight: ship_expense,
+	}
+	if settlement_ran:
+		expected[acc.cash] = deposit - ship_expense
+	else:
+		expected[acc.cash] = deposit
+		expected[acc.creditors] = -ship_expense
+	vouchers = _vouchers_for(invoice, extra)
+	_record_expectation(ctx, case, _net_by_account(list(dict.fromkeys(vouchers))), expected)
+
+
 def _case_partner_return(ctx: RunContext, env: dict[str, Any]) -> None:
 	"""Return a delivery-partner order.
 
@@ -705,6 +863,22 @@ def run(cleanup: bool = True) -> dict[str, Any]:
 			("MONEY-PARTIAL-SHIPPING", lambda: _case_partial_shipping(ctx, env, courier)),
 			("MONEY-PARTIAL-TWICE", lambda: _case_partial_twice_never_exceeds_invoice(ctx, env, courier)),
 			("MONEY-SETTLE-AFTER-RETURN", lambda: _case_settle_after_return(ctx, env, courier)),
+			(
+				"MONEY-COD-DEPOSIT-CREDIT",
+				lambda: _case_cod_deposit_return(
+					ctx,
+					env,
+					case="MONEY-COD-DEPOSIT-CREDIT",
+					refund_mode=ir.REFUND_CUSTOMER_CREDIT,
+					courier=courier,
+				),
+			),
+			(
+				"MONEY-COD-DEPOSIT-REFUND",
+				lambda: _case_cod_deposit_return(
+					ctx, env, case="MONEY-COD-DEPOSIT-REFUND", refund_mode=ir.REFUND_NOW, courier=courier
+				),
+			),
 			("MONEY-PARTNER-RETURN", lambda: _case_partner_return(ctx, env)),
 		]
 		for name, run_case in cases:
