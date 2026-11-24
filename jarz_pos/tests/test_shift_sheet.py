@@ -50,7 +50,13 @@ JAR_ROWS = [
 	{"parent": "SI-1", "item_code": "J-MAN-S", "item_name": "Mango Small", "item_group": "Small", "qty": 2},
 	{"parent": "SI-1", "item_code": "J-MAN-M", "item_name": "Mango Medium", "item_group": "Medium", "qty": 1},
 	{"parent": "SI-1", "item_code": "BOX", "item_name": "Gift Box", "item_group": "Packaging", "qty": 5},
-	{"parent": "SI-2", "item_code": "BND-1", "item_name": "Mango Small Bundle", "item_group": "Small", "qty": 1},
+	{
+		"parent": "SI-2",
+		"item_code": "BND-1",
+		"item_name": "Mango Small Bundle",
+		"item_group": "Small",
+		"qty": 1,
+	},
 	{"parent": "SI-2", "item_code": "J-MAN-S", "item_name": "Mango Small", "item_group": "Small", "qty": 3},
 	{"parent": "SI-2", "item_code": "J-ORE-L", "item_name": "Oreo Large", "item_group": "Large", "qty": 1},
 	{"parent": "SI-2", "item_code": "J-ORE-M", "item_name": "Oreo Meduim", "item_group": "Meduim", "qty": 2},
@@ -80,6 +86,9 @@ class TestShiftSheet(unittest.TestCase):
 			patch.object(shift, "_resolve_sheet_dispatches", return_value=dispatches or {}),
 			patch.object(shift, "_resolve_sheet_settlements", return_value=settlements or {}),
 			patch.object(shift, "_resolve_sheet_returns", return_value=returns or []),
+			patch.object(
+				shift, "_resolve_sheet_cash_flow", return_value={"opening": 100.0, "expected": 700.0}
+			),
 			patch.object(frappe, "session", SimpleNamespace(user=user)),
 			patch.object(shift, "_resolve_sheet_opening", return_value=dict(opening)),
 			patch.object(shift, "_resolve_sheet_closing", return_value=closing),
@@ -99,8 +108,22 @@ class TestShiftSheet(unittest.TestCase):
 				shift,
 				"_resolve_sheet_payouts",
 				return_value=[
-					{"kind": "expense", "name": "EXP-1", "label": "Ice", "amount": 40.0, "status": "Paid", "at": "x"},
-					{"kind": "advance", "name": "EA-1", "label": "Ali", "amount": 60.0, "status": "Paid", "at": "y"},
+					{
+						"kind": "expense",
+						"name": "EXP-1",
+						"label": "Ice",
+						"amount": 40.0,
+						"status": "Paid",
+						"at": "x",
+					},
+					{
+						"kind": "advance",
+						"name": "EA-1",
+						"label": "Ali",
+						"amount": 60.0,
+						"status": "Paid",
+						"at": "y",
+					},
 				],
 			),
 			patch.object(
@@ -211,19 +234,47 @@ class TestShiftSheet(unittest.TestCase):
 			_inv("SI-OFD", 100, creation="2026-11-19 21:00:00"),
 		]
 		returns = [
-			{"credit_note": "CN-1", "order": "SI-1", "order_number": "SI-1", "amount": 50.0,
-			 "refund_amount": 50.0, "refund_account": "Cash - A", "refund_kind": "cash", "at": "x"},
-			{"credit_note": "CN-2", "order": "SI-9", "order_number": "9", "amount": 80.0,
-			 "refund_amount": 80.0, "refund_account": "Bank Account - J", "refund_kind": "bank", "at": "y"},
-			{"credit_note": "CN-3", "order": "SI-8", "order_number": "8", "amount": 20.0,
-			 "refund_amount": 0.0, "refund_account": None, "refund_kind": "credit", "at": "z"},
+			{
+				"credit_note": "CN-1",
+				"order": "SI-1",
+				"order_number": "SI-1",
+				"amount": 50.0,
+				"refund_amount": 50.0,
+				"refund_account": "Cash - A",
+				"refund_kind": "cash",
+				"at": "x",
+			},
+			{
+				"credit_note": "CN-2",
+				"order": "SI-9",
+				"order_number": "9",
+				"amount": 80.0,
+				"refund_amount": 80.0,
+				"refund_account": "Bank Account - J",
+				"refund_kind": "bank",
+				"at": "y",
+			},
+			{
+				"credit_note": "CN-3",
+				"order": "SI-8",
+				"order_number": "8",
+				"amount": 20.0,
+				"refund_amount": 0.0,
+				"refund_account": None,
+				"refund_kind": "credit",
+				"at": "z",
+			},
 		]
 		return self._run(
 			"mgr@example.com",
 			manager=True,
 			profiles=["Branch A"],
 			invoices=invoices,
-			dispatches={"SI-OLD": "2026-11-20 12:00:00", "SI-OFD": "2026-11-20 10:30:00", "SI-1": "2026-11-20 11:30:00"},
+			dispatches={
+				"SI-OLD": "2026-11-20 12:00:00",
+				"SI-OFD": "2026-11-20 10:30:00",
+				"SI-1": "2026-11-20 11:30:00",
+			},
 			settlements={"SI-OLD": {"at": "2026-11-20 13:00:00", "amount": 170.0}},
 			returns=returns,
 		)
@@ -261,3 +312,148 @@ class TestShiftSheet(unittest.TestCase):
 
 if __name__ == "__main__":
 	unittest.main()
+
+
+class TestShiftSheetDeliveryMoney(TestShiftSheet):
+	"""Courier cost, courier cash and the delivery totals per order."""
+
+	def test_courier_cost_and_cash_in(self):
+		invoices = [
+			_inv(
+				"SI-1",
+				300,
+				custom_courier_party_type="Employee",
+				custom_courier_party="EMP-1",
+				custom_shipping_expense=65,
+			),
+			_inv(
+				"SI-3",
+				480,
+				custom_courier_party_type="Employee",
+				custom_courier_party="EMP-1",
+				custom_shipping_expense=50,
+			),
+			_inv("SI-4", 320, sales_partner="Talabat", custom_shipping_expense=25),
+			_inv("SI-5", 200, custom_shipping_expense=70, custom_sales_invoice_state="Received"),
+		]
+		dispatches = {
+			"SI-1": "2026-11-20 12:00:00",
+			"SI-3": "2026-11-20 12:30:00",
+			"SI-4": "2026-11-20 13:00:00",
+		}
+		settlements = {
+			"SI-1": {"at": "2026-11-20 15:00:00", "amount": 300.0, "fee": 65.0},
+			"SI-3": {"at": "2026-11-20 15:00:00", "amount": 0.0, "fee": 50.0},
+		}
+		sheet = self._run(
+			"mgr@example.com",
+			manager=True,
+			profiles=["Branch A"],
+			invoices=invoices,
+			dispatches=dispatches,
+			settlements=settlements,
+		)
+		rows = {o["name"]: o for o in sheet["orders"]}
+		self.assertEqual(rows["SI-1"]["shipping_expense"], 65.0)
+		self.assertEqual(rows["SI-1"]["courier_cash_in"], 235.0)
+		self.assertEqual(rows["SI-1"]["courier_fee_paid"], 65.0)
+		# Prepaid order: the branch paid the courier its fee.
+		self.assertEqual(rows["SI-3"]["courier_cash_in"], -50.0)
+		# Partner-delivered order: no courier of ours, no cost.
+		self.assertEqual(rows["SI-4"]["shipping_expense"], 0.0)
+		# Not sent out yet: the stored figure is only an estimate.
+		self.assertIsNone(rows["SI-5"]["shipping_expense"])
+		totals = sheet["totals"]
+		self.assertEqual(totals["delivery_orders"], 3)
+		self.assertEqual(totals["delivery_income"], 30.0)
+		self.assertEqual(totals["delivery_cost"], 115.0)
+		self.assertEqual(totals["delivery_net"], -85.0)
+		self.assertEqual(totals["courier_cash_in"], 185.0)
+		self.assertEqual(totals["courier_fees_paid"], 115.0)
+		self.assertEqual(sheet["cash_flow"]["expected"], 700.0)
+
+	def test_staff_view_has_no_cash_flow(self):
+		sheet = self._run("opener@example.com")
+		self.assertIsNone(sheet["cash_flow"])
+
+	def test_pickup_costs_nothing(self):
+		self.assertEqual(
+			shift._sheet_shipping_expense({"custom_is_pickup": 1, "custom_shipping_expense": 40}, True), 0.0
+		)
+
+
+class TestShiftSheetCashClassifier(unittest.TestCase):
+	TILL = "Branch A - J"
+	CO = "Courier Outstanding - J"
+	OS = "Cash Over Short - J"
+
+	def _classify(self, vouchers, legs, pe=None, parties=None):
+		types = {
+			"Bank Account - J": {"account_type": "Bank", "root_type": "Asset"},
+			"Cash - J": {"account_type": "Cash", "root_type": "Asset"},
+			"Misc - J": {"account_type": "", "root_type": "Expense"},
+			"Creditors - J": {"account_type": "Payable", "root_type": "Liability"},
+			self.CO: {"account_type": "", "root_type": "Asset"},
+			self.OS: {"account_type": "", "root_type": "Expense"},
+		}
+		return shift._classify_sheet_cash(
+			vouchers, legs, pe or {}, types, self.TILL, self.CO, self.OS, parties or set()
+		)
+
+	def test_courier_settlement_split_into_orders_and_fees(self):
+		vouchers = [{"voucher_type": "Journal Entry", "voucher_no": "JE-1", "amount": 2990.0, "title": "Ali"}]
+		legs = {
+			"JE-1": [
+				{"account": self.TILL, "debit": 2990, "credit": 0},
+				{
+					"account": "Creditors - J",
+					"debit": 250,
+					"credit": 0,
+					"party_type": "Supplier",
+					"party": "Ali",
+				},
+				{"account": self.CO, "debit": 0, "credit": 3240},
+			]
+		}
+		sums, lines = self._classify(vouchers, legs)
+		self.assertEqual(sums["courier_orders"], 3240.0)
+		self.assertEqual(sums["courier_fees"], -250.0)
+		self.assertEqual(len(lines), 2)
+
+	def test_kinds(self):
+		vouchers = [
+			{"voucher_type": "Payment Entry", "voucher_no": "PE-1", "amount": 240.0},
+			{"voucher_type": "Payment Entry", "voucher_no": "PE-2", "amount": -660.0},
+			{"voucher_type": "Payment Entry", "voucher_no": "PE-3", "amount": -300.0},
+			{"voucher_type": "Journal Entry", "voucher_no": "JE-2", "amount": -3000.0},
+			{"voucher_type": "Journal Entry", "voucher_no": "JE-3", "amount": -30.0},
+			{"voucher_type": "Journal Entry", "voucher_no": "JE-4", "amount": 50.0},
+			{"voucher_type": "Journal Entry", "voucher_no": "JE-5", "amount": -200.0},
+		]
+		legs = {
+			"JE-2": [{"account": "Cash - J", "debit": 3000, "credit": 0}],
+			"JE-3": [{"account": "Misc - J", "debit": 30, "credit": 0}],
+			"JE-4": [{"account": self.OS, "debit": 0, "credit": 50}],
+			"JE-5": [
+				{
+					"account": "Creditors - J",
+					"debit": 200,
+					"credit": 0,
+					"party_type": "Supplier",
+					"party": "InDrive",
+				}
+			],
+		}
+		pe = {
+			"PE-1": {"payment_type": "Receive", "party_name": "Cust"},
+			"PE-2": {"payment_type": "Pay", "reference_no": "RET-CN-1", "party_name": "Cust"},
+			"PE-3": {"payment_type": "Pay", "party_name": "Belal"},
+		}
+		sums, _lines = self._classify(vouchers, legs, pe, {("Supplier", "InDrive")})
+		self.assertEqual(sums["sales_cash"], 240.0)
+		self.assertEqual(sums["refunds"], -660.0)
+		self.assertEqual(sums["expenses"], -330.0)
+		self.assertEqual(sums["handovers"], -3000.0)
+		self.assertEqual(sums["courier_fees"], -200.0)
+		# A previous close's over/short entry is already in the counted opening.
+		self.assertEqual(sums["other"], 0.0)

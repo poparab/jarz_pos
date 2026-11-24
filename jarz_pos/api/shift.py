@@ -1774,6 +1774,7 @@ def _resolve_sheet_invoices(
 				"custom_sub_territory",
 				"custom_is_pickup",
 				"custom_kanban_profile",
+				"custom_shipping_expense",
 			)
 			if _sheet_has_column("Sales Invoice", c)
 		]
@@ -1894,11 +1895,15 @@ def _resolve_sheet_dispatches(branch: str, start: Any, end: Any) -> dict[str, An
 def _resolve_sheet_settlements(
 	opening_entry: str, branch: str, start: Any, end: Any
 ) -> dict[str, dict[str, Any]]:
-	"""invoice -> {"at": first settle time, "amount": sum of Courier Transaction.amount}.
+	"""invoice -> {"at", "amount", "fee"} for Courier Transactions settled in the shift.
 
-	A Courier Transaction counts when ``settled_in_shift`` is this opening entry,
-	or when it has no shift link, was settled inside the window and the invoice
-	belongs to the branch.
+	``amount`` is the order money the courier carried (Courier Transaction.amount)
+	and ``fee`` the courier's delivery fee deducted at settlement
+	(``shipping_amount``), so ``amount - fee`` is the cash the branch received
+	(negative for a prepaid order: the branch paid the courier). A Courier
+	Transaction counts when ``settled_in_shift`` is this opening entry, or when it
+	has no shift link, was settled inside the window and the invoice belongs to
+	the branch.
 	"""
 	out: dict[str, dict[str, Any]] = {}
 	try:
@@ -1910,7 +1915,7 @@ def _resolve_sheet_settlements(
 		rows = (
 			frappe.db.sql(
 				f"""
-				SELECT ct.reference_invoice AS name, ct.amount, ct.settled_at
+				SELECT ct.reference_invoice AS name, ct.amount, ct.shipping_amount, ct.settled_at
 				FROM `tabCourier Transaction` ct
 				JOIN `tabSales Invoice` si ON si.name = ct.reference_invoice
 				WHERE si.docstatus = 1 AND si.is_return = 0
@@ -1927,8 +1932,9 @@ def _resolve_sheet_settlements(
 			or []
 		)
 		for r in rows:
-			entry = out.setdefault(r["name"], {"at": None, "amount": 0.0})
+			entry = out.setdefault(r["name"], {"at": None, "amount": 0.0, "fee": 0.0})
 			entry["amount"] += flt(r.get("amount"))
+			entry["fee"] += flt(r.get("shipping_amount"))
 			at = r.get("settled_at")
 			if at and (entry["at"] is None or get_datetime(at) < get_datetime(entry["at"])):
 				entry["at"] = at
@@ -2199,6 +2205,298 @@ def _resolve_sheet_payouts(branch: str, start: Any, end: Any) -> list[dict[str, 
 	return payouts
 
 
+SHEET_CASH_KINDS = (
+	"sales_cash",
+	"courier_orders",
+	"courier_fees",
+	"expenses",
+	"refunds",
+	"handovers",
+	"other",
+)
+
+
+def _classify_sheet_cash(
+	vouchers: list[dict[str, Any]],
+	je_legs: dict[str, list[dict[str, Any]]],
+	pe_info: dict[str, dict[str, Any]],
+	account_types: dict[str, dict[str, Any]],
+	till: str,
+	courier_outstanding: str | None,
+	over_short: str | None,
+	courier_parties: set[tuple[str, str]] | None = None,
+) -> tuple[dict[str, float], list[dict[str, Any]]]:
+	"""Sort the till's GL movements of a shift into the drawer's kinds of money.
+
+	``vouchers`` are rows of {voucher_type, voucher_no, amount (till debit - credit),
+	at}. Returns per-kind sums (money out negative) and one line per entry.
+
+	A courier settlement Journal Entry is split in two: the order money it
+	releases from Courier Outstanding (``courier_orders``) and the courier fees
+	kept back (``courier_fees`` = what reached the till minus that order money).
+	A Cash Over/Short entry is a shift close adjusting the previous count, which
+	the counted opening already includes, so it is left out.
+	"""
+	sums = {k: 0.0 for k in SHEET_CASH_KINDS}
+	lines: list[dict[str, Any]] = []
+
+	def add(kind: str, amount: float, row: dict[str, Any], label: str) -> None:
+		amount = flt(amount, 2)
+		if abs(amount) < 0.005:
+			return
+		sums[kind] += amount
+		lines.append(
+			{
+				"kind": kind,
+				"voucher_type": row.get("voucher_type"),
+				"voucher_no": row.get("voucher_no"),
+				"label": label or row.get("voucher_no") or "",
+				"amount": amount,
+				"at": _sheet_iso(row.get("at")),
+			}
+		)
+
+	for row in vouchers:
+		vtype = row.get("voucher_type")
+		amount = flt(row.get("amount"))
+		name = row.get("voucher_no")
+		if vtype == "Journal Entry":
+			legs = [leg for leg in je_legs.get(name, []) if leg.get("account") != till]
+			accounts = {leg.get("account") for leg in legs}
+			title = str(row.get("title") or "")
+			if courier_outstanding and courier_outstanding in accounts:
+				gross = sum(
+					flt(leg.get("credit")) - flt(leg.get("debit"))
+					for leg in legs
+					if leg.get("account") == courier_outstanding
+				)
+				add("courier_orders", gross, row, title)
+				add("courier_fees", amount - gross, row, title)
+				continue
+			if over_short and over_short in accounts:
+				continue
+			if courier_parties and any(
+				(leg.get("party_type"), leg.get("party")) in courier_parties for leg in legs
+			):
+				# Paying a courier (e.g. a ride-hailing driver supplier) its trip fees.
+				add("courier_fees", amount, row, title)
+				continue
+			meta = [account_types.get(a) or {} for a in accounts]
+			if any(m.get("account_type") in ("Cash", "Bank") for m in meta):
+				other = next(
+					(
+						a
+						for a in accounts
+						if (account_types.get(a) or {}).get("account_type") in ("Cash", "Bank")
+					),
+					"",
+				)
+				add("handovers", amount, row, other)
+			elif any(m.get("root_type") == "Expense" for m in meta) or any(
+				leg.get("party_type") in ("Employee", "Supplier") for leg in legs
+			):
+				add("expenses", amount, row, title)
+			else:
+				add("other", amount, row, title)
+		elif vtype == "Payment Entry":
+			pe = pe_info.get(name) or {}
+			label = str(pe.get("party_name") or pe.get("party") or "")
+			ptype = pe.get("payment_type")
+			if ptype == "Receive":
+				add("sales_cash", amount, row, label)
+			elif ptype == "Pay" and str(pe.get("reference_no") or "").startswith("RET-"):
+				add("refunds", amount, row, label)
+			elif ptype == "Pay":
+				add("expenses", amount, row, label)
+			else:
+				add("handovers", amount, row, label)
+		elif vtype == "Sales Invoice":
+			add("sales_cash" if amount >= 0 else "refunds", amount, row, name)
+		else:
+			add("expenses" if amount < 0 else "other", amount, row, name)
+	return {k: flt(v, 2) for k, v in sums.items()}, lines
+
+
+def _resolve_sheet_cash_flow(
+	branch: str,
+	company: str | None,
+	start: Any,
+	end: Any,
+	drawer: dict[str, float | None],
+	is_open: bool,
+) -> dict[str, Any] | None:
+	"""How the drawer went from the opening count to the expected closing.
+
+	Built from the branch till's own GL entries in the shift window, so every
+	figure is money that actually moved. ``other`` absorbs whatever the
+	classified movements do not explain, so opening + kinds == expected always.
+	"""
+	try:
+		from jarz_pos.utils.account_utils import get_pos_cash_account
+
+		if not company:
+			return None
+		till = get_pos_cash_account(branch, company)
+		if not till:
+			return None
+		vouchers = (
+			frappe.db.sql(
+				"""
+				SELECT voucher_type, voucher_no, SUM(debit - credit) AS amount, MIN(creation) AS at
+				FROM `tabGL Entry`
+				WHERE account = %(till)s AND is_cancelled = 0 AND creation BETWEEN %(start)s AND %(end)s
+				GROUP BY voucher_type, voucher_no
+				ORDER BY at ASC, voucher_no ASC
+				""",
+				{"till": till, "start": start, "end": end},
+				as_dict=True,
+			)
+			or []
+		)
+		je_names = [v["voucher_no"] for v in vouchers if v.get("voucher_type") == "Journal Entry"]
+		pe_names = [v["voucher_no"] for v in vouchers if v.get("voucher_type") == "Payment Entry"]
+		je_legs: dict[str, list[dict[str, Any]]] = {}
+		titles: dict[str, str] = {}
+		if je_names:
+			for leg in frappe.get_all(
+				"Journal Entry Account",
+				filters={"parent": ["in", je_names], "parenttype": "Journal Entry"},
+				fields=["parent", "account", "debit", "credit", "party_type", "party"],
+				limit=0,
+			):
+				je_legs.setdefault(leg["parent"], []).append(leg)
+			for je in frappe.get_all(
+				"Journal Entry", filters={"name": ["in", je_names]}, fields=["name", "title"], limit=0
+			):
+				titles[je["name"]] = je.get("title") or ""
+		employee_names: dict[str, str] = {}
+		employees = sorted(
+			{
+				leg["party"]
+				for legs in je_legs.values()
+				for leg in legs
+				if leg.get("party_type") == "Employee" and leg.get("party")
+			}
+		)
+		if employees:
+			for e in frappe.get_all(
+				"Employee", filters={"name": ["in", employees]}, fields=["name", "employee_name"], limit=0
+			):
+				employee_names[e["name"]] = e.get("employee_name") or e["name"]
+		for v in vouchers:
+			party_leg = next(
+				(leg for leg in je_legs.get(v["voucher_no"], []) if leg.get("party")),
+				None,
+			)
+			if party_leg:
+				party = party_leg["party"]
+				v["title"] = (
+					employee_names.get(party, party) if party_leg.get("party_type") == "Employee" else party
+				)
+			else:
+				v["title"] = titles.get(v["voucher_no"], "")
+		pe_info: dict[str, dict[str, Any]] = {}
+		if pe_names:
+			for pe in frappe.get_all(
+				"Payment Entry",
+				filters={"name": ["in", pe_names]},
+				fields=["name", "payment_type", "party", "party_name", "reference_no"],
+				limit=0,
+			):
+				pe_info[pe["name"]] = pe
+		leg_accounts = sorted(
+			{leg["account"] for legs in je_legs.values() for leg in legs if leg.get("account")}
+		)
+		account_types: dict[str, dict[str, Any]] = {}
+		if leg_accounts:
+			for acc in frappe.get_all(
+				"Account",
+				filters={"name": ["in", leg_accounts]},
+				fields=["name", "account_type", "root_type", "account_name"],
+				limit=0,
+			):
+				account_types[acc["name"]] = acc
+		courier_outstanding = next(
+			(
+				a
+				for a, m in account_types.items()
+				if str(m.get("account_name") or "").startswith("Courier Outstanding")
+			),
+			None,
+		)
+		over_short = next(
+			(
+				a
+				for a, m in account_types.items()
+				if "over" in str(m.get("account_name") or "").lower()
+				and "short" in str(m.get("account_name") or "").lower()
+			),
+			None,
+		)
+		leg_parties = {
+			(leg.get("party_type"), leg.get("party"))
+			for legs in je_legs.values()
+			for leg in legs
+			if leg.get("party_type") in ("Supplier", "Employee") and leg.get("party")
+		}
+		courier_parties: set[tuple[str, str]] = set()
+		if leg_parties:
+			for r in (
+				frappe.db.sql(
+					"""SELECT DISTINCT party_type, party FROM `tabCourier Transaction`
+				WHERE party IN %(parties)s""",
+					{"parties": tuple(p for _t, p in leg_parties)},
+					as_dict=True,
+				)
+				or []
+			):
+				key = (r.get("party_type"), r.get("party"))
+				if key in leg_parties:
+					courier_parties.add(key)
+		sums, lines = _classify_sheet_cash(
+			vouchers, je_legs, pe_info, account_types, till, courier_outstanding, over_short, courier_parties
+		)
+		opening = flt(drawer.get("opening_amount"))
+		moved = flt(sum(sums.values()), 2)
+		if not is_open and drawer.get("expected_closing") is not None:
+			expected = flt(drawer.get("expected_closing"), 2)
+			remainder = flt(expected - opening - moved, 2)
+			if abs(remainder) >= 0.005:
+				sums["other"] = flt(sums["other"] + remainder, 2)
+		else:
+			expected = flt(opening + moved, 2)
+		return {
+			"opening": opening,
+			**sums,
+			"expected": expected,
+			"counted": None if is_open else drawer.get("actual_closing"),
+			"difference": None if is_open else drawer.get("difference"),
+			"is_open": bool(is_open),
+			"till_account": till,
+			"lines": lines,
+		}
+	except Exception:
+		_sheet_log("cash_flow")
+		return None
+
+
+def _sheet_shipping_expense(inv: dict[str, Any], dispatched: bool) -> float | None:
+	"""Courier cost of one order: the order's ``custom_shipping_expense``.
+
+	0 for a pickup and for a delivery-partner order with no courier of ours
+	(the partner delivers, we pay no trip); None while the order has not gone
+	out yet, because the stored figure is then only the territory estimate.
+	"""
+	if cint(inv.get("custom_is_pickup")):
+		return 0.0
+	has_courier = bool(inv.get("custom_courier_party"))
+	if inv.get("sales_partner") and not has_courier:
+		return 0.0
+	if not (dispatched or has_courier):
+		return None
+	return flt(inv.get("custom_shipping_expense"), 2)
+
+
 def _resolve_sheet_drawer(opening_entry: str, closing_entry: str | None) -> dict[str, float | None]:
 	"""Drawer figures for the manager totals; every missing part stays None."""
 	out: dict[str, float | None] = {
@@ -2290,6 +2588,20 @@ def get_shift_sheet(opening_entry: str) -> dict[str, Any]:
 	(cash / bank / credit) and at. The manager ``totals`` add new_orders,
 	out_for_delivery_orders, settled_orders, settled_amount, returns,
 	returns_amount, cash_refunds and bank_refunds.
+
+	Delivery money per order: ``delivery_fee`` is what the customer was charged
+	(the Shipping Income row, so a custom delivery charge is included),
+	``shipping_expense`` the courier cost (``custom_shipping_expense``; 0 for
+	pickup / partner-delivered, null before dispatch), ``courier_cash_in`` the cash
+	the courier handed in for it in this shift and ``courier_fee_paid`` the fee
+	kept back. Totals add delivery_orders / delivery_income / delivery_cost /
+	delivery_net over orders sent out in this shift, plus courier_cash_in and
+	courier_fees_paid.
+
+	``cash_flow`` (managers only) walks the drawer from the opening count to the
+	expected closing using the till's GL: sales_cash, courier_orders,
+	courier_fees, expenses, refunds, handovers, other (money out negative), with
+	the entries in ``lines``.
 	"""
 	opening = _resolve_sheet_opening(opening_entry)
 	if not opening:
@@ -2381,6 +2693,13 @@ def get_shift_sheet(opening_entry: str) -> dict[str, Any]:
 				"out_for_delivery_at": _sheet_iso(ofd_at),
 				"settled_at": _sheet_iso((settled or {}).get("at")),
 				"settled_amount": flt((settled or {}).get("amount"), 2) if settled else 0.0,
+				"shipping_expense": _sheet_shipping_expense(inv, bool(ofd_at)),
+				"courier_fee_paid": flt((settled or {}).get("fee"), 2) if settled else 0.0,
+				"courier_cash_in": flt(
+					flt((settled or {}).get("amount")) - flt((settled or {}).get("fee")), 2
+				)
+				if settled
+				else 0.0,
 			}
 		)
 	orders.sort(key=lambda o: sort_keys[o["name"]])
@@ -2390,9 +2709,16 @@ def get_shift_sheet(opening_entry: str) -> dict[str, Any]:
 	payouts = _resolve_sheet_payouts(branch, start, end)
 
 	totals = None
+	cash_flow = None
 	if is_manager_view:
 		drawer = _resolve_sheet_drawer(opening_entry, (closing or {}).get("name"))
+		cash_flow = _resolve_sheet_cash_flow(
+			branch, opening.get("company"), start, end, drawer, is_open=not closing
+		)
 		created_orders = [o for o in orders if "created" in o["reasons"]]
+		sent_out = [o for o in orders if "out_for_delivery" in o["reasons"] and not o["is_pickup"]]
+		delivery_income = flt(sum(o["delivery_fee"] for o in sent_out), 2)
+		delivery_cost = flt(sum(flt(o["shipping_expense"]) for o in sent_out), 2)
 		totals = {
 			"orders": len(created_orders),
 			"jars": sum(o["jars"] for o in created_orders),
@@ -2407,6 +2733,12 @@ def get_shift_sheet(opening_entry: str) -> dict[str, Any]:
 			"cash_refunds": flt(sum(r["refund_amount"] for r in returns if r["refund_kind"] == "cash"), 2),
 			"bank_refunds": flt(sum(r["refund_amount"] for r in returns if r["refund_kind"] == "bank"), 2),
 			"payouts": flt(sum(p["amount"] for p in payouts), 2),
+			"delivery_orders": len(sent_out),
+			"delivery_income": delivery_income,
+			"delivery_cost": delivery_cost,
+			"delivery_net": flt(delivery_income - delivery_cost, 2),
+			"courier_cash_in": flt(sum(o["courier_cash_in"] for o in orders), 2),
+			"courier_fees_paid": flt(sum(o["courier_fee_paid"] for o in orders), 2),
 			**drawer,
 		}
 
@@ -2433,4 +2765,5 @@ def get_shift_sheet(opening_entry: str) -> dict[str, Any]:
 		"jars_by_flavour": jars_by_flavour,
 		"payouts": payouts,
 		"totals": totals,
+		"cash_flow": cash_flow,
 	}
