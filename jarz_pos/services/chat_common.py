@@ -638,7 +638,7 @@ def publish_chat_update(
 	message: dict | None = None,
 	draft: dict | None = None,
 	summary: dict | None = None,
-	notes: list | None = None,
+	notes: Any = None,
 ) -> None:
 	"""Emit ``jarz_chat_update`` to each recipient's own room, after commit.
 
@@ -654,11 +654,13 @@ def publish_chat_update(
 			"message": message,
 			"draft": draft,
 		}
-		if notes is not None:
+		if notes is not None and not callable(notes):
 			payload["notes"] = notes
 		for user in chat_recipients():
 			try:
-				frappe.publish_realtime(WS_EVENTS.CHAT_UPDATE, payload, user=user, after_commit=True)
+				# ``notes`` may be a per-recipient builder (each user's own can_delete).
+				body = {**payload, "notes": notes(user)} if callable(notes) else payload
+				frappe.publish_realtime(WS_EVENTS.CHAT_UPDATE, body, user=user, after_commit=True)
 			except Exception:
 				pass
 	except Exception:

@@ -120,7 +120,8 @@ def open_note_counts(names: Iterable[str]) -> dict[str, int]:
 
 
 def _publish(conversation: str) -> None:
-	cc.publish_chat_update(conversation, "note", notes=list_notes(conversation))
+	rows = load_rows(conversation)
+	cc.publish_chat_update(conversation, "note", notes=lambda user: [serialize_note(r, user) for r in rows])
 
 
 def add_note(conversation: str, text: Any) -> dict[str, Any]:
