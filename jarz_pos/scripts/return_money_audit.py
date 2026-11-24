@@ -385,6 +385,113 @@ def _case_prepaid_full_return(ctx: RunContext, env: dict[str, Any], *, case: str
 	_record_expectation(ctx, case, _net_by_account(_vouchers_for(invoice)), expected)
 
 
+def _dispatch_paid_with_courier(invoice: str, profile: str, courier: dict[str, Any]) -> None:
+	"""Dispatch an already-paid order with our own courier, fee settled later.
+
+	``_dispatch_invoice`` sends a paid order down the legacy kanban transition,
+	which writes no Courier Transaction and no freight entry at all ("paid_noops")
+	— so the prepaid cases above never had a courier to pay or not pay. The floor
+	dispatches through ``dispatch_settlement``; that is the path that leaves a
+	courier row carrying a FEE and no CASH, which is the whole point of the case.
+	"""
+	from jarz_pos.services.settlement_strategies import dispatch_settlement
+
+	dispatch_settlement(
+		invoice,
+		mode="later",
+		pos_profile=profile,
+		party_type=courier.get("party_type"),
+		party=courier.get("party"),
+	)
+
+
+def _open_courier_fee(invoice: str) -> float:
+	"""What the courier is still owed for this order on the rows he is settled from."""
+	return round(
+		sum(
+			flt(r["shipping_amount"])
+			for r in frappe.get_all(
+				"Courier Transaction",
+				filters={"reference_invoice": invoice},
+				fields=["shipping_amount"],
+				limit_page_length=0,
+			)
+		),
+		2,
+	)
+
+
+def _case_online_courier_fee(
+	ctx: RunContext, env: dict[str, Any], *, case: str, pay_courier: bool, courier: dict[str, Any] | None
+) -> None:
+	"""An order with NO cash on the courier, returned in full.
+
+	Paid before dispatch, so the courier row carries a fee and an amount of zero —
+	the same shape an InstaPay or Kashier order has. The fee used to be looked up
+	on the row that carries cash, found nothing, and the "pay the courier for the
+	trip" switch was hidden: the courier was paid for an order that never left the
+	shop (production order 21983, 2026-11-17, 80 EGP).
+
+	Expectation: the money the customer paid stays in the till as their credit
+	either way. The trip fee stands when we pay for the trip, and is gone from
+	BOTH the ledger and the courier's own rows when we do not — the second half is
+	what makes the reversal real, because couriers are settled from the rows.
+	"""
+	acc: Accounts = env["accounts"]
+	if not courier:
+		ctx.skip(f"{case}.skipped", "no courier on this site; the case needs one")
+		return
+	invoice = _setup_order(
+		ctx, env, case, prepay=True, courier=courier, dispatch_fn=_dispatch_paid_with_courier
+	)
+	grand_total = flt(frappe.db.get_value("Sales Invoice", invoice, "grand_total"))
+	ship_expense = _courier_shipping_expense(invoice)
+	cash_rows = frappe.get_all(
+		"Courier Transaction", filters={"reference_invoice": invoice, "amount": [">", 0]}, pluck="name"
+	)
+	ctx.record(
+		f"{case}.courier_carries_a_fee_and_no_cash",
+		ship_expense > _TOL and not cash_rows,
+		f"shipping_amount={ship_expense}, rows with amount>0={cash_rows}",
+	)
+	if ship_expense <= _TOL or cash_rows:
+		return
+
+	preview = ir.build_return_preview(invoice)
+	ctx.record(
+		f"{case}.fee_switch_is_offered",
+		bool((preview.get("toggles") or {}).get("can_choose_courier_fee")),
+		f"toggles={preview.get('toggles')} courier={preview.get('courier')}",
+	)
+
+	result = ir.run_invoice_return(
+		invoice_id=invoice,
+		lines=_full_lines(invoice),
+		reason=f"{case} money audit",
+		refund_mode=ir.REFUND_CUSTOMER_CREDIT,
+		pay_courier_for_trip=pay_courier,
+	)
+	ctx.record(f"{case}.succeeded", bool(result.get("success")), json.dumps(result, default=str)[:300])
+	if not result.get("success"):
+		return
+
+	expected = {
+		acc.receivable: -grand_total,
+		acc.cash: grand_total,
+		acc.freight: ship_expense if pay_courier else 0.0,
+		acc.creditors: -ship_expense if pay_courier else 0.0,
+	}
+	_record_expectation(ctx, case, _net_by_account(_vouchers_for(invoice)), expected)
+
+	still_owed = _open_courier_fee(invoice)
+	want = ship_expense if pay_courier else 0.0
+	ctx.record(
+		f"{case}.courier_rows_agree_with_the_ledger",
+		abs(still_owed - want) <= _TOL,
+		f"fee still on the courier's rows={still_owed}, expected {want}",
+	)
+
+
 def _case_partial_shipping(ctx: RunContext, env: dict[str, Any], courier: dict[str, Any] | None) -> None:
 	"""Return ONE line of a two-line order.
 
@@ -715,18 +822,23 @@ def _case_cod_deposit_return(
 	_record_expectation(ctx, case, _net_by_account(list(dict.fromkeys(vouchers))), expected)
 
 
-def _case_partner_return(ctx: RunContext, env: dict[str, Any]) -> None:
+def _case_partner_return(
+	ctx: RunContext, env: dict[str, Any], *, case: str = "MONEY-PARTNER-RETURN", pay_courier: bool = True
+) -> None:
 	"""Return a delivery-partner order.
 
 	A partner rider carries the branch's money like our own courier: dispatch
 	moves the receivable to Courier Outstanding and accrues the partner's fee to
 	the partner's settlement account. The return must release Courier Outstanding
-	in full and leave the fee owed — the partner is paid for the trip regardless.
-	(This case used to assert the older model, where partner dispatch bypassed
-	Courier Outstanding; it also failed at dispatch once the partner's own
+	in full and leave the fee owed — the partner is paid for a trip whose goods
+	came back. (This case used to assert the older model, where partner dispatch
+	bypassed Courier Outstanding; it also failed at dispatch once the partner's own
 	delivery cost became mandatory.)
+
+	``pay_courier=False`` is the order that was pulled back before the rider took
+	it: the trip never happened, so the fee must leave the partner's payable AND
+	the weekly bill. There was no way to do that at all before 2026-11-25.
 	"""
-	case = "MONEY-PARTNER-RETURN"
 	partner = frappe.db.get_value("Delivery Partner", {}, ["name", "settlement_account"], as_dict=True)
 	if not partner or not partner.get("settlement_account"):
 		# WHY: recorded passed=True. Without a Delivery Partner the partner
@@ -772,12 +884,20 @@ def _case_partner_return(ctx: RunContext, env: dict[str, Any]) -> None:
 	if not is_partner:
 		return
 
+	if not pay_courier:
+		preview = ir.build_return_preview(invoice)
+		ctx.record(
+			f"{case}.fee_switch_is_offered",
+			bool((preview.get("toggles") or {}).get("can_choose_courier_fee")),
+			f"toggles={preview.get('toggles')} courier={preview.get('courier')}",
+		)
+
 	result = ir.run_invoice_return(
 		invoice_id=invoice,
 		lines=_full_lines(invoice),
 		reason=f"{case} money audit",
 		refund_mode=ir.REFUND_CUSTOMER_CREDIT,
-		pay_courier_for_trip=True,
+		pay_courier_for_trip=pay_courier,
 	)
 	ctx.record(f"{case}.succeeded", bool(result.get("success")), json.dumps(result, default=str)[:300])
 	if not result.get("success"):
@@ -786,34 +906,43 @@ def _case_partner_return(ctx: RunContext, env: dict[str, Any]) -> None:
 	# The partner's fee lives on ``partner_fee`` (and ``custom_shipping_expense``);
 	# a partner Courier Transaction carries ``shipping_amount`` 0 on purpose, so
 	# ``_courier_shipping_expense`` would read 0 here.
-	partner_fee = round(
-		sum(
-			flt(r["partner_fee"])
-			for r in frappe.get_all(
-				"Courier Transaction",
-				filters={"reference_invoice": invoice, "is_partner_order": 1},
-				fields=["partner_fee"],
-			)
-		),
-		2,
+	partner_rows = frappe.get_all(
+		"Courier Transaction",
+		filters={"reference_invoice": invoice, "is_partner_order": 1},
+		fields=["name", "partner_fee", "partner_settled"],
+		limit_page_length=0,
 	)
+	# What dispatch entered, read off the dispatch row alone.
+	partner_fee = round(sum(flt(r["partner_fee"]) for r in partner_rows if flt(r["partner_fee"]) > 0), 2)
 	ctx.record(
 		f"{case}.partner_fee_recorded",
 		abs(partner_fee - PARTNER_FEE) <= _TOL,
-		f"partner_fee on the courier rows={partner_fee}, entered at dispatch={PARTNER_FEE}",
+		f"partner_fee on the dispatch row={partner_fee}, entered at dispatch={PARTNER_FEE}",
+	)
+	# What the weekly bill would charge for this order: the unbilled rows, summed —
+	# exactly the query ``settle_delivery_partner`` runs.
+	billable = round(
+		sum(flt(r["partner_fee"]) for r in partner_rows if not int(r.get("partner_settled") or 0)), 2
+	)
+	fee_owed = partner_fee if pay_courier else 0.0
+	ctx.record(
+		f"{case}.weekly_bill_agrees_with_the_ledger",
+		abs(billable - fee_owed) <= _TOL,
+		f"unbilled partner_fee for this order={billable}, expected {fee_owed}; rows={partner_rows}",
 	)
 	actual = _net_by_account(_vouchers_for(invoice))
 	# Dispatch moves the receivable to Courier Outstanding against the partner's
 	# rider, exactly like our own courier, and accrues the partner's fee
 	# (DR Freight / CR partner ledger). A full return releases Courier Outstanding
-	# in full and does NOT reverse the fee — the partner charges for a trip whose
-	# goods came back. So the partner ends up owed exactly the fee (a payable,
-	# hence negative), freight stands, and every other account nets to zero.
+	# in full. The fee is NOT reversed when the trip happened — the partner charges
+	# for a trip whose goods came back — so the partner ends up owed exactly the
+	# fee (a payable, hence negative) and freight stands. When the trip never
+	# happened both go back to zero. Every other account nets to zero either way.
 	expected = {
 		acc.receivable: 0.0,
 		acc.courier_outstanding: 0.0,
-		partner["settlement_account"]: -partner_fee,
-		acc.freight: partner_fee,
+		partner["settlement_account"]: -fee_owed,
+		acc.freight: fee_owed,
 	}
 	_record_expectation(ctx, case, actual, expected)
 	ctx.record(
@@ -908,6 +1037,22 @@ def run(cleanup: bool = True) -> dict[str, Any]:
 				),
 			),
 			("MONEY-PARTNER-RETURN", lambda: _case_partner_return(ctx, env)),
+			(
+				"MONEY-PARTNER-NO-FEE",
+				lambda: _case_partner_return(ctx, env, case="MONEY-PARTNER-NO-FEE", pay_courier=False),
+			),
+			(
+				"MONEY-ONLINE-PAY-COURIER",
+				lambda: _case_online_courier_fee(
+					ctx, env, case="MONEY-ONLINE-PAY-COURIER", pay_courier=True, courier=courier
+				),
+			),
+			(
+				"MONEY-ONLINE-NO-COURIER-FEE",
+				lambda: _case_online_courier_fee(
+					ctx, env, case="MONEY-ONLINE-NO-COURIER-FEE", pay_courier=False, courier=courier
+				),
+			),
 		]
 		for name, run_case in cases:
 			try:

@@ -217,6 +217,185 @@ class TestCourierCarriedAmounts(unittest.TestCase):
 		self.assertEqual(ir._deposit_collected(_invoice(grand_total=500.0), []), 0.0)
 
 
+class TestCourierFeePosition(unittest.TestCase):
+	"""The trip fee is found on its own terms, not on the row that carries cash.
+
+	Production order 21983 (2026-11-17): paid by InstaPay, pulled back 21 minutes
+	after dispatch, and the courier was still paid 80 — because the fee was only
+	ever looked up on a row with ``amount > 0`` and an online order has none.
+	"""
+
+	ONLINE = {
+		"name": "CT-1",
+		"party_type": "Supplier",
+		"party": "SUP-1",
+		"amount": 0.0,
+		"shipping_amount": 80.0,
+		"status": "Unsettled",
+	}
+	PARTNER = {
+		"name": "CT-2",
+		"party_type": "Supplier",
+		"party": "RIDER-1",
+		"amount": 0.0,
+		"shipping_amount": 0.0,
+		"status": "Settled",
+		"is_partner_order": 1,
+		"delivery_partner": "Deliverk",
+		"partner_fee": 50.0,
+		"partner_settled": 0,
+	}
+
+	def test_an_online_order_has_no_cash_row(self):
+		self.assertIsNone(ir._cash_courier_row([self.ONLINE]))
+
+	@patch.object(ir, "_find_existing_je_by_tag", return_value="ACC-JV-1")
+	def test_an_online_order_still_has_a_fee_to_decide(self, _find):
+		position = ir._courier_fee_position(_invoice(), [self.ONLINE])
+		self.assertEqual(position["shipping_amount"], 80.0)
+		self.assertEqual((position["party_type"], position["party"]), ("Supplier", "SUP-1"))
+		self.assertEqual(position["is_partner_order"], 0)
+
+	@patch.object(ir, "_find_existing_je_by_tag", return_value="ACC-JV-1")
+	def test_a_settled_fee_row_still_counts(self, _find):
+		"""Being paid already does not make the fee undecidable — it is clawed back."""
+		row = dict(self.ONLINE, status="Settled")
+		self.assertEqual(ir._courier_fee_position(_invoice(), [row])["shipping_amount"], 80.0)
+
+	@patch.object(ir, "_find_existing_je_by_tag", return_value="ACC-JV-1")
+	def test_a_fee_already_reversed_is_not_reversed_twice(self, _find):
+		"""Second partial return: the first one's negative row nets the fee to zero."""
+		rows = [self.ONLINE, dict(self.ONLINE, name="CT-R", shipping_amount=-80.0)]
+		self.assertIsNone(ir._courier_fee_position(_invoice(), rows))
+
+	@patch.object(ir, "_find_existing_je_by_tag", return_value=None)
+	def test_no_accrual_means_nothing_to_reverse(self, _find):
+		"""The reversal mirrors the dispatch accrual; with none booked there is no mirror."""
+		self.assertIsNone(ir._courier_fee_position(_invoice(), [self.ONLINE]))
+
+	@patch.object(ir, "_find_existing_je_by_tag", return_value="ACC-JV-1")
+	def test_a_prepaid_partner_order_reports_the_partner_fee(self, _find):
+		position = ir._courier_fee_position(_invoice(), [self.PARTNER])
+		self.assertEqual(position["partner_fee"], 50.0)
+		self.assertEqual(position["shipping_amount"], 0.0)
+		self.assertEqual(position["delivery_partner"], "Deliverk")
+		self.assertEqual(position["is_partner_order"], 1)
+
+	@patch.object(ir, "_find_existing_je_by_tag", return_value="ACC-JV-1")
+	def test_a_partner_fee_already_reversed_is_gone(self, _find):
+		rows = [self.PARTNER, dict(self.PARTNER, name="CT-R", partner_fee=-50.0)]
+		self.assertIsNone(ir._courier_fee_position(_invoice(), rows))
+
+	@patch.object(ir, "_find_existing_je_by_tag", return_value="ACC-JV-1")
+	def test_no_rows_no_fee(self, _find):
+		self.assertIsNone(ir._courier_fee_position(_invoice(), []))
+
+
+@patch.object(ir, "get_delivery_partner_supplier", return_value="SUP-DELIVERK")
+@patch.object(ir, "_get_partner_settlement_account", return_value="Deliverk - J")
+@patch.object(ir, "get_freight_expense_account", return_value="Freight - J")
+@patch.object(ir, "get_creditors_account", return_value="Creditors - J")
+@patch.object(ir, "get_company_receivable_account", return_value="Debtors - J")
+class TestPartnerFeeReversal(unittest.TestCase):
+	"""A partner's fee stands through a return unless the trip never happened."""
+
+	COURIER = {
+		"party_type": "Supplier",
+		"party": "RIDER-1",
+		"delivery_partner": "Deliverk",
+		"is_partner_order": 1,
+		"shipping_amount": 0.0,
+		"partner_fee": 50.0,
+	}
+
+	def _plan(self, *, pay_courier):
+		return ir.plan_return_journal_legs(
+			inv=_invoice(custom_is_partner_order=1),
+			money_state=ir.MONEY_PREPAID,
+			return_total=500.0,
+			credit_note_name="ACC-SINV-2026-00099",
+			pay_courier_for_trip=pay_courier,
+			courier=self.COURIER,
+		)
+
+	def test_the_fee_stands_when_the_trip_happened(self, *_):
+		self.assertEqual(self._plan(pay_courier=True), [])
+
+	def test_the_fee_is_reversed_on_the_partners_own_payable(self, *_):
+		plans = self._plan(pay_courier=False)
+		self.assertEqual([p["je_type"] for p in plans], [ir.JE_PARTNER_REVERSAL])
+		legs = plans[0]["legs"]
+		payable = next(l for l in legs if l["account"] == "Deliverk - J")
+		freight = next(l for l in legs if l["account"] == "Freight - J")
+		self.assertTrue(payable["debit"])
+		self.assertFalse(freight["debit"])
+		self.assertEqual((payable["amount"], freight["amount"]), (50.0, 50.0))
+		# The accrual credited the partner's Supplier, not the rider and not Creditors.
+		self.assertEqual((payable["party_type"], payable["party"]), ("Supplier", "SUP-DELIVERK"))
+		self.assertNotIn("Creditors - J", {l["account"] for l in legs})
+
+	def test_a_partner_row_without_a_fee_reverses_nothing(self, *_):
+		courier = dict(self.COURIER, partner_fee=0.0)
+		plans = ir.plan_return_journal_legs(
+			inv=_invoice(custom_is_partner_order=1),
+			money_state=ir.MONEY_PREPAID,
+			return_total=500.0,
+			credit_note_name="ACC-SINV-2026-00099",
+			pay_courier_for_trip=False,
+			courier=courier,
+		)
+		self.assertEqual(plans, [])
+
+
+class TestCompensatingCourierRow(unittest.TestCase):
+	"""The row that makes a fee reversal real — couriers are settled from rows."""
+
+	def _insert(self, courier, **kwargs):
+		ct = MagicMock()
+		with patch.object(ir, "frappe") as mock_frappe:
+			mock_frappe.new_doc.return_value = ct
+			name = ir._compensating_courier_transaction(
+				_invoice(), courier, credit_note_name="ACC-SINV-2026-00099", **kwargs
+			)
+		self.assertEqual(name, ct.name)
+		ct.insert.assert_called_once()
+		return ct
+
+	def test_online_order_fee_only_row_stays_open_for_settlement(self):
+		ct = self._insert(
+			{"party_type": "Supplier", "party": "SUP-1"}, return_total=0.0, shipping_reversed=80.0
+		)
+		self.assertEqual(ct.amount, 0)
+		self.assertEqual(ct.shipping_amount, -80.0)
+		# +80 on the dispatch row, -80 here: the courier's balance nets to nothing.
+		self.assertEqual(ct.status, "Unsettled")
+		self.assertEqual(ct.is_partner_order, 0)
+
+	def test_partner_fee_reversal_lands_on_the_weekly_bill(self):
+		ct = self._insert(
+			{"party_type": "Supplier", "party": "RIDER-1", "is_partner_order": 1, "delivery_partner": "Deliverk"},
+			return_total=0.0,
+			shipping_reversed=0.0,
+			partner_fee_reversed=50.0,
+		)
+		self.assertEqual(ct.partner_fee, -50.0)
+		self.assertEqual(ct.partner_settled, 0)
+		self.assertEqual(ct.delivery_partner, "Deliverk")
+		# No cash and no own-courier fee: nothing for the rider to settle.
+		self.assertEqual(ct.status, "Settled")
+
+	def test_partner_cash_release_keeps_the_fee_when_the_trip_happened(self):
+		ct = self._insert(
+			{"party_type": "Supplier", "party": "RIDER-1", "is_partner_order": 1, "delivery_partner": "Deliverk"},
+			return_total=500.0,
+			shipping_reversed=0.0,
+		)
+		self.assertEqual(ct.amount, -500.0)
+		self.assertEqual(ct.partner_fee, 0)
+		self.assertEqual(ct.partner_settled, 1)
+		self.assertEqual(ct.status, "Unsettled")
+
+
 class TestPostReturnJe(unittest.TestCase):
 	"""The single posting door enforcing the v16 rules."""
 

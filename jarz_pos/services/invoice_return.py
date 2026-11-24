@@ -48,7 +48,9 @@ from frappe.utils import flt
 from jarz_pos.services.delivery_handling import (
 	_find_existing_je_by_tag,
 	_get_courier_outstanding_account,
+	_get_partner_settlement_account,
 	_tag_journal_entry,
+	get_delivery_partner_supplier,
 	update_submitted_sales_invoice_fields,
 )
 from jarz_pos.utils.access_control import (
@@ -309,6 +311,8 @@ def _unsettled_courier_transactions(invoice_name: str) -> list[dict[str, Any]]:
 					"status",
 					"delivery_partner",
 					"is_partner_order",
+					"partner_fee",
+					"partner_settled",
 				],
 				limit_page_length=20,
 			)
@@ -316,6 +320,95 @@ def _unsettled_courier_transactions(invoice_name: str) -> list[dict[str, Any]]:
 		)
 	except Exception:
 		return []
+
+
+def _cash_courier_row(transactions: list[dict[str, Any]]) -> dict[str, Any] | None:
+	"""The dispatch row that put this order's CASH on a carrier, if there is one.
+
+	Only a cash-on-delivery dispatch writes a positive ``amount``. An order paid
+	online, sent before its payment was confirmed, or switched to an online
+	collection after dispatch carries ``amount`` 0 — so this row answers "who holds
+	the money" and nothing else. Who is owed a TRIP FEE is a different question with
+	a different answer: see :func:`_courier_fee_position`.
+	"""
+	return next((t for t in transactions or [] if flt(t.get("amount")) > _TOL), None)
+
+
+#: Dispatch tags the own-courier freight accrual is posted under (see
+#: ``delivery_handling._create_shipping_expense_to_creditors_je``).
+_FREIGHT_ACCRUAL_JE_TYPES = ("COURIER_EXPENSE", "OFD")
+_PARTNER_FEE_ACCRUAL_JE_TYPE = "PARTNER_FEE_ACCRUAL"
+
+
+def _fee_accrual_exists(inv: Any, je_types: tuple[str, ...]) -> bool:
+	return any(_find_existing_je_by_tag(inv.company, inv.name, je_type) for je_type in je_types)
+
+
+def _courier_fee_position(inv: Any, transactions: list[dict[str, Any]]) -> dict[str, Any] | None:
+	"""Who is owed a trip fee for this order, and how much of it still stands.
+
+	The fee used to be looked up on the row that carried the order's cash
+	(``amount > 0``). That row does not exist on an order with no cash on the
+	carrier — paid online, sent unconfirmed, on account — so those orders read as
+	having no courier at all: the "pay the courier for the trip" switch was hidden,
+	the app sent "yes", and the courier was paid for an order that had been pulled
+	back before it left the shop. The fee is found on its own terms here.
+
+	Returns ``None`` when no fee stands, otherwise a dict shaped like a Courier
+	Transaction row (``party_type``, ``party``, ``delivery_partner``,
+	``is_partner_order``) with the two amounts NETTED across every row:
+
+	``shipping_amount``
+	    What our own courier is still owed. Netted so a second partial return
+	    cannot reverse a fee the first one already took back.
+	``partner_fee``
+	    What the delivery partner company still bills for the trip.
+
+	A fee is only reported when its dispatch accrual can be found, because the
+	reversal is that accrual's mirror image: reversing an expense that was never
+	booked would understate freight instead of correcting it.
+	"""
+	rows = transactions or []
+
+	partner_rows = [t for t in rows if int(t.get("is_partner_order") or 0)]
+	partner_fee = max(sum(flt(t.get("partner_fee")) for t in partner_rows), 0.0)
+	if partner_fee > _TOL:
+		source = next((t for t in partner_rows if flt(t.get("partner_fee")) > _TOL), None)
+		if (
+			source
+			and source.get("delivery_partner")
+			and _fee_accrual_exists(inv, (_PARTNER_FEE_ACCRUAL_JE_TYPE,))
+		):
+			return {
+				"name": source.get("name"),
+				"party_type": source.get("party_type"),
+				"party": source.get("party"),
+				"delivery_partner": source.get("delivery_partner"),
+				"is_partner_order": 1,
+				"shipping_amount": 0.0,
+				"partner_fee": round(partner_fee, 2),
+			}
+
+	shipping = max(sum(flt(t.get("shipping_amount")) for t in rows), 0.0)
+	if shipping > _TOL:
+		source = next((t for t in rows if flt(t.get("shipping_amount")) > _TOL), None)
+		if (
+			source
+			and source.get("party_type")
+			and source.get("party")
+			and _fee_accrual_exists(inv, _FREIGHT_ACCRUAL_JE_TYPES)
+		):
+			return {
+				"name": source.get("name"),
+				"party_type": source.get("party_type"),
+				"party": source.get("party"),
+				"delivery_partner": source.get("delivery_partner"),
+				"is_partner_order": 0,
+				"shipping_amount": round(shipping, 2),
+				"partner_fee": 0.0,
+			}
+
+	return None
 
 
 def _courier_open_amount(transactions: list[dict[str, Any]]) -> float:
@@ -350,10 +443,14 @@ def _is_partner_order(inv: Any) -> bool:
 	  branch's money exactly like our own courier does — dispatch moves the
 	  receivable to Courier Outstanding against him, in full — so a return releases
 	  it from Courier Outstanding like any other order.
-	* The FEE must NOT be reversed. The partner charges for the trip whether or not
-	  the customer keeps the goods, so what we owe them stands after a return. The
+	* The FEE stands by default. The partner charges for the trip whether or not
+	  the customer keeps the goods, so what we owe them survives a return. The
 	  Courier Transaction carries ``shipping_amount`` of zero and holds the fee on
-	  ``partner_fee`` precisely so no freight-reversal path can reach it by accident.
+	  ``partner_fee`` precisely so the own-courier freight reversal can never reach
+	  it by accident. The one exception is an explicit operator decision that the
+	  trip never happened (``pay_courier_for_trip`` off — the order was pulled back
+	  before the rider took it): then the accrual is reversed on the partner's own
+	  payable and a negative fee line goes onto the weekly bill.
 	"""
 	try:
 		return bool(int(inv.get("custom_is_partner_order") or 0))
@@ -521,7 +618,13 @@ def build_return_preview(invoice_id: str) -> dict[str, Any]:
 		open_shift = None
 
 	transactions = _unsettled_courier_transactions(invoice_id)
-	courier = next((t for t in transactions if flt(t.get("amount")) > _TOL), None)
+	courier = _cash_courier_row(transactions)
+	# The trip fee is looked up separately from the cash: an order paid online has
+	# no cash on the courier but he is still owed (or not owed) the trip.
+	try:
+		fee_courier = _courier_fee_position(inv, transactions)
+	except Exception:
+		fee_courier = None
 	freight_je = None
 	for je_type in ("OFD", "COURIER_EXPENSE"):
 		try:
@@ -577,15 +680,21 @@ def build_return_preview(invoice_id: str) -> dict[str, Any]:
 		"lines": lines,
 		"delivery_note": _original_delivery_note(invoice_id),
 		"courier": {
-			"party_type": (courier or {}).get("party_type"),
-			"party": (courier or {}).get("party"),
-			"courier_transaction": (courier or {}).get("name"),
-			"shipping_amount": flt((courier or {}).get("shipping_amount")),
+			"party_type": (courier or fee_courier or {}).get("party_type"),
+			"party": (courier or fee_courier or {}).get("party"),
+			"courier_transaction": (courier or fee_courier or {}).get("name"),
+			"shipping_amount": flt((fee_courier or {}).get("shipping_amount")),
+			"partner_fee": flt((fee_courier or {}).get("partner_fee")),
+			# The fee the switch below keeps or removes, whoever it is owed to.
+			"fee_amount": flt((fee_courier or {}).get("shipping_amount"))
+			+ flt((fee_courier or {}).get("partner_fee")),
+			"is_partner_order": bool((fee_courier or {}).get("is_partner_order")),
 			"freight_journal_entry": freight_je,
 		},
 		"toggles": {
-			# A pickup order never had a courier, so the trip question is moot.
-			"can_choose_courier_fee": bool(courier and not is_pickup),
+			# Offered whenever a trip fee stands — NOT only when the courier carries
+			# cash. A pickup order never had a courier, so the question is moot.
+			"can_choose_courier_fee": bool(fee_courier and not is_pickup),
 			"can_refund_now": bool(refund_available and open_shift),
 			"refund_blocked_reason": (
 				None
@@ -799,12 +908,41 @@ def plan_return_journal_legs(
 	# already in the branch, so the only question is the refund, handled
 	# separately as a Payment Entry (or left as customer credit).
 
+	# The trip fee. *courier* here is whoever is owed the fee (see
+	# ``_courier_fee_position``), which is not necessarily someone carrying cash.
+	#
 	# A delivery partner charges for the trip whether or not the customer keeps the
-	# goods, so their fee is never reversed by a return — it stays on the weekly
-	# bill. ``shipping_amount`` is zero on a partner row (the fee lives on
-	# ``partner_fee``), so this block would skip it anyway; the guard is explicit so
-	# the rule is not lost the next time someone reads the arithmetic.
-	if not pay_courier_for_trip and courier and not partner_order:
+	# goods, so their fee stands through an ordinary return and stays on the weekly
+	# bill. It is taken back only when the operator says the trip never happened —
+	# and then on the partner's OWN payable, where dispatch accrued it, never on
+	# Creditors. ``shipping_amount`` is zero on a partner row (the fee lives on
+	# ``partner_fee``), so the two branches below can never both fire.
+	partner_order = partner_order or bool(courier and int(courier.get("is_partner_order") or 0))
+	if not pay_courier_for_trip and courier and partner_order:
+		partner_fee = flt(courier.get("partner_fee"))
+		delivery_partner = courier.get("delivery_partner")
+		if partner_fee > _TOL and delivery_partner:
+			plans.append(
+				{
+					"je_type": JE_PARTNER_REVERSAL,
+					"human": f"Return partner fee reversal – {inv.name} / {credit_note_name}",
+					"legs": [
+						{
+							"account": _get_partner_settlement_account(delivery_partner),
+							"amount": partner_fee,
+							"debit": True,
+							"party_type": "Supplier",
+							"party": get_delivery_partner_supplier(delivery_partner),
+						},
+						{
+							"account": get_freight_expense_account(company),
+							"amount": partner_fee,
+							"debit": False,
+						},
+					],
+				}
+			)
+	elif not pay_courier_for_trip and courier:
 		shipping = flt(courier.get("shipping_amount"))
 		if shipping > _TOL:
 			# The accrual has to be reversed where it was made: on Creditors,
@@ -846,7 +984,7 @@ def dry_run_return_postings(invoice_id: str) -> dict[str, Any]:
 	inv = frappe.get_doc("Sales Invoice", str(invoice_id or "").strip())
 	money_state = _money_state(inv)
 	transactions = _unsettled_courier_transactions(inv.name)
-	courier = next((t for t in transactions if flt(t.get("amount")) > _TOL), None)
+	courier = _courier_fee_position(inv, transactions)
 	courier_release = _courier_open_amount(transactions) if money_state == MONEY_COURIER_OUTSTANDING else None
 
 	result: dict[str, Any] = {
@@ -1052,8 +1190,17 @@ def _compensating_courier_transaction(
 	return_total: float,
 	shipping_reversed: float,
 	credit_note_name: str,
+	partner_fee_reversed: float = 0.0,
 ) -> str | None:
 	"""Insert a negative-amount Courier Transaction that cancels the original.
+
+	One row carries up to three reversals, each zero when it does not apply:
+	``amount`` (order cash the courier no longer carries), ``shipping_amount`` (a
+	trip fee our own courier is no longer owed) and ``partner_fee`` (a trip fee the
+	delivery partner company no longer bills). A fee-only row — amount 0 — is what
+	an online-paid order produces, and it is the only thing that makes the fee
+	reversal real: the Journal Entry corrects the ledger, but couriers are settled
+	from these rows, never from the Creditors balance.
 
 	Courier Transaction is not submittable and has only Unsettled/Settled — there
 	is no reversal state to move to. A compensating negative row is the idiom
@@ -1075,7 +1222,12 @@ def _compensating_courier_transaction(
 		ct.reference_invoice = inv.name
 		ct.amount = -abs(flt(return_total))
 		ct.shipping_amount = -abs(flt(shipping_reversed))
-		ct.status = "Unsettled"
+		# Open only while it holds a cash or own-courier fee position for someone to
+		# settle. A row that reverses nothing but a partner fee has no rider position
+		# at all — like the prepaid partner dispatch row it mirrors, it is born
+		# Settled so it never sits on the courier balances screen as a zero.
+		has_rider_position = abs(flt(ct.amount)) > _TOL or abs(flt(ct.shipping_amount)) > _TOL
+		ct.status = "Unsettled" if has_rider_position else "Settled"
 		ct.payment_mode = "Deferred"
 		ct.idempotency_token = f"RET::{credit_note_name}"
 		ct.notes = f"Return reversal for {inv.name} (credit note {credit_note_name})"
@@ -1088,8 +1240,17 @@ def _compensating_courier_transaction(
 		# the weekly reconciliation list, which is a list of trips to pay for.
 		ct.is_partner_order = 1 if courier.get("is_partner_order") else 0
 		if ct.is_partner_order:
-			ct.partner_fee = 0
-			ct.partner_settled = 1
+			fee_back = abs(flt(partner_fee_reversed))
+			if fee_back > _TOL:
+				# The trip never happened: a negative fee line, left UNBILLED, so the
+				# weekly reconciliation list shows the trip and its cancellation
+				# side by side and the bill nets to what the partner is really owed
+				# (it reduces the next bill if this trip was already paid).
+				ct.partner_fee = -fee_back
+				ct.partner_settled = 0
+			else:
+				ct.partner_fee = 0
+				ct.partner_settled = 1
 		ct.flags.ignore_permissions = True
 		ct.insert(ignore_permissions=True)
 		return ct.name
@@ -1602,7 +1763,11 @@ def run_invoice_return(
 		money_state = _money_state(inv)
 		branch = get_invoice_branch(inv)
 		transactions = _unsettled_courier_transactions(invoice_id)
-		courier = next((t for t in transactions if flt(t.get("amount")) > _TOL), None)
+		# Two different questions with two different rows: who carries the order's
+		# cash, and who is owed the trip fee. They are the same row on a
+		# cash-on-delivery order and only there.
+		courier = _cash_courier_row(transactions)
+		fee_courier = _courier_fee_position(inv, transactions)
 		courier_open = _courier_open_amount(transactions)
 		deposit_collected = (
 			_deposit_collected(inv, transactions) if money_state == MONEY_COURIER_OUTSTANDING else 0.0
@@ -1697,7 +1862,7 @@ def run_invoice_return(
 				return_total=return_total,
 				credit_note_name=cn.name,
 				pay_courier_for_trip=pay_courier_for_trip,
-				courier=courier,
+				courier=fee_courier,
 				courier_release=courier_release,
 			):
 				posted = _post_return_je(
@@ -1711,17 +1876,39 @@ def run_invoice_return(
 					journal_entries.append(posted)
 
 			# 4. Operational counter-rows.
+			#
+			# The fee legs mirror the Journal Entries planned above exactly: a fee
+			# reversed in the ledger with no row here is invisible to every
+			# settlement screen (they read these rows, not Creditors), which is how a
+			# reversed fee used to be paid out anyway.
+			shipping_reversed = 0.0
+			partner_fee_reversed = 0.0
+			if fee_courier and not pay_courier_for_trip:
+				if fee_courier.get("is_partner_order"):
+					partner_fee_reversed = flt(fee_courier.get("partner_fee"))
+				else:
+					shipping_reversed = flt(fee_courier.get("shipping_amount"))
+			cash_released = bool(courier and money_state == MONEY_COURIER_OUTSTANDING)
+
 			compensating_ct = None
-			if courier and money_state == MONEY_COURIER_OUTSTANDING:
+			if cash_released or shipping_reversed > _TOL or partner_fee_reversed > _TOL:
 				compensating_ct = _compensating_courier_transaction(
 					inv,
-					courier,
+					# Same party either way; the cash row wins when both exist.
+					(courier if cash_released else None) or fee_courier or courier,
 					# Cancel only what the courier carried; a larger negative row
 					# would net his balance below zero by the deposit.
-					return_total=flt(courier_release),
-					shipping_reversed=(0.0 if pay_courier_for_trip else flt(courier.get("shipping_amount"))),
+					return_total=(flt(courier_release) if cash_released else 0.0),
+					shipping_reversed=shipping_reversed,
+					partner_fee_reversed=partner_fee_reversed,
 					credit_note_name=cn.name,
 				)
+				if compensating_ct is None and (shipping_reversed > _TOL or partner_fee_reversed > _TOL):
+					# The ledger says the fee is gone; without this row the courier is
+					# still paid it. Better no return than a silent mismatch.
+					raise frappe.ValidationError(
+						_("The courier fee could not be removed for this return. Nothing was posted; try again.")
+					)
 			compensating_spt = _compensating_sales_partner_transaction(
 				inv, ratio=ratio, credit_note_name=cn.name
 			)
@@ -1807,6 +1994,7 @@ def run_invoice_return(
 					frappe.db.get_value("Payment Entry", refund_pe, "paid_from") if refund_pe else None
 				),
 				"refund_amount": refund_amount,
+				"courier_fee_reversed": round(shipping_reversed + partner_fee_reversed, 2),
 				"return_status": return_status,
 				"money_state": money_state,
 				"return_total": return_total,
