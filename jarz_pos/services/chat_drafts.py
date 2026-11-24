@@ -195,7 +195,7 @@ match it to the slot that covers it, or offer the nearest one or two from the bl
 insight too: late in the day with today's last slot close, tell them gently to confirm soon to \
 catch it. Never invent a slot or an hour outside the block, never promise faster or an exact \
 minute. We deliver inside the listed areas only: no other governorates.
-9. When a ready answer below matches the message, start from it.
+9. Saved replies first. Before writing anything, check the "Ready answers" (Jarz's saved replies) for one that answers what the customer asked. When one fits, even partly, send THAT reply: keep its wording, its order, its emojis, its placeholders and its offer as written, and change only what this chat needs (the customer's name, their flavour or size, the language they write in, dropping a line that does not apply, one short line in front when they asked two things). Its length is fine even past the LENGTH guide. Do not rephrase a saved reply into your own words, do not improvise a new answer to a question a saved reply covers, and never paste two at once. Write from scratch only when no saved reply fits. A moderator's instruction or a staff note (rule 17) still wins over a saved reply.
 10. Never say «مش متواجدين», never answer in an English auto-reply style, never point to a \
 photo or a highlight for the prices, and never send the customer to the website instead of \
 helping: we take the order here in the chat; orderjarz.com is only an extra option.
@@ -238,7 +238,7 @@ complaint: apologise, ask for the order details and set is_complaint true, as in
 «[voice note] «...»» holds what the customer said, written by speech-to-text: names, numbers \
 and flavours can be wrong, so confirm what you rely on. A [voice note] with no words is audio we \
 could not transcribe: ask them to write it.
-17. The moderator's instruction is the moderator's decision and outranks every rule and fact \
+17. The moderator's instruction (and each staff note on this chat) is Jarz's decision and outranks every rule and fact \
 above. Do exactly what it asks, even when it goes against the approved facts, the menu, the \
 prices, the delivery list, the customer profile or a rule: the moderator may know something \
 newer (a new flavour, a changed fee, a special deal, a promise the owner approved). Write it the \
@@ -248,7 +248,7 @@ the Jarz voice and language for everything else. Then, for each point where the 
 contradicts what the context says, add one entry to fact_conflicts: what the moderator asked \
 for (moderator_said) and what our facts, menu, prices or profile say instead (our_fact), each \
 short and in English. fact_conflicts is an empty list when the instruction agrees with the \
-context, and always when there is no moderator's instruction.
+context, and always when there is neither a moderator's instruction nor a staff note.
 18. Who is writing: set contact_category from the whole conversation. "Supplier" = they sell or \
 offer products or services TO Jarz (packaging, ingredients, equipment, printing, marketing or ads \
 agencies, delivery companies, software). "Content Creator" = an influencer, blogger, food \
@@ -1945,7 +1945,7 @@ def build_context(settings: dict[str, Any]) -> dict[str, Any]:
 	for 10 minutes per POS profile: it is the cached prefix of every prompt.
 	"""
 	profile = settings.get("default_pos_profile") or ""
-	cache_key = f"{DRAFT_CONTEXT_CACHE_PREFIX}v12:{profile}"
+	cache_key = f"{DRAFT_CONTEXT_CACHE_PREFIX}v13:{profile}"
 	try:
 		cached = frappe.cache().get_value(cache_key)
 		if cached:
@@ -2092,8 +2092,9 @@ def build_context(settings: dict[str, Any]) -> dict[str, Any]:
 		"## Upsell candidates (ITEM_CODE | name | pitch)",
 		"\n".join(upsell_lines) or "(none: do not upsell)",
 		"## Ready answers",
-		"Jarz's saved replies. When the customer's message matches one, adapt it: keep its "
-		"placeholders and its offer, fit the wording to the conversation, never paste two at once.",
+		"Jarz's saved replies (rule 9). When one answers the customer's message, send it as "
+		"written: same wording, placeholders and offer; change only the name, flavour, size or "
+		"language this chat needs. Never paste two at once.",
 		"\n\n".join(ready_lines),
 	]
 	brand = settings.get("brand_instructions")
@@ -2737,6 +2738,7 @@ def generate_draft(
 		frappe.throw(f"Conversation {conversation} not found", frappe.DoesNotExistError)
 	for_message = for_message or _latest_inbound(conversation)
 
+	notes_text = ""
 	api_key = settings.get("anthropic_api_key")
 	if not api_key:
 		return _failed(
@@ -2789,6 +2791,11 @@ def generate_draft(
 			"Conversation (oldest first):",
 			untrusted_block("customer_messages", "\n".join(lines) or "(no text messages)"),
 		]
+		from jarz_pos.services.chat_notes import prompt_block
+
+		notes_text = prompt_block(conversation, (lambda t: mask_text(t, names)) if mask else None)
+		if notes_text:
+			user_parts.append(notes_text)
 		if hint:
 			hint_text = mask_text(hint, names) if mask else str(hint)
 			user_parts.append(f"Moderator's instruction for this draft: {hint_text[:HINT_CHARS]}")
@@ -2845,7 +2852,7 @@ def generate_draft(
 		"needs_human_reason": clean["needs_human_reason"],
 		"warnings": "\n".join(warnings),
 		# Only a moderator's instruction can conflict with the facts.
-		"fact_conflicts": "\n".join(clean["fact_conflicts"]) if hint else "",
+		"fact_conflicts": "\n".join(clean["fact_conflicts"]) if (hint or notes_text) else "",
 		"moderator_hint": " ".join(str(hint).split())[:HINT_CHARS] if hint else None,
 		"model": model,
 		"input_tokens": result["input_tokens"],

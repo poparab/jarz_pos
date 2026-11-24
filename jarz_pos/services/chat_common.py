@@ -310,13 +310,20 @@ def pending_draft_conversations(names: Iterable[str]) -> set[str]:
 
 
 def serialize_summary(
-	row: Any, has_pending_draft: bool | None = None, at: _dt.datetime | None = None
+	row: Any,
+	has_pending_draft: bool | None = None,
+	at: _dt.datetime | None = None,
+	open_notes: int | None = None,
 ) -> dict[str, Any]:
 	"""ConversationSummary from a ``frappe._dict`` / Document carrying SUMMARY_FIELDS."""
 	get = row.get
 	name = get("name")
 	if has_pending_draft is None:
 		has_pending_draft = name in pending_draft_conversations([name])
+	if open_notes is None:
+		from jarz_pos.services.chat_notes import open_note_counts
+
+		open_notes = open_note_counts([name]).get(name, 0)
 	return {
 		"name": name,
 		"channel": get("channel"),
@@ -337,6 +344,7 @@ def serialize_summary(
 		"window_expires_at": dt_str(get("window_expires_at")),
 		"window_open": window_open(get("window_expires_at"), at),
 		"has_pending_draft": bool(has_pending_draft),
+		"open_notes": int(open_notes or 0),
 		"last_order": get("last_order") or None,
 		"contact_category": get("contact_category") or None,
 		"contact_category_source": get("contact_category_source") or None,
@@ -630,6 +638,7 @@ def publish_chat_update(
 	message: dict | None = None,
 	draft: dict | None = None,
 	summary: dict | None = None,
+	notes: list | None = None,
 ) -> None:
 	"""Emit ``jarz_chat_update`` to each recipient's own room, after commit.
 
@@ -645,6 +654,8 @@ def publish_chat_update(
 			"message": message,
 			"draft": draft,
 		}
+		if notes is not None:
+			payload["notes"] = notes
 		for user in chat_recipients():
 			try:
 				frappe.publish_realtime(WS_EVENTS.CHAT_UPDATE, payload, user=user, after_commit=True)

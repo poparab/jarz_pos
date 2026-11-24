@@ -30,6 +30,7 @@ from frappe import _
 
 from jarz_pos.constants import CHAT_ROLES, ROLES
 from jarz_pos.services import chat_common as cc
+from jarz_pos.services import chat_notes
 
 _DRAFT_LOCK_SECONDS = 60
 _MAX_LIST = 100
@@ -184,9 +185,12 @@ def get_conversations(
 	has_more = len(rows) > limit_n
 	rows = rows[:limit_n]
 	pending = cc.pending_draft_conversations([r.name for r in rows])
+	from jarz_pos.services.chat_notes import open_note_counts
+
+	note_counts = open_note_counts([r.name for r in rows])
 	at = cc.now()
 	return {
-		"conversations": [cc.serialize_summary(r, r.name in pending, at) for r in rows],
+		"conversations": [cc.serialize_summary(r, r.name in pending, at, note_counts.get(r.name, 0)) for r in rows],
 		"has_more": has_more,
 		"open_count": frappe.db.count(cc.CONVERSATION, {"status": "Open"}),
 		"category_counts": _category_counts(),
@@ -287,6 +291,7 @@ def get_conversation(name: str, limit: int | str | None = 50, before: str | None
 		"draft": cc.pending_draft(conv.name),
 		"customer": cc.customer_card(conv.customer),
 		"customer_suggestion": _customer_suggestion(conv),
+		"notes": chat_notes.list_notes(conv.name),
 		"has_more": has_more,
 	}
 
@@ -569,6 +574,41 @@ def regenerate_draft(conversation: str, hint: str | None = None) -> dict[str, An
 
 	name = generate_draft(conv.name, hint=str(hint or "").strip() or None)
 	return {"draft": cc.load_draft(name)}
+
+
+@frappe.whitelist(methods=["GET", "POST"])
+def get_chat_notes(conversation: str) -> dict[str, Any]:
+	"""The staff notes pinned to one chat, newest first."""
+	_gate()
+	conv = _conversation_or_throw(conversation)
+	return {"notes": chat_notes.list_notes(conv.name)}
+
+
+@frappe.whitelist(methods=["POST"])
+def add_chat_note(conversation: str, note: str) -> dict[str, Any]:
+	"""Pin a staff note to a chat (never sent to the customer). Pushed live to every chat user;
+	the AI draft reads it as an instruction."""
+	_gate()
+	conv = _conversation_or_throw(conversation)
+	row = chat_notes.add_note(conv.name, note)
+	return {"note": row, "notes": chat_notes.list_notes(conv.name)}
+
+
+@frappe.whitelist(methods=["POST"])
+def set_chat_note_handled(note: str, handled: int | str | bool = 1) -> dict[str, Any]:
+	"""Mark a note handled (or open again). Any chat user may: it is the moderator's ack."""
+	_gate()
+	value = str(handled).strip().lower() not in ("0", "false", "no", "")
+	row = chat_notes.set_resolved(note, value)
+	return {"note": row, "notes": chat_notes.list_notes(row["conversation"])}
+
+
+@frappe.whitelist(methods=["POST"])
+def delete_chat_note(note: str) -> dict[str, Any]:
+	"""Delete a note: its author or a manager."""
+	_gate()
+	res = chat_notes.remove_note(note)
+	return {"ok": True, "notes": chat_notes.list_notes(res["conversation"])}
 
 
 @frappe.whitelist(methods=["POST"])
