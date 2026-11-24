@@ -80,6 +80,29 @@ PARTNER_FEE = 45.0
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def _write_off_entries(invoice: str) -> list[str]:
+	"""Submitted Material Issues that wrote this order's returned goods off as waste.
+
+	Found by the invoice name in ``remarks`` — by discovery, like everything else
+	here — and never by reading the name back out of the return's own result.
+	"""
+	# Anchored on the write-off's own prefix: the automatic consumable deduction is a
+	# Material Issue too, and it must stay out of every other case's ledger sum.
+	prefix = getattr(ir, "WASTE_REMARKS_PREFIX", "Damaged return write-off")
+	return [
+		r["name"]
+		for r in (
+			frappe.db.sql(
+				"""SELECT name FROM `tabStock Entry`
+	               WHERE docstatus = 1 AND purpose = 'Material Issue' AND remarks LIKE %s""",
+				(prefix + "%" + invoice + "%",),
+				as_dict=True,
+			)
+			or []
+		)
+	]
+
+
 def _vouchers_for(invoice: str, extra: list[tuple] | None = None) -> list[tuple]:
 	"""Every voucher whose GL belongs to this order's lifecycle.
 
@@ -126,6 +149,11 @@ def _vouchers_for(invoice: str, extra: list[tuple] | None = None) -> list[tuple]
 		):
 			if ("Journal Entry", je["name"]) not in found:
 				found.append(("Journal Entry", je["name"]))
+
+	# A damaged return's write-off names the invoice and credit note in remarks.
+	for se in _write_off_entries(invoice):
+		if ("Stock Entry", se) not in found:
+			found.append(("Stock Entry", se))
 
 	# Payment Entries reach the order either through their reference table or
 	# through the RET- reference_no the refund stamps.
@@ -383,6 +411,130 @@ def _case_prepaid_full_return(ctx: RunContext, env: dict[str, Any], *, case: str
 	expected[acc.freight] = ship_expense
 	expected[acc.creditors] = -ship_expense
 	_record_expectation(ctx, case, _net_by_account(_vouchers_for(invoice)), expected)
+
+
+def _stock_moved(voucher_type: str, voucher_no: str) -> float:
+	"""Net quantity a voucher moved, straight off the stock ledger (in = positive)."""
+	rows = frappe.get_all(
+		"Stock Ledger Entry",
+		filters={"voucher_type": voucher_type, "voucher_no": voucher_no, "is_cancelled": 0},
+		fields=["actual_qty"],
+		limit_page_length=0,
+	)
+	return round(sum(flt(r["actual_qty"]) for r in rows), 3)
+
+
+def _case_returned_goods(
+	ctx: RunContext, env: dict[str, Any], *, case: str, damaged: bool, courier: dict[str, Any] | None
+) -> None:
+	"""Where the GOODS end up after a full return — sellable stock, or waste.
+
+	Every return used to put the goods back as sellable; "Damaged" was only a
+	label. Measured on the stock ledger across the order's own vouchers:
+
+	* sellable -> dispatch out, return in: the order's net stock movement is zero.
+	* damaged  -> dispatch out, return in, write-off out: the net is minus what was
+	  sold, i.e. the jars are NOT back in the count.
+
+	The money side must be the ordinary cash-on-delivery result either way, plus —
+	damaged only — the loss on the Stock Adjustment Account, taken out of stock.
+	"""
+	acc: Accounts = env["accounts"]
+	invoice = _setup_order(ctx, env, case, prepay=False, courier=courier)
+	ship_expense = _courier_shipping_expense(invoice)
+
+	original_dn = ir._original_delivery_note(invoice)
+	sold_qty = -_stock_moved("Delivery Note", original_dn) if original_dn else 0.0
+	ctx.record(f"{case}.dispatch_moved_stock", sold_qty > 0, f"original DN={original_dn}, qty out={sold_qty}")
+	if sold_qty <= 0:
+		return
+
+	result = ir.run_invoice_return(
+		invoice_id=invoice,
+		lines=_full_lines(invoice),
+		reason=f"{case} money audit",
+		# The dialog has no goods question yet: the return TYPE is how the floor
+		# says "these are not sellable", so that is what the case drives.
+		return_type="Damaged" if damaged else "Customer Return",
+		refund_mode=ir.REFUND_CUSTOMER_CREDIT,
+		pay_courier_for_trip=True,
+	)
+	ctx.record(f"{case}.succeeded", bool(result.get("success")), json.dumps(result, default=str)[:300])
+	if not result.get("success"):
+		return
+
+	write_offs = _write_off_entries(invoice)
+	try:
+		ctx.record(
+			f"{case}.write_off_entry_count",
+			len(write_offs) == (1 if damaged else 0),
+			f"write-off Stock Entries for this order={write_offs}",
+		)
+
+		net_qty = round(
+			sum(
+				_stock_moved("Delivery Note", dn)
+				for dn in set(
+					frappe.get_all(
+						"Delivery Note Item",
+						filters={"against_sales_invoice": invoice, "docstatus": 1},
+						pluck="parent",
+						limit_page_length=0,
+					)
+				)
+			)
+			+ sum(_stock_moved("Stock Entry", se) for se in write_offs),
+			3,
+		)
+		want_qty = -sold_qty if damaged else 0.0
+		ctx.record(
+			f"{case}.goods_end_up_where_they_should",
+			abs(net_qty - want_qty) <= 0.001,
+			f"net stock movement for the order={net_qty}, expected {want_qty} (sold {sold_qty})",
+		)
+
+		actual = _net_by_account(_vouchers_for(invoice))
+		expected = {
+			acc.receivable: 0.0,
+			acc.courier_outstanding: 0.0,
+			acc.freight: ship_expense,
+			acc.creditors: -ship_expense,
+		}
+		if damaged:
+			adjustment = frappe.db.get_value("Company", env["company"], "stock_adjustment_account")
+			loss = flt(actual.get(adjustment, 0.0))
+			ctx.record(
+				f"{case}.loss_is_booked_as_waste",
+				loss > _TOL,
+				f"{adjustment} net={loss} (must be a debit: the cost of the jars thrown away)",
+			)
+			# The loss comes out of stock and out of nothing else. Stated per stock
+			# ledger account rather than by name so a warehouse with its own account
+			# is covered too; cost of goods sold must be back to zero, so it is
+			# deliberately absent from the expectation.
+			stock_accounts = [
+				a for a in actual if frappe.db.get_value("Account", a, "account_type") == "Stock"
+			]
+			stock_net = round(sum(flt(actual[a]) for a in stock_accounts), 2)
+			ctx.record(
+				f"{case}.loss_comes_out_of_stock",
+				abs(stock_net + loss) <= _TOL,
+				f"stock accounts {stock_accounts} net={stock_net}, expected {-loss}",
+			)
+			expected[adjustment] = loss
+			for a in stock_accounts:
+				expected[a] = flt(actual[a])
+		_record_expectation(ctx, case, actual, expected)
+	finally:
+		# The shared teardown cancels the Delivery Notes; a write-off left standing
+		# would keep the fixture's jars out of staging stock for good.
+		for se in write_offs:
+			try:
+				doc = frappe.get_doc("Stock Entry", se)
+				doc.flags.ignore_permissions = True
+				doc.cancel()
+			except Exception as exc:
+				ctx.record(f"{case}.write_off_cleaned_up", False, f"{se}: {type(exc).__name__}: {exc}")
 
 
 def _dispatch_paid_with_courier(invoice: str, profile: str, courier: dict[str, Any]) -> None:
@@ -1040,6 +1192,16 @@ def run(cleanup: bool = True) -> dict[str, Any]:
 			(
 				"MONEY-PARTNER-NO-FEE",
 				lambda: _case_partner_return(ctx, env, case="MONEY-PARTNER-NO-FEE", pay_courier=False),
+			),
+			(
+				"MONEY-GOODS-RESTOCK",
+				lambda: _case_returned_goods(
+					ctx, env, case="MONEY-GOODS-RESTOCK", damaged=False, courier=courier
+				),
+			),
+			(
+				"MONEY-GOODS-WASTE",
+				lambda: _case_returned_goods(ctx, env, case="MONEY-GOODS-WASTE", damaged=True, courier=courier),
 			),
 			(
 				"MONEY-ONLINE-PAY-COURIER",

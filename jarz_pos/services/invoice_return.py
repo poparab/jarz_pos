@@ -92,6 +92,27 @@ REFUND_MODES = {REFUND_NOW, REFUND_CUSTOMER_CREDIT}
 
 RETURN_TYPES = {"Customer Return", "Failed Delivery", "Damaged", "Wrong Item"}
 
+# ── What happens to the goods ────────────────────────────────────────────────
+# A return always brings the goods back on a Sales Return Delivery Note — that is
+# what reverses the cost of the sale. Whether they are SELLABLE afterwards is a
+# separate fact: a jar that came back melted must not sit in the freezer count as
+# stock. ``waste`` posts a Material Issue straight after the return Delivery Note,
+# so the sale is fully reversed and the loss is booked where it belongs — the
+# Stock Adjustment Account, which ``api.business_reports.get_stock_adjustments``
+# already reads as waste.
+GOODS_RESTOCK = "restock"
+GOODS_WASTE = "waste"
+GOODS_CONDITIONS = {GOODS_RESTOCK, GOODS_WASTE}
+
+#: Return types whose goods are unsellable unless the caller says otherwise. The
+#: app's dialog has no goods question yet, so picking "Damaged" is how an operator
+#: says it today; an explicit ``goods_condition`` always wins over the type.
+_WASTE_RETURN_TYPES = {"Damaged"}
+
+#: Leads the write-off Stock Entry's remarks, followed by the invoice and credit
+#: note names — which is how the entry is found again from either document.
+WASTE_REMARKS_PREFIX = "Damaged return write-off"
+
 #: Operational states from which a return makes sense — the order left the branch.
 _RETURNABLE_STATES = {"out_for_delivery", "delivered", "completed"}
 
@@ -691,6 +712,13 @@ def build_return_preview(invoice_id: str) -> dict[str, Any]:
 			"is_partner_order": bool((fee_courier or {}).get("is_partner_order")),
 			"freight_journal_entry": freight_je,
 		},
+		"goods": {
+			# What the dialog needs to ask "are the goods sellable?": whether a
+			# write-off can post at all, and which return types imply one today.
+			"can_write_off": bool(_write_off_account(inv.company)),
+			"write_off_account": _write_off_account(inv.company),
+			"waste_return_types": sorted(_WASTE_RETURN_TYPES),
+		},
 		"toggles": {
 			# Offered whenever a trip fee stands — NOT only when the courier carries
 			# cash. A pickup order never had a courier, so the question is moot.
@@ -1183,6 +1211,120 @@ def _build_return_delivery_note(original_dn: str, inv_name: str, requested: dict
 	return rdn
 
 
+def _resolve_goods_condition(goods_condition: Any, return_type: str) -> str | None:
+	"""``restock`` or ``waste`` for this return; ``None`` for a value we do not know.
+
+	An explicit choice wins. With none, the return type decides: "Damaged" goods
+	are written off, everything else goes back on the shelf as before.
+	"""
+	value = str(goods_condition or "").strip().lower().replace("-", "_").replace(" ", "_")
+	if not value:
+		return GOODS_WASTE if return_type in _WASTE_RETURN_TYPES else GOODS_RESTOCK
+	if value in {GOODS_WASTE, "damaged", "write_off", "writeoff"}:
+		return GOODS_WASTE
+	if value in {GOODS_RESTOCK, "sellable", "back_to_stock"}:
+		return GOODS_RESTOCK
+	return None
+
+
+def _write_off_account(company: str) -> str | None:
+	"""Where a damaged return's loss is booked: the Company's Stock Adjustment Account.
+
+	The same ledger ``services.stock_handover`` charges for stock lost in transit,
+	so every write-off the business makes lands in one place.
+	"""
+	try:
+		return frappe.db.get_value("Company", company, "stock_adjustment_account") or None
+	except Exception:
+		return None
+
+
+def _returned_stock_rows(return_delivery_note: str) -> list[dict[str, Any]]:
+	"""What the return Delivery Note actually put back, per item and warehouse.
+
+	Read from the stock ledger rather than from the document's rows on purpose: a
+	bundle line moves its packed children, not itself, and the ledger is already
+	in stock units. Writing off exactly these rows undoes exactly what came back.
+	"""
+	merged: dict[tuple[str, str], dict[str, Any]] = {}
+	for row in (
+		frappe.get_all(
+			"Stock Ledger Entry",
+			filters={
+				"voucher_type": "Delivery Note",
+				"voucher_no": return_delivery_note,
+				"is_cancelled": 0,
+				"actual_qty": [">", 0],
+			},
+			fields=["item_code", "warehouse", "actual_qty", "stock_uom"],
+			limit_page_length=0,
+		)
+		or []
+	):
+		key = (row.get("item_code") or "", row.get("warehouse") or "")
+		if not all(key):
+			continue
+		slot = merged.setdefault(
+			key,
+			{"item_code": key[0], "warehouse": key[1], "qty": 0.0, "stock_uom": row.get("stock_uom")},
+		)
+		slot["qty"] += flt(row.get("actual_qty"))
+	return [r for r in merged.values() if r["qty"] > _TOL]
+
+
+def _write_off_returned_goods(
+	inv: Any, return_delivery_note: str, *, credit_note_name: str, reason: str
+) -> str | None:
+	"""Issue the returned goods straight back out of stock as waste.
+
+	Posted AFTER the return Delivery Note, never instead of it. The Delivery Note
+	is what reverses the cost of the sale; skipping it would leave a refunded order
+	still carrying its cost of goods. This entry then takes the same goods out of
+	the same warehouse and charges them to the Stock Adjustment Account:
+
+	    return DN   DR Stock          / CR Cost of Goods Sold   (sale undone)
+	    this entry  DR Stock Adjust.  / CR Stock                (loss recognised)
+
+	Net: stock exactly where dispatch left it, no cost of sale, one waste line.
+	Returns ``None`` when the return moved no stock (service-only lines).
+	"""
+	rows = _returned_stock_rows(return_delivery_note)
+	if not rows:
+		return None
+
+	company = inv.company
+	account = _write_off_account(company)
+	if not account:
+		frappe.throw(
+			_("Set the Stock Adjustment Account on {0} to write off damaged returns.").format(company)
+		)
+	cost_center = inv.get("cost_center") or frappe.db.get_value("Company", company, "cost_center")
+
+	se = frappe.new_doc("Stock Entry")
+	se.stock_entry_type = "Material Issue"
+	se.purpose = "Material Issue"
+	se.company = company
+	se.remarks = f"{WASTE_REMARKS_PREFIX} – {inv.name} / {credit_note_name}: {reason}"[:1000]
+	for row in rows:
+		line: dict[str, Any] = {
+			"item_code": row["item_code"],
+			"qty": row["qty"],
+			"s_warehouse": row["warehouse"],
+			"expense_account": account,
+		}
+		if row.get("stock_uom"):
+			line["uom"] = row["stock_uom"]
+			line["stock_uom"] = row["stock_uom"]
+			line["conversion_factor"] = 1
+		if cost_center:
+			line["cost_center"] = cost_center
+		se.append("items", line)
+	se.flags.ignore_permissions = True
+	se.insert(ignore_permissions=True)
+	se.submit()
+	return se.name
+
+
 def _compensating_courier_transaction(
 	inv: Any,
 	courier: dict[str, Any],
@@ -1641,8 +1783,12 @@ def run_invoice_return(
 	pay_courier_for_trip: bool = True,
 	notes: str | None = None,
 	request_id: str | None = None,
+	goods_condition: str | None = None,
 ) -> dict[str, Any]:
 	"""Execute a return. Never raises to the caller; returns a result dict.
+
+	*goods_condition* is ``"restock"`` (back on the shelf) or ``"waste"`` (written
+	off). Left empty it follows the return type: "Damaged" is waste.
 
 	Structured after ``api.manager._run_invoice_amendment_job``: advisory lock →
 	re-verify under the lock → savepoint → build the graph → roll back wholesale
@@ -1664,6 +1810,9 @@ def run_invoice_return(
 		return {"success": False, "error": _("Unknown refund mode: {0}").format(refund_mode)}
 	if return_type not in RETURN_TYPES:
 		return {"success": False, "error": _("Unknown return type: {0}").format(return_type)}
+	goods = _resolve_goods_condition(goods_condition, return_type)
+	if goods is None:
+		return {"success": False, "error": _("Unknown goods condition: {0}").format(goods_condition)}
 	if not returns_enabled():
 		return {"success": False, "error": _("The return workflow is not enabled.")}
 
@@ -1688,6 +1837,9 @@ def run_invoice_return(
 					"refund_mode": refund_mode,
 					"pay_courier_for_trip": pay_courier_for_trip,
 					"return_type": return_type,
+					# Only when it differs from the old default, so a request made
+					# before this option existed still derives the id it always did.
+					**({"goods": goods} if goods_condition and goods == GOODS_WASTE else {}),
 				},
 				sort_keys=True,
 				default=str,
@@ -1773,6 +1925,17 @@ def run_invoice_return(
 			_deposit_collected(inv, transactions) if money_state == MONEY_COURIER_OUTSTANDING else 0.0
 		)
 
+		if goods == GOODS_WASTE and not _write_off_account(inv.company):
+			# Refused before anything is posted: the alternative is discovering it
+			# after the stock is already back and rolling the whole return back.
+			return {
+				"success": False,
+				"error": _("Set the Stock Adjustment Account on {0} to write off damaged returns.").format(
+					inv.company
+				),
+				"return_block_code": "write_off_account_missing",
+			}
+
 		if refund_mode == REFUND_CUSTOMER_CREDIT and _employee_credit_return_blocked(inv, money_state):
 			return {
 				"success": False,
@@ -1840,6 +2003,16 @@ def run_invoice_return(
 			# in _build_credit_note, so the board state has to be corrected here —
 			# after the document exists — or the credit note reads as a live card.
 			_set_credit_note_board_state(cn)
+
+			# 2b. Unsellable goods leave stock again, as waste. After the return
+			# Delivery Note on purpose — see _write_off_returned_goods — and inside
+			# the savepoint, so a write-off that cannot post takes the whole return
+			# with it instead of leaving damaged jars counted as stock.
+			waste_entry = None
+			if goods == GOODS_WASTE:
+				waste_entry = _write_off_returned_goods(
+					inv, rdn.name, credit_note_name=cn.name, reason=reason
+				)
 
 			return_total = abs(flt(cn.grand_total))
 			ratio = (return_total / flt(inv.grand_total)) if flt(inv.grand_total) else 1.0
@@ -1972,7 +2145,12 @@ def run_invoice_return(
 				f"Type: {return_type} | Refund: {refund_mode} | "
 				f"Courier paid for trip: {pay_courier_for_trip}\n"
 				f"Credit note: {cn.name} | Return DN: {rdn.name}\n"
-				f"Request ID: {request_id}"
+				+ (
+					f"Goods: written off as waste ({waste_entry or 'no stock moved'})\n"
+					if goods == GOODS_WASTE
+					else "Goods: back to stock\n"
+				)
+				+ f"Request ID: {request_id}"
 			)
 			for target in (inv.name, cn.name):
 				try:
@@ -1986,6 +2164,8 @@ def run_invoice_return(
 				"invoice_id": inv.name,
 				"credit_note": cn.name,
 				"return_delivery_note": rdn.name,
+				"goods_condition": goods,
+				"waste_stock_entry": waste_entry,
 				"journal_entries": journal_entries,
 				"compensating_courier_transaction": compensating_ct,
 				"compensating_sales_partner_transaction": compensating_spt,

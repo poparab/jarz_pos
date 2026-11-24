@@ -566,6 +566,105 @@ class TestReturnEligibility(unittest.TestCase):
 		self.assertEqual(result["return_block_code"], "original_delivery_note_missing")
 
 
+class TestGoodsCondition(unittest.TestCase):
+	"""Returned goods are sellable unless someone says they are not.
+
+	Every return used to put the goods back as sellable stock; "Damaged" was a
+	label and nothing more, so a spoiled jar came back into the freezer count.
+	"""
+
+	def test_goods_go_back_to_stock_by_default(self):
+		for return_type in ("Customer Return", "Failed Delivery", "Wrong Item"):
+			self.assertEqual(ir._resolve_goods_condition(None, return_type), ir.GOODS_RESTOCK)
+
+	def test_a_damaged_return_is_waste(self):
+		self.assertEqual(ir._resolve_goods_condition(None, "Damaged"), ir.GOODS_WASTE)
+		self.assertEqual(ir._resolve_goods_condition("", "Damaged"), ir.GOODS_WASTE)
+
+	def test_an_explicit_choice_beats_the_return_type(self):
+		# Damaged box, jars fine: back on the shelf.
+		self.assertEqual(ir._resolve_goods_condition("restock", "Damaged"), ir.GOODS_RESTOCK)
+		# Delivery failed and the order melted on the way back.
+		self.assertEqual(ir._resolve_goods_condition("waste", "Failed Delivery"), ir.GOODS_WASTE)
+		self.assertEqual(ir._resolve_goods_condition("Write-Off", "Customer Return"), ir.GOODS_WASTE)
+
+	def test_an_unknown_condition_is_not_guessed(self):
+		self.assertIsNone(ir._resolve_goods_condition("compost", "Customer Return"))
+
+	@patch.object(ir, "returns_enabled", return_value=True)
+	def test_an_unknown_condition_is_refused_before_any_work(self, _enabled):
+		result = ir.run_invoice_return(
+			invoice_id="INV-1",
+			lines=[{"si_detail": "r", "qty": 1}],
+			reason="x",
+			goods_condition="compost",
+		)
+		self.assertFalse(result["success"])
+		self.assertIn("compost", result["error"])
+
+	def test_returned_rows_are_merged_per_item_and_warehouse(self):
+		ledger = [
+			{"item_code": "JAR-A", "warehouse": "Dokki - J", "actual_qty": 1.0, "stock_uom": "Nos"},
+			{"item_code": "JAR-A", "warehouse": "Dokki - J", "actual_qty": 2.0, "stock_uom": "Nos"},
+			{"item_code": "JAR-B", "warehouse": "Dokki - J", "actual_qty": 1.0, "stock_uom": "Nos"},
+		]
+		with patch.object(ir, "frappe") as mock_frappe:
+			mock_frappe.get_all.return_value = ledger
+			rows = ir._returned_stock_rows("MAT-DN-RET-1")
+		self.assertEqual(
+			sorted((r["item_code"], r["warehouse"], r["qty"]) for r in rows),
+			[("JAR-A", "Dokki - J", 3.0), ("JAR-B", "Dokki - J", 1.0)],
+		)
+		# Only what the return DN put IN: the filter must not pick up outgoing rows.
+		filters = mock_frappe.get_all.call_args.kwargs["filters"]
+		self.assertEqual(filters["voucher_no"], "MAT-DN-RET-1")
+		self.assertEqual(filters["actual_qty"], [">", 0])
+
+	def _write_off(self, rows, account="Stock Adjustment - J"):
+		se = MagicMock()
+		se.items = []
+		se.append.side_effect = lambda _table, row: se.items.append(row)
+		inv = _invoice(cost_center="Dokki CC - J")
+		with (
+			patch.object(ir, "_returned_stock_rows", return_value=rows),
+			patch.object(ir, "_write_off_account", return_value=account),
+			patch.object(ir, "frappe") as mock_frappe,
+		):
+			mock_frappe.new_doc.return_value = se
+			mock_frappe.throw.side_effect = RuntimeError
+			name = ir._write_off_returned_goods(
+				inv, "MAT-DN-RET-1", credit_note_name="ACC-SINV-2026-00099", reason="melted"
+			)
+		return name, se
+
+	def test_the_write_off_issues_exactly_what_came_back(self):
+		rows = [{"item_code": "JAR-A", "warehouse": "Dokki - J", "qty": 3.0, "stock_uom": "Nos"}]
+		name, se = self._write_off(rows)
+		self.assertEqual(name, se.name)
+		self.assertEqual(se.purpose, "Material Issue")
+		self.assertEqual(len(se.items), 1)
+		line = se.items[0]
+		self.assertEqual((line["item_code"], line["qty"], line["s_warehouse"]), ("JAR-A", 3.0, "Dokki - J"))
+		# The loss is booked to the Stock Adjustment Account, on the order's cost centre.
+		self.assertEqual(line["expense_account"], "Stock Adjustment - J")
+		self.assertEqual(line["cost_center"], "Dokki CC - J")
+		# Findable again from either document.
+		self.assertIn("ACC-SINV-2026-00001", se.remarks)
+		self.assertIn("ACC-SINV-2026-00099", se.remarks)
+		self.assertTrue(se.remarks.startswith(ir.WASTE_REMARKS_PREFIX))
+		se.submit.assert_called_once()
+
+	def test_a_return_that_moved_no_stock_writes_nothing_off(self):
+		name, se = self._write_off([])
+		self.assertIsNone(name)
+		se.submit.assert_not_called()
+
+	def test_no_adjustment_account_is_an_error_not_a_silent_restock(self):
+		rows = [{"item_code": "JAR-A", "warehouse": "Dokki - J", "qty": 1.0, "stock_uom": "Nos"}]
+		with self.assertRaises(RuntimeError):
+			self._write_off(rows, account=None)
+
+
 class TestSubmitValidation(unittest.TestCase):
 	"""Argument validation happens before anything is written."""
 

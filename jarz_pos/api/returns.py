@@ -49,10 +49,13 @@ def submit_invoice_return(
 	pay_courier_for_trip: Any = True,
 	notes: str | None = None,
 	request_id: str | None = None,
+	goods_condition: str | None = None,
 ) -> dict[str, Any]:
 	"""Post the return document graph.
 
 	``lines`` is a JSON list of ``{"si_detail": <row name>, "qty": <positive>}``.
+	``goods_condition`` is ``"restock"`` or ``"waste"``; left out, a "Damaged"
+	return is written off as waste and every other type goes back to stock.
 	Idempotent by ``request_id``; resubmitting the same one returns the original
 	result rather than posting a second set of documents.
 	"""
@@ -66,6 +69,7 @@ def submit_invoice_return(
 		pay_courier_for_trip=pay_courier_for_trip,
 		notes=notes,
 		request_id=request_id,
+		goods_condition=goods_condition,
 	)
 
 
