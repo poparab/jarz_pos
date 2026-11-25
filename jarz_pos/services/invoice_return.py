@@ -380,16 +380,29 @@ def _courier_fee_position(inv: Any, transactions: list[dict[str, Any]]) -> dict[
 	``is_partner_order``) with the two amounts NETTED across every row:
 
 	``shipping_amount``
-	    What our own courier is still owed. Netted so a second partial return
-	    cannot reverse a fee the first one already took back.
+	    What our own courier is still owed AND HAS NOT BEEN PAID YET — the net of
+	    his rows that are still open. Netted so a second partial return cannot
+	    reverse a fee the first one already took back. A fee he has already been
+	    paid (its row is Settled) is not reported: taking it back means collecting
+	    cash from him, which no settlement screen can do — a lone negative row is
+	    closed by the per-invoice button without a posting, shown as "pay courier"
+	    by the preview and refused by the batch sweep. Until settlement can collect
+	    from a courier, a paid fee stays paid; see :func:`_courier_fee_already_paid`.
 	``partner_fee``
-	    What the delivery partner company still bills for the trip.
+	    What the delivery partner company still bills for the trip. Netted across
+	    every row, billed or not: a partner is settled by a weekly bill that sums
+	    its unbilled rows, so a negative row simply lowers the next bill.
+
+	Only one position is returned, the partner's first. An order re-dispatched from
+	a partner to our own courier nets the partner fee out at the re-dispatch, so
+	both standing at once is not a state dispatch produces.
 
 	A fee is only reported when its dispatch accrual can be found, because the
 	reversal is that accrual's mirror image: reversing an expense that was never
 	booked would understate freight instead of correcting it.
 	"""
 	rows = transactions or []
+	open_rows = [t for t in rows if str(t.get("status") or "").strip() != "Settled"]
 
 	partner_rows = [t for t in rows if int(t.get("is_partner_order") or 0)]
 	partner_fee = max(sum(flt(t.get("partner_fee")) for t in partner_rows), 0.0)
@@ -410,9 +423,9 @@ def _courier_fee_position(inv: Any, transactions: list[dict[str, Any]]) -> dict[
 				"partner_fee": round(partner_fee, 2),
 			}
 
-	shipping = max(sum(flt(t.get("shipping_amount")) for t in rows), 0.0)
+	shipping = max(sum(flt(t.get("shipping_amount")) for t in open_rows), 0.0)
 	if shipping > _TOL:
-		source = next((t for t in rows if flt(t.get("shipping_amount")) > _TOL), None)
+		source = next((t for t in open_rows if flt(t.get("shipping_amount")) > _TOL), None)
 		if (
 			source
 			and source.get("party_type")
@@ -430,6 +443,36 @@ def _courier_fee_position(inv: Any, transactions: list[dict[str, Any]]) -> dict[
 			}
 
 	return None
+
+
+def _courier_fee_already_paid(transactions: list[dict[str, Any]]) -> float:
+	"""Own-courier trip fee that was already paid out for this order (never < 0).
+
+	The part of the fee :func:`_courier_fee_position` deliberately leaves alone.
+	Reported so the return dialog can say why the fee question is not offered,
+	and so a request to remove a paid fee is recorded as "not removed" instead of
+	being written down as done.
+	"""
+	settled = [t for t in transactions or [] if str(t.get("status") or "").strip() == "Settled"]
+	return round(max(sum(flt(t.get("shipping_amount")) for t in settled), 0.0), 2)
+
+
+def _planned_fee_reversals(plans: list[dict[str, Any]]) -> tuple[float, float]:
+	"""``(own-courier fee, partner fee)`` the planned Journal Entries take back.
+
+	The compensating Courier Transaction is written from THIS, not from a second
+	reading of the rows: the ledger and the settlement screens then cannot
+	disagree about a fee, whatever the plan decided.
+	"""
+	shipping = 0.0
+	partner_fee = 0.0
+	for plan in plans or []:
+		debit = sum(flt(leg.get("amount")) for leg in plan.get("legs") or [] if leg.get("debit"))
+		if plan.get("je_type") == JE_FREIGHT_REVERSAL:
+			shipping += debit
+		elif plan.get("je_type") == JE_PARTNER_REVERSAL:
+			partner_fee += debit
+	return round(shipping, 2), round(partner_fee, 2)
 
 
 def _courier_open_amount(transactions: list[dict[str, Any]]) -> float:
@@ -723,6 +766,9 @@ def build_return_preview(invoice_id: str) -> dict[str, Any]:
 			# Offered whenever a trip fee stands — NOT only when the courier carries
 			# cash. A pickup order never had a courier, so the question is moot.
 			"can_choose_courier_fee": bool(fee_courier and not is_pickup),
+			# Our courier was already paid this order's fee, so it is not offered:
+			# the return cannot take paid cash back from him.
+			"courier_fee_already_paid": _courier_fee_already_paid(transactions),
 			"can_refund_now": bool(refund_available and open_shift),
 			"refund_blocked_reason": (
 				None
@@ -857,7 +903,6 @@ def plan_return_journal_legs(
 	company = inv.company
 	customer = inv.customer
 	receivable = get_company_receivable_account(company)
-	partner_order = _is_partner_order(inv)
 	plans: list[dict[str, Any]] = []
 
 	if money_state == MONEY_UNPAID:
@@ -945,8 +990,14 @@ def plan_return_journal_legs(
 	# and then on the partner's OWN payable, where dispatch accrued it, never on
 	# Creditors. ``shipping_amount`` is zero on a partner row (the fee lives on
 	# ``partner_fee``), so the two branches below can never both fire.
-	partner_order = partner_order or bool(courier and int(courier.get("is_partner_order") or 0))
-	if not pay_courier_for_trip and courier and partner_order:
+	#
+	# Which branch fires is decided by the fee position alone. The invoice's own
+	# partner flag is stamped at dispatch and never cleared, so an order sent with a
+	# partner and then re-dispatched to our courier still carries it: trusting it
+	# here took the partner branch, found no partner fee and posted nothing, while
+	# the courier's row was still cut by his fee.
+	fee_is_partner = bool(courier and int(courier.get("is_partner_order") or 0))
+	if not pay_courier_for_trip and courier and fee_is_partner:
 		partner_fee = flt(courier.get("partner_fee"))
 		delivery_partner = courier.get("delivery_partner")
 		if partner_fee > _TOL and delivery_partner:
@@ -1991,7 +2042,11 @@ def run_invoice_return(
 			if cn.meta.get_field("custom_return_type"):
 				cn.custom_return_type = return_type
 			if cn.meta.get_field("custom_return_courier_paid"):
-				cn.custom_return_courier_paid = 1 if pay_courier_for_trip else 0
+				# What will actually happen, not what was asked for: with no
+				# reversible fee the courier keeps it, and stamping "not paid"
+				# would hide a fee he really received from every report that
+				# reads this flag.
+				cn.custom_return_courier_paid = 0 if (fee_courier and not pay_courier_for_trip) else 1
 			if cn.meta.get_field("custom_return_refund_mode"):
 				cn.custom_return_refund_mode = (
 					"Refund Now" if refund_mode == REFUND_NOW else "Customer Credit"
@@ -2029,7 +2084,7 @@ def run_invoice_return(
 
 			# 3. Money that already moved.
 			journal_entries: list[str] = []
-			for plan in plan_return_journal_legs(
+			plans = plan_return_journal_legs(
 				inv=inv,
 				money_state=money_state,
 				return_total=return_total,
@@ -2037,7 +2092,8 @@ def run_invoice_return(
 				pay_courier_for_trip=pay_courier_for_trip,
 				courier=fee_courier,
 				courier_release=courier_release,
-			):
+			)
+			for plan in plans:
 				posted = _post_return_je(
 					company=inv.company,
 					dedup_key=cn.name,
@@ -2054,13 +2110,8 @@ def run_invoice_return(
 			# reversed in the ledger with no row here is invisible to every
 			# settlement screen (they read these rows, not Creditors), which is how a
 			# reversed fee used to be paid out anyway.
-			shipping_reversed = 0.0
-			partner_fee_reversed = 0.0
-			if fee_courier and not pay_courier_for_trip:
-				if fee_courier.get("is_partner_order"):
-					partner_fee_reversed = flt(fee_courier.get("partner_fee"))
-				else:
-					shipping_reversed = flt(fee_courier.get("shipping_amount"))
+			shipping_reversed, partner_fee_reversed = _planned_fee_reversals(plans)
+			fee_reversed = shipping_reversed + partner_fee_reversed
 			cash_released = bool(courier and money_state == MONEY_COURIER_OUTSTANDING)
 
 			compensating_ct = None
@@ -2076,11 +2127,14 @@ def run_invoice_return(
 					partner_fee_reversed=partner_fee_reversed,
 					credit_note_name=cn.name,
 				)
-				if compensating_ct is None and (shipping_reversed > _TOL or partner_fee_reversed > _TOL):
-					# The ledger says the fee is gone; without this row the courier is
-					# still paid it. Better no return than a silent mismatch.
+				if compensating_ct is None:
+					# The ledger has moved — the fee is gone, or the cash is off
+					# Courier Outstanding — and couriers are settled from these rows.
+					# Without the row he is still paid the fee, or still asked for
+					# cash on goods that came back. Better no return than a silent
+					# mismatch: the savepoint takes the postings above with it.
 					raise frappe.ValidationError(
-						_("The courier fee could not be removed for this return. Nothing was posted; try again.")
+						_("The courier's balance could not be updated for this return. Nothing was posted; try again.")
 					)
 			compensating_spt = _compensating_sales_partner_transaction(
 				inv, ratio=ratio, credit_note_name=cn.name
@@ -2143,8 +2197,13 @@ def run_invoice_return(
 				f"Return processed by {frappe.session.user}\n"
 				f"Reason: {reason}\n"
 				f"Type: {return_type} | Refund: {refund_mode} | "
-				f"Courier paid for trip: {pay_courier_for_trip}\n"
-				f"Credit note: {cn.name} | Return DN: {rdn.name}\n"
+				f"Courier paid for trip: {fee_reversed <= _TOL}"
+				+ (
+					" (asked to remove the fee; none was still unpaid, so it stands)\n"
+					if (not pay_courier_for_trip and fee_reversed <= _TOL)
+					else "\n"
+				)
+				+ f"Credit note: {cn.name} | Return DN: {rdn.name}\n"
 				+ (
 					f"Goods: written off as waste ({waste_entry or 'no stock moved'})\n"
 					if goods == GOODS_WASTE
@@ -2174,7 +2233,9 @@ def run_invoice_return(
 					frappe.db.get_value("Payment Entry", refund_pe, "paid_from") if refund_pe else None
 				),
 				"refund_amount": refund_amount,
-				"courier_fee_reversed": round(shipping_reversed + partner_fee_reversed, 2),
+				"courier_fee_reversed": round(fee_reversed, 2),
+				# Asked to remove the fee and could not: nothing unpaid stood.
+				"courier_fee_not_reversible": bool(not pay_courier_for_trip and fee_reversed <= _TOL),
 				"return_status": return_status,
 				"money_state": money_state,
 				"return_total": return_total,

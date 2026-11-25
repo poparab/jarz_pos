@@ -644,6 +644,111 @@ def _case_online_courier_fee(
 	)
 
 
+def _case_online_fee_already_paid(ctx: RunContext, env: dict[str, Any], courier: dict[str, Any] | None) -> None:
+	"""Online-paid order whose courier was ALREADY PAID his fee, then returned "no fee".
+
+	A return cannot take paid cash back from a courier: no settlement screen can
+	collect from one. A lone negative fee row would be closed by the per-invoice
+	button with no posting, leaving the reversal entry as a permanent debit on
+	Creditors while the courier keeps the money.
+
+	Expectation: the fee question is not offered; asked anyway, the return goes
+	through, posts NO fee reversal, writes NO fee row, and says so — in its
+	result and on the credit note, which must not claim the courier went unpaid.
+	"""
+	case = "MONEY-ONLINE-FEE-ALREADY-PAID"
+	acc: Accounts = env["accounts"]
+	if not courier:
+		ctx.skip(f"{case}.skipped", "no courier on this site; the case needs one")
+		return
+	invoice = _setup_order(
+		ctx, env, case, prepay=True, courier=courier, dispatch_fn=_dispatch_paid_with_courier
+	)
+	grand_total = flt(frappe.db.get_value("Sales Invoice", invoice, "grand_total"))
+	ship_expense = _courier_shipping_expense(invoice)
+	if ship_expense <= _TOL:
+		ctx.record(f"{case}.courier_carries_a_fee", False, f"shipping_amount={ship_expense}")
+		return
+
+	from jarz_pos.services.delivery_handling import settle_single_invoice_paid
+
+	extra: list[tuple] = []
+	try:
+		settled = (
+			settle_single_invoice_paid(
+				invoice, env["pos_profile"], courier.get("party_type"), courier.get("party")
+			)
+			or {}
+		)
+	except frappe.ValidationError as exc:
+		ctx.skip(f"{case}.skipped", f"could not pay the fee first: {type(exc).__name__}: {exc}")
+		return
+	name = settled.get("journal_entry") if isinstance(settled, dict) else None
+	if name and frappe.db.exists("Journal Entry", name):
+		extra.append(("Journal Entry", name))
+	open_rows = frappe.get_all(
+		"Courier Transaction",
+		filters={"reference_invoice": invoice, "status": ["!=", "Settled"]},
+		pluck="name",
+	)
+	ctx.record(f"{case}.fee_was_paid_first", bool(name) and not open_rows, f"je={name} open={open_rows}")
+	if not name or open_rows:
+		return
+
+	preview = ir.build_return_preview(invoice)
+	toggles = preview.get("toggles") or {}
+	ctx.record(
+		f"{case}.fee_switch_is_not_offered",
+		not toggles.get("can_choose_courier_fee")
+		and abs(flt(toggles.get("courier_fee_already_paid")) - ship_expense) <= _TOL,
+		f"toggles={toggles}",
+	)
+
+	result = ir.run_invoice_return(
+		invoice_id=invoice,
+		lines=_full_lines(invoice),
+		reason=f"{case} money audit",
+		refund_mode=ir.REFUND_CUSTOMER_CREDIT,
+		pay_courier_for_trip=False,
+	)
+	ctx.record(f"{case}.succeeded", bool(result.get("success")), json.dumps(result, default=str)[:300])
+	if not result.get("success"):
+		return
+	ctx.record(
+		f"{case}.says_the_fee_was_not_removed",
+		bool(result.get("courier_fee_not_reversible"))
+		and abs(flt(result.get("courier_fee_reversed"))) <= _TOL
+		and not result.get("compensating_courier_transaction"),
+		f"not_reversible={result.get('courier_fee_not_reversible')} "
+		f"reversed={result.get('courier_fee_reversed')} row={result.get('compensating_courier_transaction')}",
+	)
+	if frappe.get_meta("Sales Invoice").get_field("custom_return_courier_paid"):
+		stamped = frappe.db.get_value("Sales Invoice", result.get("credit_note"), "custom_return_courier_paid")
+		ctx.record(f"{case}.credit_note_says_courier_was_paid", int(stamped or 0) == 1, f"stamp={stamped}")
+
+	# The customer's money stays as credit; the courier's fee was paid out of the
+	# till and stays a freight cost. Creditors is square: accrued, then paid.
+	expected = {
+		acc.receivable: -grand_total,
+		acc.cash: grand_total - ship_expense,
+		acc.freight: ship_expense,
+		acc.creditors: 0.0,
+	}
+	vouchers = _vouchers_for(invoice, extra)
+	_record_expectation(ctx, case, _net_by_account(list(dict.fromkeys(vouchers))), expected)
+
+	open_after = frappe.get_all(
+		"Courier Transaction",
+		filters={"reference_invoice": invoice, "status": ["!=", "Settled"]},
+		pluck="name",
+	)
+	ctx.record(
+		f"{case}.no_dangling_courier_row",
+		not open_after and abs(_open_courier_fee(invoice) - ship_expense) <= _TOL,
+		f"open rows={open_after}, fee on rows={_open_courier_fee(invoice)}, expected {ship_expense}",
+	)
+
+
 def _case_partial_shipping(ctx: RunContext, env: dict[str, Any], courier: dict[str, Any] | None) -> None:
 	"""Return ONE line of a two-line order.
 
@@ -1215,6 +1320,7 @@ def run(cleanup: bool = True) -> dict[str, Any]:
 					ctx, env, case="MONEY-ONLINE-NO-COURIER-FEE", pay_courier=False, courier=courier
 				),
 			),
+			("MONEY-ONLINE-FEE-ALREADY-PAID", lambda: _case_online_fee_already_paid(ctx, env, courier)),
 		]
 		for name, run_case in cases:
 			try:

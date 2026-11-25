@@ -257,10 +257,27 @@ class TestCourierFeePosition(unittest.TestCase):
 		self.assertEqual(position["is_partner_order"], 0)
 
 	@patch.object(ir, "_find_existing_je_by_tag", return_value="ACC-JV-1")
-	def test_a_settled_fee_row_still_counts(self, _find):
-		"""Being paid already does not make the fee undecidable — it is clawed back."""
+	def test_a_fee_already_paid_out_is_left_alone(self, _find):
+		"""A paid fee cannot be taken back by a return: no settlement screen can
+		collect from a courier, so a lone negative row would be closed without a
+		posting and the reversal entry would sit on Creditors for good."""
 		row = dict(self.ONLINE, status="Settled")
-		self.assertEqual(ir._courier_fee_position(_invoice(), [row])["shipping_amount"], 80.0)
+		self.assertIsNone(ir._courier_fee_position(_invoice(), [row]))
+		self.assertEqual(ir._courier_fee_already_paid([row]), 80.0)
+
+	@patch.object(ir, "_find_existing_je_by_tag", return_value="ACC-JV-1")
+	def test_an_unpaid_fee_is_not_reported_as_paid(self, _find):
+		self.assertEqual(ir._courier_fee_already_paid([self.ONLINE]), 0.0)
+
+	@patch.object(ir, "_find_existing_je_by_tag", return_value="ACC-JV-1")
+	def test_a_settled_pair_leaves_nothing_to_reverse(self, _find):
+		"""Fee reversed by an earlier return, then both rows closed: still nothing."""
+		rows = [
+			dict(self.ONLINE, status="Settled"),
+			dict(self.ONLINE, name="CT-R", shipping_amount=-80.0, status="Settled"),
+		]
+		self.assertIsNone(ir._courier_fee_position(_invoice(), rows))
+		self.assertEqual(ir._courier_fee_already_paid(rows), 0.0)
 
 	@patch.object(ir, "_find_existing_je_by_tag", return_value="ACC-JV-1")
 	def test_a_fee_already_reversed_is_not_reversed_twice(self, _find):
@@ -333,6 +350,27 @@ class TestPartnerFeeReversal(unittest.TestCase):
 		# The accrual credited the partner's Supplier, not the rider and not Creditors.
 		self.assertEqual((payable["party_type"], payable["party"]), ("Supplier", "SUP-DELIVERK"))
 		self.assertNotIn("Creditors - J", {l["account"] for l in legs})
+
+	def test_a_stale_partner_flag_does_not_swallow_our_couriers_fee(self, *_):
+		"""Sent with a partner, then re-dispatched to our own courier: the invoice
+		keeps its partner flag for good, but the fee that stands is our courier's.
+		The plan must reverse it on Creditors — and report it, so the courier's row
+		is cut by exactly what the ledger took back."""
+		own = {"party_type": "Supplier", "party": "SUP-1", "is_partner_order": 0, "shipping_amount": 80.0}
+		plans = ir.plan_return_journal_legs(
+			inv=_invoice(custom_is_partner_order=1),
+			money_state=ir.MONEY_PREPAID,
+			return_total=500.0,
+			credit_note_name="ACC-SINV-2026-00099",
+			pay_courier_for_trip=False,
+			courier=own,
+		)
+		self.assertEqual([p["je_type"] for p in plans], [ir.JE_FREIGHT_REVERSAL])
+		self.assertEqual(ir._planned_fee_reversals(plans), (80.0, 0.0))
+
+	def test_the_row_mirrors_the_planned_partner_reversal(self, *_):
+		self.assertEqual(ir._planned_fee_reversals(self._plan(pay_courier=False)), (0.0, 50.0))
+		self.assertEqual(ir._planned_fee_reversals(self._plan(pay_courier=True)), (0.0, 0.0))
 
 	def test_a_partner_row_without_a_fee_reverses_nothing(self, *_):
 		courier = dict(self.COURIER, partner_fee=0.0)
