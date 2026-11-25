@@ -405,6 +405,9 @@ override_doctype_class = {
 	# Any-branch check-in (Employee.custom_checkin_any_branch): HRMS's geofence
 	# measures only the rostered branch, and it throws before any app hook runs.
 	"Employee Checkin": "jarz_pos.overrides.employee_checkin.EmployeeCheckin",
+	# Process-loss check with a rounding tolerance: ERPNext's exact float compare
+	# refused about one Manufacture weight in four for BOMs with a process loss.
+	"Stock Entry": "jarz_pos.overrides.stock_entry.StockEntry",
 }
 
 # Document Events

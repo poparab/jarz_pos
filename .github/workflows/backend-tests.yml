@@ -118,6 +118,8 @@ jobs:
           # the live clone. Verified locally: Item Price count is unchanged by this run.
           MODULES=(
             test_commercial_policy
+            # Manufacture process-loss check with a rounding tolerance.
+            test_overrides_stock_entry
             # Employee order purpose: the "Deliver at Branch" auto-fulfilment
             # (Delivery Note -> OFD -> Delivered), the line-manager advance
             # request/approve flow, the manager employee ledger, and the
