@@ -332,7 +332,9 @@ def _ensure_shortage_count_access() -> None:
 		frappe.throw(_("Not permitted: production managers only"), frappe.PermissionError)
 
 
-def _shortage_count_plan(lines: Any, scheduled_at: Any = None, company: str | None = None) -> dict[str, Any]:
+def _shortage_count_plan(
+	lines: Any, scheduled_at: Any = None, company: str | None = None, count_at: Any = None
+) -> dict[str, Any]:
 	"""What the correction would post: one row per short (item, warehouse).
 
 	Always recomputed from the basket on the server — the client's figures are
@@ -343,6 +345,13 @@ def _shortage_count_plan(lines: Any, scheduled_at: Any = None, company: str | No
 	to the required quantity) is what keeps every later movement intact: the
 	rollup's shortage for a backdated basket is already capped by the lowest
 	later balance, so this is exactly the quantity the batch is missing.
+
+	``count_at`` lets the user date the count EARLIER than the default
+	(production − 5 min, never later than now): the miscount usually happened
+	at an earlier count, not minutes before production.  A later date is
+	refused, and so is a date with another stock count of the same item
+	between it and production — that later count would reset the balance and
+	silently erase the addition (``later_counts`` names them).
 	"""
 	from datetime import timedelta
 
@@ -350,6 +359,10 @@ def _shortage_count_plan(lines: Any, scheduled_at: Any = None, company: str | No
 
 	from jarz_pos.api import inventory_count
 	from jarz_pos.api.manufacturing import _resolve_now_datetime, _resolve_scheduled_datetime
+
+	chosen_count_at = None
+	if count_at not in (None, ""):
+		chosen_count_at = get_datetime(count_at).replace(microsecond=0)
 
 	parsed = _coerce_lines(lines)
 	if not parsed:
@@ -370,6 +383,13 @@ def _shortage_count_plan(lines: Any, scheduled_at: Any = None, company: str | No
 	if count_at > now:
 		count_at = now
 	count_at = count_at.replace(microsecond=0)
+	default_count_at = count_at
+	if chosen_count_at is not None:
+		if chosen_count_at > default_count_at:
+			frappe.throw(
+				_("The count date cannot be after {0}").format(default_count_at.strftime("%Y-%m-%d %H:%M"))
+			)
+		count_at = chosen_count_at
 
 	rollup = planning.build_basket_rollup(parsed, company)
 	rows: list[dict[str, Any]] = []
@@ -409,23 +429,89 @@ def _shortage_count_plan(lines: Any, scheduled_at: Any = None, company: str | No
 			r["current_qty"] = current
 			r["counted_qty"] = max(0.0, round(current + r["missing_qty"], 6))
 
+	items = [r for r in rows if r["counted_qty"] > r["current_qty"] + 1e-9]
+	later_counts: list[dict[str, Any]] = []
+	if items and count_at < production_at:
+		later_counts = _later_stock_counts(
+			[(r["item_code"], r["warehouse"]) for r in items],
+			count_at.strftime("%Y-%m-%d %H:%M:%S"),
+			production_at.strftime("%Y-%m-%d %H:%M:%S"),
+		)
+
 	return {
 		"company": company,
 		"production_at": production_at.strftime("%Y-%m-%d %H:%M:%S"),
 		"count_at": count_at.strftime("%Y-%m-%d %H:%M:%S"),
+		"latest_count_at": default_count_at.strftime("%Y-%m-%d %H:%M:%S"),
 		"lead_minutes": SHORTAGE_COUNT_LEAD_MINUTES,
-		"items": [r for r in rows if r["counted_qty"] > r["current_qty"] + 1e-9],
+		"items": items,
+		"later_counts": later_counts,
 		"skipped": skipped,
 	}
 
 
+def _later_stock_counts(
+	pairs: list[tuple[str, str]], after: str, until: str
+) -> list[dict[str, Any]]:
+	"""Submitted stock counts of these (item, warehouse) pairs in (after, until].
+
+	A Stock Reconciliation sets the balance outright, so one of these sitting
+	between a back-dated count and the production would wipe the added
+	quantity out again on repost.  Newest first, one row per item.
+	"""
+	if not pairs:
+		return []
+	item_codes = sorted({p[0] for p in pairs})
+	warehouses = sorted({p[1] for p in pairs})
+	rows = frappe.db.sql(
+		"""
+		SELECT item_code, warehouse, voucher_no,
+			TIMESTAMP(posting_date, posting_time) AS posted_at
+		FROM `tabStock Ledger Entry`
+		WHERE voucher_type = 'Stock Reconciliation'
+			AND is_cancelled = 0
+			AND item_code IN %(items)s
+			AND warehouse IN %(warehouses)s
+			AND TIMESTAMP(posting_date, posting_time) > %(after)s
+			AND TIMESTAMP(posting_date, posting_time) <= %(until)s
+		ORDER BY posted_at DESC
+		""",
+		{"items": item_codes, "warehouses": warehouses, "after": after, "until": until},
+		as_dict=True,
+	)
+	wanted = set(pairs)
+	seen: set[tuple[str, str]] = set()
+	out: list[dict[str, Any]] = []
+	for row in rows:
+		key = (row.get("item_code"), row.get("warehouse"))
+		if key not in wanted or key in seen:
+			continue
+		seen.add(key)
+		posted = row.get("posted_at")
+		out.append(
+			{
+				"item_code": key[0],
+				"warehouse": key[1],
+				"stock_reconciliation": row.get("voucher_no"),
+				"posted_at": posted.strftime("%Y-%m-%d %H:%M:%S") if hasattr(posted, "strftime") else str(posted),
+			}
+		)
+	return out
+
+
 @frappe.whitelist()
 def preview_shortage_count_fix(
-	lines: Any, scheduled_at: str | None = None, company: str | None = None
+	lines: Any,
+	scheduled_at: str | None = None,
+	company: str | None = None,
+	count_at: str | None = None,
 ) -> dict[str, Any]:
-	"""The confirmation's content: items, counts and the count moment.  Posts nothing."""
+	"""The confirmation's content: items, counts and the count moment.  Posts nothing.
+
+	``count_at`` (optional) dates the count earlier than the default.
+	"""
 	_ensure_shortage_count_access()
-	return _shortage_count_plan(lines, scheduled_at, company)
+	return _shortage_count_plan(lines, scheduled_at, company, count_at)
 
 
 @frappe.whitelist(methods=["POST"])
@@ -434,6 +520,7 @@ def fix_shortage_by_count(
 	scheduled_at: str | None = None,
 	company: str | None = None,
 	confirm_miscount: Any = 0,
+	count_at: str | None = None,
 ) -> dict[str, Any]:
 	"""Post the correction: one Stock Reconciliation per warehouse, all or none.
 
@@ -446,7 +533,15 @@ def fix_shortage_by_count(
 	if not _coerce_int(confirm_miscount, 0):
 		frappe.throw(_("Confirm that the stock was counted wrong before adding it"))
 
-	plan = _shortage_count_plan(lines, scheduled_at, company)
+	plan = _shortage_count_plan(lines, scheduled_at, company, count_at)
+	if plan["later_counts"]:
+		first = plan["later_counts"][0]
+		frappe.throw(
+			_(
+				"{0} was counted again at {1} ({2}), after the chosen date. That count would erase "
+				"this addition: choose a date after it."
+			).format(first["item_code"], first["posted_at"], first["stock_reconciliation"])
+		)
 	if not plan["items"]:
 		return {**plan, "ok": True, "stock_reconciliations": []}
 
@@ -455,7 +550,7 @@ def fix_shortage_by_count(
 	remarks = (
 		"Production shortage correction from the Production Board: counted wrong, "
 		f"not a missing base or purchase invoice (confirmed by {full_name}). "
-		f"Production at {plan['production_at']}."
+		f"Production at {plan['production_at']}; count dated {plan['count_at']}."
 	)
 
 	by_warehouse: dict[str, list[dict[str, Any]]] = {}

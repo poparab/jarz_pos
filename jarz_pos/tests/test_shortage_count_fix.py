@@ -49,9 +49,10 @@ def _raise(msg, exc=None, *args, **kwargs):
 
 
 class TestShortageCountFix(unittest.TestCase):
-	def _patches(self, balances=None, roles=("Manufacturing Manager",)):
+	def _patches(self, balances=None, roles=("Manufacturing Manager",), later_counts=None):
 		balances = balances if balances is not None else {"Label 330": 11.0, "strawberry mix": 1.0}
 		return [
+			patch("jarz_pos.api.production._later_stock_counts", return_value=list(later_counts or [])),
 			patch("jarz_pos.api.production._", new=lambda msg: msg),
 			patch("jarz_pos.api.production.planning._resolve_default_company", return_value="Jarz Co"),
 			patch("jarz_pos.api.production.planning.build_basket_rollup", return_value=ROLLUP),
@@ -64,8 +65,8 @@ class TestShortageCountFix(unittest.TestCase):
 			patch("jarz_pos.api.production.frappe.throw", side_effect=_raise),
 		]
 
-	def _run(self, fn, *args, balances=None, roles=("Manufacturing Manager",), **kwargs):
-		patches = self._patches(balances, roles)
+	def _run(self, fn, *args, balances=None, roles=("Manufacturing Manager",), later_counts=None, **kwargs):
+		patches = self._patches(balances, roles, later_counts)
 		for p in patches:
 			p.start()
 		try:
@@ -159,6 +160,80 @@ class TestShortageCountFix(unittest.TestCase):
 		self.assertTrue(kwargs["qty_as_of_posting"])
 		self.assertIn("counted wrong", kwargs["remarks"])
 		db.commit.assert_called_once()
+
+	def test_count_can_be_dated_earlier_than_production(self):
+		from jarz_pos.api import production
+
+		plan = self._run(
+			production.preview_shortage_count_fix,
+			LINES,
+			scheduled_at="2026-11-20 18:00:00",
+			count_at="2026-11-18 09:30:00",
+		)
+		self.assertEqual(plan["count_at"], "2026-11-18 09:30:00")
+		self.assertEqual(plan["latest_count_at"], "2026-11-20 17:55:00")
+		self.assertEqual(plan["later_counts"], [])
+
+	def test_count_dated_after_the_default_moment_is_refused(self):
+		import frappe
+
+		from jarz_pos.api import production
+
+		with self.assertRaises(frappe.ValidationError):
+			self._run(
+				production.preview_shortage_count_fix,
+				LINES,
+				scheduled_at="2026-11-20 18:00:00",
+				count_at="2026-11-20 17:59:00",
+			)
+
+	def test_post_refuses_a_date_before_a_later_stock_count(self):
+		import frappe
+
+		from jarz_pos.api import production
+
+		later = [
+			{
+				"item_code": "Label 330",
+				"warehouse": "Raw Material - J",
+				"stock_reconciliation": "MAT-RECO-9",
+				"posted_at": "2026-11-19 10:00:00",
+			}
+		]
+		with patch("jarz_pos.api.inventory_count._reconcile_counts") as reco:
+			with self.assertRaises(frappe.ValidationError):
+				self._run(
+					production.fix_shortage_by_count,
+					LINES,
+					scheduled_at="2026-11-20 18:00:00",
+					count_at="2026-11-18 09:30:00",
+					confirm_miscount=1,
+					later_counts=later,
+				)
+			reco.assert_not_called()
+
+	def test_post_uses_the_chosen_count_date(self):
+		from jarz_pos.api import production
+
+		with (
+			patch(
+				"jarz_pos.api.inventory_count._reconcile_counts",
+				return_value={"ok": True, "stock_reconciliation": "MAT-RECO-2", "differences": 2},
+			) as reco,
+			patch("jarz_pos.api.production.frappe") as mock_frappe,
+		):
+			mock_frappe.session.user = "owner@example.com"
+			mock_frappe.db.get_value.return_value = "Owner"
+			self._run(
+				production.fix_shortage_by_count,
+				LINES,
+				scheduled_at="2026-11-20 18:00:00",
+				count_at="2026-11-18 09:30:00",
+				confirm_miscount=1,
+			)
+		args, kwargs = reco.call_args
+		self.assertEqual(args[1], "2026-11-18 09:30:00")
+		self.assertIn("count dated 2026-11-18 09:30:00", kwargs["remarks"])
 
 
 if __name__ == "__main__":
