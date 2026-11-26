@@ -135,7 +135,7 @@ class Harness(unittest.TestCase):
 			),
 			mock.patch.object(cc, "publish_chat_update", lambda *a, **k: self.published.append((a, k))),
 			mock.patch.object(cc, "supersede_live_drafts", lambda *a, **k: []),
-			mock.patch.object(meta, "_settings", lambda: {"whatsapp_phone_number_id": "PN1"}),
+			mock.patch.object(meta, "_settings", lambda: {"enabled": True, "whatsapp_phone_number_id": "PN1"}),
 		]
 		for p in patches:
 			p.start()
@@ -246,7 +246,7 @@ class GraphShapeTest(Harness):
 			mock.patch.object(
 				meta,
 				"_settings",
-				lambda: {"whatsapp_phone_number_id": "PN1", "facebook_page_id": "PAGE1", "graph_api_version": "v24.0"},
+				lambda: {"enabled": True, "whatsapp_phone_number_id": "PN1", "facebook_page_id": "PAGE1", "graph_api_version": "v24.0"},
 			),
 			mock.patch.object(meta, "_wa_token", lambda: "WA"),
 			mock.patch.object(meta, "_page_token", lambda: "PG"),

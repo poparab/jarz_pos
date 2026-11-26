@@ -78,6 +78,9 @@ def _request(
 	files: dict | None = None,
 ) -> dict[str, Any]:
 	"""One Graph call. ``form`` / ``files`` make it a multipart upload (``requests`` sets the boundary)."""
+	if str(method).upper() != "GET":
+		# GETs only read (history, media info, contact names) and cannot message a customer.
+		_require_chat_enabled()
 	if not token:
 		raise MetaApiError("Meta access token is not configured in Jarz Chat Settings", "config")
 	url = path_or_url if path_or_url.startswith("http") else _url(path_or_url)
@@ -100,6 +103,21 @@ def _request(
 		return resp.json() or {}
 	except Exception:
 		return {}
+
+
+CHAT_OFF_MESSAGE = "Customer chat is switched off on this site"
+
+
+def _require_chat_enabled() -> None:
+	"""Kill switch: refuse any outbound write while Jarz Chat Settings.enabled is off.
+
+	Every send, media upload, reaction, template, read receipt, comment reply / edit / delete
+	and app-sync call goes through :func:`_request`, so one check there keeps a site that
+	still stores a real token (staging) from ever reaching a customer. Raised before any
+	network call.
+	"""
+	if not _settings().get("enabled"):
+		raise MetaApiError(CHAT_OFF_MESSAGE, "chat_disabled")
 
 
 def _wa_token() -> str:
