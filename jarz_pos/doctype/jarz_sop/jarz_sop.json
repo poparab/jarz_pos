@@ -2,18 +2,30 @@
  "actions": [],
  "autoname": "naming_series:",
  "creation": "2026-08-01 00:00:00.000000",
- "description": "Standard Operating Procedure for producing one item. Steps are authored against a single BOM batch and scaled at read time.",
+ "description": "Standard Operating Procedure for one recipe. Steps are authored against a single BOM batch and scaled at read time. Also the Recipe Book entry: Approved, Trial and Retired versions.",
  "doctype": "DocType",
  "engine": "InnoDB",
  "field_order": [
   "naming_series",
+  "recipe_title",
   "item_code",
   "item_name",
   "bom",
   "column_break_head",
+  "stage",
+  "track",
   "version",
   "is_active",
+  "approved_on",
   "yield_percent",
+  "section_break_change",
+  "change_summary",
+  "section_break_yield",
+  "yield_qty",
+  "column_break_yield",
+  "yield_uom",
+  "section_break_ingredients",
+  "ingredients",
   "section_break_process",
   "prep_time_mins",
   "column_break_process",
@@ -33,14 +45,22 @@
    "reqd": 1
   },
   {
+   "fieldname": "recipe_title",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Recipe Title",
+   "description": "Name shown in the Recipe Book. Defaults to the item name; required when there is no Item."
+  },
+  {
    "fieldname": "item_code",
    "fieldtype": "Link",
    "in_list_view": 1,
    "in_standard_filter": 1,
    "label": "Item Code",
    "options": "Item",
-   "reqd": 1,
-   "search_index": 1
+   "reqd": 0,
+   "search_index": 1,
+   "description": "Leave blank for a recipe that is not an Item yet (a trial). Only recipes with an Item reach the Production Board."
   },
   {
    "fetch_from": "item_code.item_name",
@@ -62,6 +82,23 @@
    "fieldtype": "Column Break"
   },
   {
+   "default": "Approved",
+   "description": "Trial and Retired recipes appear in the Recipe Book only, never on the Production Board.",
+   "fieldname": "stage",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Stage",
+   "options": "Approved\nTrial\nRetired"
+  },
+  {
+   "fieldname": "track",
+   "fieldtype": "Select",
+   "in_standard_filter": 1,
+   "label": "Track",
+   "options": "\nStandard line\nCookie jar line\nWinter warmer\nLight line"
+  },
+  {
    "default": "1",
    "description": "Bump this and create a new record instead of editing a procedure that has already been run.",
    "fieldname": "version",
@@ -72,7 +109,7 @@
   },
   {
    "default": "1",
-   "description": "Only one version per item stays active; activating this one deactivates the rest.",
+   "description": "Only one version per item stays active; activating this one deactivates the rest. Only an Approved recipe with an Item can be active.",
    "fieldname": "is_active",
    "fieldtype": "Check",
    "in_list_view": 1,
@@ -80,11 +117,61 @@
    "label": "Is Active"
   },
   {
+   "description": "The date the owner approved this version.",
+   "fieldname": "approved_on",
+   "fieldtype": "Date",
+   "label": "Approved On"
+  },
+  {
    "default": "100",
    "description": "Expected good output as a percentage of the BOM quantity.",
    "fieldname": "yield_percent",
    "fieldtype": "Percent",
    "label": "Yield %"
+  },
+  {
+   "fieldname": "section_break_change",
+   "fieldtype": "Section Break",
+   "label": "What Changed"
+  },
+  {
+   "description": "What changed against the previous version, one or two sentences.",
+   "fieldname": "change_summary",
+   "fieldtype": "Small Text",
+   "label": "Change Summary"
+  },
+  {
+   "fieldname": "section_break_yield",
+   "fieldtype": "Section Break",
+   "label": "Yield and Ingredients"
+  },
+  {
+   "description": "What one batch makes, for a recipe with no BOM (for example 4).",
+   "fieldname": "yield_qty",
+   "fieldtype": "Float",
+   "label": "Yield Qty"
+  },
+  {
+   "fieldname": "column_break_yield",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "Unit of the yield (for example \"jars\", \"g\", \"tray 40x60\").",
+   "fieldname": "yield_uom",
+   "fieldtype": "Data",
+   "label": "Yield Unit"
+  },
+  {
+   "fieldname": "section_break_ingredients",
+   "fieldtype": "Section Break",
+   "label": "Ingredients (recipes without a BOM)"
+  },
+  {
+   "description": "Used only when the recipe has no BOM. In an instruction, {{item:CODE|grams}} matches an ingredient's Item Code first, then its name.",
+   "fieldname": "ingredients",
+   "fieldtype": "Table",
+   "label": "Ingredients",
+   "options": "Jarz SOP Ingredient"
   },
   {
    "fieldname": "section_break_process",
@@ -132,7 +219,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-08-01 00:00:00.000000",
+ "modified": "2026-11-27 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "jarz pos",
  "name": "Jarz SOP",
@@ -174,6 +261,6 @@
  "sort_field": "modified",
  "sort_order": "DESC",
  "states": [],
- "title_field": "item_name",
+ "title_field": "recipe_title",
  "track_changes": 1
 }

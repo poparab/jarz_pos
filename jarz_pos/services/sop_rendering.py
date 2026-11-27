@@ -396,6 +396,77 @@ def format_quantity(qty: Any, uom: Any) -> str:
 # ── Public API ──────────────────────────────────────────────────────────
 
 
+def _evaluate_token(
+	payload: str,
+	component_qty_map: Mapping[str, Any],
+	uom_map: Mapping[str, Any],
+	name_map: Mapping[str, Any],
+	lowered: Mapping[str, str],
+	batch_count: float,
+	per_batch_units: float,
+) -> tuple[dict[str, Any] | None, str]:
+	"""Resolve one token payload to ``(result, "")`` or ``(None, unresolved_label)``.
+
+	The single source of truth for what a token means: ``render_instruction``
+	formats the result as text and ``tokenize_instruction`` hands it to the
+	app as data, so the two can never disagree about a figure or a refusal.
+	``result`` holds ``variant``, ``amount`` (grams for ``grams``), ``unit``,
+	``name``, ``each``, ``multiplier`` and ``parts`` (resolved ``(code, weight)``).
+	"""
+	code, variant, multiplier, each, valid = _split_payload(payload)
+
+	if not valid or not code:
+		return None, str(payload).strip()
+
+	parts = _resolve_parts(code, component_qty_map, name_map, uom_map, lowered)
+	if parts is None:
+		return None, code
+
+	if each:
+		if per_batch_units <= 0:
+			# "Per jar" without a known yield would be a made-up number.
+			return None, str(payload).strip()
+		scale = multiplier / per_batch_units
+	else:
+		scale = batch_count * multiplier
+
+	quantities = [to_float(component_qty_map.get(p), 0.0) * scale * w for p, w in parts]
+	uoms = [str(uom_map.get(p) or "").strip() for p, _w in parts]
+	name_text = " + ".join(str(name_map.get(p) or p).strip() for p, _w in parts)
+	result = {
+		"variant": variant,
+		"amount": None,
+		"unit": None,
+		"name": name_text,
+		"each": each,
+		"multiplier": multiplier,
+		"parts": parts,
+	}
+	refusal = str(payload).strip()
+
+	if variant == "grams":
+		grams = [to_grams(q, u) for q, u in zip(quantities, uoms, strict=False)]
+		if any(g is None for g in grams):
+			# Not a unit of mass: refuse rather than print a wrong number.
+			return None, refusal
+		if sum(grams) < 0:
+			# A negative part took more than the line holds: a BOM that
+			# no longer fits the recipe, never an amount to weigh out.
+			return None, refusal
+		result["amount"] = sum(grams)
+		result["unit"] = "g"
+		return result, ""
+	if variant == "name":
+		return result, ""
+
+	# qty, count, uom and the full form quote ONE unit, so a sum must share it.
+	if len({u.lower() for u in uoms}) > 1 or sum(quantities) < 0:
+		return None, refusal
+	result["amount"] = sum(quantities)
+	result["unit"] = uoms[0]
+	return result, ""
+
+
 def render_instruction(
 	text: Any,
 	*,
@@ -434,62 +505,106 @@ def render_instruction(
 	unresolved: list[str] = []
 
 	def _replace(match: re.Match[str]) -> str:
-		payload = match.group(1)
-		code, variant, multiplier, each, valid = _split_payload(payload)
-
-		if not valid or not code:
-			_remember(unresolved, str(payload).strip())
+		result, label = _evaluate_token(
+			match.group(1),
+			component_qty_map,
+			uom_map,
+			name_map,
+			lowered,
+			batch_count,
+			per_batch_units,
+		)
+		if result is None:
+			_remember(unresolved, label)
 			return match.group(0)
 
-		parts = _resolve_parts(code, component_qty_map, name_map, uom_map, lowered)
-		if parts is None:
-			_remember(unresolved, code)
-			return match.group(0)
-
-		if each:
-			if per_batch_units <= 0:
-				# "Per jar" without a known yield would be a made-up number.
-				_remember(unresolved, str(payload).strip())
-				return match.group(0)
-			scale = multiplier / per_batch_units
-		else:
-			scale = batch_count * multiplier
-
-		quantities = [to_float(component_qty_map.get(p), 0.0) * scale * w for p, w in parts]
-		uoms = [str(uom_map.get(p) or "").strip() for p, _w in parts]
-		name_text = " + ".join(str(name_map.get(p) or p).strip() for p, _w in parts)
-
+		variant = result["variant"]
 		if variant == "grams":
-			grams = [to_grams(q, u) for q, u in zip(quantities, uoms, strict=False)]
-			if any(g is None for g in grams):
-				# Not a unit of mass: refuse rather than print a wrong number.
-				_remember(unresolved, str(payload).strip())
-				return match.group(0)
-			if sum(grams) < 0:
-				# A negative part took more than the line holds: a BOM that
-				# no longer fits the recipe, never an amount to weigh out.
-				_remember(unresolved, str(payload).strip())
-				return match.group(0)
-			return _grams_text(sum(grams))
+			return _grams_text(result["amount"])
 		if variant == "name":
-			return name_text
-
-		# qty, count, uom and the full form quote ONE unit, so a sum must share it.
-		if len({u.lower() for u in uoms}) > 1 or sum(quantities) < 0:
-			_remember(unresolved, str(payload).strip())
-			return match.group(0)
+			return result["name"]
 		if variant == "count":
-			return _one_decimal(sum(quantities))
-		qty_text = f"{sum(quantities):.{places}f}"
-		uom_text = uoms[0]
-
+			return _one_decimal(result["amount"])
+		qty_text = f"{result['amount']:.{places}f}"
 		if variant == "qty":
 			return qty_text
 		if variant == "uom":
-			return uom_text
-		return " ".join(part for part in (qty_text, uom_text, name_text) if part)
+			return result["unit"]
+		return " ".join(part for part in (qty_text, result["unit"], result["name"]) if part)
 
 	return _TOKEN_RE.sub(_replace, source), unresolved
+
+
+def tokenize_instruction(
+	text: Any,
+	*,
+	component_qty_map: Mapping[str, Any],
+	uom_map: Mapping[str, Any],
+	name_map: Mapping[str, Any],
+	units_per_batch: Any = None,
+) -> tuple[list[dict[str, Any]], list[str]]:
+	"""Split plain text into ``(segments, unresolved)`` for one batch (factor 1).
+
+	The recipe book scales client-side, so instead of finished text it gets
+	data: ``{"text": ...}`` segments and token segments carrying ``format``,
+	``amount``, ``unit``, ``name``, ``key`` and ``scales``.  Figures come from
+	the same ``_evaluate_token`` as ``render_instruction``; an unknown token
+	stays a text segment, verbatim, and is listed in ``unresolved``.
+
+	``scales`` is False for ``each`` (a portion per finished unit does not
+	grow with the run) and for ``name``/``uom`` (no figure).  ``key`` is the
+	lower-cased component code when the token names one component, ``None``
+	for a sum.  Pass plain text: strip HTML first.
+	"""
+	source = normalise_markup(text)
+	if not source:
+		return [], []
+
+	component_qty_map = component_qty_map or {}
+	uom_map = uom_map or {}
+	name_map = name_map or {}
+	per_batch_units = to_float(units_per_batch, 0.0)
+	lowered = _lowered_index(component_qty_map, name_map, uom_map)
+
+	segments: list[dict[str, Any]] = []
+	unresolved: list[str] = []
+
+	def _text(value: str) -> None:
+		if not value:
+			return
+		if segments and "text" in segments[-1]:
+			segments[-1]["text"] += value
+		else:
+			segments.append({"text": value})
+
+	cursor = 0
+	for match in _TOKEN_RE.finditer(source):
+		_text(source[cursor : match.start()])
+		cursor = match.end()
+
+		result, label = _evaluate_token(
+			match.group(1), component_qty_map, uom_map, name_map, lowered, 1.0, per_batch_units
+		)
+		if result is None:
+			_remember(unresolved, label)
+			_text(match.group(0))
+			continue
+
+		variant = result["variant"] or "full"
+		parts = result["parts"]
+		single = len(parts) == 1 and parts[0][1] == 1.0
+		segments.append(
+			{
+				"key": str(parts[0][0]).strip().lower() if single else None,
+				"amount": None if result["amount"] is None or variant in ("name", "uom") else round(result["amount"], 6),
+				"unit": result["unit"],
+				"format": variant,
+				"scales": not result["each"] and variant not in ("name", "uom"),
+				"name": result["name"],
+			}
+		)
+	_text(source[cursor:])
+	return segments, unresolved
 
 
 def scale_duration(duration_mins: Any, scaling_mode: Any, batches: Any, units: Any) -> float:

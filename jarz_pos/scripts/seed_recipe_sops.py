@@ -11,7 +11,9 @@ Run::
     bench --site <site> execute jarz_pos.scripts.seed_recipe_sops.run
     bench --site <site> execute jarz_pos.scripts.seed_recipe_sops.run --kwargs "{'items': 'Tiramisu Large,Tiramisu Small'}"
 
-Idempotent by ``(item_code, version)``: re-running updates the existing SOP in
+Idempotent by ``(item_code, version)`` - or, for a recipe with no Item (a
+trial, an approved recipe not in the system), by ``(recipe_title, version)``
+with ``item_code`` unset.  Re-running updates the existing SOP in
 place rather than stacking duplicates, so fixing a typo is just an edit and a
 re-run.  Bump ``version`` in the data below to keep the old one for comparison
 instead of overwriting it.
@@ -29,6 +31,17 @@ from typing import Any, Optional
 
 import frappe
 from frappe.utils import flt
+
+# Recipe Book entries (trials, approved-but-not-in-system, extra versions) live
+# in their own data file.  A site that has this seeder but not that file yet
+# seeds the kitchen recipes only; any OTHER import failure is a real bug and
+# must surface.
+try:
+	from jarz_pos.scripts.recipe_book_data import BOOK_RECIPES
+except ModuleNotFoundError as _exc:  # pragma: no cover - depends on the checkout
+	if _exc.name != "jarz_pos.scripts.recipe_book_data":
+		raise
+	BOOK_RECIPES = []
 
 # ── Recipe data ─────────────────────────────────────────────────────────
 # `capture` turns a step into a checkpoint the operator must answer.  Used only
@@ -176,67 +189,91 @@ _CAKE_NOTE = (
 # temperature.  BOM-Fudge Cake-005 is 45 eggs -> 14.29 Kg of batter.
 FUDGE_CAKE = {
 	"item_code": "Fudge Cake",
-	"version": 3,
+	"version": 4,
 	"yield_percent": 98,
-	"prep_time_mins": 70,
-	"equipment": "Planetary mixer (whisk then hand), sieve, trays, oven, probe thermometer",
+	"prep_time_mins": 85,
+	"equipment": "Planetary mixer (whisk then hand), sieve, spatula, trays, oven, probe thermometer",
+	"change_summary": (
+		"The oil now goes into the whipped eggs in a thin stream, and the cocoa "
+		"water is cooled to about 50°C and added in turns with the dry mix. "
+		"v3 stirred the oil into the hot cocoa water: it split out as an oily "
+		"layer at the bottom of the trays and the hot liquid knocked the air out "
+		"of the eggs, so the cake rose poorly."
+	),
 	"notes": (
 		"Cake A, the official Fudge Cake since 2026-10-29. One BOM batch = 45 eggs = "
 		"14.29 Kg of batter. Cocoa is Cacao Barry Extra Brute (alkalised), so never "
 		"more baking soda than the BOM line. Bake loss target: 10% or less "
 		"(over 12% means overbaked). Don't keep plain cake in the fridge for days; "
-		"freeze what isn't used today.\n" + BASES_V2_NOTE
+		"freeze what isn't used today.\n"
+		"v4 (2026-11-27): same ingredients, new order. If the cake still rises and "
+		"then sinks in the middle, the next thing to test is less baking powder.\n"
+		+ BASES_V2_NOTE
 	),
 	"steps": [
 		{
-			"title": "Bloom the cocoa in the boiling water",
+			"title": "Bloom the cocoa in the boiling water, then cool it to about 50°C",
 			"instruction": (
 				"Sift {{item:coco powder|grams}} cocoa. Boil {{item:Water (tap)|grams}} water, "
-				"whisk in the cocoa until there are no lumps, cover and rest 5 minutes.\n"
+				"whisk in the cocoa until there are no lumps, cover and leave it until it is "
+				"about 50°C: warm, not hot. Do this first so it cools while the eggs whip.\n"
 				"ينخل {{item:coco powder|grams}} كاكاو. يغلي {{item:Water (tap)|grams}} ماء "
 				"و يضاف عليه الكاكاو مع التقليب بالمضرب اليدوي حتي لا يبقي اي تكتل، "
-				"ثم يغطي و يترك 5 دقائق."
+				"ثم يغطي و يتساب لحد ما يوصل حوالي 50 درجه: دافي مش سخن. "
+				"يتعمل الاول عشان يبرد علي ما البيض يتخفق."
 			),
-			"duration_mins": 10,
-			"scaling_mode": "Per Batch",
+			"duration_mins": 20,
+			"scaling_mode": "Fixed",
+			"capture_type": "Temperature",
+			"capture_label": "Cocoa water temperature before it goes in (°C)",
+			"capture_min": 40,
+			"capture_max": 55,
 			"requires_confirmation": 1,
 		},
 		dict(_CAKE_WHIP),
 		{
-			"title": "Add the dry mix in three additions on speed 1",
+			"title": "Pour the oil into the whipped eggs in a thin stream",
 			"instruction": (
-				"Drop to speed 1 and add the dry mix — {{item:flour|grams}} flour, "
+				"Turn the mixer down to speed 2 and pour {{item:oil|grams}} oil in a thin "
+				"stream down the side of the bowl, over about 2 minutes. The foam should "
+				"stay thick and pale; the egg holds the oil so it can't separate later.\n"
+				"نزل العجان علي سرعه 2 و صب {{item:oil|grams}} زيت خيط رفيع علي جنب "
+				"الطاسه علي مدار حوالي دقيقتين. الخليط لازم يفضل تقيل و فاتح؛ البيض "
+				"بيمسك الزيت فمينفصلش بعد كده."
+			),
+			"duration_mins": 3,
+			"scaling_mode": "Per Batch",
+			"requires_confirmation": 1,
+		},
+		{
+			"title": "On speed 1, add the dry mix and the cocoa water in turns",
+			"instruction": (
+				"Drop to speed 1. Add the dry mix ({{item:flour|grams}} flour, "
 				"{{item:baking powder|grams}} baking powder, {{item:baking soda|grams}} "
-				"baking soda, a pinch of salt — in three additions, each until it "
+				"baking soda, a pinch of salt) and the warm cocoa water in turns: dry, "
+				"cocoa water, dry, cocoa water, dry. Mix each addition only until it "
 				"disappears. Weigh the soda on the small scale.\n"
-				"انزال المضرب علي سرعه 1 ثم يضاف اليه الخليط الجاف "
+				"انزال المضرب علي سرعه 1. يضاف الخليط الجاف "
 				"( {{item:flour|grams}} دقيق – {{item:baking powder|grams}} بيكنج بودر – "
-				"{{item:baking soda|grams}} بيكنج صودا – رشه ملح ) علي ثلاث مرات حتي يختفي "
-				"الخليط. الصودا توزن علي الميزان الصغير."
+				"{{item:baking soda|grams}} بيكنج صودا – رشه ملح ) و ماء الكاكاو الدافي "
+				"بالتبادل: جاف، كاكاو، جاف، كاكاو، جاف. كل اضافه تتقلب لحد ما تختفي بس. "
+				"الصودا توزن علي الميزان الصغير."
 			),
 			"duration_mins": 5,
 			"scaling_mode": "Per Batch",
 			"requires_confirmation": 1,
 		},
 		{
-			"title": "Combine oil and the cocoa water, add gradually",
+			"title": "Scrape the bottom, fill the trays straight away 3–4 cm deep",
 			"instruction": (
-				"Mix {{item:oil|grams}} oil into the hot cocoa water, then add it "
-				"gradually to the mixer.\n"
-				"يخلط {{item:oil|grams}} زيت مع ماء الكاكاو الساخن "
-				"ثم يضاف علي الخليط في العجان تدريجيا."
-			),
-			"duration_mins": 5,
-			"scaling_mode": "Per Batch",
-			"requires_confirmation": 1,
-		},
-		{
-			"title": "Stop the mixer, hand-stir, fill the trays 3–4 cm deep",
-			"instruction": (
-				"Stop the mixer, stir well by hand with a spoon, then divide evenly "
-				"over the trays so the batter is 3–4 cm deep.\n"
-				"يفصل العجان و يقلب الخليط بمعلقه جيدا ثم يوزع بالتساوي علي الصاجات "
-				"بحيث يكون ارتفاع الخليط 3 الي 4 سم."
+				"Stop the mixer. Scrape the bottom of the bowl with a spatula, where any "
+				"oil hides, and fold it through. Fill the trays straight away, 3–4 cm deep, "
+				"and give the bowl a stir between trays. Each tray goes in the oven as soon "
+				"as it is filled; don't let the batter wait.\n"
+				"يفصل العجان. تتكشط قاعدة الطاسه بالسباتولا، لان الزيت بيستخبي تحت، و "
+				"يتقلب في الخليط. يتوزع علي الصاجات علي طول بارتفاع 3 الي 4 سم، و يتقلب "
+				"الخليط في الطاسه بين كل صاج و التاني. كل صاج يدخل الفرن اول ما يتملي؛ "
+				"الخليط ميستناش."
 			),
 			"duration_mins": 5,
 			"scaling_mode": "Per Batch",
@@ -1175,15 +1212,51 @@ def _missing_bom_lines(item_code: str, codes: list[str]) -> list[str]:
 	return [c for c in codes if not frappe.db.exists("BOM Item", {"parent": bom, "item_code": c})]
 
 
+def _recipe_label(recipe: dict[str, Any]) -> str:
+	"""Item code, or the title of a recipe that is not an Item."""
+	return recipe.get("item_code") or recipe.get("recipe_title") or ""
+
+
+def _approved(recipe: dict[str, Any]) -> bool:
+	return (recipe.get("stage") or "Approved") == "Approved"
+
+
 def _apply(doc, recipe: dict[str, Any]) -> None:
-	doc.item_code = recipe["item_code"]
+	item_code = recipe.get("item_code") or None
+	stage = recipe.get("stage") or "Approved"
+	doc.item_code = item_code
 	doc.version = recipe["version"]
-	doc.is_active = 1
+	doc.stage = stage
+	doc.track = recipe.get("track") or "Standard line"
+	# Only an Approved recipe with an Item is ever on the Production Board.
+	doc.is_active = 1 if (stage == "Approved" and item_code) else 0
+	title = recipe.get("recipe_title")
+	if not title and item_code:
+		title = frappe.db.get_value("Item", item_code, "item_name") or item_code
+	doc.recipe_title = title
+	doc.approved_on = recipe.get("approved_on") or None
+	doc.change_summary = recipe.get("change_summary") or ""
+	doc.yield_qty = flt(recipe.get("yield_qty")) if recipe.get("yield_qty") is not None else None
+	doc.yield_uom = recipe.get("yield_uom") or ""
 	doc.yield_percent = recipe.get("yield_percent") or 100
 	doc.prep_time_mins = recipe.get("prep_time_mins") or 0
 	doc.equipment = recipe.get("equipment") or ""
 	doc.notes = recipe.get("notes") or ""
-	doc.bom = _default_bom(recipe["item_code"])
+	doc.bom = _default_bom(item_code) if item_code else None
+
+	doc.set("ingredients", [])
+	for row in recipe.get("ingredients") or []:
+		doc.append(
+			"ingredients",
+			{
+				"ingredient": row["ingredient"],
+				"item_code": row.get("item_code") or None,
+				"qty": flt(row["qty"]),
+				"uom": row["uom"],
+				"section": row.get("section") or "",
+				"note": row.get("note") or "",
+			},
+		)
 
 	doc.set("steps", [])
 	for index, step in enumerate(recipe["steps"], start=1):
@@ -1238,40 +1311,54 @@ def run(dry_run: Any = False, items: Any = None) -> dict[str, Any]:
 	skipped: list[dict[str, str]] = []
 
 	wanted = _parse_items(items)
-	recipes = [r for r in RECIPES if wanted is None or r["item_code"] in wanted]
-	unmatched = [] if wanted is None else [c for c in wanted if c not in {r["item_code"] for r in RECIPES}]
+	every_recipe = list(RECIPES) + list(BOOK_RECIPES)
+	recipes = [r for r in every_recipe if wanted is None or _recipe_label(r) in wanted]
+	known = {_recipe_label(r) for r in every_recipe}
+	unmatched = [] if wanted is None else [c for c in wanted if c not in known]
 
 	for recipe in recipes:
-		item_code = recipe["item_code"]
-		if not frappe.db.exists("Item", item_code):
-			skipped.append({"item_code": item_code, "reason": "item not found"})
-			continue
+		item_code = recipe.get("item_code") or None
+		label = _recipe_label(recipe)
 
-		missing = _missing_bom_lines(item_code, recipe.get("requires_bom_lines") or [])
-		if missing:
-			skipped.append(
-				{"item_code": item_code, "reason": f"default BOM has no {', '.join(missing)} line yet"}
-			)
-			continue
+		if item_code:
+			if not frappe.db.exists("Item", item_code):
+				skipped.append({"item_code": label, "reason": "item not found"})
+				continue
 
-		existing = frappe.db.get_value(
-			"Jarz SOP", {"item_code": item_code, "version": recipe["version"]}, "name"
-		)
+			missing = _missing_bom_lines(item_code, recipe.get("requires_bom_lines") or [])
+			if missing:
+				skipped.append(
+					{"item_code": label, "reason": f"default BOM has no {', '.join(missing)} line yet"}
+				)
+				continue
+
+			identity = {"item_code": item_code, "version": recipe["version"]}
+		else:
+			if not recipe.get("recipe_title"):
+				skipped.append({"item_code": label or "?", "reason": "no item_code and no recipe_title"})
+				continue
+			identity = {
+				"recipe_title": recipe["recipe_title"],
+				"version": recipe["version"],
+				"item_code": ["is", "not set"],
+			}
+
+		existing = frappe.db.get_value("Jarz SOP", identity, "name")
 
 		if dry_run:
-			(updated if existing else created).append(item_code)
+			(updated if existing else created).append(label)
 			continue
 
 		if existing:
 			doc = frappe.get_doc("Jarz SOP", existing)
 			_apply(doc, recipe)
 			doc.save()
-			updated.append(f"{item_code} ({doc.name})")
+			updated.append(f"{label} ({doc.name})")
 		else:
 			doc = frappe.new_doc("Jarz SOP")
 			_apply(doc, recipe)
 			doc.insert()
-			created.append(f"{item_code} ({doc.name})")
+			created.append(f"{label} ({doc.name})")
 
 	if not dry_run:
 		frappe.db.commit()

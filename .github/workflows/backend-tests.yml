@@ -412,6 +412,8 @@ jobs:
             # renderer against the per-jar BOM figures, so a mistyped token or a
             # drifted item code shows up here instead of on the kitchen's phone.
             test_seed_recipe_sops
+            # Recipe Book: token segments, version status, controller rules, no-item seeding.
+            test_recipe_book
             test_purchase_warehouse_utils
             test_purchase_setup
             test_purchase_request_links

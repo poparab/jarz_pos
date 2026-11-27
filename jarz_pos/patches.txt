@@ -79,3 +79,5 @@ jarz_pos.Patches.v1_9.seed_brand_facts
 # Dated amounts for recurring expenses (a raise no longer rewrites past months): rebuild each
 # registry row's history from its Version log. Skips rows that already have history. Re-runnable.
 jarz_pos.Patches.v1_9.backfill_recurring_amount_history
+# Recipe Book: existing Jarz SOPs become Approved / Standard line, titled by item name. Only blank values are written; re-runnable.
+jarz_pos.Patches.v1_9.backfill_recipe_book_fields

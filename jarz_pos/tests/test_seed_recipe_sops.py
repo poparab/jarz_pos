@@ -367,12 +367,12 @@ class TestBaseRecipes(unittest.TestCase):
 		from jarz_pos.scripts import seed_recipe_sops as seed
 
 		versions = {r["item_code"]: r["version"] for r in seed.RECIPES if r["item_code"] in BASE_BOMS}
-		# Fudge Cake is v3 (Cake A) so the v2 method stays on file, inactive.
+		# Fudge Cake is v4 (Cake A, oil into the eggs) so earlier methods stay on file, inactive.
 		# The ganache had no SOP before ganache B, so it starts at v1.
 		self.assertEqual(
 			{
 				**{code: 2 for code in BASE_BOMS},
-				"Fudge Cake": 3,
+				"Fudge Cake": 4,
 				"Chocolate ganache": 1,
 				"Cocoa soak syrup": 1,
 			},
@@ -434,10 +434,12 @@ class TestBaseRecipes(unittest.TestCase):
 		fudge = render_base("Fudge Cake")
 		self.assertIn("Sift 570 g cocoa. Boil 2850 g water", fudge["steps"][0]["instruction_html"])
 		self.assertIn("beat 45 eggs + 3750 g sugar + 27 g vanilla", fudge["steps"][1]["instruction_html"])
+		# v4: the oil streams into the whipped eggs, then dry and cocoa water go in turns.
+		self.assertIn("pour 2025 g oil in a thin stream", fudge["steps"][2]["instruction_html"])
 		self.assertIn(
-			"2700 g flour, 105 g baking powder, 13.5 g baking soda", fudge["steps"][2]["instruction_html"]
+			"2700 g flour, 105 g baking powder, 13.5 g baking soda", fudge["steps"][3]["instruction_html"]
 		)
-		self.assertIn("2025 g oil into the hot cocoa water", fudge["steps"][3]["instruction_html"])
+		self.assertNotIn("hot cocoa water", fudge["steps"][2]["instruction_html"])
 
 		velvet = render_base("Red Velvet Cake", batches=1.5)
 		self.assertIn("beat 45 eggs + 3750 g sugar", velvet["steps"][0]["instruction_html"])
@@ -679,7 +681,7 @@ class TestItemsFilter(unittest.TestCase):
 		from jarz_pos.scripts import seed_recipe_sops as seed
 
 		result, _ = self._run()
-		self.assertEqual(len(seed.RECIPES), len(result["created"]))
+		self.assertEqual(len(seed.RECIPES) + len(seed.BOOK_RECIPES), len(result["created"]))
 
 	def test_comma_separated_string_restricts_the_run(self):
 		result, _ = self._run(items="Tiramisu Large,Tiramisu Small")
