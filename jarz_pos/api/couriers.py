@@ -10,7 +10,7 @@ import hmac
 import json
 
 import frappe
-from frappe.utils import get_datetime, now_datetime
+from frappe.utils import cint, get_datetime, now_datetime
 
 from jarz_pos.api.invoices import pay_invoice as _pay_invoice  # reuse payment creation
 from jarz_pos.constants import DELIVERY_GROUPS, ROLES
@@ -603,6 +603,31 @@ def change_payment_collection_method(
 		raise
 
 
+def _branch_default_delivery_partner(pos_profile: str | None) -> str | None:
+	"""The active Delivery Partner a branch's new riders belong to, or None."""
+	if not pos_profile:
+		return None
+	try:
+		meta = frappe.get_meta("POS Profile")
+		if not meta.get_field("custom_default_delivery_partner"):
+			return None
+		fields = ["custom_default_delivery_partner"]
+		if meta.get_field("custom_allow_delivery_partner"):
+			fields.append("custom_allow_delivery_partner")
+		row = frappe.db.get_value("POS Profile", pos_profile, fields, as_dict=True) or {}
+		partner = (row.get("custom_default_delivery_partner") or "").strip()
+		if not partner:
+			return None
+		if "custom_allow_delivery_partner" in fields and not cint(row.get("custom_allow_delivery_partner")):
+			return None
+		if not frappe.db.get_value("Delivery Partner", partner, "is_active"):
+			return None
+		return partner
+	except Exception:
+		frappe.log_error(frappe.get_traceback(), "couriers.branch_default_delivery_partner")
+		return None
+
+
 @frappe.whitelist()  # type: ignore[attr-defined]
 def create_delivery_party(
 	party_type: str,
@@ -612,15 +637,23 @@ def create_delivery_party(
 	first_name: str | None = None,
 	last_name: str | None = None,
 	delivery_partner: str | None = None,
+	no_delivery_partner: int | str | bool | None = None,
 ):
 	"""Create a new delivery party (Employee or Supplier) and return unified structure.
 
 	Either provide (first_name & last_name) or a combined name.
 	If delivery_partner is provided, sets custom_delivery_partner on the created record.
+	A Supplier created with no delivery_partner at a branch whose POS Profile names a
+	``custom_default_delivery_partner`` is linked to that partner, unless the caller
+	passes ``no_delivery_partner`` (a per-trip rider such as Uber/InDrive). An
+	unlinked rider at a partner branch is booked as an ordinary courier: his fee is
+	owed to him personally and kept back from the cash at settlement.
 	Returns: {party_type, party, display_name, phone}
 	"""
 	try:
 		delivery_partner = (delivery_partner or "").strip() or None
+		if not delivery_partner and party_type == "Supplier" and not cint(no_delivery_partner):
+			delivery_partner = _branch_default_delivery_partner(pos_profile)
 		# Validate POS profile is active
 		if pos_profile:
 			from jarz_pos.utils.validation_utils import assert_pos_profile_enabled

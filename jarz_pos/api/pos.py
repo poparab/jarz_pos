@@ -278,12 +278,25 @@ def get_pos_profiles():
 	except Exception:
 		pass
 
+	has_default_dp = False
+	try:
+		has_default_dp = bool(frappe.get_meta("POS Profile").get_field("custom_default_delivery_partner"))
+	except Exception:
+		pass
+
 	result = []
 	for p in profiles:
 		row = p["name"]
 		if has_dp_field:
 			allow_dp = frappe.db.get_value("POS Profile", p["name"], "custom_allow_delivery_partner")
-			result.append({"name": p["name"], "allow_delivery_partner": bool(allow_dp)})
+			entry = {"name": p["name"], "allow_delivery_partner": bool(allow_dp)}
+			if has_default_dp:
+				# The delivery company riders of this branch belong to; the app
+				# preselects it when a courier is created here.
+				entry["default_delivery_partner"] = (
+					frappe.db.get_value("POS Profile", p["name"], "custom_default_delivery_partner") or None
+				)
+			result.append(entry)
 		else:
 			result.append(row)
 	return result
