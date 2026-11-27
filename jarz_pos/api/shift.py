@@ -1943,6 +1943,226 @@ def _resolve_sheet_settlements(
 	return out
 
 
+def _resolve_sheet_drawer_payments(
+	branch: str, company: str | None, start: Any, end: Any
+) -> dict[str, dict[str, Any]]:
+	"""invoice -> {"at", "amount"} for order money that reached the branch till in the window.
+
+	Read from the till's own GL: a POS-paid Sales Invoice posting cash to the
+	till, or a Receive Payment Entry into the till allocated to the invoice.
+	Money through Courier Outstanding is not here; it reaches the till at the
+	courier settlement, which ``_resolve_sheet_settlements`` covers.
+	"""
+	out: dict[str, dict[str, Any]] = {}
+	try:
+		from jarz_pos.utils.account_utils import get_pos_cash_account
+
+		if not company:
+			return out
+		till = get_pos_cash_account(branch, company)
+		if not till:
+			return out
+		params = {"till": till, "start": start, "end": end}
+
+		def add(name: str, amount: Any, at: Any) -> None:
+			amount = flt(amount, 2)
+			if not name or amount <= 0:
+				return
+			entry = out.setdefault(name, {"at": None, "amount": 0.0})
+			entry["amount"] = flt(entry["amount"] + amount, 2)
+			if at and (entry["at"] is None or get_datetime(at) < get_datetime(entry["at"])):
+				entry["at"] = at
+
+		for r in (
+			frappe.db.sql(
+				"""
+				SELECT gle.voucher_no AS name, SUM(gle.debit - gle.credit) AS amount, MIN(gle.creation) AS at
+				FROM `tabGL Entry` gle
+				WHERE gle.account = %(till)s AND gle.is_cancelled = 0
+				  AND gle.voucher_type = 'Sales Invoice'
+				  AND gle.creation BETWEEN %(start)s AND %(end)s
+				GROUP BY gle.voucher_no
+				""",
+				params,
+				as_dict=True,
+			)
+			or []
+		):
+			add(r.get("name"), r.get("amount"), r.get("at"))
+		for r in (
+			frappe.db.sql(
+				"""
+				SELECT per.reference_name AS name, SUM(per.allocated_amount) AS amount, MIN(pe.creation) AS at
+				FROM `tabPayment Entry` pe
+				JOIN `tabPayment Entry Reference` per
+				  ON per.parent = pe.name AND per.parenttype = 'Payment Entry'
+				WHERE pe.docstatus = 1 AND pe.payment_type = 'Receive' AND pe.paid_to = %(till)s
+				  AND per.reference_doctype = 'Sales Invoice'
+				  AND pe.creation BETWEEN %(start)s AND %(end)s
+				GROUP BY per.reference_name
+				""",
+				params,
+				as_dict=True,
+			)
+			or []
+		):
+			add(r.get("name"), r.get("amount"), r.get("at"))
+	except Exception:
+		_sheet_log("drawer_payments")
+	return out
+
+
+SHEET_OVERDUE_LOOKBACK_DAYS = 14
+# An order is on the sheet's list only when one of these happened in the shift:
+# each one moves money in or out of the drawer (or hands it to a courier).
+SHEET_DRAWER_REASONS = frozenset({"out_for_delivery", "settled", "paid"})
+
+
+def _resolve_sheet_overdue(branch: str, start: Any, ref_end: Any, is_open: bool) -> list[dict[str, Any]]:
+	"""Branch orders whose delivery slot passed by ``ref_end`` and had not gone out by then.
+
+	``ref_end`` is the shift's end (now while it is open). An order counts when
+	it is submitted, not in the Cancelled state, has a delivery slot whose end
+	(``ops_reports.slot_window``; a slot with no duration ends at its start, a
+	date-only slot at midnight) is at most ``ref_end`` and at most
+	``SHEET_OVERDUE_LOOKBACK_DAYS`` old, and its first Out for Delivery /
+	Delivered move (Invoice State Log, else the first Delivery Note, else
+	``custom_delivered_at``) is missing or after ``ref_end``. A rescheduled
+	order has a later slot and drops out by itself. Orders with no slot are
+	left out: there is no promised time to have missed.
+	"""
+	try:
+		from datetime import timedelta
+
+		from jarz_pos.api.ops_reports import slot_window
+
+		ref = get_datetime(ref_end)
+		shift_start = get_datetime(start)
+		floor = ref - timedelta(days=SHEET_OVERDUE_LOOKBACK_DAYS)
+
+		def col(c: str, default: str = "NULL") -> str:
+			return f"si.`{c}`" if _sheet_has_column("Sales Invoice", c) else default
+
+		if not _sheet_has_column("Sales Invoice", "custom_delivery_date"):
+			return []
+		rows = (
+			frappe.db.sql(
+				f"""
+				SELECT si.name, si.creation, si.customer, si.customer_name, si.territory,
+				       si.grand_total, si.outstanding_amount, {col("woo_order_id", "0")} AS woo_order_id,
+				       {col("woo_order_number")} AS woo_order_number,
+				       {col("custom_sales_invoice_state")} AS state,
+				       {col("custom_payment_method")} AS payment_method,
+				       {col("custom_is_pickup", "0")} AS is_pickup,
+				       {col("custom_sub_territory")} AS sub_territory,
+				       {col("custom_delivery_date")} AS delivery_date,
+				       {col("custom_delivery_time_from")} AS time_from,
+				       {col("custom_delivery_duration")} AS duration,
+				       {col("custom_delivery_slot_label")} AS slot_label,
+				       {col("custom_delivered_at")} AS delivered_at
+				FROM `tabSales Invoice` si
+				WHERE si.docstatus = 1 AND si.is_return = 0
+				  AND {_sheet_branch_expr("si")} = %(branch)s
+				  AND si.creation <= %(ref)s
+				  AND si.custom_delivery_date BETWEEN %(floor_day)s AND %(ref_day)s
+				  AND IFNULL({col("custom_sales_invoice_state", "''")}, '') != 'Cancelled'
+				ORDER BY si.creation ASC
+				""",
+				{
+					"branch": branch,
+					"ref": ref,
+					"floor_day": floor.date(),
+					"ref_day": ref.date(),
+				},
+				as_dict=True,
+			)
+			or []
+		)
+		due: list[tuple[dict[str, Any], Any, Any, Any]] = []
+		for r in rows:
+			slot_start, slot_end = slot_window(r.get("delivery_date"), r.get("time_from"), r.get("duration"))
+			deadline = slot_end or slot_start
+			if not deadline or deadline > ref or deadline < floor:
+				continue
+			due.append((r, slot_start, slot_end, deadline))
+		if not due:
+			return []
+
+		names = tuple(r["name"] for r, *_ in due)
+		went_out: dict[str, Any] = {}
+		if frappe.db.table_exists("Invoice State Log"):
+			for r in (
+				frappe.db.sql(
+					"""
+					SELECT sales_invoice AS name, MIN(changed_at) AS at
+					FROM `tabInvoice State Log`
+					WHERE sales_invoice IN %(names)s
+					  AND to_state IN ('Out for Delivery', 'Delivered')
+					  AND IFNULL(source, '') NOT LIKE 'migration%%'
+					GROUP BY sales_invoice
+					""",
+					{"names": names},
+					as_dict=True,
+				)
+				or []
+			):
+				went_out[r["name"]] = r.get("at")
+		missing = tuple(n for n in names if n not in went_out)
+		if missing:
+			for r in (
+				frappe.db.sql(
+					"""
+					SELECT dni.against_sales_invoice AS name, MIN(dn.creation) AS at
+					FROM `tabDelivery Note Item` dni
+					JOIN `tabDelivery Note` dn ON dn.name = dni.parent
+					WHERE dn.docstatus = 1 AND dn.is_return = 0 AND dni.against_sales_invoice IN %(names)s
+					GROUP BY dni.against_sales_invoice
+					""",
+					{"names": missing},
+					as_dict=True,
+				)
+				or []
+			):
+				went_out[r["name"]] = r.get("at")
+
+		areas = _resolve_sheet_area_labels({r["territory"] for r, *_ in due if r.get("territory")})
+		out: list[dict[str, Any]] = []
+		for r, slot_start, slot_end, deadline in due:
+			left = went_out.get(r["name"]) or r.get("delivered_at")
+			if left and get_datetime(left) <= ref:
+				continue
+			area = areas.get(r.get("territory")) if r.get("territory") else None
+			if area and r.get("sub_territory"):
+				area = f"{area} - {r['sub_territory']}"
+			out.append(
+				{
+					"name": r["name"],
+					"order_number": _sheet_order_number(r),
+					"customer_name": r.get("customer_name") or r.get("customer") or None,
+					"created_at": _sheet_iso(r.get("creation")),
+					"slot_start": _sheet_iso(slot_start),
+					"slot_end": _sheet_iso(slot_end),
+					"slot_label": (str(r.get("slot_label") or "").strip() or None),
+					"deadline": _sheet_iso(deadline),
+					"minutes_late": max(0, int((ref - deadline).total_seconds() // 60)),
+					"state": r.get("state") or None,
+					"is_pickup": bool(cint(r.get("is_pickup"))),
+					"area": area or None,
+					"payment_method": r.get("payment_method") or None,
+					"grand_total": flt(r.get("grand_total"), 2),
+					"outstanding_amount": flt(r.get("outstanding_amount"), 2),
+					"due_in_this_shift": deadline >= shift_start,
+					# Only a closed shift can learn that the order left later.
+					"went_out_at": None if is_open else _sheet_iso(left),
+				}
+			)
+		out.sort(key=lambda o: (o["deadline"] or "", o["name"]))
+		return out
+	except Exception:
+		_sheet_log("overdue")
+		return []
+
+
 def _sheet_order_number(row: dict[str, Any]) -> str:
 	woo_number = str(row.get("woo_order_number") or "").strip()
 	woo_id = cint(row.get("woo_order_id"))
@@ -2573,14 +2793,21 @@ def get_shift_sheet(opening_entry: str) -> dict[str, Any]:
 	The opener and shift-monitor managers of the branch may read it. The staff view
 	carries per-order amounts but no totals and no drawer figures (blind count).
 
-	``orders`` lists every order of the branch that was created, went Out for
-	Delivery, or was courier-settled inside the shift window. Each row carries
-	``reasons`` (subset of created / out_for_delivery / settled, in that order),
-	``out_for_delivery_at`` and ``settled_at`` (in-window times or null) and
-	``settled_amount`` (Courier Transaction amounts settled in this shift). Rows
-	are sorted by the earliest in-window moment. ``jars_by_flavour`` and
-	``totals.orders / jars / grand_total / delivery_fees`` count only orders with
-	"created" in ``reasons``, so nothing is counted twice across shifts.
+	``orders`` lists only the orders that touched the drawer inside the shift
+	window: went Out for Delivery, were courier-settled, or had cash paid into
+	the branch till. An order only created in the shift (due out tomorrow) is not
+	listed. Each row carries ``reasons`` (subset of created / out_for_delivery /
+	settled / paid, in that order; "created" is never alone),
+	``out_for_delivery_at``, ``settled_at`` and ``paid_at`` (in-window times or
+	null), ``settled_amount`` (Courier Transaction amounts settled in this shift)
+	and ``paid_amount`` (cash into the till for it). Rows are sorted by the
+	earliest in-window moment. ``jars_by_flavour`` and ``totals.orders / jars /
+	grand_total / delivery_fees`` count every order created in the shift, listed
+	or not, so nothing is counted twice across shifts.
+
+	``overdue`` (always a list) holds the branch's orders whose delivery slot
+	passed by the shift end (now while open), at most 14 days back, that had not
+	gone out by then: see ``_resolve_sheet_overdue``.
 
 	``returns`` (always a list) holds credit notes of the branch's orders created
 	in the window plus those refunded in the window: credit_note, order,
@@ -2620,7 +2847,10 @@ def get_shift_sheet(opening_entry: str) -> dict[str, Any]:
 
 	dispatches = _resolve_sheet_dispatches(branch, start, end)
 	settlements = _resolve_sheet_settlements(opening_entry, branch, start, end)
-	invoices = _resolve_sheet_invoices(branch, start, end, sorted(set(dispatches) | set(settlements)))
+	drawer_paid = _resolve_sheet_drawer_payments(branch, opening.get("company"), start, end)
+	invoices = _resolve_sheet_invoices(
+		branch, start, end, sorted(set(dispatches) | set(settlements) | set(drawer_paid))
+	)
 	names = [inv["name"] for inv in invoices]
 
 	start_dt, end_dt = get_datetime(start), get_datetime(end)
@@ -2663,6 +2893,15 @@ def get_shift_sheet(opening_entry: str) -> dict[str, Any]:
 			reasons.append("settled")
 			if settled.get("at"):
 				moments.append(get_datetime(settled["at"]))
+		paid = drawer_paid.get(inv["name"])
+		if paid:
+			reasons.append("paid")
+			if paid.get("at"):
+				moments.append(get_datetime(paid["at"]))
+		if not (set(reasons) & SHEET_DRAWER_REASONS):
+			# Created here but nothing reached the drawer yet (e.g. due out
+			# tomorrow): it belongs to the shift that sends it out.
+			continue
 		sort_keys[inv["name"]] = (min(moments) if moments else start_dt, inv["name"])
 		is_pickup = bool(cint(inv.get("custom_is_pickup")))
 		party = inv.get("custom_courier_party")
@@ -2700,11 +2939,14 @@ def get_shift_sheet(opening_entry: str) -> dict[str, Any]:
 				)
 				if settled
 				else 0.0,
+				"paid_at": _sheet_iso((paid or {}).get("at")),
+				"paid_amount": flt((paid or {}).get("amount"), 2) if paid else 0.0,
 			}
 		)
 	orders.sort(key=lambda o: sort_keys[o["name"]])
 
 	returns = _resolve_sheet_returns(branch, opening.get("company"), start, end)
+	overdue = _resolve_sheet_overdue(branch, start, end, is_open=not closing)
 
 	payouts = _resolve_sheet_payouts(branch, start, end)
 
@@ -2715,16 +2957,22 @@ def get_shift_sheet(opening_entry: str) -> dict[str, Any]:
 		cash_flow = _resolve_sheet_cash_flow(
 			branch, opening.get("company"), start, end, drawer, is_open=not closing
 		)
-		created_orders = [o for o in orders if "created" in o["reasons"]]
+		# Sales count every order created in the shift, listed or not (an order
+		# due out tomorrow is a sale of today but not on today's list).
+		created_invoices = [inv for inv in invoices if inv["name"] in created_names]
 		sent_out = [o for o in orders if "out_for_delivery" in o["reasons"] and not o["is_pickup"]]
 		delivery_income = flt(sum(o["delivery_fee"] for o in sent_out), 2)
 		delivery_cost = flt(sum(flt(o["shipping_expense"]) for o in sent_out), 2)
 		totals = {
-			"orders": len(created_orders),
-			"jars": sum(o["jars"] for o in created_orders),
-			"grand_total": flt(sum(o["grand_total"] for o in created_orders), 2),
-			"delivery_fees": flt(sum(o["delivery_fee"] for o in created_orders), 2),
-			"new_orders": len(created_orders),
+			"orders": len(created_invoices),
+			"jars": sum(jars_by_invoice.get(inv["name"], 0) for inv in created_invoices),
+			"grand_total": flt(sum(flt(inv.get("grand_total")) for inv in created_invoices), 2),
+			"delivery_fees": flt(sum(flt(shipping.get(inv["name"], 0.0)) for inv in created_invoices), 2),
+			"new_orders": len(created_invoices),
+			"listed_orders": len(orders),
+			"paid_orders": sum(1 for o in orders if "paid" in o["reasons"]),
+			"paid_amount": flt(sum(o["paid_amount"] for o in orders), 2),
+			"overdue_orders": len(overdue),
 			"out_for_delivery_orders": sum(1 for o in orders if "out_for_delivery" in o["reasons"]),
 			"settled_orders": sum(1 for o in orders if "settled" in o["reasons"]),
 			"settled_amount": flt(sum(o["settled_amount"] for o in orders), 2),
@@ -2761,6 +3009,7 @@ def get_shift_sheet(opening_entry: str) -> dict[str, Any]:
 		"is_manager_view": is_manager_view,
 		"amounts_hidden": 0 if is_manager_view else 1,
 		"orders": orders,
+		"overdue": overdue,
 		"returns": returns,
 		"jars_by_flavour": jars_by_flavour,
 		"payouts": payouts,

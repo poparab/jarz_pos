@@ -76,14 +76,21 @@ class TestShiftSheet(unittest.TestCase):
 		dispatches=None,
 		settlements=None,
 		returns=None,
+		drawer_paid=None,
+		overdue=None,
 	):
+		if dispatches is None:
+			# Both default orders went out in the shift, so both are listed.
+			dispatches = {"SI-1": "2026-11-20 11:30:00", "SI-2": "2026-11-20 11:45:00"}
 		if invoices is None:
 			invoices = [
 				_inv("SI-1", 300, custom_courier_party_type="Employee", custom_courier_party="EMP-1"),
 				_inv("SI-2", 500, custom_is_pickup=1, custom_courier_party="EMP-1", woo_order_id=77),
 			]
 		patches = [
-			patch.object(shift, "_resolve_sheet_dispatches", return_value=dispatches or {}),
+			patch.object(shift, "_resolve_sheet_dispatches", return_value=dispatches),
+			patch.object(shift, "_resolve_sheet_drawer_payments", return_value=drawer_paid or {}),
+			patch.object(shift, "_resolve_sheet_overdue", return_value=overdue or []),
 			patch.object(shift, "_resolve_sheet_settlements", return_value=settlements or {}),
 			patch.object(shift, "_resolve_sheet_returns", return_value=returns or []),
 			patch.object(
@@ -217,13 +224,55 @@ class TestShiftSheet(unittest.TestCase):
 		self.assertEqual(per, {"SI-1": 3, "SI-2": 6})
 		self.assertEqual([m["flavour"] for m in matrix], ["Mango", "Oreo"])
 
-	def test_default_rows_are_created_only_and_returns_is_a_list(self):
+	def test_default_rows_and_returns_is_a_list(self):
 		sheet = self._run("opener@example.com")
-		self.assertEqual([o["reasons"] for o in sheet["orders"]], [["created"], ["created"]])
-		self.assertIsNone(sheet["orders"][0]["out_for_delivery_at"])
+		self.assertEqual(
+			[o["reasons"] for o in sheet["orders"]],
+			[["created", "out_for_delivery"], ["created", "out_for_delivery"]],
+		)
 		self.assertIsNone(sheet["orders"][0]["settled_at"])
 		self.assertEqual(sheet["orders"][0]["settled_amount"], 0.0)
+		self.assertIsNone(sheet["orders"][0]["paid_at"])
+		self.assertEqual(sheet["orders"][0]["paid_amount"], 0.0)
 		self.assertEqual(sheet["returns"], [])
+		self.assertEqual(sheet["overdue"], [])
+
+	def test_created_only_orders_are_not_listed_but_still_count_as_sales(self):
+		# Both orders were taken in this shift but go out tomorrow: nothing
+		# touched the drawer, so the list is empty, yet they are today's sales.
+		sheet = self._run("mgr@example.com", manager=True, profiles=["Branch A"], dispatches={})
+		self.assertEqual(sheet["orders"], [])
+		totals = sheet["totals"]
+		self.assertEqual(totals["orders"], 2)
+		self.assertEqual(totals["jars"], 9)
+		self.assertEqual(totals["grand_total"], 800.0)
+		self.assertEqual(totals["listed_orders"], 0)
+		self.assertEqual(len(sheet["jars_by_flavour"]), 2)
+
+	def test_cash_paid_into_drawer_lists_the_order(self):
+		sheet = self._run(
+			"mgr@example.com",
+			manager=True,
+			profiles=["Branch A"],
+			dispatches={},
+			drawer_paid={"SI-2": {"at": "2026-11-20 11:05:00", "amount": 500.0}},
+		)
+		self.assertEqual([o["name"] for o in sheet["orders"]], ["SI-2"])
+		row = sheet["orders"][0]
+		self.assertEqual(row["reasons"], ["created", "paid"])
+		self.assertTrue(row["paid_at"].startswith("2026-11-20T11:05"))
+		self.assertEqual(row["paid_amount"], 500.0)
+		self.assertEqual(sheet["totals"]["paid_orders"], 1)
+		self.assertEqual(sheet["totals"]["paid_amount"], 500.0)
+
+	def test_overdue_is_passed_through_and_counted(self):
+		item = {"name": "SI-LATE", "order_number": "123", "minutes_late": 90, "due_in_this_shift": True}
+		sheet = self._run("mgr@example.com", manager=True, profiles=["Branch A"], overdue=[item])
+		self.assertEqual(sheet["overdue"], [item])
+		self.assertEqual(sheet["totals"]["overdue_orders"], 1)
+		# Staff see the late list too (no totals).
+		staff = self._run("opener@example.com", overdue=[item])
+		self.assertEqual(staff["overdue"], [item])
 
 	def _multi_reason_sheet(self):
 		invoices = [
@@ -335,6 +384,8 @@ class TestShiftSheetDeliveryMoney(TestShiftSheet):
 			),
 			_inv("SI-4", 320, sales_partner="Talabat", custom_shipping_expense=25),
 			_inv("SI-5", 200, custom_shipping_expense=70, custom_sales_invoice_state="Received"),
+			# Taken and not sent out: never listed.
+			_inv("SI-6", 150, custom_shipping_expense=40, custom_sales_invoice_state="Received"),
 		]
 		dispatches = {
 			"SI-1": "2026-11-20 12:00:00",
@@ -352,8 +403,11 @@ class TestShiftSheetDeliveryMoney(TestShiftSheet):
 			invoices=invoices,
 			dispatches=dispatches,
 			settlements=settlements,
+			# SI-5 was paid in cash at the counter but has not gone out yet.
+			drawer_paid={"SI-5": {"at": "2026-11-20 11:10:00", "amount": 200.0}},
 		)
 		rows = {o["name"]: o for o in sheet["orders"]}
+		self.assertNotIn("SI-6", rows)
 		self.assertEqual(rows["SI-1"]["shipping_expense"], 65.0)
 		self.assertEqual(rows["SI-1"]["courier_cash_in"], 235.0)
 		self.assertEqual(rows["SI-1"]["courier_fee_paid"], 65.0)
