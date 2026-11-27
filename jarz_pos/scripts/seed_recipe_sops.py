@@ -1277,6 +1277,44 @@ def _apply(doc, recipe: dict[str, Any]) -> None:
 		)
 
 
+def _used_in_production(sop_name: str) -> bool:
+	"""True when a Work Order was stamped with this SOP (its steps are frozen)."""
+	from jarz_pos.doctype.jarz_sop.jarz_sop import WORK_ORDER_STAMP_FIELD
+	from jarz_pos.services.sop_rendering import VERSION_STAMP_SEPARATOR
+
+	return bool(
+		frappe.db.exists(
+			"Work Order",
+			{WORK_ORDER_STAMP_FIELD: ["like", f"{sop_name}{VERSION_STAMP_SEPARATOR}%"]},
+		)
+	)
+
+
+def _step_titles(sop_name: str) -> list[str]:
+	return frappe.get_all(
+		"Jarz SOP Step",
+		filters={"parent": sop_name, "parenttype": "Jarz SOP"},
+		order_by="idx asc",
+		pluck="title",
+	)
+
+
+def _refresh_labels(sop_name: str, recipe: dict[str, Any]) -> None:
+	"""Write the Recipe Book fields of a frozen SOP without touching its steps."""
+	values: dict[str, Any] = {
+		"stage": recipe.get("stage") or "Approved",
+		"track": recipe.get("track") or "Standard line",
+		"approved_on": recipe.get("approved_on") or None,
+		"change_summary": recipe.get("change_summary") or "",
+	}
+	title = recipe.get("recipe_title")
+	if not title and recipe.get("item_code"):
+		title = frappe.db.get_value("Item", recipe["item_code"], "item_name") or recipe["item_code"]
+	if title:
+		values["recipe_title"] = title
+	frappe.db.set_value("Jarz SOP", sop_name, values)
+
+
 def _parse_items(items: Any) -> list[str] | None:
 	"""``None``/blank -> no filter; else a de-duplicated list of item codes.
 
@@ -1347,6 +1385,19 @@ def run(dry_run: Any = False, items: Any = None) -> dict[str, Any]:
 
 		if dry_run:
 			(updated if existing else created).append(label)
+			continue
+
+		if existing and _used_in_production(existing):
+			# A version some batch was made to is frozen (the controller refuses a
+			# step edit, and rebuilding the rows counts as one).  Refresh only the
+			# Recipe Book labels; a changed method must arrive as a new version.
+			_refresh_labels(existing, recipe)
+			if _step_titles(existing) != [s["title"] for s in recipe["steps"]]:
+				skipped.append(
+					{"item_code": label, "reason": f"{existing} is in production use and its steps differ: bump the version"}
+				)
+			else:
+				updated.append(f"{label} ({existing}, labels only: in production use)")
 			continue
 
 		if existing:
