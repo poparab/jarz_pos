@@ -363,6 +363,139 @@ if __name__ == "__main__":
 	unittest.main()
 
 
+class TestShiftSheetDrawerRules(TestShiftSheet):
+	"""Blind count on the server, and sales stay with the order's own branch."""
+
+	def test_staff_response_carries_no_drawer_money(self):
+		sheet = self._run(
+			"opener@example.com",
+			settlements={"SI-1": {"at": "2026-11-20 15:00:00", "amount": 300.0, "fee": 65.0}},
+			drawer_paid={"SI-2": {"at": "2026-11-20 11:05:00", "amount": 500.0}},
+		)
+		for o in sheet["orders"]:
+			self.assertEqual(o["paid_amount"], 0.0)
+			self.assertEqual(o["courier_cash_in"], 0.0)
+			self.assertEqual(o["courier_fee_paid"], 0.0)
+			self.assertEqual(o["settled_amount"], 0.0)
+		# The times stay: staff can see that it was paid, not how much.
+		by_name = {o["name"]: o for o in sheet["orders"]}
+		self.assertIn("paid", by_name["SI-2"]["reasons"])
+		self.assertIsNotNone(by_name["SI-2"]["paid_at"])
+
+	def test_other_branch_order_is_listed_but_not_a_sale_here(self):
+		invoices = [
+			_inv("SI-1", 300),
+			# Taken at Branch A, moved to Branch B's board, paid into A's till.
+			_inv("SI-MOVED", 400, custom_kanban_profile="Branch B", pos_profile="Branch A"),
+		]
+		sheet = self._run(
+			"mgr@example.com",
+			manager=True,
+			profiles=["Branch A"],
+			invoices=invoices,
+			dispatches={"SI-1": "2026-11-20 11:30:00"},
+			drawer_paid={"SI-MOVED": {"at": "2026-11-20 11:05:00", "amount": 400.0}},
+		)
+		by_name = {o["name"]: o for o in sheet["orders"]}
+		self.assertEqual(by_name["SI-MOVED"]["reasons"], ["paid"])
+		self.assertEqual(sheet["totals"]["orders"], 1)
+		self.assertEqual(sheet["totals"]["grand_total"], 300.0)
+
+
+class TestShiftSheetOverdue(unittest.TestCase):
+	"""The real ``_resolve_sheet_overdue`` rules, with the DB reads faked."""
+
+	START = "2026-11-20 10:00:00"
+	END = "2026-11-20 22:00:00"
+
+	def _row(self, name, delivery_date, time_from, duration=5400, **extra):
+		row = {
+			"name": name,
+			"creation": "2026-11-19 12:00:00",
+			"customer": "C-1",
+			"customer_name": "Mona",
+			"territory": None,
+			"grand_total": 300,
+			"outstanding_amount": 0,
+			"woo_order_id": 0,
+			"woo_order_number": name.replace("SI-", ""),
+			"state": "Recieved",
+			"payment_method": "Cash",
+			"is_pickup": 0,
+			"sub_territory": None,
+			"delivery_date": delivery_date,
+			"time_from": time_from,
+			"duration": duration,
+			"slot_label": None,
+			"delivered_at": None,
+		}
+		row.update(extra)
+		return row
+
+	def _resolve(self, rows, logs=None, dns=None, is_open=False, end=None):
+		def fake_sql(query, params=None, as_dict=False):
+			if "FROM `tabSales Invoice` si" in query:
+				return rows
+			if "FROM `tabInvoice State Log`" in query:
+				return [{"name": k, "at": v} for k, v in (logs or {}).items() if k in params["names"]]
+			if "FROM `tabDelivery Note Item`" in query:
+				return [{"name": k, "at": v} for k, v in (dns or {}).items() if k in params["names"]]
+			raise AssertionError(query)
+
+		patches = [
+			patch.object(shift, "_sheet_has_column", return_value=True),
+			patch.object(shift, "_resolve_sheet_area_labels", return_value={}),
+			patch.object(frappe.db, "sql", side_effect=fake_sql),
+			patch.object(frappe.db, "table_exists", return_value=True),
+		]
+		for p in patches:
+			p.start()
+			self.addCleanup(p.stop)
+		return shift._resolve_sheet_overdue("Branch A", self.START, end or self.END, is_open=is_open)
+
+	def test_rules(self):
+		rows = [
+			# slot 14:00-15:30 today, never went out -> late, due this shift
+			self._row("SI-LATE", "2026-11-20", "14:00:00"),
+			# slot passed, but went out at 15:00 (in time for the shift) -> not listed
+			self._row("SI-OUT", "2026-11-20", "14:00:00"),
+			# slot yesterday, went out only after this shift ended -> listed, earlier shift
+			self._row("SI-CARRIED", "2026-11-19", "16:00:00"),
+			# rescheduled to 23:00 tonight: slot not passed yet -> not listed
+			self._row("SI-RESCHED", "2026-11-20", "23:00:00"),
+			# slot with no duration ends at its start
+			self._row("SI-NODUR", "2026-11-20", "20:00:00", duration=0),
+			# older than the 14-day lookback -> not listed
+			self._row("SI-ANCIENT", "2026-11-01", "14:00:00"),
+			# only a Delivery Note, before the end -> went out
+			self._row("SI-DN", "2026-11-20", "12:00:00"),
+		]
+		late = self._resolve(
+			rows,
+			logs={"SI-OUT": "2026-11-20 15:00:00", "SI-CARRIED": "2026-11-21 13:00:00"},
+			dns={"SI-DN": "2026-11-20 12:30:00"},
+		)
+		by_name = {o["name"]: o for o in late}
+		self.assertEqual(set(by_name), {"SI-CARRIED", "SI-LATE", "SI-NODUR"})
+		self.assertEqual([o["name"] for o in late], ["SI-CARRIED", "SI-LATE", "SI-NODUR"])
+		self.assertTrue(by_name["SI-LATE"]["due_in_this_shift"])
+		self.assertEqual(by_name["SI-LATE"]["minutes_late"], 390)  # 15:30 -> 22:00
+		self.assertFalse(by_name["SI-CARRIED"]["due_in_this_shift"])
+		self.assertTrue(by_name["SI-CARRIED"]["went_out_at"].startswith("2026-11-21T13:00"))
+		self.assertTrue(by_name["SI-NODUR"]["deadline"].startswith("2026-11-20T20:00"))
+		self.assertEqual(by_name["SI-LATE"]["order_number"], "LATE")
+		self.assertEqual(by_name["SI-LATE"]["customer_name"], "Mona")
+
+	def test_open_shift_trusts_current_out_state_and_hides_went_out(self):
+		rows = [
+			self._row("SI-NOLOG", "2026-11-20", "14:00:00", state="Out for Delivery"),
+			self._row("SI-WAIT", "2026-11-20", "14:00:00"),
+		]
+		late = self._resolve(rows, is_open=True)
+		self.assertEqual([o["name"] for o in late], ["SI-WAIT"])
+		self.assertIsNone(late[0]["went_out_at"])
+
+
 class TestShiftSheetDeliveryMoney(TestShiftSheet):
 	"""Courier cost, courier cash and the delivery totals per order."""
 

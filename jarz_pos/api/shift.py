@@ -1992,13 +1992,20 @@ def _resolve_sheet_drawer_payments(
 		for r in (
 			frappe.db.sql(
 				"""
-				SELECT per.reference_name AS name, SUM(per.allocated_amount) AS amount, MIN(pe.creation) AS at
-				FROM `tabPayment Entry` pe
+				SELECT per.reference_name AS name, SUM(per.allocated_amount) AS amount, MIN(g.at) AS at
+				FROM (
+				  -- When the money hit the till (submit), as the cash-flow card dates it.
+				  SELECT voucher_no, MIN(creation) AS at
+				  FROM `tabGL Entry`
+				  WHERE account = %(till)s AND is_cancelled = 0 AND voucher_type = 'Payment Entry'
+				    AND creation BETWEEN %(start)s AND %(end)s
+				  GROUP BY voucher_no
+				) g
+				JOIN `tabPayment Entry` pe ON pe.name = g.voucher_no
 				JOIN `tabPayment Entry Reference` per
 				  ON per.parent = pe.name AND per.parenttype = 'Payment Entry'
 				WHERE pe.docstatus = 1 AND pe.payment_type = 'Receive' AND pe.paid_to = %(till)s
 				  AND per.reference_doctype = 'Sales Invoice'
-				  AND pe.creation BETWEEN %(start)s AND %(end)s
 				GROUP BY per.reference_name
 				""",
 				params,
@@ -2130,6 +2137,9 @@ def _resolve_sheet_overdue(branch: str, start: Any, ref_end: Any, is_open: bool)
 		for r, slot_start, slot_end, deadline in due:
 			left = went_out.get(r["name"]) or r.get("delivered_at")
 			if left and get_datetime(left) <= ref:
+				continue
+			if is_open and r.get("state") in ("Out for Delivery", "Delivered", "Returned"):
+				# Moved by a writer that left no log row: it is out, just undated.
 				continue
 			area = areas.get(r.get("territory")) if r.get("territory") else None
 			if area and r.get("sub_territory"):
@@ -2856,6 +2866,11 @@ def get_shift_sheet(opening_entry: str) -> dict[str, Any]:
 	start_dt, end_dt = get_datetime(start), get_datetime(end)
 
 	def _created_in_window(inv: dict[str, Any]) -> bool:
+		# Only this branch's orders are its sales: an order of another branch
+		# can be on the list (settled or paid here) without being a sale here.
+		owner = inv.get("custom_kanban_profile") or inv.get("pos_profile")
+		if owner and owner != branch:
+			return False
 		try:
 			return bool(inv.get("creation")) and start_dt <= get_datetime(inv["creation"]) <= end_dt
 		except Exception:
@@ -2944,6 +2959,11 @@ def get_shift_sheet(opening_entry: str) -> dict[str, Any]:
 			}
 		)
 	orders.sort(key=lambda o: sort_keys[o["name"]])
+	if not is_manager_view:
+		# Blind count: the staff view never carries the money that reached the
+		# drawer, even per order (the app hides it too).
+		for o in orders:
+			o.update(paid_amount=0.0, courier_cash_in=0.0, courier_fee_paid=0.0, settled_amount=0.0)
 
 	returns = _resolve_sheet_returns(branch, opening.get("company"), start, end)
 	overdue = _resolve_sheet_overdue(branch, start, end, is_open=not closing)
