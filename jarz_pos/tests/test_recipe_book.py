@@ -502,3 +502,281 @@ class TestSeederNoItem(unittest.TestCase):
 			self.assertIn(rec.get("stage") or "Approved", ("Approved", "Trial", "Retired"))
 			for ing in rec.get("ingredients") or []:
 				self.assertTrue(ing["ingredient"] and ing["uom"])
+
+
+# ── v2: catalog, classification, jar families ──────────────────────────
+
+
+class TestClassifyRecipe(unittest.TestCase):
+	def setUp(self):
+		from jarz_pos.api import recipe_book
+
+		self.rb = recipe_book
+
+	def test_jars_with_a_size(self):
+		cases = [
+			(("Tiramisu Large", "Large"), ("jars", "Tiramisu", "Large")),
+			(("Chocolate Hazelnut Small", "Small"), ("jars", "Chocolate Hazelnut", "Small")),
+			(("Carrot cake jar (Medium)", None), ("jars", "Carrot cake", "Medium")),
+			(("Apple pie jar (Medium)", None), ("jars", "Apple pie", "Medium")),
+			(("Tiramisu", "Medium"), ("jars", "Tiramisu", "Medium")),
+			(("tiramisu large", None), ("jars", "Tiramisu", "Large")),
+		]
+		for args, expected in cases:
+			with self.subTest(args=args):
+				self.assertEqual(expected, self.rb.classify_recipe(*args))
+
+	def test_a_jar_without_a_size_has_no_family(self):
+		self.assertEqual(("jars", None, None), self.rb.classify_recipe("Cookie jar second bake", None))
+
+	def test_fillings(self):
+		for title, group in [
+			("Cheesecake Mix", "Sub Assemblies"),
+			("Chocolate ganache", None),
+			("Cocoa soak syrup", None),
+			("Soak at 15%", None),
+			("London caramel", None),
+			("Apple pie filling", None),
+			("S1-L cocoa syrup", None),
+			("Mango mix", None),
+			("raspberry mix", None),
+			("Something unclassifiable", None),
+		]:
+			with self.subTest(title=title):
+				self.assertEqual(("fillings", None, None), self.rb.classify_recipe(title, group))
+
+	def test_bases(self):
+		for title in [
+			"Fudge Cake",
+			"Red Velvet Cake",
+			"Sponge Cake",
+			"Savoiardi",
+			"Butter Biscuit",
+			"Carrot Cake",
+			"Apple pie crumbs",
+		]:
+			with self.subTest(title=title):
+				self.assertEqual(("bases", None, None), self.rb.classify_recipe(title, "Sub Assemblies"))
+
+	def test_override_wins_over_the_heuristic(self):
+		with patch.dict(self.rb.CATEGORY_OVERRIDES, {"fudge cake": "fillings"}):
+			self.assertEqual(("fillings", None, None), self.rb.classify_recipe("Fudge Cake", None))
+		self.assertEqual("bases", self.rb.classify_recipe("Fudge Cake", None)[0])
+
+
+def _row(name, item_code, title=None, stage="Approved", version=1, is_active=1, modified="2026-11-01 10:00:00", track=None):
+	return {
+		"name": name,
+		"item_code": item_code,
+		"item_name": item_code,
+		"recipe_title": title,
+		"track": track,
+		"stage": stage,
+		"version": version,
+		"is_active": is_active,
+		"approved_on": None,
+		"change_summary": None,
+		"modified": modified,
+	}
+
+
+class TestBuildCatalog(unittest.TestCase):
+	def setUp(self):
+		from jarz_pos.api import recipe_book
+
+		self.rb = recipe_book
+		self.rows = [
+			_row("SOP-1", "Tiramisu Small", track="Standard line"),
+			_row("SOP-2", "Tiramisu Large", stage="Approved", is_active=1, track="Standard line"),
+			_row("SOP-3", "Tiramisu Large", stage="Trial", version=2, is_active=0),
+		]
+		self.boms = [
+			{"item": "Tiramisu Small", "modified": "2026-10-01 00:00:00"},
+			{"item": "Tiramisu Medium", "modified": "2026-10-02 00:00:00"},
+			{"item": "Fudge Cake", "modified": "2026-10-03 00:00:00"},
+			{"item": "Old Thing", "modified": "2026-10-04 00:00:00"},
+			{"item": "Cheesecake Mix", "modified": "2026-10-05 00:00:00"},
+		]
+		self.info = {
+			"Tiramisu Small": {"item_name": "Tiramisu Small", "item_group": "Small", "disabled": 0},
+			"Tiramisu Medium": {"item_name": "Tiramisu Medium", "item_group": "Medium", "disabled": 0},
+			"Tiramisu Large": {"item_name": "Tiramisu Large", "item_group": "Large", "disabled": 0},
+			"Fudge Cake": {"item_name": "Fudge Cake", "item_group": "Sub Assemblies", "disabled": 0},
+			"Old Thing": {"item_name": "Old Thing", "item_group": "Sub Assemblies", "disabled": 1},
+			"Cheesecake Mix": {"item_name": "Cheesecake Mix", "item_group": "Sub Assemblies", "disabled": 0},
+		}
+		self.out = self.rb.build_catalog(self.rows, self.boms, self.info)
+		self.by_key = {r["key"]: r for r in self.out["recipes"]}
+
+	def test_bom_only_recipes_are_added_but_not_for_sop_items_or_disabled_items(self):
+		self.assertEqual(
+			{"Tiramisu Small", "Tiramisu Large", "Tiramisu Medium", "Fudge Cake", "Cheesecake Mix"}, set(self.by_key)
+		)
+
+	def test_bom_only_entry_shape(self):
+		self.assertEqual(
+			{
+				"key": "Fudge Cake",
+				"title": "Fudge Cake",
+				"item_code": "Fudge Cake",
+				"track": None,
+				"status": "approved",
+				"headline": None,
+				"has_trial": False,
+				"updated": "2026-10-03 00:00:00",
+				"versions": [],
+				"category": "bases",
+				"family": None,
+				"size": None,
+				"has_method": False,
+				"source": "bom",
+			},
+			self.by_key["Fudge Cake"],
+		)
+
+	def test_sop_recipe_keeps_its_v1_keys_and_gains_the_new_ones(self):
+		rec = self.by_key["Tiramisu Large"]
+		self.assertEqual(
+			("jars", "Tiramisu", "Large", True, "sop"),
+			(rec["category"], rec["family"], rec["size"], rec["has_method"], rec["source"]),
+		)
+		self.assertTrue(rec["has_trial"])
+		self.assertEqual("SOP-2", rec["headline"])
+
+	def test_categories_and_families(self):
+		self.assertEqual(["bases", "fillings", "jars"], [c["key"] for c in self.out["categories"]])
+		self.assertEqual("Cakes & biscuits", self.out["categories"][0]["label"])
+		(fam,) = self.out["families"]
+		self.assertEqual("Tiramisu", fam["family"])
+		self.assertEqual("Standard line", fam["track"])
+		self.assertEqual(["Small", "Medium", "Large"], fam["sizes"])
+		self.assertTrue(fam["has_trial"])
+		self.assertEqual("approved", fam["status"])
+		self.assertEqual("2026-11-01 10:00:00", fam["updated"])
+
+	def test_a_trial_only_family_is_trial(self):
+		rows = [_row("SOP-9", "Mango Small", stage="Trial", is_active=0)]
+		info = {"Mango Small": {"item_name": "Mango Small", "item_group": "Small", "disabled": 0}}
+		(fam,) = self.rb.build_catalog(rows, [], info)["families"]
+		self.assertEqual(("Mango", "trial", True), (fam["family"], fam["status"], fam["has_trial"]))
+
+	def test_catalog_off_is_the_v1_payload(self):
+		rb = self.rb
+		v1 = rb.build_recipe_list(self.rows)
+		with patch.object(rb, "_ensure_production_view_access"), patch.object(
+			rb, "_fetch_rows", return_value=self.rows
+		), patch.object(rb, "_fetch_catalog_inputs") as inputs:
+			for off in (0, None, "0", "", "false"):
+				self.assertEqual(v1, rb.list_recipes(off))
+			self.assertEqual(v1, rb.list_recipes())
+			inputs.assert_not_called()
+			inputs.return_value = (self.boms, self.info)
+			on = rb.list_recipes("1")
+		self.assertIn("families", on)
+		self.assertNotIn("families", v1)
+		self.assertNotIn("category", v1["recipes"][0])
+
+
+class TestJarFamily(unittest.TestCase):
+	def setUp(self):
+		from jarz_pos.api import recipe_book
+
+		self.rb = recipe_book
+		self.members = [
+			{"size": "Large", "item_code": "Tiramisu Large", "title": "Tiramisu Large", "track": None,
+			 "status": "approved", "sop": None, "sop_version": None, "bom": "BOM-L"},
+			{"size": "Small", "item_code": "Tiramisu Small", "title": "Tiramisu Small", "track": "Standard line",
+			 "status": "approved", "sop": "SOP-1", "sop_version": 2, "bom": "BOM-S"},
+			{"size": "Medium", "item_code": None, "title": "Tiramisu Medium", "track": None,
+			 "status": "trial", "sop": "SOP-M", "sop_version": 1, "bom": None},
+		]
+		self.boms = {
+			"BOM-S": {
+				"quantity": 1,
+				"lines": [
+					{"item_code": "Jar 147", "item_name": "Glass Jar 147", "stock_qty": 1, "stock_uom": "Nos"},
+					{"item_code": "Cheesecake Mix", "item_name": "Cheesecake Mix", "stock_qty": 0.0431, "stock_uom": "Kg"},
+					{"item_code": "Savoiardi", "item_name": "Savoiardi", "stock_qty": 20, "stock_uom": "g"},
+				],
+			},
+			"BOM-L": {
+				"quantity": 2,
+				"lines": [
+					{"item_code": "Cheesecake Mix", "item_name": "Cheesecake Mix", "stock_qty": 0.28, "stock_uom": "Kg"},
+					{"item_code": "Jar 400", "item_name": "Glass Jar 400", "stock_qty": 2, "stock_uom": "Nos"},
+					{"item_code": "Cocoa", "item_name": "Cocoa", "stock_qty": 10, "stock_uom": "g"},
+					{"item_code": "Cocoa", "item_name": "Cocoa", "stock_qty": 4, "stock_uom": "g"},
+				],
+			},
+		}
+		self.sops = {
+			"SOP-M": {
+				"yield_qty": 4,
+				"yield_uom": "jars",
+				"ingredients": [
+					{"ingredient": "Cheesecake Mix", "item_code": "Cheesecake Mix", "qty": 0.344, "uom": "Kg"},
+					{"ingredient": "Glass Jar 250", "item_code": "Jar 250", "qty": 4, "uom": "Nos"},
+				],
+			}
+		}
+		self.groups = {"jar 147": "Packaging", "jar 400": "Glass", "jar 250": "Glass"}
+		self.parents = {"Glass": "Packaging", "Packaging": "Materials"}
+		self.out = self.rb.build_jar_family("Tiramisu", self.members, self.boms, self.sops, self.groups, self.parents)
+
+	def test_sizes_ordered_small_medium_large(self):
+		self.assertEqual(["Small", "Medium", "Large"], [s["size"] for s in self.out["sizes"]])
+		self.assertEqual("Standard line", self.out["track"])
+		small = self.out["sizes"][0]
+		self.assertEqual(("SOP-1", 2, "approved"), (small["sop"], small["sop_version"], small["status"]))
+
+	def test_layer_order_is_first_appearance_small_to_large(self):
+		self.assertEqual(["cheesecake mix", "savoiardi", "cocoa"], [x["key"] for x in self.out["layers"]])
+
+	def test_kg_become_grams_and_bom_quantity_divides(self):
+		by = {x["key"]: x for x in self.out["layers"]}
+		self.assertEqual({"Small": 43.1, "Medium": 86.0, "Large": 140.0}, by["cheesecake mix"]["per_jar"])
+		self.assertEqual("g", by["cheesecake mix"]["unit"])
+		# duplicate BOM lines add up, then divide by the BOM quantity of 2
+		self.assertEqual({"Large": 7.0}, by["cocoa"]["per_jar"])
+
+	def test_packaging_split_by_group_and_ancestor(self):
+		by = {p["key"]: p for p in self.out["packaging"]}
+		# "jar 147" / "jar 250" / "jar 400" are one part in three sizes: one row
+		self.assertEqual({"glass jar"}, set(by))
+		self.assertEqual({"Small": 1, "Medium": 1, "Large": 1}, by["glass jar"]["per_jar"])
+		self.assertEqual("Nos", by["glass jar"]["unit"])
+		self.assertEqual("Glass jar", by["glass jar"]["name"])
+		self.assertEqual({"Small": "Glass Jar 147", "Medium": "Glass Jar 250", "Large": "Glass Jar 400"}, by["glass jar"]["items"])
+		self.assertNotIn("jar 147", [x["key"] for x in self.out["layers"]])
+
+	def test_packaging_role(self):
+		self.assertEqual("tiramisu jar label", self.rb.packaging_role("Tiramisu  Jar Label 147"))
+		self.assertEqual("glass jar", self.rb.packaging_role("glass jar"))
+		self.assertEqual("jar lid", self.rb.packaging_role("Jar Lid 330"))
+		self.assertEqual("147", self.rb.packaging_role("147"))
+
+	def test_sop_yield_in_jars_fallback(self):
+		by = {x["key"]: x for x in self.out["layers"]}
+		self.assertEqual(86.0, by["cheesecake mix"]["per_jar"]["Medium"])
+		self.assertEqual({"Medium": 1}, {p["key"]: p["per_jar"] for p in self.out["packaging"]}["glass jar"]["Medium"] and {"Medium": 1})
+		self.assertEqual(86.0, self.out["sizes"][1]["jar_grams"])
+
+	def test_jar_grams_sums_gram_layers_only(self):
+		self.assertEqual(63.1, self.out["sizes"][0]["jar_grams"])
+		self.assertEqual(147.0, self.out["sizes"][2]["jar_grams"])
+
+	def test_no_bom_and_no_jar_yield_contributes_nothing(self):
+		sops = {"SOP-M": dict(self.sops["SOP-M"], yield_uom="g")}
+		out = self.rb.build_jar_family("Tiramisu", self.members, self.boms, sops, self.groups, self.parents)
+		medium = out["sizes"][1]
+		self.assertIsNone(medium["jar_grams"])
+		self.assertTrue(all("Medium" not in x["per_jar"] for x in out["layers"] + out["packaging"]))
+
+	def test_is_packaging_group(self):
+		rb = self.rb
+		self.assertTrue(rb.is_packaging_group("Labels", {}))
+		self.assertTrue(rb.is_packaging_group("Consumable", {}))
+		self.assertTrue(rb.is_packaging_group("Glass", self.parents))
+		self.assertFalse(rb.is_packaging_group("Raw Material", {"Raw Material": "Materials"}))
+		self.assertFalse(rb.is_packaging_group(None, {}))
+		self.assertFalse(rb.is_packaging_group("A", {"A": "B", "B": "A"}))
