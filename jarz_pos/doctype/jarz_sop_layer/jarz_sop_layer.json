@@ -1,0 +1,46 @@
+{
+ "actions": [],
+ "creation": "2026-11-28 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "layer",
+  "grams",
+  "note"
+ ],
+ "fields": [
+  {
+   "description": "For example \"Savoiardi\", \"Coffee soak\", \"Cream\", \"Cocoa\".",
+   "fieldname": "layer",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Layer",
+   "reqd": 1
+  },
+  {
+   "description": "Weight of this layer in ONE jar, in grams. Row order is the fill order, first row at the bottom.",
+   "fieldname": "grams",
+   "fieldtype": "Float",
+   "in_list_view": 1,
+   "label": "Grams per Jar",
+   "reqd": 1
+  },
+  {
+   "fieldname": "note",
+   "fieldtype": "Data",
+   "label": "Note"
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "istable": 1,
+ "links": [],
+ "modified": "2026-11-28 12:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "jarz pos",
+ "name": "Jarz SOP Layer",
+ "owner": "Administrator",
+ "permissions": [],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}

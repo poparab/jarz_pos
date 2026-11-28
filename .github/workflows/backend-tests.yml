@@ -414,6 +414,8 @@ jobs:
             test_seed_recipe_sops
             # Recipe Book: token segments, version status, controller rules, no-item seeding.
             test_recipe_book
+            # Recipe Book v3: placeholder codec, edit / new version / approve, jar layers, layer seed.
+            test_recipe_book_edit
             test_purchase_warehouse_utils
             test_purchase_setup
             test_purchase_request_links

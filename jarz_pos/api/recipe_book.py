@@ -9,7 +9,11 @@ Read-only endpoints (contract: ``.scratch/recipe-book/CONTRACT.md``):
   by item code, its current SOP, else its default BOM.  The app scales
   client-side, so quantities inside the steps come back as segments carrying
   the figure and how it scales, not as finished text.
-* ``get_jar_family(family)`` - one jar flavour, every size's layers side by side.
+* ``get_jar_family(family)`` - one jar flavour, every size's layers side by side,
+  and the per-layer weights of one jar (``assembly``) when the sizes have them.
+
+The write side (edit, new version, approve, jar layers) lives in
+``jarz_pos.api.recipe_book_edit``; it reuses the helpers below.
 
 Same gate as the Production Board (``_ensure_production_view_access``).  The
 grouping, status and ingredient logic is pure (no frappe) so it is unit-tested
@@ -17,8 +21,10 @@ directly; the only database reads are ``_fetch_rows`` (one ``get_all``) and the
 reads ``get_recipe`` needs for the one version it opens.
 
 Version ``status``: ``trial``/``retired`` follow the stage; an Approved version
-is ``current`` when ``is_active`` is set (for a recipe with no Item, the highest
-Approved version), else ``previous``.  Recipe ``status`` is ``approved`` when it
+is ``current`` when ``is_active`` is set; when NO version of the recipe is
+active (a recipe with no Item, or a layers-only version that has no steps and
+so is never active) the highest Approved version is ``current``; any other
+Approved version is ``previous``.  Recipe ``status`` is ``approved`` when it
 has a current version, else ``trial`` when it has a trial, else ``retired``.
 """
 
@@ -29,9 +35,11 @@ import re
 from typing import Any
 
 import frappe
+from frappe import _
 
 from jarz_pos.api.sop import (
 	SOP_DOCTYPE,
+	WORK_ORDER_STAMP_FIELD,
 	_build_component_maps_with_direct,
 	_coerce_int,
 	_ensure_production_view_access,
@@ -40,6 +48,7 @@ from jarz_pos.api.sop import (
 	_resolve_sop_doc,
 	_step_rows,
 )
+from jarz_pos.constants import ROLES
 from jarz_pos.services import sop_rendering as rendering
 
 STAGE_APPROVED = "Approved"
@@ -54,6 +63,7 @@ _LIST_FIELDS = [
 	"item_name",
 	"recipe_title",
 	"track",
+	"category",
 	"stage",
 	"version",
 	"is_active",
@@ -63,7 +73,9 @@ _LIST_FIELDS = [
 ]
 
 _BLOCK_END_RE = re.compile(r"</\s*(?:p|div|li|h[1-6]|tr|ul|ol)\s*>", re.IGNORECASE)
-_BREAK_RE = re.compile(r"<\s*br\s*/?\s*>", re.IGNORECASE)
+# A ``<br>`` followed by one newline is ONE line break: the editor stores ``<br>`` + newline
+# so the Production Board (which just strips tags) still shows the line break.
+_BREAK_RE = re.compile(r"<\s*br\s*/?\s*>\n?", re.IGNORECASE)
 _TAG_RE = re.compile(r"<[^>]+>")
 _BLANK_LINES_RE = re.compile(r"\n{3,}")
 
@@ -111,9 +123,10 @@ def _sort_key(row: Any) -> tuple[int, str]:
 
 def version_statuses(rows: list[Any]) -> dict[str, str]:
 	"""``{sop name: current|previous|trial|retired}`` for the versions of ONE recipe."""
-	has_item = any(_clean(_field(r, "item_code")) for r in rows)
 	approved = [r for r in rows if _stage(r) == STAGE_APPROVED]
 	top_approved = max(approved, key=_sort_key) if approved else None
+	# "current" is the active version; with none active, the highest Approved one.
+	any_active = any(_coerce_int(_field(r, "is_active"), 0) for r in approved)
 
 	statuses: dict[str, str] = {}
 	for row in rows:
@@ -123,7 +136,7 @@ def version_statuses(rows: list[Any]) -> dict[str, str]:
 			statuses[name] = "trial"
 		elif stage == STAGE_RETIRED:
 			statuses[name] = "retired"
-		elif has_item:
+		elif any_active:
 			statuses[name] = "current" if _coerce_int(_field(row, "is_active"), 0) else "previous"
 		else:
 			statuses[name] = "current" if row is top_approved else "previous"
@@ -221,6 +234,11 @@ PACKAGING_GROUPS = ("packaging", "labels", "consumable")
 # heuristic below; empty until the heuristic gets one wrong.
 CATEGORY_OVERRIDES: dict[str, str] = {}
 
+# Jarz SOP.category (Select label) -> category key.
+CATEGORY_BY_LABEL = {c["label"]: c["key"] for c in CATEGORIES}
+CATEGORY_LABELS = {c["key"]: c["label"] for c in CATEGORIES}
+CATEGORY_KEYS = tuple(c["key"] for c in CATEGORIES)
+
 _SIZE_WORDS = {s.lower(): s for s in SIZES}
 _TRAILING_SIZE_RE = re.compile(r"[\s(]*\b(small|medium|large)\b[\s)]*$", re.IGNORECASE)
 _TRAILING_JAR_RE = re.compile(r"[\s(]*\bjar\b[\s)]*$", re.IGNORECASE)
@@ -270,6 +288,29 @@ def classify_recipe(title: Any, item_group: Any = None) -> tuple[str, str | None
 	if _BASE_RE.search(text):
 		return "bases", None, None
 	return "fillings", None, None
+
+
+def classify_with_stored(
+	title: Any, item_group: Any = None, stored: Any = None
+) -> tuple[str, str | None, str | None]:
+	"""``classify_recipe`` unless the SOP carries its own category (label or key)."""
+	category, family, size = classify_recipe(title, item_group)
+	key = CATEGORY_BY_LABEL.get(_clean(stored), _clean(stored).lower())
+	if key in CATEGORY_KEYS and key != category:
+		# Family and size only mean something for a jar the name says is sized.
+		return key, (family if key == "jars" else None), (size if key == "jars" else None)
+	return category, family, size
+
+
+def stored_categories(rows: list[Any]) -> dict[str, str]:
+	"""``{recipe key: category key}`` from the newest version that sets one."""
+	out: dict[str, str] = {}
+	for row in sorted(rows, key=_sort_key, reverse=True):
+		key = recipe_key(row)
+		value = CATEGORY_BY_LABEL.get(_clean(_field(row, "category")))
+		if key and value and key not in out:
+			out[key] = value
+	return out
 
 
 def _bom_only_recipe(item_code: str, item: Any, modified: Any) -> dict[str, Any]:
@@ -327,6 +368,7 @@ def build_catalog(
 	recipes: list[dict[str, Any]] = payload["recipes"]
 	sop_items = {r["item_code"] for r in recipes if r["item_code"]}
 
+	stored = stored_categories(rows)
 	seen: set[str] = set()
 	for bom in bom_rows:
 		code = _clean(_field(bom, "item"))
@@ -338,7 +380,7 @@ def build_catalog(
 
 	for rec in recipes:
 		group = _field(item_info.get(rec["item_code"]) or {}, "item_group") if rec["item_code"] else None
-		category, family, size = classify_recipe(rec["title"], group)
+		category, family, size = classify_with_stored(rec["title"], group, stored.get(rec["key"]))
 		rec.update(
 			category=category,
 			family=family,
@@ -642,6 +684,89 @@ def build_steps(
 	return steps, unresolved
 
 
+# ── Jar layers (v3): pure ───────────────────────────────────────────────
+
+
+def layer_entry(layer: Any, grams: Any, note: Any = None) -> dict[str, Any]:
+	return {
+		"layer": _clean(layer),
+		"grams": round(rendering.to_float(grams, 0.0), 3),
+		"note": _clean(note) or None,
+	}
+
+
+def build_assembly(by_size: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
+	"""One jar's layers per size, side by side when every size has the same layers.
+
+	``by_size``: ``{size: [{"layer", "grams", "note"}]}`` in fill order; a size with
+	no layers is left out.  ``aligned``: every size that has layers lists the
+	same layer names in the same order, and then ``rows`` is filled by position.
+	"""
+	ordered = {size: list(by_size[size]) for size in SIZES if by_size.get(size)}
+	names = [[_clean(row["layer"]).lower() for row in rows] for rows in ordered.values()]
+	aligned = all(n == names[0] for n in names) if names else True
+	rows: list[dict[str, Any]] = []
+	if aligned and ordered:
+		first = next(iter(ordered.values()))
+		for position, layer in enumerate(first):
+			rows.append(
+				{
+					"layer": layer["layer"],
+					"grams": {size: items[position]["grams"] for size, items in ordered.items()},
+				}
+			)
+	return {
+		"aligned": aligned,
+		"rows": rows,
+		"by_size": ordered,
+		"totals": {size: round(sum(row["grams"] for row in items), 1) for size, items in ordered.items()},
+	}
+
+
+# ── Access and usage (v3) ───────────────────────────────────────────────
+
+
+def can_edit() -> bool:
+	"""May the session user edit recipes (``ROLES.MANUFACTURING``)?"""
+	return bool(set(frappe.get_roles()).intersection(ROLES.MANUFACTURING))
+
+
+def _ensure_recipe_edit_access() -> None:
+	if not can_edit():
+		frappe.throw(_("Not permitted: recipe editing needs a manufacturing role"), frappe.PermissionError)
+
+
+def is_used_in_production(sop_name: Any) -> bool:
+	"""True when a Work Order was stamped with this SOP: its method is frozen."""
+	name = _clean(sop_name)
+	if not name:
+		return False
+	return bool(
+		frappe.db.exists(
+			"Work Order",
+			{WORK_ORDER_STAMP_FIELD: ["like", f"{name}{rendering.VERSION_STAMP_SEPARATOR}%"]},
+		)
+	)
+
+
+def fetch_layers(parents: list[str]) -> dict[str, list[dict[str, Any]]]:
+	"""``{SOP name: [layer entries in fill order]}`` in one read."""
+	names = sorted({_clean(p) for p in parents if _clean(p)})
+	out: dict[str, list[dict[str, Any]]] = {name: [] for name in names}
+	if not names:
+		return out
+	for row in frappe.get_all(
+		"Jarz SOP Layer",
+		filters={"parent": ["in", names], "parenttype": SOP_DOCTYPE, "parentfield": "layers"},
+		fields=["parent", "layer", "grams", "note"],
+		order_by="parent asc, idx asc",
+		limit_page_length=0,
+	):
+		if row["parent"] in out:
+			out[row["parent"]].append(layer_entry(row["layer"], row["grams"], row["note"]))
+	return out
+
+
 # ── frappe reads ────────────────────────────────────────────────────────
 
 
@@ -713,7 +838,7 @@ def list_recipes(catalog: Any = 0) -> dict[str, Any]:
 	"""Every recipe with its versions.  ``catalog=1`` adds BOM-only recipes, categories, families."""
 	_ensure_production_view_access()
 	if _truthy(catalog):
-		return _catalog()
+		return {**_catalog(), "can_edit": can_edit()}
 	return build_recipe_list(_fetch_rows())
 
 
@@ -726,8 +851,8 @@ def _item_group(item_code: str) -> str | None:
 		return None
 
 
-def _classification(title: str, item_code: str) -> dict[str, Any]:
-	category, family, size = classify_recipe(title, _item_group(item_code))
+def _classification(title: str, item_code: str, stored: Any = None) -> dict[str, Any]:
+	category, family, size = classify_with_stored(title, _item_group(item_code), stored)
 	return {"category": category, "family": family, "size": size}
 
 
@@ -758,6 +883,10 @@ def _bom_recipe_payload(item_code: str) -> dict[str, Any]:
 		"steps": [],
 		"versions": [],
 		"unresolved_tokens": [],
+		"layers": [],
+		"editable_in_place": False,
+		"used_in_production": False,
+		"can_edit": can_edit(),
 		**_classification(title, item_code),
 	}
 
@@ -783,30 +912,21 @@ def get_recipe(sop: str | None = None, item_code: str | None = None) -> dict[str
 	return _bom_recipe_payload(code)
 
 
-def _sop_payload(sop: Any) -> dict[str, Any]:
-	doc = _resolve_sop_doc(_clean(sop))
+def recipe_data(doc: Any) -> dict[str, Any]:
+	"""What a version's figures resolve against: BOM or its own ingredient table.
 
+	An approved recipe with a BOM is that BOM (the kitchen's truth); a trial or a
+	recipe with no BOM reads its own ingredient table.  Shared by the read
+	payload and the editor so both agree on the ingredients and the token maps.
+	"""
 	item_code = _clean(_field(doc, "item_code"))
-	title = _clean(_field(doc, "recipe_title")) or _clean(_field(doc, "item_name")) or item_code
-	if item_code:
-		sibling_filters: dict[str, Any] = {"item_code": item_code}
-	else:
-		sibling_filters = {"recipe_title": title, "item_code": ["is", "not set"]}
-	siblings = _fetch_rows(sibling_filters)
-	card = build_recipe(siblings) if siblings else None
-	versions = card["versions"] if card else []
-	this = next((v for v in versions if v["name"] == doc.name), None) or _version_dict(
-		doc, "current" if _coerce_int(_field(doc, "is_active"), 0) else "previous"
-	)
-
 	table_rows = list(_field(doc, "ingredients") or [])
 	stage = _stage(doc)
 	bom = _resolve_bom(item_code, _field(doc, "bom"))
-	# An approved recipe with a BOM is that BOM (the kitchen's truth); a trial
-	# or a recipe with no BOM reads its own ingredient table.
 	use_bom = bom is not None and (stage == STAGE_APPROVED or not table_rows)
 
 	alias_to_key: dict[str, str] = {}
+	order: list[str] = []
 	if use_bom:
 		bom_qty = rendering.to_float(bom.get("quantity"), 1.0) or 1.0
 		qty_map, uom_map, name_map, order = _build_component_maps_with_direct(
@@ -828,16 +948,59 @@ def _sop_payload(sop: Any) -> dict[str, Any]:
 			"amount": round(yield_qty, 6) if yield_qty > 0 else None,
 			"unit": _clean(_field(doc, "yield_uom")) or None,
 		}
+	return {
+		"use_bom": use_bom,
+		"bom": bom,
+		"table_rows": table_rows,
+		"ingredients": ingredients,
+		"qty_map": qty_map,
+		"uom_map": uom_map,
+		"name_map": name_map,
+		"order": order,
+		"alias_to_key": alias_to_key,
+		"units_per_batch": units_per_batch,
+		"yield": yield_info,
+	}
 
-	steps, unresolved = build_steps(
-		_step_rows(doc),
-		qty_map=qty_map,
-		uom_map=uom_map,
-		name_map=name_map,
-		units_per_batch=units_per_batch,
-		alias_to_key=alias_to_key,
+
+def doc_layers(doc: Any) -> list[dict[str, Any]]:
+	rows = sorted(list(_field(doc, "layers") or []), key=lambda r: _coerce_int(_field(r, "idx"), 0))
+	return [layer_entry(_field(r, "layer"), _field(r, "grams"), _field(r, "note")) for r in rows]
+
+
+def sibling_rows(doc: Any) -> list[dict[str, Any]]:
+	"""Every version row of the recipe this version belongs to."""
+	item_code = _clean(_field(doc, "item_code"))
+	if item_code:
+		return _fetch_rows({"item_code": item_code})
+	title = _clean(_field(doc, "recipe_title")) or _clean(_field(doc, "item_name"))
+	return _fetch_rows({"recipe_title": title, "item_code": ["is", "not set"]})
+
+
+def _sop_payload(sop: Any) -> dict[str, Any]:
+	doc = _resolve_sop_doc(_clean(sop))
+
+	item_code = _clean(_field(doc, "item_code"))
+	title = _clean(_field(doc, "recipe_title")) or _clean(_field(doc, "item_name")) or item_code
+	siblings = sibling_rows(doc)
+	card = build_recipe(siblings) if siblings else None
+	versions = card["versions"] if card else []
+	this = next((v for v in versions if v["name"] == doc.name), None) or _version_dict(
+		doc, "current" if _coerce_int(_field(doc, "is_active"), 0) else "previous"
 	)
 
+	data = recipe_data(doc)
+	steps, unresolved = build_steps(
+		_step_rows(doc),
+		qty_map=data["qty_map"],
+		uom_map=data["uom_map"],
+		name_map=data["name_map"],
+		units_per_batch=data["units_per_batch"],
+		alias_to_key=data["alias_to_key"],
+	)
+
+	editor = can_edit()
+	used = is_used_in_production(doc.name)
 	return {
 		"name": doc.name,
 		"key": item_code or title,
@@ -853,12 +1016,16 @@ def _sop_payload(sop: Any) -> dict[str, Any]:
 		"equipment": _clean(_field(doc, "equipment")) or None,
 		"prep_time_mins": _coerce_int(_field(doc, "prep_time_mins"), 0),
 		"notes": html_to_text(_field(doc, "notes")),
-		"yield": yield_info,
-		"ingredients": ingredients,
+		"yield": data["yield"],
+		"ingredients": data["ingredients"],
 		"steps": steps,
 		"versions": versions,
 		"unresolved_tokens": unresolved,
-		**_classification(title, item_code),
+		"layers": doc_layers(doc),
+		"editable_in_place": editor and not used,
+		"used_in_production": used,
+		"can_edit": editor,
+		**_classification(title, item_code, _field(doc, "category")),
 	}
 
 
@@ -954,4 +1121,18 @@ def get_jar_family(family: str) -> dict[str, Any]:
 		g["name"]: g["parent_item_group"]
 		for g in frappe.get_all("Item Group", fields=["name", "parent_item_group"], limit_page_length=0)
 	}
-	return build_jar_family(recipes[0]["family"], members, boms, sops, item_groups, parents)
+	out = build_jar_family(recipes[0]["family"], members, boms, sops, item_groups, parents)
+
+	layers = fetch_layers([m["sop"] for m in members if m["sop"]])
+	editor = can_edit()
+	by_size: dict[str, list[dict[str, Any]]] = {}
+	by_member = {m["size"]: m for m in members}
+	for entry in out["sizes"]:
+		member = by_member.get(entry["size"]) or {}
+		sop_name = member.get("sop")
+		entry["editable_in_place"] = bool(editor and sop_name and not is_used_in_production(sop_name))
+		if sop_name and layers.get(sop_name):
+			by_size[entry["size"]] = layers[sop_name]
+	out["assembly"] = build_assembly(by_size)
+	out["can_edit"] = editor
+	return out

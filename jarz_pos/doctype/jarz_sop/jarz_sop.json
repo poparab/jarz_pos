@@ -14,6 +14,7 @@
   "column_break_head",
   "stage",
   "track",
+  "category",
   "version",
   "is_active",
   "approved_on",
@@ -26,6 +27,8 @@
   "yield_uom",
   "section_break_ingredients",
   "ingredients",
+  "section_break_layers",
+  "layers",
   "section_break_process",
   "prep_time_mins",
   "column_break_process",
@@ -97,6 +100,14 @@
    "in_standard_filter": 1,
    "label": "Track",
    "options": "\nStandard line\nCookie jar line\nWinter warmer\nLight line"
+  },
+  {
+   "description": "Overrides the automatic grouping in the Recipe Book (cakes, mixes and fillings, jars). Leave blank to group by name.",
+   "fieldname": "category",
+   "fieldtype": "Select",
+   "in_standard_filter": 1,
+   "label": "Category",
+   "options": "\nCakes & biscuits\nMixes & fillings\nJars"
   },
   {
    "default": "1",
@@ -174,6 +185,18 @@
    "options": "Jarz SOP Ingredient"
   },
   {
+   "fieldname": "section_break_layers",
+   "fieldtype": "Section Break",
+   "label": "Jar Layers"
+  },
+  {
+   "description": "What goes into ONE jar, in fill order (first row at the bottom), grams per jar.",
+   "fieldname": "layers",
+   "fieldtype": "Table",
+   "label": "Layers",
+   "options": "Jarz SOP Layer"
+  },
+  {
    "fieldname": "section_break_process",
    "fieldtype": "Section Break",
    "label": "Process"
@@ -219,7 +242,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-11-27 12:00:00.000000",
+ "modified": "2026-11-28 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "jarz pos",
  "name": "Jarz SOP",
