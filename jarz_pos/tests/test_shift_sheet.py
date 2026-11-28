@@ -78,10 +78,15 @@ class TestShiftSheet(unittest.TestCase):
 		returns=None,
 		drawer_paid=None,
 		overdue=None,
+		out_rows=None,
 	):
 		if dispatches is None:
 			# Both default orders went out in the shift, so both are listed.
 			dispatches = {"SI-1": "2026-11-20 11:30:00", "SI-2": "2026-11-20 11:45:00"}
+		if out_rows is None:
+			# Both default orders went out in the shift: their Delivery Notes
+			# carry the same lines as the invoices.
+			out_rows = JAR_ROWS
 		if invoices is None:
 			invoices = [
 				_inv("SI-1", 300, custom_courier_party_type="Employee", custom_courier_party="EMP-1"),
@@ -106,6 +111,7 @@ class TestShiftSheet(unittest.TestCase):
 				return_value=invoices,
 			),
 			patch.object(shift, "_resolve_sheet_jar_rows", return_value=JAR_ROWS),
+			patch.object(shift, "_resolve_sheet_dispatched_jar_rows", return_value=out_rows),
 			patch.object(shift, "_resolve_sheet_bundle_codes", return_value={"BND-1"}),
 			patch.object(shift, "_resolve_sheet_shipping", return_value={"SI-1": 30.0}),
 			patch.object(shift, "_resolve_sheet_courier_labels", return_value={("Employee", "EMP-1"): "Ali"}),
@@ -240,14 +246,33 @@ class TestShiftSheet(unittest.TestCase):
 	def test_created_only_orders_are_not_listed_but_still_count_as_sales(self):
 		# Both orders were taken in this shift but go out tomorrow: nothing
 		# touched the drawer, so the list is empty, yet they are today's sales.
-		sheet = self._run("mgr@example.com", manager=True, profiles=["Branch A"], dispatches={})
+		sheet = self._run(
+			"mgr@example.com", manager=True, profiles=["Branch A"], dispatches={}, out_rows=[]
+		)
 		self.assertEqual(sheet["orders"], [])
 		totals = sheet["totals"]
 		self.assertEqual(totals["orders"], 2)
 		self.assertEqual(totals["jars"], 9)
 		self.assertEqual(totals["grand_total"], 800.0)
 		self.assertEqual(totals["listed_orders"], 0)
-		self.assertEqual(len(sheet["jars_by_flavour"]), 2)
+		# Nothing left the branch, so the stock table is empty.
+		self.assertEqual(sheet["jars_by_flavour"], [])
+		self.assertEqual(totals["jars_out"], 0)
+
+	def test_flavour_matrix_is_what_left_the_branch(self):
+		# Only an order created in an earlier shift went out in this one: its jars
+		# are in the stock table, the two orders created here (not yet out) are not,
+		# though they still count as this shift's sales.
+		out_rows = [
+			{"parent": "SI-OLD", "item_code": "J-ORE-M", "item_name": "Oreo Medium", "item_group": "Medium", "qty": 4},
+			{"parent": "SI-OLD", "item_code": "BND-1", "item_name": "Mango Small Bundle", "item_group": "Small", "qty": 1},
+		]
+		sheet = self._run(
+			"mgr@example.com", manager=True, profiles=["Branch A"], dispatches={}, out_rows=out_rows
+		)
+		self.assertEqual(sheet["jars_by_flavour"], [{"flavour": "Oreo", "small": 0, "medium": 4, "large": 0}])
+		self.assertEqual(sheet["totals"]["jars_out"], 4)
+		self.assertEqual(sheet["totals"]["jars"], 9)
 
 	def test_cash_paid_into_drawer_lists_the_order(self):
 		sheet = self._run(

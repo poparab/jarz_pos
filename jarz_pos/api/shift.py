@@ -2283,6 +2283,42 @@ def _resolve_sheet_jar_rows(invoice_names: list[str]) -> list[dict[str, Any]]:
 		return []
 
 
+def _resolve_sheet_dispatched_jar_rows(branch: str, start: Any, end: Any) -> list[dict[str, Any]]:
+	"""Item rows of the stock that left the branch inside the window.
+
+	Read from the Delivery Notes themselves (submitted, non-return, created in
+	[start, end]) of the branch's orders: a Delivery Note is made the moment an
+	order goes Out for Delivery or is handed over, whoever does it. ``parent`` is
+	the Sales Invoice, so the rows feed ``_aggregate_sheet_jars`` like invoice rows.
+	A cancelled Delivery Note (the stock came back) is not counted.
+	"""
+	if not branch:
+		return []
+	try:
+		branch_expr = _sheet_branch_expr("si")
+		return (
+			frappe.db.sql(
+				f"""
+				SELECT dni.against_sales_invoice AS parent, dni.item_code, dni.item_name,
+				       COALESCE(NULLIF(dni.item_group, ''), i.item_group) AS item_group, dni.qty
+				FROM `tabDelivery Note Item` dni
+				JOIN `tabDelivery Note` dn ON dn.name = dni.parent
+				JOIN `tabSales Invoice` si ON si.name = dni.against_sales_invoice
+				LEFT JOIN `tabItem` i ON i.name = dni.item_code
+				WHERE dn.docstatus = 1 AND dn.is_return = 0
+				  AND dn.creation BETWEEN %(start)s AND %(end)s
+				  AND si.is_return = 0 AND {branch_expr} = %(branch)s
+				""",
+				{"branch": branch, "start": start, "end": end},
+				as_dict=True,
+			)
+			or []
+		)
+	except Exception:
+		_sheet_log("dispatched_jar_rows")
+		return []
+
+
 def _resolve_sheet_bundle_codes() -> set[str]:
 	try:
 		from jarz_pos.api.product_analytics import _get_bundle_item_codes
@@ -2811,9 +2847,11 @@ def get_shift_sheet(opening_entry: str) -> dict[str, Any]:
 	``out_for_delivery_at``, ``settled_at`` and ``paid_at`` (in-window times or
 	null), ``settled_amount`` (Courier Transaction amounts settled in this shift)
 	and ``paid_amount`` (cash into the till for it). Rows are sorted by the
-	earliest in-window moment. ``jars_by_flavour`` and ``totals.orders / jars /
-	grand_total / delivery_fees`` count every order created in the shift, listed
-	or not, so nothing is counted twice across shifts.
+	earliest in-window moment. ``totals.orders / jars / grand_total /
+	delivery_fees`` count every order created in the shift, listed or not, so
+	nothing is counted twice across shifts. ``jars_by_flavour`` (and
+	``totals.jars_out``) is stock, not sales: the jars on the Delivery Notes made
+	inside the shift, i.e. what physically left the branch, whoever sent it out.
 
 	``overdue`` (always a list) holds the branch's orders whose delivery slot
 	passed by the shift end (now while open), at most 14 days back, that had not
@@ -2881,10 +2919,11 @@ def get_shift_sheet(opening_entry: str) -> dict[str, Any]:
 	jar_rows = _resolve_sheet_jar_rows(names)
 	bundle_codes = _resolve_sheet_bundle_codes()
 	jars_by_invoice, _all_flavours = _aggregate_sheet_jars(jar_rows, bundle_codes)
-	# The flavour matrix counts only orders created in this shift, so a jar is
-	# never counted in two shifts.
-	_per_created, jars_by_flavour = _aggregate_sheet_jars(
-		[r for r in jar_rows if r.get("parent") in created_names], bundle_codes
+	# The flavour matrix is stock, not sales: the jars on the Delivery Notes made
+	# inside this shift (what physically left the branch), so it matches the
+	# branch's count. A jar leaves once, so it is never counted in two shifts.
+	jars_out_by_invoice, jars_by_flavour = _aggregate_sheet_jars(
+		_resolve_sheet_dispatched_jar_rows(branch, start, end), bundle_codes
 	)
 	shipping = _resolve_sheet_shipping(names)
 	courier_labels = _resolve_sheet_courier_labels(invoices)
@@ -2986,6 +3025,7 @@ def get_shift_sheet(opening_entry: str) -> dict[str, Any]:
 		totals = {
 			"orders": len(created_invoices),
 			"jars": sum(jars_by_invoice.get(inv["name"], 0) for inv in created_invoices),
+			"jars_out": sum(jars_out_by_invoice.values()),
 			"grand_total": flt(sum(flt(inv.get("grand_total")) for inv in created_invoices), 2),
 			"delivery_fees": flt(sum(flt(shipping.get(inv["name"], 0.0)) for inv in created_invoices), 2),
 			"new_orders": len(created_invoices),
